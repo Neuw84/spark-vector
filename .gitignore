@@ -1,0 +1,16 @@
+target/
+*.log
+*.iml
+.idea/
+.vscode/
+.bsp/
+.metals/
+.bloop/
+*.class
+spark-warehouse/
+metastore_db/
+derby.log
+benchmarks/data/
+benchmarks/results/*.md
+!benchmarks/results/.gitkeep
+.DS_Store
