@@ -189,6 +189,8 @@
           <configuration>
             <scalaVersion>${scala.version}</scalaVersion>
             <scalaCompatVersion>${scala.binary.version}</scalaCompatVersion>
+            <!-- Zinc's Java name-hashing fails on modern Java syntax (switch expressions, records). -->
+            <recompileMode>all</recompileMode>
             <args>
               <arg>-deprecation</arg>
               <arg>-feature</arg>
