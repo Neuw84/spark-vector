@@ -2,7 +2,8 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, Cast, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Multiply, Not, Or, Subtract, UnaryMinus}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, Cast, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, Multiply, Not, Or, Subtract, UnaryMinus}
+import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, IntegerType, LongType, TimestampType}
 
 /**
@@ -37,6 +38,12 @@ object ExpressionCompiler {
     case Literal(_, dt) => Left(s"unsupported literal type ${dt.simpleString}")
 
     case Alias(child, _) => compile(child, input)
+
+    // Spark (and Comet's plan normalisation) wrap doubles used in comparisons and grouping keys in
+    // NormalizeNaNAndZero so that all NaNs and both zeros compare equal. Our compare kernels already
+    // implement that ordering and double grouping keys are rejected, so both are identities here.
+    case KnownFloatingPointNormalized(child) => compile(child, input)
+    case NormalizeNaNAndZero(child) => compile(child, input)
 
     case EqualTo(l, r) => comparison(CompareOp.EQ, l, r, input)
     case LessThan(l, r) => comparison(CompareOp.LT, l, r, input)

@@ -108,7 +108,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
   }
 
   test("double grouping keys fall back") {
-    checkFallback("SELECT d2, count(*) FROM t GROUP BY d2", Seq(Agg), "unsupported expression")
+    checkFallback("SELECT d2, count(*) FROM t GROUP BY d2", Seq(Agg), "grouping key type double not supported")
   }
 
   test("TPC-H Q1 end to end") {

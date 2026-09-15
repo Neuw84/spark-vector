@@ -31,8 +31,10 @@ class VectorPlugin extends SparkPlugin {
   }
 
   override def executorPlugin(): ExecutorPlugin = new ExecutorPlugin {
-    override def init(ctx: PluginContext, extraConf: java.util.Map[String, String]): Unit =
+    override def init(ctx: PluginContext, extraConf: java.util.Map[String, String]): Unit = {
       VectorPlugin.requireVectorApi()
+      io.sparkvector.spark.comet.CometVectorAdapter.tryRegister()
+    }
   }
 }
 

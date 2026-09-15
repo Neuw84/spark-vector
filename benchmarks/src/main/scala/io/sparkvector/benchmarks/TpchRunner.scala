@@ -21,21 +21,42 @@ import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStag
  */
 object TpchRunner {
 
+  /** Comet with only its native Parquet scan active; every Comet operator and its shuffle are off. */
+  val CometScanOnly: Map[String, String] = Map(
+      "spark.comet.enabled" -> "true",
+      "spark.comet.scan.enabled" -> "true",
+      // Comet 1.0's only scan is the native DataFusion one, which requires exec to be enabled; keep
+      // every Comet operator off so the scan is the only native piece and Spark's shuffle is used.
+      "spark.comet.exec.enabled" -> "true",
+      "spark.comet.exec.shuffle.enabled" -> "false",
+      "spark.comet.exec.project.enabled" -> "false",
+      "spark.comet.exec.filter.enabled" -> "false",
+      "spark.comet.exec.aggregate.enabled" -> "false",
+      "spark.comet.exec.sort.enabled" -> "false",
+      "spark.comet.exec.localLimit.enabled" -> "false",
+      "spark.comet.exec.globalLimit.enabled" -> "false",
+      "spark.comet.exec.takeOrderedAndProject.enabled" -> "false",
+      "spark.comet.exec.hashJoin.enabled" -> "false",
+      "spark.comet.exec.sortMergeJoin.enabled" -> "false",
+      "spark.comet.exec.broadcastHashJoin.enabled" -> "false",
+      "spark.comet.exec.broadcastExchange.enabled" -> "false",
+      "spark.comet.exec.expand.enabled" -> "false",
+      "spark.comet.exec.union.enabled" -> "false",
+      "spark.comet.exec.window.enabled" -> "false",
+      "spark.comet.exec.coalesce.enabled" -> "false",
+      "spark.comet.exec.collectLimit.enabled" -> "false",
+      "spark.comet.exec.explode.enabled" -> "false",
+      "spark.comet.exec.sample.enabled" -> "false",
+      "spark.memory.offHeap.enabled" -> "true",
+      "spark.memory.offHeap.size" -> "1g")
+
   /** Spark configurations under comparison. Comet configs need the Comet jar on the classpath. */
   val Configs: Map[String, Map[String, String]] = Map(
     "spark" -> Map.empty,
     "vector" -> Map(
       "spark.plugins" -> "io.sparkvector.spark.VectorPlugin"),
-    "comet-scan" -> Map(
-      "spark.plugins" -> "org.apache.spark.CometPlugin",
-      "spark.comet.enabled" -> "true",
-      "spark.comet.scan.enabled" -> "true",
-      "spark.comet.exec.enabled" -> "false"),
-    "comet-scan-vector" -> Map(
-      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
-      "spark.comet.enabled" -> "true",
-      "spark.comet.scan.enabled" -> "true",
-      "spark.comet.exec.enabled" -> "false"),
+    "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
+    "comet-scan-vector" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
     "comet" -> Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin",
       "spark.comet.enabled" -> "true",

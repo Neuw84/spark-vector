@@ -9,7 +9,10 @@ consumes whatever columnar batches sit below it. Two sources work out of the box
 | Apache DataFusion Comet scan (`CometScanExec` / `CometBatchScanExec`) | zero copy: the Arrow buffers Comet's native reader produced are wrapped as `MemorySegment`s | dictionary-encoded strings stay encoded, so `GROUP BY` string keys hash the dictionary once per batch |
 
 Comet is used in *scan-only* mode: its native Parquet-to-Arrow reader replaces Spark's, its native
-operators stay off, and spark-vector's JVM SIMD operators run above the scan.
+operators stay off, and spark-vector's JVM SIMD operators run above the scan. Comet 1.0 only ships
+the fully native DataFusion scan (`CometNativeScanExec`), which needs `spark.comet.exec.enabled=true`
+and off-heap memory; "scan-only" therefore means enabling exec and switching every Comet operator
+off individually (`io.sparkvector.benchmarks.TpchRunner.CometScanOnly` lists the full set).
 
 ## Configuration
 
@@ -17,7 +20,14 @@ operators stay off, and spark-vector's JVM SIMD operators run above the scan.
 --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
 --conf spark.comet.enabled=true
 --conf spark.comet.scan.enabled=true
---conf spark.comet.exec.enabled=false
+--conf spark.comet.exec.enabled=true
+--conf spark.comet.exec.shuffle.enabled=false
+--conf spark.comet.exec.project.enabled=false
+--conf spark.comet.exec.filter.enabled=false
+--conf spark.comet.exec.aggregate.enabled=false
+--conf spark.comet.exec.sort.enabled=false        # ... and so on for the other spark.comet.exec.<op>.enabled keys
+--conf spark.memory.offHeap.enabled=true
+--conf spark.memory.offHeap.size=2g
 --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED"
 --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED"
 --jars comet-spark-spark4.1_2.13-1.0.0.jar,spark-vector-spark_2.13-0.1.0-SNAPSHOT.jar

@@ -20,13 +20,40 @@ class CometScanSuite extends VectorQuerySuite {
     "spark.plugins" -> s"org.apache.spark.CometPlugin,${classOf[VectorPlugin].getName}",
     "spark.comet.enabled" -> "true",
     "spark.comet.scan.enabled" -> "true",
-    "spark.comet.exec.enabled" -> "false",
+    // Comet 1.0's only scan is the native DataFusion one, which requires exec to be enabled; keep
+    // every Comet operator off so the scan is the only native piece and Spark's shuffle is used.
+    "spark.comet.exec.enabled" -> "true",
+    "spark.comet.exec.shuffle.enabled" -> "false",
+    "spark.comet.exec.project.enabled" -> "false",
+    "spark.comet.exec.filter.enabled" -> "false",
+    "spark.comet.exec.aggregate.enabled" -> "false",
+    "spark.comet.exec.sort.enabled" -> "false",
+    "spark.comet.exec.localLimit.enabled" -> "false",
+    "spark.comet.exec.globalLimit.enabled" -> "false",
+    "spark.comet.exec.takeOrderedAndProject.enabled" -> "false",
+    "spark.comet.exec.hashJoin.enabled" -> "false",
+    "spark.comet.exec.sortMergeJoin.enabled" -> "false",
+    "spark.comet.exec.broadcastHashJoin.enabled" -> "false",
+    "spark.comet.exec.broadcastExchange.enabled" -> "false",
+    "spark.comet.exec.expand.enabled" -> "false",
+    "spark.comet.exec.union.enabled" -> "false",
+    "spark.comet.exec.window.enabled" -> "false",
+    "spark.comet.exec.coalesce.enabled" -> "false",
+    "spark.comet.exec.collectLimit.enabled" -> "false",
+    "spark.comet.exec.explode.enabled" -> "false",
+    "spark.comet.exec.sample.enabled" -> "false",
+    "spark.memory.offHeap.enabled" -> "true",
+    "spark.memory.offHeap.size" -> "1g",
     "spark.comet.explainFallback.enabled" -> "false",
     "spark.sql.parquet.enableVectorizedReader" -> "true",
     "spark.sql.adaptive.enabled" -> "true")
 
+  /** Comet 1.0 plans its scan as CometNativeScanExec (or CometScanExec / CometBatchScanExec). */
   private def cometScans(df: org.apache.spark.sql.DataFrame) =
-    org.apache.spark.sql.vector.PlanUtils.allNodes(finalPlan(df)).filter(_.getClass.getSimpleName.startsWith("CometScan"))
+    org.apache.spark.sql.vector.PlanUtils.allNodes(finalPlan(df)).filter { n =>
+      val name = n.getClass.getSimpleName
+      name.startsWith("Comet") && name.contains("Scan")
+    }
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
@@ -35,11 +62,12 @@ class CometScanSuite extends VectorQuerySuite {
   }
 
   test("Comet scan is the columnar source and its vectors are adapted zero-copy", CometTest) {
-    assert(CometVectorAdapter.isRegistered, "Comet adapter should be registered when Comet is on the classpath")
     val df = checkVectorized("SELECT i, l, d, dt, b, s FROM t WHERE i > 100 AND d IS NOT NULL", Seq(Filter))
-    assert(cometScans(df).nonEmpty, s"expected CometScanExec:\n${finalPlan(df).treeString}")
+    assert(cometScans(df).nonEmpty, s"expected a Comet scan:\n${finalPlan(df).treeString}")
     val filter = nodesOf[VectorFilterExec](df).head
-    assert(filter.child.getClass.getSimpleName.startsWith("CometScan"), filter.child.nodeName)
+    assert(cometScans(df).contains(filter.child), filter.child.nodeName)
+    // The adapter registers itself the first time a batch is adapted (executor side, local here).
+    assert(CometVectorAdapter.isRegistered, "Comet adapter should be registered when Comet is on the classpath")
   }
 
   test("filter, project and aggregate over Comet scan", CometTest) {
