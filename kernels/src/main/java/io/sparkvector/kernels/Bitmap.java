@@ -110,6 +110,11 @@ public final class Bitmap {
     return word & ((1L << bitsInWord) - 1);
   }
 
+  /** A word with the low {@code count} bits set ({@code 1 <= count <= 64}). */
+  public static long lowBits(int count) {
+    return count >= 64 ? -1L : (1L << count) - 1;
+  }
+
   /** Writes the low {@code min(64, numBits - wordIndex*64)} bits of {@code word}. */
   public static void setWord(MemorySegment bm, int wordIndex, int numBits, long word) {
     long byteOffset = (long) wordIndex << 3;

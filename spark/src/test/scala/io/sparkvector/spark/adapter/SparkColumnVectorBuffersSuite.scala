@@ -63,6 +63,38 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
     }
   }
 
+  test("dictionary-encoded string vectors copy as indices plus the referenced dictionary values") {
+    val values = Array("A", "N", "R", "unused")
+    val dictionary = new org.apache.spark.sql.execution.vectorized.Dictionary {
+      override def decodeToInt(id: Int): Int = fail("not an int dictionary")
+      override def decodeToLong(id: Int): Long = fail("not a long dictionary")
+      override def decodeToFloat(id: Int): Float = fail("not a float dictionary")
+      override def decodeToDouble(id: Int): Double = fail("not a double dictionary")
+      override def decodeToBinary(id: Int): Array[Byte] = values(id).getBytes("UTF-8")
+    }
+    for (withNulls <- Seq(true, false)) {
+      val cv = new OnHeapColumnVector(n, StringType)
+      try {
+        cv.setDictionary(dictionary)
+        val ids = cv.reserveDictionaryIds(n)
+        (0 until n).foreach { i =>
+          if (withNulls && i % 7 == 3) cv.putNull(i) else ids.putInt(i, i % 3)
+        }
+        val arena = Arena.ofConfined()
+        try {
+          val vb = SparkColumnVectorBuffers.copy(cv, n, arena)
+          assert(vb.isDictionaryEncoded)
+          assert(vb.dictionary().length() === 3, "only referenced values are kept")
+          assert(vb.hasNulls === withNulls)
+          (0 until n).foreach { i =>
+            assert(vb.isNull(i) === cv.isNullAt(i))
+            if (!cv.isNullAt(i)) assert(vb.getString(i) === cv.getUTF8String(i).toString)
+          }
+        } finally arena.close()
+      } finally cv.close()
+    }
+  }
+
   test("unsupported Spark types are rejected") {
     val cv = new OnHeapColumnVector(4, FloatType)
     try {

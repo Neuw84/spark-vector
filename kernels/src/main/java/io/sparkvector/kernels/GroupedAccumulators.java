@@ -37,12 +37,27 @@ public final class GroupedAccumulators {
         }
       } else {
         int[] ids = a.ids();
+        MemorySegment data = v.data();
         MemorySegment validity = v.validity();
-        for (int i = 0; i < a.numRows(); i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
+        int n = a.numRows();
+        double[] sum = this.sum;
+        long[] count = this.count;
+        if (validity == null) {
+          for (int i = 0; i < n; i++) {
             int g = ids[i];
-            sum[g] += v.getDouble(i);
+            sum[g] += data.get(VectorBuffers.LE_DOUBLE, (long) i << 3);
             count[g]++;
+          }
+        } else {
+          for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+            long bits = Bitmap.wordAt(validity, w, n);
+            while (bits != 0L) {
+              int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+              bits &= bits - 1;
+              int g = ids[i];
+              sum[g] += data.get(VectorBuffers.LE_DOUBLE, (long) i << 3);
+              count[g]++;
+            }
           }
         }
       }
@@ -87,12 +102,35 @@ public final class GroupedAccumulators {
         }
       } else {
         int[] ids = a.ids();
+        MemorySegment data = v.data();
         MemorySegment validity = v.validity();
-        for (int i = 0; i < a.numRows(); i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
-            int g = ids[i];
-            sum[g] += ints ? v.getInt(i) : v.getLong(i);
-            count[g]++;
+        int n = a.numRows();
+        long[] sum = this.sum;
+        long[] count = this.count;
+        if (validity == null) {
+          if (ints) {
+            for (int i = 0; i < n; i++) {
+              int g = ids[i];
+              sum[g] += data.get(VectorBuffers.LE_INT, (long) i << 2);
+              count[g]++;
+            }
+          } else {
+            for (int i = 0; i < n; i++) {
+              int g = ids[i];
+              sum[g] += data.get(VectorBuffers.LE_LONG, (long) i << 3);
+              count[g]++;
+            }
+          }
+        } else {
+          for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+            long bits = Bitmap.wordAt(validity, w, n);
+            while (bits != 0L) {
+              int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+              bits &= bits - 1;
+              int g = ids[i];
+              sum[g] += ints ? data.get(VectorBuffers.LE_INT, (long) i << 2) : data.get(VectorBuffers.LE_LONG, (long) i << 3);
+              count[g]++;
+            }
           }
         }
       }
@@ -150,9 +188,12 @@ public final class GroupedAccumulators {
         }
       } else {
         int[] ids = a.ids();
-        for (int i = 0; i < a.numRows(); i++) {
-          if (Bitmap.isSet(validity, i)) {
-            count[ids[i]]++;
+        int n = a.numRows();
+        for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+          long bits = Bitmap.wordAt(validity, w, n);
+          while (bits != 0L) {
+            count[ids[(w << 6) + Long.numberOfTrailingZeros(bits)]]++;
+            bits &= bits - 1;
           }
         }
       }
@@ -193,10 +234,21 @@ public final class GroupedAccumulators {
         }
       } else {
         int[] ids = a.ids();
+        MemorySegment data = v.data();
         MemorySegment validity = v.validity();
-        for (int i = 0; i < a.numRows(); i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
-            offer(ids[i], v.getDouble(i));
+        int n = a.numRows();
+        if (validity == null) {
+          for (int i = 0; i < n; i++) {
+            offer(ids[i], data.get(VectorBuffers.LE_DOUBLE, (long) i << 3));
+          }
+        } else {
+          for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+            long bits = Bitmap.wordAt(validity, w, n);
+            while (bits != 0L) {
+              int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+              bits &= bits - 1;
+              offer(ids[i], data.get(VectorBuffers.LE_DOUBLE, (long) i << 3));
+            }
           }
         }
       }
@@ -259,10 +311,21 @@ public final class GroupedAccumulators {
         }
       } else {
         int[] ids = a.ids();
+        MemorySegment data = v.data();
         MemorySegment validity = v.validity();
-        for (int i = 0; i < a.numRows(); i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
-            offer(ids[i], ints ? v.getInt(i) : v.getLong(i));
+        int n = a.numRows();
+        if (validity == null) {
+          for (int i = 0; i < n; i++) {
+            offer(ids[i], ints ? data.get(VectorBuffers.LE_INT, (long) i << 2) : data.get(VectorBuffers.LE_LONG, (long) i << 3));
+          }
+        } else {
+          for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+            long bits = Bitmap.wordAt(validity, w, n);
+            while (bits != 0L) {
+              int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+              bits &= bits - 1;
+              offer(ids[i], ints ? data.get(VectorBuffers.LE_INT, (long) i << 2) : data.get(VectorBuffers.LE_LONG, (long) i << 3));
+            }
           }
         }
       }

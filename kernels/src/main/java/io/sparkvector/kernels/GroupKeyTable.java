@@ -26,11 +26,20 @@ public final class GroupKeyTable {
   private final int[][] intKeys; // INT32 and BOOL (0/1)
   private final long[][] longKeys; // INT64 and FLOAT64 (raw bits)
   private final byte[][] strBytes; // UTF8 byte store per column
+  private final MemorySegment[] strSegments; // heap views of strBytes, refreshed on growth
   private final int[] strUsed; // bytes used per UTF8 column
   private final int[][] strOffsets; // per UTF8 column: size + 1 offsets
   private final BitSet[] nulls;
 
-  private int[] hashScratch = new int[0];
+  private int[] hashScratch = new int[0]; // row hashes, or combined indices on the memoised path
+  private int[] idxScratch = new int[0];
+  private int[] memo = new int[0];
+
+  /**
+   * When every key is dictionary encoded and the dictionaries are small, group ids are memoised per
+   * combination of dictionary indices for the batch, so most rows never probe the table.
+   */
+  private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
 
   public GroupKeyTable(VecType[] types) {
     this.types = types.clone();
@@ -41,6 +50,7 @@ public final class GroupKeyTable {
     intKeys = new int[k][];
     longKeys = new long[k][];
     strBytes = new byte[k][];
+    strSegments = new MemorySegment[k];
     strUsed = new int[k];
     strOffsets = new int[k][];
     nulls = new BitSet[k];
@@ -51,6 +61,7 @@ public final class GroupKeyTable {
         case INT64, FLOAT64 -> longKeys[c] = new long[INITIAL_CAPACITY];
         case UTF8 -> {
           strBytes[c] = new byte[INITIAL_CAPACITY * 8];
+          strSegments[c] = MemorySegment.ofArray(strBytes[c]);
           strOffsets[c] = new int[INITIAL_CAPACITY + 1];
         }
       }
@@ -74,6 +85,10 @@ public final class GroupKeyTable {
    * groups as needed. Returns the number of groups after the batch.
    */
   public int assign(VectorBuffers[] keys, int n, int[] outIds) {
+    long combinations = dictionaryCombinations(keys);
+    if (combinations > 0 && combinations <= MEMO_MAX_COMBINATIONS) {
+      return assignMemoised(keys, n, outIds, (int) combinations);
+    }
     if (hashScratch.length < n) {
       hashScratch = new int[Math.max(n, hashScratch.length * 2)];
     }
@@ -86,6 +101,98 @@ public final class GroupKeyTable {
       outIds[i] = lookupOrInsert(keys, i, HashKernels.finish(hashes[i]));
     }
     return size;
+  }
+
+  /** Product of (dictionary size + 1) over the keys, or 0 if any key is not dictionary encoded. */
+  private static long dictionaryCombinations(VectorBuffers[] keys) {
+    if (keys.length == 0) {
+      return 0;
+    }
+    long combinations = 1;
+    for (VectorBuffers k : keys) {
+      if (!k.isDictionaryEncoded()) {
+        return 0;
+      }
+      combinations *= k.dictionary().length() + 1L;
+      if (combinations > MEMO_MAX_COMBINATIONS) {
+        return combinations;
+      }
+    }
+    return combinations;
+  }
+
+  private int assignMemoised(VectorBuffers[] keys, int n, int[] outIds, int combinations) {
+    if (memo.length < combinations) {
+      memo = new int[Math.max(combinations, memo.length * 2)];
+    }
+    Arrays.fill(memo, 0, combinations, -1);
+    int k = keys.length;
+    // Fold the per-column dictionary indices (0 = null, i + 1 otherwise) into one combined index
+    // per row, column by column, so the hot loop runs over plain int arrays.
+    int[] combined = combinedScratch(n);
+    Arrays.fill(combined, 0, n, 0);
+    int[] idx = idxScratch(n);
+    for (int c = 0; c < k; c++) {
+      VectorBuffers key = keys[c];
+      int size = key.dictionary().length() + 1;
+      MemorySegment.copy(key.data(), VectorBuffers.LE_INT, 0, idx, 0, n);
+      MemorySegment validity = key.validity();
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
+          combined[i] = combined[i] * size + idx[i] + 1;
+        }
+      } else {
+        for (int i = 0; i < n; i++) {
+          combined[i] = combined[i] * size + (Bitmap.isSet(validity, i) ? idx[i] + 1 : 0);
+        }
+      }
+    }
+    for (int i = 0; i < n; i++) {
+      int gid = memo[combined[i]];
+      if (gid < 0) {
+        gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));
+        memo[combined[i]] = gid;
+      }
+      outIds[i] = gid;
+    }
+    return size;
+  }
+
+  private int[] combinedScratch(int n) {
+    if (hashScratch.length < n) {
+      hashScratch = new int[Math.max(n, hashScratch.length * 2)];
+    }
+    return hashScratch;
+  }
+
+  private int[] idxScratch(int n) {
+    if (idxScratch.length < n) {
+      idxScratch = new int[Math.max(n, idxScratch.length * 2)];
+    }
+    return idxScratch;
+  }
+
+  /** Same hash {@link HashKernels#mixColumn} produces for the row, computed for one row. */
+  private static int dictionaryRowHash(VectorBuffers[] keys, int row) {
+    int h = HashKernels.SEED;
+    for (VectorBuffers k : keys) {
+      int v;
+      if (k.isNull(row)) {
+        v = HashKernels.NULL_MARK;
+      } else {
+        VectorBuffers dict = k.dictionary();
+        int idx = k.getInt(row);
+        if (dict.isNull(idx)) {
+          v = HashKernels.NULL_MARK;
+        } else {
+          int start = dict.offsets().get(VectorBuffers.LE_INT, (long) idx << 2);
+          int len = dict.offsets().get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - start;
+          v = HashKernels.hashBytes(dict.data(), start, len);
+        }
+      }
+      h = HashKernels.mix32(h, v);
+    }
+    return HashKernels.finish(h);
   }
 
   private int lookupOrInsert(VectorBuffers[] keys, int row, int hash) {
@@ -166,8 +273,7 @@ public final class GroupKeyTable {
     if (len == 0) {
       return true;
     }
-    MemorySegment stored = MemorySegment.ofArray(strBytes[c]);
-    return MemorySegment.mismatch(stored, start, start + len, data, rowStart, rowStart + len) == -1;
+    return MemorySegment.mismatch(strSegments[c], start, start + len, data, rowStart, rowStart + len) == -1;
   }
 
   private int insert(VectorBuffers[] keys, int row, int hash, int pos) {
@@ -214,6 +320,7 @@ public final class GroupKeyTable {
       }
       if (used + len > strBytes[c].length) {
         strBytes[c] = Arrays.copyOf(strBytes[c], Math.max(strBytes[c].length * 2, used + len));
+        strSegments[c] = MemorySegment.ofArray(strBytes[c]);
       }
       MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, strBytes[c], used, len);
       used += len;

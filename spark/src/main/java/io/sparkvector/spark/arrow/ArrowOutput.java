@@ -6,7 +6,6 @@ import io.sparkvector.kernels.CompactKernels;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;
@@ -124,44 +123,47 @@ public final class ArrowOutput {
     return finish(out, outCount, !in.hasNulls());
   }
 
-  /** Dictionary-encoded input is decoded while compacting (Spark has no dictionary vectors). */
+  /**
+   * Dictionary-encoded input stays dictionary encoded: the int32 indices are compacted with the
+   * fixed-width kernel and the (small) dictionary is copied into its own vector.
+   */
   private static ColumnVector compactDictionary(
       String name, VectorBuffers in, MemorySegment selection, int outCount, BufferAllocator allocator) {
-    VectorBuffers dict = in.dictionary();
-    MemorySegment dictOffsets = dict.offsets();
-    int n = in.length();
-    long bytes = 0;
-    for (int i = 0; i < n; i++) {
-      if (Bitmap.isSet(selection, i) && !in.isNull(i)) {
-        int k = in.getInt(i);
-        bytes += dictOffsets.get(VectorBuffers.LE_INT, (long) (k + 1) << 2)
-            - dictOffsets.get(VectorBuffers.LE_INT, (long) k << 2);
+    IntVector indices = new IntVector(name, allocator);
+    indices.setInitialCapacity(outCount);
+    indices.allocateNew();
+    ArrowVectorBuffers out = ArrowVectorBuffers.forWrite(indices, outCount);
+    if (selection == null) {
+      MemorySegment.copy(in.data(), 0, out.data(), 0, (long) outCount << 2);
+      if (in.hasNulls()) {
+        BitmapKernels.copy(in.validity(), out.validity(), outCount);
       }
+    } else {
+      CompactKernels.compactFixed(in, selection, outCount, out.data(), out.validity());
     }
-    ArrowVectorBuffers out = allocateUtf8(name, outCount, bytes, allocator);
-    MemorySegment outOff = out.offsets();
-    MemorySegment outData = out.data();
-    int o = 0;
-    int pos = 0;
-    for (int i = 0; i < n; i++) {
-      if (!Bitmap.isSet(selection, i)) {
-        continue;
-      }
-      outOff.set(VectorBuffers.LE_INT, (long) o << 2, pos);
-      if (in.isNull(i)) {
-        Bitmap.clear(out.validity(), o);
-      } else {
-        Bitmap.set(out.validity(), o);
-        int k = in.getInt(i);
-        int start = dictOffsets.get(VectorBuffers.LE_INT, (long) k << 2);
-        int len = dictOffsets.get(VectorBuffers.LE_INT, (long) (k + 1) << 2) - start;
-        MemorySegment.copy(dict.data(), ValueLayout.JAVA_BYTE, start, outData, ValueLayout.JAVA_BYTE, pos, len);
-        pos += len;
-      }
-      o++;
+    if (!in.hasNulls()) {
+      Bitmap.fill(out.validity(), outCount, true);
     }
-    outOff.set(VectorBuffers.LE_INT, (long) o << 2, pos);
-    return finish(out, outCount, false);
+    indices.setValueCount(outCount);
+    VarCharVector dictionary = copyDictionary(name + ".dictionary", in.dictionary(), allocator);
+    return new VectorDictionaryColumnVector(indices, dictionary);
+  }
+
+  private static VarCharVector copyDictionary(String name, VectorBuffers dict, BufferAllocator allocator) {
+    int n = dict.length();
+    int end = dict.offsets().get(VectorBuffers.LE_INT, (long) n << 2);
+    ArrowVectorBuffers out = allocateUtf8(name, n, end, allocator);
+    MemorySegment.copy(dict.offsets(), 0, out.offsets(), 0, ((long) n + 1) << 2);
+    MemorySegment.copy(dict.data(), 0, out.data(), 0, end);
+    if (dict.hasNulls()) {
+      BitmapKernels.copy(dict.validity(), out.validity(), n);
+    } else {
+      Bitmap.fill(out.validity(), n, true);
+    }
+    VarCharVector v = (VarCharVector) out.vector();
+    v.setLastSet(n - 1);
+    v.setValueCount(n);
+    return v;
   }
 
   /**
@@ -200,7 +202,7 @@ public final class ArrowOutput {
     int n = in.length();
     if (in.type() == VecType.UTF8) {
       if (in.isDictionaryEncoded()) {
-        return compactDictionary(name, in, allSelected(n), n, allocator);
+        return compactDictionary(name, in, null, n, allocator);
       }
       int end = in.offsets().get(VectorBuffers.LE_INT, (long) n << 2);
       ArrowVectorBuffers out = allocateUtf8(name, n, end, allocator);
@@ -223,9 +225,4 @@ public final class ArrowOutput {
     return finish(out, n, !in.hasNulls());
   }
 
-  private static MemorySegment allSelected(int n) {
-    MemorySegment sel = MemorySegment.ofArray(new long[Math.max(1, Bitmap.wordsFor(n))]);
-    Bitmap.fill(sel, n, true);
-    return sel;
-  }
 }

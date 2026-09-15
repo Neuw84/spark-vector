@@ -106,6 +106,12 @@ public final class CompactKernels {
       }
       int base = w << 6;
       int limit = Math.min(64, n - base);
+      if (word == Bitmap.lowBits(limit)) {
+        // Every element of the word is selected: one bulk copy instead of per-lane shuffles.
+        MemorySegment.copy(data, (long) base << 2, out, (long) o << 2, (long) limit << 2);
+        o += limit;
+        continue;
+      }
       for (int k = 0; k < limit; k += lanes) {
         long bits = (word >>> k) & laneMask;
         if (bits == 0L) {
@@ -144,6 +150,22 @@ public final class CompactKernels {
       }
       int base = w << 6;
       int limit = Math.min(64, n - base);
+      if (word == Bitmap.lowBits(limit)) {
+        // Every element of the word is selected: one bulk copy instead of per-lane shuffles.
+        MemorySegment.copy(data, (long) base << 3, out, (long) o << 3, (long) limit << 3);
+        o += limit;
+        continue;
+      }
+      if (lanes <= 2) {
+        // Two 64-bit lanes (NEON): a branch-free scalar walk over the set bits beats shuffling.
+        while (word != 0L) {
+          int i = base + Long.numberOfTrailingZeros(word);
+          word &= word - 1;
+          out.set(VectorBuffers.LE_LONG, (long) o << 3, data.get(VectorBuffers.LE_LONG, (long) i << 3));
+          o++;
+        }
+        continue;
+      }
       for (int k = 0; k < limit; k += lanes) {
         long bits = (word >>> k) & laneMask;
         if (bits == 0L) {
@@ -182,6 +204,22 @@ public final class CompactKernels {
       }
       int base = w << 6;
       int limit = Math.min(64, n - base);
+      if (word == Bitmap.lowBits(limit)) {
+        // Every element of the word is selected: one bulk copy instead of per-lane shuffles.
+        MemorySegment.copy(data, (long) base << 3, out, (long) o << 3, (long) limit << 3);
+        o += limit;
+        continue;
+      }
+      if (lanes <= 2) {
+        // Two 64-bit lanes (NEON): a branch-free scalar walk over the set bits beats shuffling.
+        while (word != 0L) {
+          int i = base + Long.numberOfTrailingZeros(word);
+          word &= word - 1;
+          out.set(VectorBuffers.LE_LONG, (long) o << 3, data.get(VectorBuffers.LE_LONG, (long) i << 3));
+          o++;
+        }
+        continue;
+      }
       for (int k = 0; k < limit; k += lanes) {
         long bits = (word >>> k) & laneMask;
         if (bits == 0L) {
@@ -274,11 +312,20 @@ public final class CompactKernels {
     int words = Bitmap.wordsFor(n);
     for (int w = 0; w < words; w++) {
       long s = Bitmap.wordAt(selection, w, n);
+      int base = w << 6;
+      int limit = Math.min(64, n - base);
+      if (s == Bitmap.lowBits(limit)) {
+        // Whole word selected: the byte range is contiguous (an upper bound if it holds nulls
+        // with non-empty ranges, which only over-allocates).
+        total += off.get(VectorBuffers.LE_INT, (long) (base + limit) << 2)
+            - off.get(VectorBuffers.LE_INT, (long) base << 2);
+        continue;
+      }
       if (validity != null) {
         s &= Bitmap.wordAt(validity, w, n);
       }
       while (s != 0L) {
-        int i = (w << 6) + Long.numberOfTrailingZeros(s);
+        int i = base + Long.numberOfTrailingZeros(s);
         s &= s - 1;
         total += off.get(VectorBuffers.LE_INT, (long) (i + 1) << 2)
             - off.get(VectorBuffers.LE_INT, (long) i << 2);
@@ -308,10 +355,32 @@ public final class CompactKernels {
     int o = 0;
     int pos = 0;
     int words = Bitmap.wordsFor(n);
+    int lanes = I.length();
     for (int w = 0; w < words; w++) {
       long s = Bitmap.wordAt(selection, w, n);
+      int base = w << 6;
+      int limit = Math.min(64, n - base);
+      if (s == Bitmap.lowBits(limit) && (validity == null || Bitmap.wordAt(validity, w, n) == s)) {
+        // Whole word selected and non-null: one byte copy, offsets rebased with a vector add.
+        int start = off.get(VectorBuffers.LE_INT, (long) base << 2);
+        int len = off.get(VectorBuffers.LE_INT, (long) (base + limit) << 2) - start;
+        MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, outData, ValueLayout.JAVA_BYTE, pos, len);
+        IntVector delta = IntVector.broadcast(I, pos - start);
+        int j = 0;
+        for (; j + lanes <= limit; j += lanes) {
+          IntVector.fromMemorySegment(I, off, (long) (base + j) << 2, LE)
+              .add(delta)
+              .intoMemorySegment(outOffsets, (long) (o + j) << 2, LE);
+        }
+        for (; j < limit; j++) {
+          outOffsets.set(VectorBuffers.LE_INT, (long) (o + j) << 2, off.get(VectorBuffers.LE_INT, (long) (base + j) << 2) - start + pos);
+        }
+        o += limit;
+        pos += len;
+        continue;
+      }
       while (s != 0L) {
-        int i = (w << 6) + Long.numberOfTrailingZeros(s);
+        int i = base + Long.numberOfTrailingZeros(s);
         s &= s - 1;
         outOffsets.set(VectorBuffers.LE_INT, (long) o << 2, pos);
         if (validity == null || Bitmap.isSet(validity, i)) {

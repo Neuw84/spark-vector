@@ -1,5 +1,6 @@
 package io.sparkvector.kernels;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -167,6 +168,45 @@ class GroupedAggregationTest {
       assertEquals(ids1[1], ids2[1], "N");
       assertEquals(ids1[2], ids2[2], "R");
       assertEquals(ids1[4], ids2[3], "null");
+    }
+  }
+
+  @Test
+  void memoisedDictionaryKeysMatchPlainKeys() {
+    try (Arena arena = Arena.ofConfined()) {
+      // Two dictionary-encoded keys take the memoised path; the same rows as plain strings must
+      // land in the same groups, in a table that already holds them.
+      String[] flags = {"A", "N", "R", "N", null, "A", "R", "R"};
+      String[] status = {"F", "O", "F", "F", "O", null, "O", "F"};
+      GroupKeyTable plainTable = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.UTF8});
+      int[] plainIds = new int[flags.length];
+      plainTable.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, flags), ArrowLayout.ofStrings(arena, status)}, flags.length, plainIds);
+
+      VectorBuffers flagDict = ArrowLayout.ofStrings(arena, new String[] {"R", "A", "N"});
+      VectorBuffers statusDict = ArrowLayout.ofStrings(arena, new String[] {"O", "F"});
+      SegmentVectorBuffers flagIdx = ArrowLayout.ofInts(arena, new int[] {1, 2, 0, 2, 0, 1, 0, 0}, new boolean[] {false, false, false, false, true, false, false, false});
+      SegmentVectorBuffers statusIdx = ArrowLayout.ofInts(arena, new int[] {1, 0, 1, 1, 0, 0, 0, 1}, new boolean[] {false, false, false, false, false, true, false, false});
+      VectorBuffers[] encoded = {
+        SegmentVectorBuffers.dictionaryUtf8(8, flagIdx.validity(), flagIdx.data(), flagDict),
+        SegmentVectorBuffers.dictionaryUtf8(8, statusIdx.validity(), statusIdx.data(), statusDict)
+      };
+      int[] dictIds = new int[8];
+      GroupKeyTable dictTable = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.UTF8});
+      assertEquals(plainTable.size(), dictTable.assign(encoded, 8, dictIds), "group count");
+      for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+          assertEquals(plainIds[i] == plainIds[j], dictIds[i] == dictIds[j], "rows " + i + " and " + j);
+        }
+        assertEquals(flags[i] == null, dictTable.isNull(0, dictIds[i]));
+        assertEquals(status[i] == null, dictTable.isNull(1, dictIds[i]));
+        if (flags[i] != null) {
+          assertEquals(flags[i], dictTable.getString(0, dictIds[i]));
+        }
+      }
+      // A later plain batch reuses the groups the dictionary batch created.
+      int[] again = new int[8];
+      assertEquals(plainTable.size(), dictTable.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, flags), ArrowLayout.ofStrings(arena, status)}, 8, again));
+      assertArrayEquals(dictIds, again);
     }
   }
 

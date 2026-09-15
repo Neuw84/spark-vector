@@ -1,6 +1,6 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector}
+import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDictionaryColumnVector}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression, SortOrder}
@@ -71,6 +71,7 @@ private[vector] class VectorProjectIterator(
             case ColumnRef(ordinal, _) =>
               batch.column(ordinal) match {
                 case v: VectorArrowColumnVector => v.borrow()
+                case v: VectorDictionaryColumnVector => v.borrow()
                 case _ => ArrowOutput.copy(name, dt, ctx.input(ordinal), allocator)
               }
             case e => ArrowOutput.copy(name, dt, e.eval(ctx), allocator)

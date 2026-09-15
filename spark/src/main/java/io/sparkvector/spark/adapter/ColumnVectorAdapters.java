@@ -3,6 +3,7 @@ package io.sparkvector.spark.adapter;
 import io.sparkvector.kernels.VectorBuffers;
 import io.sparkvector.spark.arrow.ArrowVectorBuffers;
 import io.sparkvector.spark.arrow.VectorArrowColumnVector;
+import io.sparkvector.spark.arrow.VectorDictionaryColumnVector;
 import java.lang.foreign.Arena;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -40,6 +41,9 @@ public final class ColumnVectorAdapters {
     if (cv instanceof VectorArrowColumnVector v) {
       return ArrowVectorBuffers.forRead(v.getValueVector());
     }
+    if (cv instanceof VectorDictionaryColumnVector d) {
+      return d.buffers();
+    }
     for (Adapter adapter : ADAPTERS) {
       VectorBuffers vb = adapter.adapt(cv, numRows);
       if (vb != null) {
@@ -51,7 +55,7 @@ public final class ColumnVectorAdapters {
 
   /** True if {@link #adapt} would not need to copy. */
   public static boolean isZeroCopy(ColumnVector cv, int numRows) {
-    if (cv instanceof VectorArrowColumnVector) {
+    if (cv instanceof VectorArrowColumnVector || cv instanceof VectorDictionaryColumnVector) {
       return true;
     }
     for (Adapter adapter : ADAPTERS) {

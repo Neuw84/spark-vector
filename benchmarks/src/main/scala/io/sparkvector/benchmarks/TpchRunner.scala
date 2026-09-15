@@ -81,7 +81,8 @@ object TpchRunner {
       shufflePartitions: Int = 8,
       out: String = "benchmarks/results",
       report: Option[String] = None,
-      label: String = "")
+      label: String = "",
+      show: Boolean = false)
 
   def main(argv: Array[String]): Unit = {
     val args = parse(argv.toList, Args())
@@ -103,6 +104,7 @@ object TpchRunner {
     case "--out" :: v :: rest => parse(rest, a.copy(out = v))
     case "--label" :: v :: rest => parse(rest, a.copy(label = v))
     case "--report" :: v :: rest => parse(rest, a.copy(report = Some(v)))
+    case "--show" :: rest => parse(rest, a.copy(show = true))
     case other :: _ => throw new IllegalArgumentException(s"unknown argument $other")
   }
 
@@ -167,12 +169,20 @@ object TpchRunner {
     (1 to args.warmup).foreach(_ => once())
     val runs = (1 to args.iterations).map(_ => once())
     val (_, rows, plan) = runs.last
+    if (args.show) rows.foreach(r => println(s"[tpch]   row: ${r.mkString(" | ")}"))
     val checksum = rows.map(_.toSeq.map {
       case d: Double => f"$d%.4f"
       case v => String.valueOf(v)
     }.mkString("|")).sorted.mkString("\n").hashCode.toHexString
-    val ops = allNodes(plan).map(_.getClass.getSimpleName).filter(n => n.startsWith("Vector") || n.startsWith("Comet"))
+    val nodes = allNodes(plan)
+    val ops = nodes.map(_.getClass.getSimpleName).filter(n => n.startsWith("Vector") || n.startsWith("Comet"))
       .groupBy(identity).view.mapValues(_.size).toSeq.sortBy(_._1).map { case (n, c) => s"$n x$c" }.mkString(", ")
+    // Per-operator kernel time of the last run (summed over tasks, so it exceeds wall clock).
+    nodes.filter(_.getClass.getSimpleName.startsWith("Vector")).foreach { n =>
+      val t = n.metrics.get("time").map(m => f"${m.value / 1e6}%.1f ms").getOrElse("-")
+      val r = n.metrics.get("numOutputRows").map(_.value).getOrElse(-1L)
+      println(s"[tpch]   ${n.getClass.getSimpleName}: kernel time $t, output rows $r")
+    }
     Measurement(name, runs.map(_._1), rows.length, checksum, if (ops.isEmpty) "spark only" else ops, plan.treeString.take(4000))
   }
 
