@@ -7,8 +7,9 @@ JVM: no native library, no JNI, no serialization boundary. Unsupported operators
 types fall back to Spark with a recorded reason.
 
 - Spark 4.1.x, Scala 2.13, JDK 25 (the Vector API is still an incubator module)
-- Input: Spark's vectorized Parquet reader (copied into Arrow layout once per batch) or Comet's
-  native Parquet reader in scan-only mode (read zero-copy). See [docs/comet.md](docs/comet.md).
+- Input: Spark's vectorized Parquet reader (copied into Arrow layout once per batch, keeping
+  dictionary-encoded strings as dictionary indices) or Comet's native Parquet reader in scan-only
+  mode (read zero-copy). See [docs/comet.md](docs/comet.md).
 - Output: unshaded Arrow 18.3.0 vectors (the version Spark bundles) wrapped in Spark's
   `ArrowColumnVector`, so Spark's own `ColumnarToRowExec` consumes them unchanged.
 
@@ -49,7 +50,7 @@ Configuration keys (all default to `true` except the last):
 
 | Key | Meaning |
 |---|---|
-| `spark.vector.enabled` | master switch |
+| `spark.vector.enabled` | main switch |
 | `spark.vector.exec.filter.enabled` | convert `FilterExec` |
 | `spark.vector.exec.project.enabled` | convert `ProjectExec` |
 | `spark.vector.exec.aggregate.enabled` | convert Partial `HashAggregateExec` |
@@ -93,8 +94,11 @@ overflow checks) falls back.
 The partial aggregate emits exactly Spark's buffer schema (`sum`, `count`, `min`, `max`,
 `(sum, count)` for `avg`), so Spark's exchange and Final aggregate run unchanged. Without grouping
 keys, one buffer row per partition. With keys, a hash table assigns dense group ids across the
-task's batches; while there are at most 64 groups every aggregate is a masked SIMD reduction per
-group (TPC-H Q1 has 4), beyond that rows are scattered into per-group accumulators.
+task's batches. When every key is a dictionary-encoded string (the usual case for low-cardinality
+Parquet columns) the ids are memoised per combination of dictionary indices, so a batch probes the
+table at most once per distinct key tuple. Rows are then scattered into per-group accumulators;
+the alternative, one masked SIMD reduction per group, only wins for one group on 128-bit vectors
+(`sparkvector.agg.maskPathMaxGroups` sets the cut-over, default 1 for ≤4 lanes and 8 above).
 
 ### Supported today
 
@@ -144,6 +148,17 @@ Three things silently turned SIMD code into something slower than a scalar loop 
    precomputed `VectorShuffle` table by the selection bits and use `rearrange`.
 3. `VectorMask.fromLong` is slow on NEON. Masks are built with a broadcast-AND-compare against lane
    bit constants, and fully valid 64-row blocks skip masks entirely.
+
+Three more came out of profiling TPC-H rather than microbenchmarks (see
+[docs/results.md](docs/results.md)):
+
+4. Two 64-bit lanes are not worth a shuffle. Compacting doubles by `rearrange` on NEON lost to a
+   scalar walk over the selection bits; 64-bit compaction uses the scalar walk when the species
+   has two lanes, and every kernel bulk-copies 64-row blocks whose selection word is all ones.
+5. Heap segments are slow inputs. Wrapping Spark's `double[]` with `MemorySegment.ofArray` instead
+   of copying it into native memory doubled the filter's time; one copy into native memory wins.
+6. Per-group masked reductions only pay off for one or two groups on 128-bit vectors; grouped
+   aggregation scatters into per-group accumulators otherwise.
 
 ## Not in scope (yet)
 
