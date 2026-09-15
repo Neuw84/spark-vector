@@ -8,6 +8,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SparkPlan}
+import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.internal.SQLConf
 
 /** Tags and helpers for explaining why an operator was left to Spark. */
@@ -63,6 +64,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
               if (failures.isEmpty) VectorProjectExec(projectList, child)
               else fallback(p, failures.mkString("; "))
+          }
+
+        case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
+          columnarInputReason(a.child) match {
+            case Some(reason) => fallback(a, reason)
+            case None =>
+              VectorAggregatePlanner.plan(a) match {
+                case Right(v) => v
+                case Left(reason) => fallback(a, reason)
+              }
           }
       }
       if (VectorConf.explainFallback(conf)) {

@@ -200,6 +200,89 @@ public final class ScalarReference {
     }
   }
 
+  // ---------------------------------------------------------------- aggregation
+
+  public static long countValid(VectorBuffers a) {
+    long c = 0;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        c++;
+      }
+    }
+    return c;
+  }
+
+  public static double sumDouble(VectorBuffers a) {
+    double s = 0.0;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        s += a.getDouble(i);
+      }
+    }
+    return s;
+  }
+
+  public static long sumLong(VectorBuffers a) {
+    long s = 0;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        s += a.type() == VecType.INT32 ? a.getInt(i) : a.getLong(i);
+      }
+    }
+    return s;
+  }
+
+  /** Spark ordering: NaN is the largest double. Returns +Inf when nothing is valid. */
+  public static double minDouble(VectorBuffers a) {
+    double best = Double.POSITIVE_INFINITY;
+    boolean any = false;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        double v = a.getDouble(i);
+        if (!any || CompareOp.nanSafeCompare(v, best) < 0) {
+          best = v;
+        }
+        any = true;
+      }
+    }
+    return best;
+  }
+
+  public static double maxDouble(VectorBuffers a) {
+    double best = Double.NEGATIVE_INFINITY;
+    boolean any = false;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        double v = a.getDouble(i);
+        if (!any || CompareOp.nanSafeCompare(v, best) > 0) {
+          best = v;
+        }
+        any = true;
+      }
+    }
+    return best;
+  }
+
+  public static long minLong(VectorBuffers a) {
+    long best = Long.MAX_VALUE;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        best = Math.min(best, a.type() == VecType.INT32 ? a.getInt(i) : a.getLong(i));
+      }
+    }
+    return best;
+  }
+
+  public static long maxLong(VectorBuffers a) {
+    long best = Long.MIN_VALUE;
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        best = Math.max(best, a.type() == VecType.INT32 ? a.getInt(i) : a.getLong(i));
+      }
+    }
+    return best;
+  }
+
   // ---------------------------------------------------------------- bitmaps
 
   public static void and(MemorySegment a, MemorySegment b, MemorySegment out, int n) {

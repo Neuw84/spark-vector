@@ -83,7 +83,13 @@ abstract class VectorBatchIterator(input: Iterator[ColumnarBatch], name: String)
   }
 
   /** Runs `f` with an evaluation context over `batch` and a confined scratch arena. */
-  protected def withEvalContext[T](batch: ColumnarBatch)(f: EvalContext => T): T = {
+  protected def withEvalContext[T](batch: ColumnarBatch)(f: EvalContext => T): T =
+    EvalContexts.withBatch(batch)(f)
+}
+
+object EvalContexts {
+  /** Runs `f` with an evaluation context over `batch`; the scratch arena is closed afterwards. */
+  def withBatch[T](batch: ColumnarBatch)(f: EvalContext => T): T = {
     val arena = Arena.ofConfined()
     try {
       val n = batch.numRows()

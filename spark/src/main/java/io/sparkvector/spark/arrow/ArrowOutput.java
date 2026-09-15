@@ -164,6 +164,37 @@ public final class ArrowOutput {
     return finish(out, outCount, false);
   }
 
+  /**
+   * A one-row column holding {@code value} (boxed Int/Long/Double/Boolean in Spark's internal
+   * representation, or {@code null}). Used to emit ungrouped aggregation buffers.
+   */
+  public static ColumnVector scalarColumn(
+      String name, DataType dt, Object value, BufferAllocator allocator) {
+    FieldVector v = newVector(name, dt, allocator);
+    v.setInitialCapacity(1);
+    v.allocateNew();
+    if (value == null) {
+      ((org.apache.arrow.vector.BaseFixedWidthVector) v).setNull(0);
+    } else if (v instanceof IntVector iv) {
+      iv.setSafe(0, ((Number) value).intValue());
+    } else if (v instanceof DateDayVector dv) {
+      dv.setSafe(0, ((Number) value).intValue());
+    } else if (v instanceof BigIntVector lv) {
+      lv.setSafe(0, ((Number) value).longValue());
+    } else if (v instanceof TimeStampMicroTZVector tv) {
+      tv.setSafe(0, ((Number) value).longValue());
+    } else if (v instanceof Float8Vector fv) {
+      fv.setSafe(0, ((Number) value).doubleValue());
+    } else if (v instanceof BitVector bv) {
+      bv.setSafe(0, ((Boolean) value) ? 1 : 0);
+    } else {
+      v.close();
+      throw new UnsupportedOperationException("scalar output not supported for " + dt);
+    }
+    v.setValueCount(1);
+    return new VectorArrowColumnVector(v);
+  }
+
   /** Copies a whole column (no selection) into a new Arrow vector. */
   public static ColumnVector copy(String name, DataType dt, VectorBuffers in, BufferAllocator allocator) {
     int n = in.length();
