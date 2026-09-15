@@ -25,6 +25,11 @@ public final class ColumnVectorAdapters {
 
   private static final List<Adapter> ADAPTERS = new CopyOnWriteArrayList<>();
 
+  static {
+    // Comet's scan vectors are read zero-copy when Comet is on the classpath (executor side).
+    io.sparkvector.spark.comet.CometVectorAdapter.tryRegister();
+  }
+
   private ColumnVectorAdapters() {}
 
   public static void register(Adapter adapter) {
