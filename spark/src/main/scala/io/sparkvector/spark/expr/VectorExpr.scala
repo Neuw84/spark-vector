@@ -178,3 +178,96 @@ object VectorExpr {
     (sel, Bitmap.popcount(sel, ctx.numRows))
   }
 }
+
+/**
+ * Binary arithmetic on same-typed operands (at most one literal). Division is only defined for
+ * doubles; a zero divisor yields null in legacy mode and raises DIVIDE_BY_ZERO in ANSI mode,
+ * exactly like Spark's `Divide`.
+ */
+final case class ArithExpr(
+    op: ArithOp,
+    left: VectorExpr,
+    right: VectorExpr,
+    dataType: DataType,
+    ansiDivideByZero: Boolean,
+    queryContext: org.apache.spark.QueryContext)
+    extends VectorExpr {
+
+  override def children: Seq[VectorExpr] = Seq(left, right)
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    val data = ArrowLayout.allocateData(ctx.arena, vecType, n)
+    var validity: java.lang.foreign.MemorySegment = null
+    var divisorZero: java.lang.foreign.MemorySegment = null
+    (left, right) match {
+      case (l, lit: LiteralExpr) =>
+        val a = l.eval(ctx)
+        ArithKernels.arithScalar(op, a, lit.number, data)
+        validity = a.validity()
+        if (op == ArithOp.DIV && lit.number.doubleValue() == 0.0) {
+          divisorZero = ctx.bitmap()
+          Bitmap.fill(divisorZero, n, true)
+        }
+      case (lit: LiteralExpr, r) =>
+        val b = r.eval(ctx)
+        ArithKernels.scalarArith(op, lit.number, b, data)
+        validity = b.validity()
+        if (op == ArithOp.DIV) divisorZero = zeroMask(b, ctx)
+      case (l, r) =>
+        val a = l.eval(ctx)
+        val b = r.eval(ctx)
+        ArithKernels.arith(op, a, b, data)
+        if (a.validity() != null || b.validity() != null) {
+          validity = ctx.bitmap()
+          BitmapKernels.combineValidity(a.validity(), b.validity(), validity, n)
+        }
+        if (op == ArithOp.DIV) divisorZero = zeroMask(b, ctx)
+    }
+    if (divisorZero != null) {
+      // Lanes that are otherwise valid but divide by zero.
+      val affected = ctx.bitmap()
+      if (validity == null) BitmapKernels.copy(divisorZero, affected, n)
+      else BitmapKernels.and(divisorZero, validity, affected, n)
+      val count = Bitmap.popcount(affected, n)
+      if (count > 0) {
+        if (ansiDivideByZero) {
+          throw org.apache.spark.sql.vector.VectorErrors.divideByZero(queryContext)
+        }
+        val newValidity = ctx.bitmap()
+        if (validity == null) BitmapKernels.not(divisorZero, newValidity, n)
+        else BitmapKernels.andNot(validity, divisorZero, newValidity, n)
+        validity = newValidity
+      }
+    }
+    SegmentVectorBuffers.fixedWidth(vecType, n, validity, data)
+  }
+
+  private def zeroMask(b: VectorBuffers, ctx: EvalContext): java.lang.foreign.MemorySegment = {
+    val zero = ctx.bitmap()
+    CompareKernels.compareScalar(b, java.lang.Double.valueOf(0.0), CompareOp.EQ, zero)
+    zero
+  }
+}
+
+/** Widening numeric cast; validity is shared with the child. */
+final case class CastExpr(child: VectorExpr, dataType: DataType) extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val data = ArrowLayout.allocateData(ctx.arena, vecType, ctx.numRows)
+    CastKernels.cast(a, vecType, data)
+    SegmentVectorBuffers.fixedWidth(vecType, ctx.numRows, a.validity(), data)
+  }
+}
+
+final case class NegateExpr(child: VectorExpr) extends VectorExpr {
+  override def dataType: DataType = child.dataType
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val data = ArrowLayout.allocateData(ctx.arena, vecType, ctx.numRows)
+    ArithKernels.negate(a, data)
+    SegmentVectorBuffers.fixedWidth(vecType, ctx.numRows, a.validity(), data)
+  }
+}

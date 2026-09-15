@@ -4,6 +4,7 @@ import io.sparkvector.spark.arrow.ArrowOutput
 import io.sparkvector.spark.expr.{ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -16,6 +17,7 @@ case class VectorFilterExec(condition: Expression, child: SparkPlan) extends Vec
 
   override def output: Seq[Attribute] = child.output
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
+  override def outputPartitioning: Partitioning = child.outputPartitioning
 
   /** Compiled on the driver; failure here is a bug because the rule already checked it. */
   @transient private lazy val compiled: VectorExpr =

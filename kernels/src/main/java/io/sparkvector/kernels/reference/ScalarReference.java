@@ -1,5 +1,6 @@
 package io.sparkvector.kernels.reference;
 
+import io.sparkvector.kernels.ArithOp;
 import io.sparkvector.kernels.Bitmap;
 import io.sparkvector.kernels.CompareOp;
 import io.sparkvector.kernels.VecType;
@@ -62,6 +63,140 @@ public final class ScalarReference {
         }
       }
       default -> throw new IllegalArgumentException("unsupported " + a.type());
+    }
+  }
+
+  // ---------------------------------------------------------------- arithmetic
+
+  public static void arith(ArithOp op, VectorBuffers a, VectorBuffers b, MemorySegment out) {
+    int n = a.length();
+    switch (a.type()) {
+      case INT32 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_INT, (long) i << 2, applyInt(op, a.getInt(i), b.getInt(i)));
+        }
+      }
+      case INT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_LONG, (long) i << 3, applyLong(op, a.getLong(i), b.getLong(i)));
+        }
+      }
+      case FLOAT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, applyDouble(op, a.getDouble(i), b.getDouble(i)));
+        }
+      }
+      default -> throw new IllegalArgumentException("unsupported " + a.type());
+    }
+  }
+
+  public static void arithScalar(ArithOp op, VectorBuffers a, Number s, MemorySegment out) {
+    int n = a.length();
+    switch (a.type()) {
+      case INT32 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_INT, (long) i << 2, applyInt(op, a.getInt(i), s.intValue()));
+        }
+      }
+      case INT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_LONG, (long) i << 3, applyLong(op, a.getLong(i), s.longValue()));
+        }
+      }
+      case FLOAT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, applyDouble(op, a.getDouble(i), s.doubleValue()));
+        }
+      }
+      default -> throw new IllegalArgumentException("unsupported " + a.type());
+    }
+  }
+
+  public static void scalarArith(ArithOp op, Number s, VectorBuffers b, MemorySegment out) {
+    int n = b.length();
+    switch (b.type()) {
+      case INT32 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_INT, (long) i << 2, applyInt(op, s.intValue(), b.getInt(i)));
+        }
+      }
+      case INT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_LONG, (long) i << 3, applyLong(op, s.longValue(), b.getLong(i)));
+        }
+      }
+      case FLOAT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, applyDouble(op, s.doubleValue(), b.getDouble(i)));
+        }
+      }
+      default -> throw new IllegalArgumentException("unsupported " + b.type());
+    }
+  }
+
+  public static void negate(VectorBuffers a, MemorySegment out) {
+    int n = a.length();
+    switch (a.type()) {
+      case INT32 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_INT, (long) i << 2, -a.getInt(i));
+        }
+      }
+      case INT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_LONG, (long) i << 3, -a.getLong(i));
+        }
+      }
+      case FLOAT64 -> {
+        for (int i = 0; i < n; i++) {
+          out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, -a.getDouble(i));
+        }
+      }
+      default -> throw new IllegalArgumentException("unsupported " + a.type());
+    }
+  }
+
+  private static int applyInt(ArithOp op, int x, int y) {
+    return switch (op) {
+      case ADD -> x + y;
+      case SUB -> x - y;
+      case MUL -> x * y;
+      case DIV -> throw new IllegalArgumentException("integer DIV");
+    };
+  }
+
+  private static long applyLong(ArithOp op, long x, long y) {
+    return switch (op) {
+      case ADD -> x + y;
+      case SUB -> x - y;
+      case MUL -> x * y;
+      case DIV -> throw new IllegalArgumentException("integer DIV");
+    };
+  }
+
+  private static double applyDouble(ArithOp op, double x, double y) {
+    return switch (op) {
+      case ADD -> x + y;
+      case SUB -> x - y;
+      case MUL -> x * y;
+      case DIV -> x / y;
+    };
+  }
+
+  public static void cast(VectorBuffers a, VecType target, MemorySegment out) {
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      switch (a.type()) {
+        case INT32 -> {
+          switch (target) {
+            case INT64 -> out.set(VectorBuffers.LE_LONG, (long) i << 3, (long) a.getInt(i));
+            case FLOAT64 -> out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, (double) a.getInt(i));
+            default -> throw new IllegalArgumentException("unsupported cast");
+          }
+        }
+        case INT64 -> out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, (double) a.getLong(i));
+        default -> throw new IllegalArgumentException("unsupported cast");
+      }
     }
   }
 

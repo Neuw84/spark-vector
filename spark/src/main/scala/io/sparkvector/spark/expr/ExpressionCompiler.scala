@@ -1,8 +1,8 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{CompareOp, VecType}
+import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BoundReference, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, Cast, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Multiply, Not, Or, Subtract, UnaryMinus}
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, IntegerType, LongType, TimestampType}
 
 /**
@@ -52,7 +52,67 @@ object ExpressionCompiler {
     case IsNull(child) => nullTestChild(child, input).map(IsNullExpr.apply)
     case IsNotNull(child) => nullTestChild(child, input).map(IsNotNullExpr.apply)
 
+    case e: Add => arithmetic(ArithOp.ADD, e.left, e.right, e.evalMode, e, input)
+    case e: Subtract => arithmetic(ArithOp.SUB, e.left, e.right, e.evalMode, e, input)
+    case e: Multiply => arithmetic(ArithOp.MUL, e.left, e.right, e.evalMode, e, input)
+    case e: Divide => arithmetic(ArithOp.DIV, e.left, e.right, e.evalMode, e, input)
+
+    case UnaryMinus(child, failOnError) =>
+      compile(child, input).flatMap {
+        case _: LiteralExpr => Left("negation of a literal")
+        case c if !arithmeticTypes.contains(c.vecType) => Left(s"negation not supported for ${c.dataType.simpleString}")
+        case c if failOnError && c.vecType != VecType.FLOAT64 => Left("ANSI integer negation (overflow check) not supported")
+        case c => Right(NegateExpr(c))
+      }
+
+    case c: Cast =>
+      val child = c.child
+      val dt = c.dataType
+      compile(child, input).flatMap {
+        case _: LiteralExpr => Left("cast of a literal")
+        case c if !TypeMapping.isSupported(dt) => Left(s"unsupported cast target ${dt.simpleString}")
+        case c if !CastKernels.isSupported(c.vecType, TypeMapping.vecTypeOf(dt)) =>
+          Left(s"unsupported cast ${child.dataType.simpleString} -> ${dt.simpleString}")
+        case c => Right(CastExpr(c, dt))
+      }
+
     case other => Left(s"unsupported expression ${other.getClass.getSimpleName}: ${other.sql}")
+  }
+
+  private val arithmeticTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64)
+
+  /**
+   * Spark 4 defaults to ANSI mode. Double arithmetic is identical in both modes except that
+   * division by zero raises instead of yielding null, which the kernel wrapper handles. Integer
+   * arithmetic in ANSI mode needs overflow checks the kernels do not implement, so it falls back.
+   */
+  private def arithmetic(
+      op: ArithOp,
+      l: Expression,
+      r: Expression,
+      mode: EvalMode.Value,
+      e: Expression,
+      input: Seq[Attribute]): Result =
+    for {
+      le <- compile(l, input)
+      re <- compile(r, input)
+      _ <- checkArithmetic(op, le, re, l, r, mode)
+    } yield ArithExpr(op, le, re, e.dataType, mode == EvalMode.ANSI, e.origin.context)
+
+  private def checkArithmetic(
+      op: ArithOp,
+      le: VectorExpr,
+      re: VectorExpr,
+      l: Expression,
+      r: Expression,
+      mode: EvalMode.Value): Either[String, Unit] = {
+    if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
+    else if (l.dataType != r.dataType) Left(s"arithmetic operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
+    else if (!arithmeticTypes.contains(le.vecType)) Left(s"arithmetic not supported for ${l.dataType.simpleString}")
+    else if (op == ArithOp.DIV && le.vecType != VecType.FLOAT64) Left(s"division not supported for ${l.dataType.simpleString}")
+    else if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
+    else if (mode == EvalMode.ANSI && le.vecType != VecType.FLOAT64) Left("ANSI integer arithmetic (overflow checks) not supported")
+    else Right(())
   }
 
   /** A filter condition must produce a non-literal boolean column. */

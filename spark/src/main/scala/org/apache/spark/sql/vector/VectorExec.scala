@@ -25,7 +25,4 @@ trait VectorExec extends UnaryExecNode {
   override protected def doExecute(): RDD[InternalRow] =
     throw new UnsupportedOperationException(
       s"${nodeName} only supports columnar execution; Spark should have inserted ColumnarToRowExec")
-
-  override def outputPartitioning: org.apache.spark.sql.catalyst.plans.physical.Partitioning =
-    child.outputPartitioning
 }

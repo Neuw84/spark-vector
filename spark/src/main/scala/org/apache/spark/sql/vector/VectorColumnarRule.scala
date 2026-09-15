@@ -7,7 +7,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
-import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, SparkPlan}
+import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SparkPlan}
 import org.apache.spark.sql.internal.SQLConf
 
 /** Tags and helpers for explaining why an operator was left to Spark. */
@@ -48,6 +48,21 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
                 case Right(_) => VectorFilterExec(condition, child)
                 case Left(reason) => fallback(f, reason)
               }
+          }
+
+        case p @ ProjectExec(projectList, child) if VectorConf.projectEnabled(conf) =>
+          columnarInputReason(child) match {
+            case Some(reason) => fallback(p, reason)
+            case None =>
+              val failures = projectList.flatMap { e =>
+                val compiled = ExpressionCompiler.compile(e, child.output)
+                val typeCheck =
+                  if (TypeMapping.isSupported(e.dataType)) Right(())
+                  else Left(s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
+                compiled.flatMap(_ => typeCheck).left.toOption.map(r => s"${e.sql}: $r")
+              }
+              if (failures.isEmpty) VectorProjectExec(projectList, child)
+              else fallback(p, failures.mkString("; "))
           }
       }
       if (VectorConf.explainFallback(conf)) {
