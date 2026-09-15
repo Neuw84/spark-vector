@@ -61,7 +61,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
 
   test("unsupported aggregates fall back") {
     // Spark rewrites DISTINCT into a grouped partial aggregate, which is not vectorized yet.
-    checkFallback("SELECT count(DISTINCT i) FROM t", Seq(Agg), "grouped aggregation")
+    checkFallback("SELECT count(DISTINCT i) FROM t", Seq(Agg), "not supported")
     checkFallback("SELECT first(d2) FROM t", Seq(Agg), "unsupported aggregate function")
     checkFallback("SELECT sum(d2) FILTER (WHERE i > 5) FROM t", Seq(Agg), "FILTER")
     checkFallback("SELECT min(b) FROM t", Seq(Agg), "not supported")
@@ -77,6 +77,45 @@ class VectorAggregateSuite extends VectorQuerySuite {
       df.collect()
       assert(nodesOf[VectorHashAggregateExec](df).isEmpty)
     }
+  }
+
+  test("grouped aggregation with few groups uses the mask path") {
+    // s has 49 distinct values plus null: at most 50 groups, below the low-cardinality threshold.
+    checkVectorized("SELECT s, count(*), count(d), sum(d2), avg(d2), min(i), max(l), min(dt) FROM t GROUP BY s", Seq(Agg))
+    checkVectorized("SELECT b, sum(d2), count(*) FROM t GROUP BY b", Seq(Agg))
+    checkVectorized("SELECT s, b, sum(d2 * 2.0), avg(d2) FROM t WHERE i > 100 GROUP BY s, b", Seq(Filter, Agg))
+  }
+
+  test("grouped aggregation with many groups uses the scatter path") {
+    checkVectorized("SELECT i, sum(d2), count(*), max(d2) FROM t GROUP BY i", Seq(Agg))
+    checkVectorized("SELECT l, count(*), sum(d2), min(i) FROM t GROUP BY l", Seq(Agg)) // nullable bigint key
+    checkVectorized("SELECT dt, count(*), avg(d2) FROM t GROUP BY dt", Seq(Agg)) // 730 date keys
+  }
+
+  test("grouping keys with nulls and NaN values in aggregates") {
+    checkVectorized("SELECT s, max(d), min(d), sum(d) FROM t GROUP BY s", Seq(Agg))
+    checkVectorized("SELECT l, max(d) FROM t WHERE d IS NOT NULL GROUP BY l", Seq(Filter, Agg))
+  }
+
+  test("grouped aggregation over empty input emits no rows") {
+    // With AQE the empty partial output makes Spark replace the stage by EmptyRelation, so only
+    // check the plan shape with AQE off.
+    checkVectorized("SELECT s, count(*) FROM t WHERE i < 0 GROUP BY s", Seq.empty)
+    withConf("spark.sql.adaptive.enabled" -> "false") {
+      val df = checkVectorized("SELECT s, count(*) FROM t WHERE i < 0 GROUP BY s", Seq(Filter, Agg))
+      assert(df.count() === 0)
+    }
+  }
+
+  test("double grouping keys fall back") {
+    checkFallback("SELECT d2, count(*) FROM t GROUP BY d2", Seq(Agg), "unsupported expression")
+  }
+
+  test("TPC-H Q1 end to end") {
+    val df = checkVectorized(TestTables.TpchQ1, Seq(Filter, Agg), tolerance = 1e-9)
+    val rows = df.collect()
+    assert(rows.length === 3, rows.mkString("\n")) // synthetic data yields (A,F), (N,O), (R,F)
+    info(s"Q1 rows:\n${rows.mkString("\n")}\n${df.queryExecution.executedPlan.treeString}")
   }
 
   test("TPC-H Q6 end to end") {

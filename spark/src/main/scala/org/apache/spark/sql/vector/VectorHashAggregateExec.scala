@@ -1,8 +1,10 @@
 package org.apache.spark.sql.vector
 
+import io.sparkvector.kernels.{GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
 import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.agg.{AggState, VectorAggFunction, VectorAggregates}
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorAllocators}
+import io.sparkvector.spark.agg.{AggState, GroupedAggState, VectorAggFunction, VectorAggregates}
+import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators}
+import io.sparkvector.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -14,13 +16,20 @@ import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
+/** Where an output column of the partial aggregate comes from. */
+sealed trait OutputSlot extends Serializable
+final case class KeySlot(key: Int) extends OutputSlot
+final case class BufferSlot(agg: Int, slot: Int) extends OutputSlot
+
 /**
  * Columnar replacement for a Partial-mode HashAggregateExec. It emits the same aggregation buffer
  * schema as Spark (`resultExpressions` are the grouping attributes followed by the functions'
  * `inputAggBufferAttributes`), so Spark's exchange and Final aggregate consume it unchanged.
  *
- * This version handles the ungrouped case: one buffer row per partition, emitted even for empty
- * input, exactly like Spark.
+ * Without grouping keys one buffer row is emitted per partition, even for empty input, exactly
+ * like Spark. With grouping keys, rows are assigned dense group ids through a [[GroupKeyTable]]
+ * and reduced per group (masked SIMD reductions while there are few groups, scalar scatter
+ * beyond); one row per group is emitted at the end.
  */
 case class VectorHashAggregateExec(
     requiredChildDistributionExpressions: Option[Seq[Expression]],
@@ -30,8 +39,6 @@ case class VectorHashAggregateExec(
     resultExpressions: Seq[NamedExpression],
     child: SparkPlan)
     extends VectorExec {
-
-  require(groupingExpressions.isEmpty, "grouped aggregation is not supported yet")
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
   override def outputPartitioning: Partitioning = child.outputPartitioning
@@ -43,12 +50,18 @@ case class VectorHashAggregateExec(
       AttributeSet(aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes)) ++
       AttributeSet(aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes))
 
-  /** For each output column: (aggregate index, buffer slot). */
-  @transient private lazy val layout: Array[(Int, Int)] =
-    VectorAggregatePlanner.bufferLayout(aggregateExpressions, resultExpressions) match {
+  @transient private lazy val layout: Array[OutputSlot] =
+    VectorAggregatePlanner.outputLayout(groupingExpressions, aggregateExpressions, resultExpressions) match {
       case Right(l) => l.toArray
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate: $reason")
     }
+
+  @transient private lazy val compiledKeys: Array[VectorExpr] = groupingExpressions.map { e =>
+    VectorAggregatePlanner.compileKey(e, child.output) match {
+      case Right(k) => k
+      case Left(reason) => throw new IllegalStateException(s"cannot vectorize grouping key ${e.sql}: $reason")
+    }
+  }.toArray
 
   @transient private lazy val compiled: Array[VectorAggFunction] = aggregateExpressions.map { agg =>
     VectorAggregates.compile(agg, child.output) match {
@@ -59,11 +72,13 @@ case class VectorHashAggregateExec(
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val aggs = compiled
+    val keys = compiledKeys
     val l = layout
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter =>
-      new VectorUngroupedAggregateIterator(iter, aggs, l, outputAttrs, m)
+      if (keys.isEmpty) new VectorUngroupedAggregateIterator(iter, aggs, l, outputAttrs, m)
+      else new VectorGroupedAggregateIterator(iter, keys, aggs, l, outputAttrs, m)
     }
   }
 
@@ -71,6 +86,7 @@ case class VectorHashAggregateExec(
 
   override def verboseStringWithOperatorId(): String = {
     s"""$formattedNodeName
+       |Keys: ${groupingExpressions.map(_.sql).mkString(", ")}
        |Functions: ${aggregateExpressions.map(_.sql).mkString(", ")}
        |Output: ${output.map(_.name).mkString(", ")}
        |""".stripMargin
@@ -81,7 +97,7 @@ case class VectorHashAggregateExec(
 private[vector] class VectorUngroupedAggregateIterator(
     input: Iterator[ColumnarBatch],
     aggs: Array[VectorAggFunction],
-    layout: Array[(Int, Int)],
+    layout: Array[OutputSlot],
     outputAttrs: Array[(String, DataType)],
     metrics: VectorMetrics)
     extends Iterator[ColumnarBatch]
@@ -116,9 +132,11 @@ private[vector] class VectorUngroupedAggregateIterator(
     val columns = new Array[ColumnVector](layout.length)
     var c = 0
     while (c < columns.length) {
-      val (aggIdx, slot) = layout(c)
       val (name, dt) = outputAttrs(c)
-      columns(c) = ArrowOutput.scalarColumn(name, dt, buffers(aggIdx)(slot), allocator)
+      columns(c) = layout(c) match {
+        case BufferSlot(aggIdx, slot) => ArrowOutput.scalarColumn(name, dt, buffers(aggIdx)(slot), allocator)
+        case KeySlot(_) => throw new IllegalStateException("key slot in ungrouped aggregate")
+      }
       c += 1
     }
     metrics.numOutputBatches += 1
@@ -136,20 +154,161 @@ private[vector] class VectorUngroupedAggregateIterator(
   }
 }
 
+/** Drains the partition into a group table, then emits the groups in batches. */
+private[vector] class VectorGroupedAggregateIterator(
+    input: Iterator[ColumnarBatch],
+    keyExprs: Array[VectorExpr],
+    aggs: Array[VectorAggFunction],
+    layout: Array[OutputSlot],
+    outputAttrs: Array[(String, DataType)],
+    metrics: VectorMetrics)
+    extends Iterator[ColumnarBatch]
+    with AutoCloseable {
+
+  private val OutputBatchSize = 4096
+
+  private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
+  private val table = new GroupKeyTable(keyExprs.map(_.vecType))
+  private val states: Array[GroupedAggState] = aggs.map(_.newGroupedState())
+  private var idScratch = new Array[Int](0)
+  private var drained = false
+  private var emittedGroups = 0
+  private var current: ColumnarBatch = _
+  private var closed = false
+
+  Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
+
+  private def drain(): Unit = {
+    if (drained) return
+    drained = true
+    val keys = new Array[VectorBuffers](keyExprs.length)
+    while (input.hasNext) {
+      val batch = input.next()
+      val n = batch.numRows()
+      if (n > 0) {
+        metrics.timed {
+          metrics.numInputBatches += 1
+          if (idScratch.length < n) idScratch = new Array[Int](n)
+          EvalContexts.withBatch(batch) { ctx =>
+            var k = 0
+            while (k < keys.length) { keys(k) = keyExprs(k).eval(ctx); k += 1 }
+            val numGroups = table.assign(keys, n, idScratch)
+            val assignment = GroupAssignment.of(idScratch, n, numGroups, ctx.arena)
+            var i = 0
+            while (i < states.length) { states(i).update(ctx, assignment); i += 1 }
+          }
+        }
+      }
+    }
+  }
+
+  override def hasNext: Boolean = {
+    drain()
+    emittedGroups < table.size()
+  }
+
+  override def next(): ColumnarBatch = {
+    if (!hasNext) throw new NoSuchElementException("no more groups")
+    releaseCurrent()
+    val from = emittedGroups
+    val to = math.min(table.size(), from + OutputBatchSize)
+    val count = to - from
+    val columns = new Array[ColumnVector](layout.length)
+    var c = 0
+    while (c < columns.length) {
+      val (name, dt) = outputAttrs(c)
+      columns(c) = layout(c) match {
+        case KeySlot(k) => keyColumn(name, dt, k, from, to)
+        case BufferSlot(aggIdx, slot) => bufferColumn(name, dt, states(aggIdx), slot, from, to)
+      }
+      c += 1
+    }
+    emittedGroups = to
+    metrics.numOutputBatches += 1
+    metrics.numOutputRows += count
+    current = new ColumnarBatch(columns, count)
+    current
+  }
+
+  private def keyColumn(name: String, dt: DataType, k: Int, from: Int, to: Int): ColumnVector = {
+    val count = to - from
+    if (table.`type`(k) == VecType.UTF8) {
+      val out = ArrowOutput.allocateUtf8(name, count, table.utf8Bytes(k, from, to), allocator)
+      table.writeKeys(k, from, to, out.validity(), out.data(), out.offsets())
+      ArrowOutput.finish(out, count, false)
+    } else {
+      val out = ArrowOutput.allocateFixed(name, dt, count, allocator)
+      table.writeKeys(k, from, to, out.validity(), out.data(), null)
+      ArrowOutput.finish(out, count, false)
+    }
+  }
+
+  private def bufferColumn(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int): ColumnVector = {
+    val count = to - from
+    val out: ArrowVectorBuffers = ArrowOutput.allocateFixed(name, dt, count, allocator)
+    val data = out.data()
+    val validity = out.validity()
+    var o = 0
+    while (o < count) {
+      state.bufferValue(from + o, slot) match {
+        case null => io.sparkvector.kernels.Bitmap.clear(validity, o)
+        case v: java.lang.Double =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())
+        case v: java.lang.Long =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
+        case v: java.lang.Integer =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+        case other => throw new IllegalStateException(s"unexpected buffer value $other")
+      }
+      o += 1
+    }
+    ArrowOutput.finish(out, count, false)
+  }
+
+  private def releaseCurrent(): Unit = {
+    if (current != null) { current.close(); current = null }
+  }
+
+  override def close(): Unit = {
+    if (!closed) {
+      closed = true
+      releaseCurrent()
+      allocator.close()
+    }
+  }
+}
+
 /** Planning-time checks shared by the rule and the operator. */
 object VectorAggregatePlanner {
 
-  /** Maps each result attribute to the (aggregate, buffer slot) that produces it. */
-  def bufferLayout(
+  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8)
+
+  /**
+   * Grouping keys: ints, longs, booleans and strings. Doubles are excluded because Spark wraps them
+   * in NormalizeNaNAndZero, which is not compiled (and would need its own equality semantics).
+   */
+  def compileKey(e: NamedExpression, input: Seq[Attribute]): Either[String, VectorExpr] =
+    ExpressionCompiler.compile(e, input).flatMap {
+      case _: LiteralExpr => Left("literal grouping key")
+      case k if !keyTypes.contains(k.vecType) => Left(s"grouping key type ${e.dataType.simpleString} not supported")
+      case k => Right(k)
+    }
+
+  /** Maps each result attribute to the grouping key or the (aggregate, buffer slot) producing it. */
+  def outputLayout(
+      groupingExpressions: Seq[NamedExpression],
       aggregateExpressions: Seq[AggregateExpression],
-      resultExpressions: Seq[NamedExpression]): Either[String, Seq[(Int, Int)]] = {
-    val slots: Map[org.apache.spark.sql.catalyst.expressions.ExprId, (Int, Int)] =
+      resultExpressions: Seq[NamedExpression]): Either[String, Seq[OutputSlot]] = {
+    val keySlots: Map[org.apache.spark.sql.catalyst.expressions.ExprId, OutputSlot] =
+      groupingExpressions.zipWithIndex.map { case (g, i) => g.toAttribute.exprId -> (KeySlot(i): OutputSlot) }.toMap
+    val bufferSlots: Map[org.apache.spark.sql.catalyst.expressions.ExprId, OutputSlot] =
       aggregateExpressions.zipWithIndex.flatMap { case (agg, i) =>
-        agg.aggregateFunction.inputAggBufferAttributes.zipWithIndex.map { case (a, slot) => a.exprId -> (i, slot) }
+        agg.aggregateFunction.inputAggBufferAttributes.zipWithIndex.map { case (a, slot) => a.exprId -> (BufferSlot(i, slot): OutputSlot) }
       }.toMap
     val mapped = resultExpressions.map {
-      case a: Attribute => slots.get(a.exprId).toRight(s"result attribute ${a.name} is not an aggregation buffer")
-      case other => Left(s"result expression ${other.sql} is not a plain buffer attribute")
+      case a: Attribute =>
+        keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId)).toRight(s"result attribute ${a.name} is neither a grouping key nor an aggregation buffer")
+      case other => Left(s"result expression ${other.sql} is not a plain attribute")
     }
     mapped.collectFirst { case Left(r) => r } match {
       case Some(reason) => Left(reason)
@@ -159,15 +318,16 @@ object VectorAggregatePlanner {
 
   /** Attempts to convert a Spark HashAggregateExec; Left explains the fallback. */
   def plan(a: HashAggregateExec): Either[String, VectorHashAggregateExec] = {
-    if (a.groupingExpressions.nonEmpty) Left("grouped aggregation not supported yet")
-    else if (a.aggregateExpressions.isEmpty) Left("aggregate without functions")
+    if (a.aggregateExpressions.isEmpty) Left("aggregate without functions (distinct-style) not supported")
     else if (a.aggregateExpressions.exists(_.mode != Partial)) Left("only Partial aggregation is vectorized; Final runs in Spark")
     else {
-      val failures = a.aggregateExpressions.flatMap(agg => VectorAggregates.compile(agg, a.child.output).left.toOption.map(r => s"${agg.sql}: $r"))
+      val keyFailures = a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
+      val aggFailures = a.aggregateExpressions.flatMap(agg => VectorAggregates.compile(agg, a.child.output).left.toOption.map(r => s"${agg.sql}: $r"))
+      val failures = keyFailures ++ aggFailures
       if (failures.nonEmpty) Left(failures.mkString("; "))
-      else bufferLayout(a.aggregateExpressions, a.resultExpressions).flatMap { _ =>
+      else outputLayout(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions).flatMap { _ =>
         a.resultExpressions.map(_.toAttribute).find(attr => !TypeMapping.isSupported(attr.dataType)) match {
-          case Some(attr) => Left(s"unsupported buffer type ${attr.dataType.simpleString} for ${attr.name}")
+          case Some(attr) => Left(s"unsupported output type ${attr.dataType.simpleString} for ${attr.name}")
           case None =>
             Right(VectorHashAggregateExec(
               a.requiredChildDistributionExpressions,

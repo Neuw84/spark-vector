@@ -1,6 +1,6 @@
 package io.sparkvector.spark.agg
 
-import io.sparkvector.kernels.{AggKernels, CompareOp, VecType, VectorBuffers}
+import io.sparkvector.kernels.{AggKernels, CompareOp, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
 import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
@@ -16,10 +16,18 @@ trait AggState {
   def bufferValues: Array[Any]
 }
 
+/** Running state of one aggregate function over many groups (see [[GroupAssignment]]). */
+trait GroupedAggState {
+  def update(ctx: EvalContext, groups: GroupAssignment): Unit
+  /** Buffer slot value of group `g` in Spark's internal representation, or `null`. */
+  def bufferValue(g: Int, slot: Int): Any
+}
+
 /** Serializable description of a supported aggregate function; states are created per task. */
 sealed trait VectorAggFunction extends Serializable {
   def bufferTypes: Seq[DataType]
   def newState(): AggState
+  def newGroupedState(): GroupedAggState
 }
 
 /** SUM over doubles: buffer `sum` is null until the first non-null input. */
@@ -34,6 +42,11 @@ final case class SumDoubleAgg(input: VectorExpr) extends VectorAggFunction {
       if (c > 0) { sum += AggKernels.sumDouble(v); count += c }
     }
     override def bufferValues: Array[Any] = Array(if (count == 0) null else java.lang.Double.valueOf(sum))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val acc = new GroupedAccumulators.DoubleSum
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+    override def bufferValue(g: Int, slot: Int): Any = if (acc.count(g) == 0) null else java.lang.Double.valueOf(acc.sum(g))
   }
 }
 
@@ -53,6 +66,11 @@ final case class SumLongAgg(input: VectorExpr) extends VectorAggFunction {
     }
     override def bufferValues: Array[Any] = Array(if (count == 0) null else java.lang.Long.valueOf(sum))
   }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val acc = new GroupedAccumulators.LongSum
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+    override def bufferValue(g: Int, slot: Int): Any = if (acc.count(g) == 0) null else java.lang.Long.valueOf(acc.sum(g))
+  }
 }
 
 /** COUNT(*) when `input` is None, otherwise COUNT of non-null values of the expression. */
@@ -65,6 +83,14 @@ final case class CountAgg(input: Option[VectorExpr]) extends VectorAggFunction {
       case Some(e) => count += AggKernels.countValid(e.eval(ctx))
     }
     override def bufferValues: Array[Any] = Array(java.lang.Long.valueOf(count))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val acc = new GroupedAccumulators.Count
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = input match {
+      case None => acc.updateAll(groups)
+      case Some(e) => acc.updateNonNull(e.eval(ctx), groups)
+    }
+    override def bufferValue(g: Int, slot: Int): Any = java.lang.Long.valueOf(acc.count(g))
   }
 }
 
@@ -105,6 +131,26 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
         case _ => Array(java.lang.Long.valueOf(bestLong))
       }
   }
+  override def newGroupedState(): GroupedAggState = input.vecType match {
+    case VecType.FLOAT64 =>
+      new GroupedAggState {
+        private val acc = new GroupedAccumulators.DoubleMinMax(isMin)
+        override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) java.lang.Double.valueOf(acc.value(g)) else null
+      }
+    case VecType.INT32 =>
+      new GroupedAggState {
+        private val acc = new GroupedAccumulators.LongMinMax(isMin)
+        override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) java.lang.Integer.valueOf(acc.value(g).toInt) else null
+      }
+    case _ =>
+      new GroupedAggState {
+        private val acc = new GroupedAccumulators.LongMinMax(isMin)
+        override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) java.lang.Long.valueOf(acc.value(g)) else null
+      }
+  }
 }
 
 /** AVG over a double-typed input (integers are cast first): buffer is (sum, count). */
@@ -119,6 +165,12 @@ final case class AverageAgg(input: VectorExpr) extends VectorAggFunction {
       if (c > 0) { sum += AggKernels.sumDouble(v); count += c }
     }
     override def bufferValues: Array[Any] = Array(java.lang.Double.valueOf(sum), java.lang.Long.valueOf(count))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val acc = new GroupedAccumulators.DoubleSum
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+    override def bufferValue(g: Int, slot: Int): Any =
+      if (slot == 0) java.lang.Double.valueOf(acc.sum(g)) else java.lang.Long.valueOf(acc.count(g))
   }
 }
 
