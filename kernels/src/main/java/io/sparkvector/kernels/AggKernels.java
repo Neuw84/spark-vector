@@ -131,29 +131,51 @@ public final class AggKernels {
 
   /**
    * {@code start} plus the valid doubles of {@code a}: the lane-parallel sum added to {@code start},
-   * or -- under {@code sparkvector.agg.interleave=1} -- the doubles added one after the other into
-   * {@code start} in row order, which is exactly Spark's running sum.
+   * or Spark's exact rounding when {@code strict} asks for it (or the legacy
+   * {@code sparkvector.agg.interleave=1} property forces it globally): the doubles added one after
+   * the other into {@code start} in row order. Which one an operator uses is decided by
+   * {@code spark.vector.exec.strictFloatingPoint}.
    */
-  public static double sumDoubleFrom(VectorBuffers a, double start) {
-    return GroupedAccumulators.INTERLEAVE == 1 ? sumDoubleSequential(a, start) : start + sumDouble(a);
+  public static double sumDoubleFrom(VectorBuffers a, double start, boolean strict) {
+    return strict || GroupedAccumulators.INTERLEAVE == 1 ? sumDoubleSequential(a, start) : start + sumDouble(a);
   }
 
-  /** The valid doubles added one after the other in row order into {@code start}, as Spark's Sum does. */
-  static double sumDoubleSequential(VectorBuffers a) {
+  /**
+   * Sum of the valid doubles in row order with a single accumulator: bit-identical to Spark's
+   * {@code sum += x} loop over the same rows, at scalar speed (C2 may not reassociate
+   * floating-point additions).
+   */
+  public static double sumDoubleSequential(VectorBuffers a) {
     return sumDoubleSequential(a, 0.0);
   }
 
-  static double sumDoubleSequential(VectorBuffers a, double start) {
+  /**
+   * {@link #sumDoubleSequential(VectorBuffers)} continued from a running sum {@code start}: {@code
+   * ((start + x0) + x1) + ...}, which is what a per-group or per-partition {@code sum += x} chain
+   * that spans batches computes (adding a per-batch sum to {@code start} would round differently).
+   */
+  public static double sumDoubleSequential(VectorBuffers a, double start) {
     MemorySegment d = a.data();
     MemorySegment validity = a.validity();
     int n = a.length();
-    double sum = start;
-    for (int i = 0; i < n; i++) {
-      if (validity == null || Bitmap.isSet(validity, i)) {
-        sum += d.getAtIndex(VectorBuffers.LE_DOUBLE, i);
+    double s = start;
+    for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      long word = wordOf(validity, w, n);
+      int base = w << 6;
+      if (word == fullWord(Math.min(64, n - base))) {
+        int limit = Math.min(64, n - base);
+        for (int k = 0; k < limit; k++) {
+          s += d.get(VectorBuffers.LE_DOUBLE, (long) (base + k) << 3);
+        }
+        continue;
+      }
+      while (word != 0L) {
+        int i = base + Long.numberOfTrailingZeros(word);
+        word &= word - 1;
+        s += d.get(VectorBuffers.LE_DOUBLE, (long) i << 3);
       }
     }
-    return sum;
+    return s;
   }
 
   /** Sum of the valid longs (wrapping on overflow, like Spark's legacy mode). */

@@ -43,7 +43,8 @@ case class VectorHashAggregateExec(
     aggregateExpressions: Seq[AggregateExpression],
     aggregateAttributes: Seq[Attribute],
     resultExpressions: Seq[NamedExpression],
-    child: SparkPlan)
+    child: SparkPlan,
+    strictFloatingPoint: Boolean = true)
     extends VectorExec with PartitioningPreservingUnaryExecNode {
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
@@ -109,7 +110,7 @@ case class VectorHashAggregateExec(
 
   // A merging stage's input is its grouping columns then the buffers (Spark's initialInputBufferOffset).
   @transient private lazy val compiled: Array[VectorAggFunction] = aggregateExpressions.zip(VectorAggregates.bufferOffsets(groupingExpressions.length, aggregateExpressions)).map { case (agg, offset) =>
-    VectorAggregates.compile(agg, child.output, offset) match {
+    VectorAggregates.compile(agg, child.output, offset, strictFloatingPoint) match {
       case Right(f) => f
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate ${agg.sql}: $reason")
     }
@@ -148,6 +149,7 @@ case class VectorHashAggregateExec(
   override def verboseStringWithOperatorId(): String = {
     s"""$formattedNodeName
        |Mode: ${modes.mkString(", ")}
+       |Floating point: ${if (strictFloatingPoint) "strict (Spark's rounding)" else "fast"}
        |Keys: ${groupingExpressions.map(_.sql).mkString(", ")}
        |Functions: ${aggregateExpressions.map(_.sql).mkString(", ")}
        |Output: ${output.map(_.name).mkString(", ")}
@@ -480,7 +482,7 @@ object VectorAggregatePlanner {
    * says whether it emits buffers (`Partial` / `PartialMerge`, as Spark's distinct rewrite mixes
    * them) or results (`Final` / `Complete`). `finalEnabled` gates the modes that read an exchange.
    */
-  def plan(a: BaseAggregateExec, finalEnabled: Boolean): Either[String, VectorHashAggregateExec] = {
+  def plan(a: BaseAggregateExec, finalEnabled: Boolean, strictFloatingPoint: Boolean = true): Either[String, VectorHashAggregateExec] = {
     val modes = a.aggregateExpressions.map(_.mode).distinct
     val keysOnly = a.aggregateExpressions.isEmpty
     // A keys-only aggregate emits its keys in both of Spark's stages: the buffer layout fits both.
@@ -518,7 +520,8 @@ object VectorAggregatePlanner {
               a.aggregateExpressions,
               a.aggregateAttributes,
               a.resultExpressions,
-              a.child))
+              a.child,
+              strictFloatingPoint))
         }
       }
     }

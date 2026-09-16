@@ -49,6 +49,45 @@ class AggKernelsTest {
     }
   }
 
+  /**
+   * The strict sum must reproduce Spark's sequential rounding bit for bit, on values of mixed
+   * magnitude where any other addition order visibly changes the last bits.
+   */
+  @Test
+  void sequentialSumIsBitIdenticalToReference() {
+    Random rnd = new Random(23);
+    for (int n : TestData.LENGTHS) {
+      for (double nullFraction : new double[] {0.0, 0.01, 0.3, 1.0}) {
+        try (Arena arena = Arena.ofConfined()) {
+          boolean[] nulls = TestData.nulls(rnd, n, nullFraction);
+          double[] dv = new double[n];
+          for (int i = 0; i < n; i++) {
+            dv[i] = (rnd.nextBoolean() ? 1 : -1) * rnd.nextDouble() * Math.pow(10, rnd.nextInt(16));
+          }
+          VectorBuffers d = ArrowLayout.ofDoubles(arena, dv, nulls);
+          String what = "n=" + n + " nulls=" + nullFraction;
+          assertEquals(
+              Double.doubleToLongBits(ScalarReference.sumDouble(d)),
+              Double.doubleToLongBits(AggKernels.sumDoubleSequential(d)),
+              "sumDoubleSequential " + what);
+          // Continued from a running sum: ((start + x0) + x1) + ..., as a chain spanning batches.
+          double start = 98765.4321;
+          double chained = start;
+          for (int i = 0; i < n; i++) {
+            if (!nulls[i]) {
+              chained += dv[i];
+            }
+          }
+          assertEquals(
+              Double.doubleToLongBits(chained),
+              Double.doubleToLongBits(AggKernels.sumDoubleSequential(d, start)),
+              "sumDoubleSequential(start) " + what);
+          assertDoubleAgg(ScalarReference.sumDouble(d), AggKernels.sumDouble(d), "sumDouble " + what);
+        }
+      }
+    }
+  }
+
   @Test
   void minMaxMatchReferenceIncludingNaNAndInfinities() {
     Random rnd = new Random(22);
@@ -112,8 +151,11 @@ class AggKernelsTest {
         }
       }
       assertEquals(expected, AggKernels.sumDoubleSequential(a, 0.25), "bit-identical to the sequential loop");
-      // The default mode keeps its contract: start plus the lane-parallel sum, equal up to rounding order.
-      assertEquals(0.25 + AggKernels.sumDouble(a), AggKernels.sumDoubleFrom(a, 0.25), Math.ulp(expected) * 64);
+      // Strict routes through the sequential loop; fast keeps its contract: start plus the
+      // lane-parallel sum, equal up to rounding order.
+      assertEquals(
+          Double.doubleToLongBits(expected), Double.doubleToLongBits(AggKernels.sumDoubleFrom(a, 0.25, true)));
+      assertEquals(0.25 + AggKernels.sumDouble(a), AggKernels.sumDoubleFrom(a, 0.25, false), Math.ulp(expected) * 64);
     }
   }
 }

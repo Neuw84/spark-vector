@@ -166,6 +166,53 @@ class GroupedAggregationTest {
     }
   }
 
+  /**
+   * A strict {@link GroupedAccumulators.DoubleSum} rounds exactly like Spark's per-group {@code sum
+   * += x} over the rows in order, on both the masked path (few groups) and the scatter path, with
+   * nulls and a selection; the fast one is only expected to agree to a tolerance.
+   */
+  @ParameterizedTest
+  @ValueSource(ints = {1, 3, 64, 300, 5000})
+  void strictDoubleSumIsBitIdenticalToSequentialReference(int cardinality) {
+    Random rnd = new Random(7 * cardinality + 1);
+    GroupedAccumulators.DoubleSum strict = new GroupedAccumulators.DoubleSum(true);
+    GroupedAccumulators.DoubleSum fast = new GroupedAccumulators.DoubleSum(false);
+    double[] expected = new double[cardinality];
+    long[] expectedCount = new long[cardinality];
+    for (int n : new int[] {1000, 37, 2048, 64, 999, 4097}) {
+      try (Arena arena = Arena.ofConfined()) {
+        int[] ids = new int[n];
+        double[] vals = new double[n];
+        boolean[] nulls = new boolean[n];
+        for (int i = 0; i < n; i++) {
+          ids[i] = rnd.nextInt(cardinality);
+          vals[i] = (rnd.nextBoolean() ? 1 : -1) * rnd.nextDouble() * Math.pow(10, rnd.nextInt(16));
+          nulls[i] = rnd.nextInt(5) == 0;
+        }
+        java.lang.foreign.MemorySegment selection = n % 2 == 0 ? TestData.randomBitmap(arena, rnd, n) : null;
+        for (int i = 0; i < n; i++) {
+          if (selection != null && !Bitmap.isSet(selection, i)) {
+            ids[i] = -1;
+          } else if (!nulls[i]) {
+            expected[ids[i]] += vals[i];
+            expectedCount[ids[i]]++;
+          }
+        }
+        VectorBuffers values = ArrowLayout.ofDoubles(arena, vals, nulls);
+        GroupAssignment a = GroupAssignment.of(ids, n, cardinality, arena, selection);
+        strict.update(values, a);
+        fast.update(values, a);
+      }
+    }
+    for (int g = 0; g < cardinality; g++) {
+      assertEquals(expectedCount[g], strict.count(g), "group " + g + " count");
+      assertEquals(expectedCount[g], fast.count(g), "group " + g + " count (fast)");
+      assertEquals(
+          Double.doubleToLongBits(expected[g]), Double.doubleToLongBits(strict.sum(g)), "group " + g + " strict sum");
+      assertEquals(expected[g], fast.sum(g), Math.abs(expected[g]) * 1e-12 + 1e-9, "group " + g + " fast sum");
+    }
+  }
+
   @Test
   void dictionaryAndPlainStringsGroupTogether() {
     try (Arena arena = Arena.ofConfined()) {

@@ -37,8 +37,12 @@ trait VectorAggFunction extends Serializable {
   def emittedTypes(declared: Seq[DataType]): Seq[DataType] = declared
 }
 
-/** SUM over doubles: buffer `sum` is null until the first non-null input. */
-final case class SumDoubleAgg(input: VectorExpr) extends VectorAggFunction {
+/**
+ * SUM over doubles: buffer `sum` is null until the first non-null input. `strict` selects Spark's
+ * rounding (rows added in order into one accumulator) over the faster lane-parallel and interleaved
+ * partial sums; see `spark.vector.exec.strictFloatingPoint`.
+ */
+final case class SumDoubleAgg(input: VectorExpr, strict: Boolean) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(DoubleType)
   override def newState(): AggState = new AggState {
     private var sum = 0.0
@@ -46,12 +50,12 @@ final case class SumDoubleAgg(input: VectorExpr) extends VectorAggFunction {
     override def update(ctx: EvalContext): Unit = {
       val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
-      if (c > 0) { sum = AggKernels.sumDoubleFrom(v, sum); count += c }
+      if (c > 0) { sum = AggKernels.sumDoubleFrom(v, sum, strict); count += c }
     }
     override def bufferValues: Array[Any] = Array(if (count == 0) null else java.lang.Double.valueOf(sum))
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
-    private val acc = new GroupedAccumulators.DoubleSum
+    private val acc = new GroupedAccumulators.DoubleSum(strict)
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
     override def bufferValue(g: Int, slot: Int): Any = if (acc.count(g) == 0) null else java.lang.Double.valueOf(acc.sum(g))
   }
@@ -654,7 +658,7 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
 }
 
 /** AVG over a double-typed input (integers are cast first): buffer is (sum, count). */
-final case class AverageAgg(input: VectorExpr) extends VectorAggFunction {
+final case class AverageAgg(input: VectorExpr, strict: Boolean) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(DoubleType, LongType)
   override def newState(): AggState = new AggState {
     private var sum = 0.0
@@ -662,12 +666,12 @@ final case class AverageAgg(input: VectorExpr) extends VectorAggFunction {
     override def update(ctx: EvalContext): Unit = {
       val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
-      if (c > 0) { sum = AggKernels.sumDoubleFrom(v, sum); count += c }
+      if (c > 0) { sum = AggKernels.sumDoubleFrom(v, sum, strict); count += c }
     }
     override def bufferValues: Array[Any] = Array(java.lang.Double.valueOf(sum), java.lang.Long.valueOf(count))
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
-    private val acc = new GroupedAccumulators.DoubleSum
+    private val acc = new GroupedAccumulators.DoubleSum(strict)
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
     override def bufferValue(g: Int, slot: Int): Any =
       if (slot == 0) java.lang.Double.valueOf(acc.sum(g)) else java.lang.Long.valueOf(acc.count(g))
@@ -696,21 +700,21 @@ final case class CountMergeAgg(count: VectorExpr) extends VectorAggFunction {
  * AVG in Final mode: partial (sum, count) buffers are summed component-wise. Empty input yields
  * (0.0, 0), Spark's initial buffer, so `sum / count` evaluates to null.
  */
-final case class AverageMergeAgg(sum: VectorExpr, count: VectorExpr) extends VectorAggFunction {
+final case class AverageMergeAgg(sum: VectorExpr, count: VectorExpr, strict: Boolean) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(DoubleType, LongType)
   override def newState(): AggState = new AggState {
     private var s = 0.0
     private var c = 0L
     override def update(ctx: EvalContext): Unit = {
       val sv = ctx.masked(sum.eval(ctx))
-      if (AggKernels.countValid(sv) > 0) s = AggKernels.sumDoubleFrom(sv, s)
+      if (AggKernels.countValid(sv) > 0) s = AggKernels.sumDoubleFrom(sv, s, strict)
       val cv = ctx.masked(count.eval(ctx))
       if (AggKernels.countValid(cv) > 0) c += AggKernels.sumLong(cv)
     }
     override def bufferValues: Array[Any] = Array(java.lang.Double.valueOf(s), java.lang.Long.valueOf(c))
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
-    private val sums = new GroupedAccumulators.DoubleSum
+    private val sums = new GroupedAccumulators.DoubleSum(strict)
     private val counts = new GroupedAccumulators.LongSum
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
       sums.update(sum.eval(ctx), groups)
@@ -726,12 +730,6 @@ object VectorAggregates {
   private val numeric: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64)
 
   /**
-   * Compiles an aggregate expression, or explains why it cannot be vectorized. The update modes
-   * (`Partial`, `Complete`) read the function's input; the merge modes (`PartialMerge`, `Final`)
-   * merge the partial buffers (`inputAggBufferAttributes`) found in `input`. What the operator then
-   * emits -- buffers or results -- is the planner's decision, not the function's.
-   */
-  /**
    * The position in a merging stage's input of each aggregate's first buffer column: the grouping
    * columns first, then every function's buffers in order -- Spark binds buffers by position, and the
    * exprIds only happen to agree when the Partial's and the Final's function instances are the same
@@ -743,25 +741,32 @@ object VectorAggregates {
   def bufferOffsets(initialOffset: Int, aggregateExpressions: Seq[AggregateExpression]): Seq[Int] =
     aggregateExpressions.scanLeft(initialOffset)((off, agg) => off + agg.aggregateFunction.inputAggBufferAttributes.length).init
 
-  def compile(agg: AggregateExpression, input: Seq[Attribute], bufferOffset: Int = -1): Either[String, VectorAggFunction] =
+  /**
+   * Compiles an aggregate expression, or explains why it cannot be vectorized. The update modes
+   * (`Partial`, `Complete`) read the function's input; the merge modes (`PartialMerge`, `Final`)
+   * merge the partial buffers (`inputAggBufferAttributes`) found in `input`. What the operator then
+   * emits -- buffers or results -- is the planner's decision, not the function's. `strict` is
+   * `spark.vector.exec.strictFloatingPoint` (default on): double sums round exactly like Spark's.
+   */
+  def compile(agg: AggregateExpression, input: Seq[Attribute], bufferOffset: Int = -1, strict: Boolean = true): Either[String, VectorAggFunction] =
     agg.mode match {
       // `isDistinct` is only a marker in a physical plan: Spark's distinct rewrites have already
       // grouped by the distinct column below, so the function runs over deduplicated input as is.
       case Partial | Complete =>
-        compileFunction(agg.aggregateFunction, input, complete = agg.mode == Complete).flatMap { f =>
+        compileFunction(agg.aggregateFunction, input, complete = agg.mode == Complete, strict).flatMap { f =>
           agg.filter match {
             case None => Right(f)
             case Some(p) => FilteredAgg.predicate(p, input).map(FilteredAgg(f, _))
           }
         }
       // The FILTER clause is applied while updating; merging buffers does not see it (Spark drops it).
-      case PartialMerge | Final => compileMerge(agg.aggregateFunction, input, finalResult = agg.mode == Final, bufferOffset)
+      case PartialMerge | Final => compileMerge(agg.aggregateFunction, input, finalResult = agg.mode == Final, bufferOffset, strict)
     }
 
   /** Whether `mode` advances the state by merging buffers rather than by reading the function's input. */
   def merges(mode: AggregateMode): Boolean = mode == PartialMerge || mode == Final
 
-  private def compileMerge(f: AggregateFunction, input: Seq[Attribute], finalResult: Boolean, bufferOffset: Int): Either[String, VectorAggFunction] = {
+  private def compileMerge(f: AggregateFunction, input: Seq[Attribute], finalResult: Boolean, bufferOffset: Int, strict: Boolean): Either[String, VectorAggFunction] = {
     val buffers = f.inputAggBufferAttributes
     /** The input column holding buffer `i`: by exprId when the ids agree, by Spark's position otherwise. */
     def bufferOrdinal(i: Int): Int = {
@@ -789,7 +794,7 @@ object VectorAggregates {
       case s: Sum =>
         ref(0).flatMap { b =>
           (s.dataType, b.vecType) match {
-            case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(b))
+            case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(b, strict))
             case (LongType, VecType.INT64) => Right(SumLongAgg(b, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
             case (dt, _) => Left(s"merging sum buffers of ${dt.simpleString} not supported")
           }
@@ -820,7 +825,7 @@ object VectorAggregates {
         }
       case a: Average =>
         if (a.dataType != DoubleType || buffers.length != 2) Left(s"avg producing ${a.dataType.simpleString} not supported")
-        else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count)
+        else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count, strict)
       case f: First if buffers.length == 2 && FirstAgg.supports(f.dataType) =>
         for (first <- ref(0); valueSet <- ref(1)) yield FirstMergeAgg(first, valueSet, f.dataType)
       case f: First => Left(s"first over ${f.dataType.simpleString} not supported")
@@ -868,7 +873,7 @@ object VectorAggregates {
       }
     }
 
-  private def compileFunction(f: AggregateFunction, input: Seq[Attribute], complete: Boolean): Either[String, VectorAggFunction] = f match {
+  private def compileFunction(f: AggregateFunction, input: Seq[Attribute], complete: Boolean, strict: Boolean): Either[String, VectorAggFunction] = f match {
     // try_sum over an integral input: Spark's (sum, isEmpty) buffer with the whole group nulled on overflow.
     case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType == LongType =>
       numericChild(s.child, input).flatMap { child =>
@@ -895,7 +900,7 @@ object VectorAggregates {
     case s: Sum =>
       numericChild(s.child, input).flatMap { child =>
         (s.dataType, child.vecType) match {
-          case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(child))
+          case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(child, strict))
           case (LongType, VecType.INT32) => Right(SumLongAgg(child, checked = false, s.origin.context))
           case (LongType, VecType.INT64) => Right(SumLongAgg(child, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
           case (dt, _) => Left(s"sum over ${s.child.dataType.simpleString} producing ${dt.simpleString} not supported")
@@ -967,7 +972,7 @@ object VectorAggregates {
     case a: Average =>
       if (a.dataType != DoubleType) Left(s"avg producing ${a.dataType.simpleString} not supported")
       else numericChild(a.child, input).map { child =>
-        AverageAgg(if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType))
+        AverageAgg(if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType), strict)
       }
 
     // The one-pass moment statistics: Spark's Welford step per row over doubles (the analyzer has

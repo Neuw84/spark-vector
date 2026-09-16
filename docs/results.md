@@ -91,8 +91,10 @@ Rotating over `sparkvector.agg.interleave` independent accumulator copies (defau
 +40% at the target case, -10% where the chain was not the bottleneck (one group: every row hits
 the same slot anyway; 16 groups: the load-store forwarding stalls are already rare). Copies are
 summed on read, so double sums round in a different order than Spark's sequential loop; on TPC-H
-Q1 the results differ from Spark's in the 12th significant digit, and `interleave=1` restores
-Spark's exact rounding.
+Q1 the results differ from Spark's in the 12th significant digit. `spark.vector.exec.strictFloatingPoint`
+(default on, like Comet's `spark.comet.exec.strictFloatingPoint` but with the opposite default) uses
+one copy and sequential reductions for double sums and reproduces Spark's rounding bit for bit, at
+7% of aggregate kernel time (2.5% of Q1 at SF10); the benchmarks set it to `false`.
 
 ### Bitmap popcount
 
@@ -414,8 +416,10 @@ double sums. Spark sums each partition in one order and the two aggregations agr
 our interleaved accumulators (`sparkvector.agg.interleave=4`) can sum the same rows in a different
 order in the two aggregations, the last bits differ, the equality finds nothing and AQE replaces the
 join with an `EmptyRelation` -- `vector` returns 0 rows where Spark returns 1. Over decimals the
-sums are exact and both engines agree. `interleave=1` restores Spark's order; whether Q15-shaped
-equality on a double sum should force that automatically is an open question.
+sums are exact and both engines agree. This is why `spark.vector.exec.strictFloatingPoint` exists
+and defaults to on: it restores Spark's order (Q15 returns its row), and the benchmarks turn it off
+to measure the fast sums, which is also what Comet's default does, so the Q15 mismatch stays in the
+reports by design.
 
 ### What the reason list says
 

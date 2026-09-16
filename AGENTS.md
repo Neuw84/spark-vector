@@ -177,8 +177,8 @@ that pin it.
   accumulators by `sparkvector.agg.maskPathMaxGroups` (1 on <=4-lane species, 8 on wider; the 8 is
   a guess from lane count, not a measurement). The scatter rotates over
   `sparkvector.agg.interleave` accumulator copies (default 4: +40% at TPC-H Q1's 4 groups) and
-  therefore sums doubles in a different order than Spark; `interleave=1` restores Spark's exact
-  rounding.
+  therefore sums doubles in a different order than Spark; strict floating point (below) forces one
+  copy for double sums.
 - AVX2 and AVX-512 paths exist and are executed emulated (`vectorBits=256|512`) by the kernel test
   suite on the Apple M3 development machine. They have never been measured on real hardware. Two
   things to re-measure there before trusting defaults: `VectorMask.fromLong` is a single `kmov` on
@@ -234,10 +234,20 @@ that pin it.
   puts the crossover at a few hundred distinct values (2x slower by 4000, for 8- and 24-byte keys
   alike). This exists because Comet's native scan delivers plain strings where Spark's reader keeps
   dictionaries, and without it the zero-copy configuration lost to the copying one at SF10.
-- Floating-point sums differ from Spark's in the last bits (lane-parallel and interleaved
-  accumulation reorder additions). Tests compare doubles with a tolerance (`1e-9` relative in
-  `VectorQuerySuite`), benchmark checksums use 10 significant digits. Never assert bit equality
-  on a double sum.
+- Floating-point rounding is a configuration choice, like Comet's `spark.comet.exec.strictFloatingPoint`.
+  `spark.vector.exec.strictFloatingPoint` (default `true`) makes every double `sum`/`avg`, Partial and
+  Final, grouped or not, bit-identical to Spark's: `GroupedAccumulators.DoubleSum(strict = true)` keeps
+  one accumulator per group and `AggKernels.sumDoubleSequential(v, start)` continues the running sum
+  row by row (adding a per-batch sum to the running one would round differently; `AggKernelsTest`
+  and `GroupedAggregationTest` pin bit equality against a sequential reference, `VectorAggregateSuite`
+  against Spark with tolerance 0). `false` restores the lane-parallel and interleaved sums (7% of
+  aggregate kernel time, 2.5% of TPC-H Q1 at SF10) that differ from Spark's in the last bits; TPC-H
+  Q15 then returns no rows because a double sum is compared for equality against the maximum of the
+  same sums computed by Spark's subquery. The benchmark configurations run with `false`
+  (`TpchRunner.VectorFast`), Comet's default, so the Q15 checksum mismatch in the reports is
+  expected. Tests compare other doubles with a tolerance (`1e-9` relative in `VectorQuerySuite`),
+  benchmark checksums use 10 significant digits; assert bit equality on a double sum only under
+  strict mode.
 
 ### 3.6 Sort
 

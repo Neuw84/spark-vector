@@ -20,9 +20,13 @@ public final class GroupedAccumulators {
    * Number of independent accumulator sets the scatter loops rotate through. A single {@code
    * sum[g] += x} chain serialises on store-to-load forwarding whenever consecutive rows share a
    * group (about 1.5 ns per row); rotating over {@code INTERLEAVE} copies lets the CPU overlap
-   * them. The copies are added together on read, so floating-point sums are rounded in a different
-   * order than a sequential loop (and than Spark); set {@code sparkvector.agg.interleave=1} to get
-   * Spark's exact rounding.
+   * them (+40% at TPC-H Q1's four groups). Integer sums and counts are exact whatever the order.
+   * Double sums are not: the copies are added on read, so they round differently from Spark's
+   * sequential loop, and TPC-H Q15, which compares a double sum against the maximum of the same
+   * sums computed by Spark, returned no rows. {@link DoubleSum} therefore takes a {@code strict}
+   * flag (one accumulator, sequential reductions: Spark's rounding) that the operator sets from
+   * {@code spark.vector.exec.strictFloatingPoint}; this property only sets the copies used when
+   * strictness is off.
    */
   public static final int INTERLEAVE = interleave();
 
@@ -67,9 +71,25 @@ public final class GroupedAccumulators {
    * copies laid out {@code [copy][group]}; {@link #sum(int)} adds the copies.
    */
   public static final class DoubleSum {
+    /** Copies of the accumulators; 1 when strict. */
+    private final int interleave;
+    /** Spark's rounding: one accumulator per group, sequential reductions on the masked path. */
+    private final boolean strict;
     private int capacity = 64;
-    private double[] sum = new double[64 * INTERLEAVE];
-    private long[] count = new long[64 * INTERLEAVE];
+    private double[] sum;
+    private long[] count;
+
+    /** Fast rounding: {@link #INTERLEAVE} copies and lane-parallel reductions. */
+    public DoubleSum() {
+      this(false);
+    }
+
+    public DoubleSum(boolean strict) {
+      this.strict = strict;
+      this.interleave = strict ? 1 : INTERLEAVE;
+      this.sum = new double[64 * interleave];
+      this.count = new long[64 * interleave];
+    }
 
     public void update(VectorBuffers v, GroupAssignment a) {
       ensure(a.numGroups());
@@ -81,7 +101,12 @@ public final class GroupedAccumulators {
           VectorBuffers sub = a.restrict(v, g);
           long c = AggKernels.countValid(sub);
           if (c > 0) {
-            sum[g] += AggKernels.sumDouble(sub);
+            if (strict) {
+              // Spark's `sum += x` chain continues from the running sum, not from a per-batch zero.
+              sum[g] = AggKernels.sumDoubleSequential(sub, sum[g]);
+            } else {
+              sum[g] += AggKernels.sumDouble(sub);
+            }
             count[g] += c;
           }
         }
@@ -96,7 +121,7 @@ public final class GroupedAccumulators {
       int cap = capacity;
       if (validity == null) {
         int i = 0;
-        if (INTERLEAVE == 4) {
+        if (interleave == 4) {
           int c1 = cap, c2 = 2 * cap, c3 = 3 * cap;
           for (; i + 4 <= n; i += 4) {
             int g0 = ids[i], g1 = ids[i + 1] + c1, g2 = ids[i + 2] + c2, g3 = ids[i + 3] + c3;
@@ -109,7 +134,7 @@ public final class GroupedAccumulators {
             count[g2]++;
             count[g3]++;
           }
-        } else if (INTERLEAVE == 2) {
+        } else if (interleave == 2) {
           for (; i + 2 <= n; i += 2) {
             int g0 = ids[i], g1 = ids[i + 1] + cap;
             sum[g0] += x.get(VectorBuffers.LE_DOUBLE, (long) (i) << 3);
@@ -125,7 +150,7 @@ public final class GroupedAccumulators {
         }
       } else {
         int slot = 0; // rotates over the copies for the valid rows only
-        int total = cap * INTERLEAVE;
+        int total = cap * interleave;
         for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
           long bits = Bitmap.wordAt(validity, w, n);
           while (bits != 0L) {
@@ -146,15 +171,15 @@ public final class GroupedAccumulators {
     private void ensure(int groups) {
       if (groups > capacity) {
         int cap = grow(capacity, groups);
-        sum = regroup(sum, capacity, cap);
-        count = regroup(count, capacity, cap);
+        sum = regroup(sum, capacity, cap, interleave);
+        count = regroup(count, capacity, cap, interleave);
         capacity = cap;
       }
     }
 
     public double sum(int g) {
       double s = 0;
-      for (int k = 0; k < INTERLEAVE; k++) {
+      for (int k = 0; k < interleave; k++) {
         s += sum[k * capacity + g];
       }
       return s;
@@ -162,7 +187,7 @@ public final class GroupedAccumulators {
 
     public long count(int g) {
       long c = 0;
-      for (int k = 0; k < INTERLEAVE; k++) {
+      for (int k = 0; k < interleave; k++) {
         c += count[k * capacity + g];
       }
       return c;
@@ -171,16 +196,24 @@ public final class GroupedAccumulators {
 
   /** Re-lays {@code [copy][group]} arrays out for a larger group capacity. */
   private static double[] regroup(double[] old, int oldCap, int newCap) {
-    double[] out = new double[newCap * INTERLEAVE];
-    for (int k = 0; k < INTERLEAVE; k++) {
+    return regroup(old, oldCap, newCap, INTERLEAVE);
+  }
+
+  private static double[] regroup(double[] old, int oldCap, int newCap, int copies) {
+    double[] out = new double[newCap * copies];
+    for (int k = 0; k < copies; k++) {
       System.arraycopy(old, k * oldCap, out, k * newCap, oldCap);
     }
     return out;
   }
 
   private static long[] regroup(long[] old, int oldCap, int newCap) {
-    long[] out = new long[newCap * INTERLEAVE];
-    for (int k = 0; k < INTERLEAVE; k++) {
+    return regroup(old, oldCap, newCap, INTERLEAVE);
+  }
+
+  private static long[] regroup(long[] old, int oldCap, int newCap, int copies) {
+    long[] out = new long[newCap * copies];
+    for (int k = 0; k < copies; k++) {
       System.arraycopy(old, k * oldCap, out, k * newCap, oldCap);
     }
     return out;

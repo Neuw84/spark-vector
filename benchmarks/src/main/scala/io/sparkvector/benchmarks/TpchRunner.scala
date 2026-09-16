@@ -67,15 +67,24 @@ object TpchRunner {
       "spark.memory.offHeap.enabled" -> "true",
       "spark.memory.offHeap.size" -> "1g")
 
+  /**
+   * Our plugin as benchmarked: fast floating point (lane-parallel and interleaved double sums), the
+   * counterpart of Comet's default `spark.comet.exec.strictFloatingPoint=false`. The plugin's own
+   * default is strict (Spark's rounding); Q15 compares a double sum for equality against a maximum
+   * of the same sums computed by Spark and returns no rows in fast mode, so its checksum differs.
+   */
+  val VectorFast: Map[String, String] = Map(
+    "spark.plugins" -> "io.sparkvector.spark.VectorPlugin",
+    "spark.vector.exec.strictFloatingPoint" -> "false")
+
   /** Spark configurations under comparison. Comet configs need the Comet jar on the classpath. */
   val Configs: Map[String, Map[String, String]] = Map(
     "spark" -> Map.empty,
-    "vector" -> Map(
-      "spark.plugins" -> "io.sparkvector.spark.VectorPlugin"),
+    "vector" -> VectorFast,
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
-    "comet-scan-vector" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
+    "comet-scan-vector" -> (VectorFast ++ Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
     // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.
-    "comet-scan-vector-shuffle" -> (Map(
+    "comet-scan-vector-shuffle" -> (VectorFast ++ Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
       "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
       CometScanOnly ++ Map("spark.comet.exec.shuffle.enabled" -> "true")),

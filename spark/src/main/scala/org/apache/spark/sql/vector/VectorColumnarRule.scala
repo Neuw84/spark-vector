@@ -360,7 +360,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     inputReason match {
       case Some(reason) => fallback(original, reason)
       case None =>
-        VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf)) match {
+        VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf), VectorConf.strictFloatingPoint(conf)) match {
           case Right(v) => v
           case Left(reason) => fallback(original, reason)
         }

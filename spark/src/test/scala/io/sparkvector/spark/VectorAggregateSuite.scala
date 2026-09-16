@@ -268,6 +268,30 @@ class VectorAggregateSuite extends VectorQuerySuite {
     }
   }
 
+  test("strict floating point reproduces Spark's double sums bit for bit; fast mode may differ") {
+    // Sums and averages, ungrouped and grouped, Partial and Final: tolerance 0 means bit equality.
+    val sql = "SELECT l_returnflag, sum(l_extendedprice * (1 - l_discount)), avg(l_extendedprice), sum(l_quantity) " +
+      "FROM lineitem GROUP BY l_returnflag"
+    val strict = checkVectorized(sql, Seq(Agg), tolerance = 0.0)
+    assert(nodesOf[VectorHashAggregateExec](strict).forall(_.strictFloatingPoint), strict.queryExecution.executedPlan.treeString)
+    checkVectorized("SELECT sum(l_extendedprice * (1 - l_discount)), avg(l_discount) FROM lineitem WHERE l_quantity < 30", Seq(Agg), tolerance = 0.0)
+    withConf(VectorConf.StrictFloatingPoint -> "false") {
+      val fast = checkVectorized(sql, Seq(Agg), tolerance = 1e-9)
+      assert(nodesOf[VectorHashAggregateExec](fast).forall(!_.strictFloatingPoint), fast.queryExecution.executedPlan.treeString)
+    }
+    // TPC-H Q15's shape: a double sum compared for equality with the maximum of the same sums.
+    // With interleaved accumulators this returned no rows at SF1; strict rounding keeps the row.
+    val q15 =
+      """WITH revenue AS (
+        |  SELECT l_suppkey AS supplier_no, sum(l_extendedprice * (1 - l_discount)) AS total_revenue
+        |  FROM lineitem WHERE l_shipdate >= DATE '1996-01-01' AND l_shipdate < DATE '1996-04-01'
+        |  GROUP BY l_suppkey)
+        |SELECT supplier_no, total_revenue FROM revenue
+        |WHERE total_revenue = (SELECT max(total_revenue) FROM revenue)""".stripMargin
+    val rows = checkVectorized(q15, Seq(Agg), tolerance = 0.0).collect()
+    assert(rows.nonEmpty, "the maximum revenue row must match itself")
+  }
+
   test("double grouping keys fall back") {
     checkFallback("SELECT d2, count(*) FROM t GROUP BY d2", Seq(Agg), "grouping key type double not supported")
   }

@@ -79,6 +79,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.exec.sortMergeJoin.enabled` | **off by default**; re-express `SortMergeJoinExec` as our shuffled hash join when the smaller side's statistics fit `spark.vector.join.maxBuildSize` and no parent relies on the merge's ordering (#10) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
+| `spark.vector.exec.strictFloatingPoint` | double `sum`/`avg` round exactly like Spark (one accumulator per group, rows added in order), the counterpart of Comet's `spark.comet.exec.strictFloatingPoint`; `false` uses lane-parallel and interleaved partial sums that differ from Spark's in the last bits (about 7% of aggregate kernel time, 2.5% of TPC-H Q1) and can make an equality between two double sums fail (TPC-H Q15). The benchmarks run with `false`, like Comet |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
 | `spark.vector.ui.enabled` | attach the Vector Acceleration tab to the Spark UI (default `true`) |
@@ -87,8 +88,8 @@ Configuration keys (all default to `true` except the last):
 
 JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forces a vector shape
 (the default is the platform's preferred one), `sparkvector.agg.interleave=1|2|4` sets how many
-accumulator copies the grouped aggregation rotates through (default 4; 1 reproduces Spark's
-floating-point rounding exactly), `sparkvector.selection.minFraction` (default 0.5) is the
+accumulator copies the grouped aggregation rotates through when `spark.vector.exec.strictFloatingPoint`
+is off (default 4; strict mode always uses one), `sparkvector.selection.minFraction` (default 0.5) is the
 surviving fraction below which a filter compacts instead of forwarding a selection, and
 `sparkvector.agg.plainDictMaxEntries` (default 512) is the number of distinct values above which a
 plain (non-dictionary) string group key stops being dictionary-encoded on the fly and is hashed and
