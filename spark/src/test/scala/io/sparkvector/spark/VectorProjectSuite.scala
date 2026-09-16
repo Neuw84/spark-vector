@@ -232,6 +232,12 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT bit_count(b) AS c FROM t", Seq(Project), "bit_count over boolean not supported")
   }
 
+  test("null-safe equality, isnan, boolean comparisons and InSet as projected booleans") {
+    checkVectorized("SELECT l <=> CAST(i AS BIGINT) * 3 AS ns, s <=> 's7' AS str, d <=> d2 AS dd, isnan(d) AS n, NOT isnan(d) AS nn FROM t", Seq(Project))
+    checkVectorized("SELECT b = true AS bt, b <> (i % 2 = 0) AS bne, b < (i % 2 = 0) AS blt, (i % 2 = 0) >= b AS bge, b <=> (i % 3 = 0) AS bns FROM t", Seq(Project))
+    checkVectorized("SELECT i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233) AS fib, l IN (0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33) AS lset, d2 IN (0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75) AS dset, s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12') AS sset FROM t", Seq(Project))
+  }
+
   test("string predicates as projected booleans and in CASE conditions") {
     checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, s LIKE 's1%' AS pre, s LIKE '%3' AS suf, contains(s, '2') AS has, i FROM t", Seq(Project))
     checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))
