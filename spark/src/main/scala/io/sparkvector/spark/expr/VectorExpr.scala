@@ -21,16 +21,27 @@ final class EvalContext(
     val numRows: Int,
     adaptColumn: Int => VectorBuffers,
     val selection: java.lang.foreign.MemorySegment,
-    val selectedCount: Int) {
+    val selectedCount: Int,
+    rawColumn: Int => org.apache.spark.sql.vectorized.ColumnVector) {
   private val adapted = new java.util.HashMap[Int, VectorBuffers]()
 
   /** Rows whose values matter for the sub-expression under evaluation (null = all). */
   var active: java.lang.foreign.MemorySegment = selection
 
+  def this(arena: Arena, numRows: Int, adaptColumn: Int => VectorBuffers, selection: java.lang.foreign.MemorySegment, selectedCount: Int) =
+    this(arena, numRows, adaptColumn, selection, selectedCount, null)
+
   def this(arena: Arena, numRows: Int, adaptColumn: Int => VectorBuffers) =
-    this(arena, numRows, adaptColumn, null, numRows)
+    this(arena, numRows, adaptColumn, null, numRows, null)
 
   def hasSelection: Boolean = selection != null
+
+  /**
+   * The batch's own column, for the one value that has no lane: the wide decimal sum buffer a
+   * merging aggregate reads row by row. Null for a context not built over a batch.
+   */
+  def column(ordinal: Int): org.apache.spark.sql.vectorized.ColumnVector =
+    if (rawColumn == null) null else rawColumn(ordinal)
 
   /** `v` with the batch selection folded into its validity, so reductions skip unselected rows. */
   def masked(v: VectorBuffers): VectorBuffers = {

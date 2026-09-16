@@ -17,6 +17,10 @@ object VectorErrors {
   def decimalPrecisionOverflow(value: Decimal, precision: Int, scale: Int, context: QueryContext): ArithmeticException =
     QueryExecutionErrors.cannotChangeDecimalPrecisionError(value, precision, scale, context)
 
+  /** `CheckOverflowInSum` on a sum buffer that overflowed earlier (a null sum of a non-empty group). */
+  def overflowInSumOfDecimal(context: QueryContext): ArithmeticException =
+    QueryExecutionErrors.overflowInSumOfDecimalError(context, "try_sum")
+
   /** ANSI integer overflow (a checked bigint sum). */
   def arithmeticOverflow(message: String, hint: String, context: QueryContext): ArithmeticException =
     QueryExecutionErrors.arithmeticOverflowError(message, hint, context)

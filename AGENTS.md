@@ -453,7 +453,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 136 kernel tests, 165 Spark tests (138 without the Comet and Iceberg profiles;
+Current counts: 136 kernel tests, 166 Spark tests (139 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -517,8 +517,12 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   is the `sum` buffer of a decimal of more than 8 digits: the Partial side accumulates it in 128 bits
   (`GroupedAccumulators.WideLongSum`, scalar two-word adds -- an accumulator is one value per group,
   not per row) and emits Spark's `(sum: Decimal(p+10, s), isEmpty)` buffer through a wide Arrow
-  `DecimalVector` (`ArrowOutput.newVector`/`decimalColumn`); the planner accepts a wide decimal output
-  column only there. The Final merge of that buffer is Spark's until #87.
+  `DecimalVector` (`ArrowOutput.newVector`/`decimalColumn`); the merge modes (`WideDecimalSumMergeAgg`)
+  read that buffer row by row from the batch's own column (`EvalContext.column`, `getDecimal` -- a merge
+  sees one row per partition per group) into an exact per-group total with Spark's `isEmpty` rules, and
+  `Final` emits `If(isEmpty, null, CheckOverflowInSum(sum))` ready-made, which `compileFinalResults`
+  recognises and forwards. The planner accepts a wide decimal input only as that buffer of a merging
+  aggregate (`VectorAggregatePlanner.wideSumBuffers`) and a wide output only as that buffer or result.
 - AVX2/AVX-512 paths are tested emulated, never measured on real hardware.
 - `TpchRunner --keep-alive` leaves the session and the Spark UI up for inspection; the demo JVM's
   Jetty resets some parallel static-resource fetches under load, so reload the page if the tab's

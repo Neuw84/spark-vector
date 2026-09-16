@@ -114,9 +114,9 @@ object EvalContexts {
       val n = batch.numRows()
       val ctx = batch match {
         case s: io.sparkvector.spark.arrow.SelectedColumnarBatch =>
-          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena), s.selection(), s.selectedCount())
+          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena), s.selection(), s.selectedCount(), c => batch.column(c))
         case _ =>
-          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
+          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena), null, n, c => batch.column(c))
       }
       f(ctx)
     } finally {

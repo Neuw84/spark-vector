@@ -4,12 +4,12 @@ import io.sparkvector.kernels.{GroupAssignment, GroupKeyTable, VecType, VectorBu
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.agg.{AggState, GroupedAggState, VectorAggFunction, VectorAggregates}
 import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators}
-import io.sparkvector.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSet, Expression, NamedExpression}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateMode, Complete, DeclarativeAggregate, Final, Partial, PartialMerge}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, AttributeSet, CheckOverflowInSum, Expression, If, Literal, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateMode, Complete, DeclarativeAggregate, Final, Partial, PartialMerge, Sum}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
@@ -383,17 +383,45 @@ object VectorAggregatePlanner {
     }.toMap
     val compiled = resultExpressions.map { e =>
       val substituted = e.transform { case a: AttributeReference if evaluate.contains(a.exprId) => evaluate(a.exprId) }
-      ExpressionCompiler.compile(substituted, input).flatMap {
-        case _: LiteralExpr => Left(s"literal result ${e.sql}")
-        case v if !TypeMapping.isSupported(e.dataType) => Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
-        case v => Right(v)
-      }.left.map(r => s"${e.sql}: $r")
+      (wideSumResult(substituted, input) match {
+        // The merge already applied isEmpty and the overflow rule at emission: forward the column.
+        case Some(ordinal) => Right(ColumnRef(ordinal, e.dataType))
+        case None => ExpressionCompiler.compile(substituted, input).flatMap {
+          case _: LiteralExpr => Left(s"literal result ${e.sql}")
+          case v if !TypeMapping.isSupported(e.dataType) => Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
+          case v => Right(v)
+        }
+      }).left.map(r => s"${e.sql}: $r")
     }
     compiled.collectFirst { case Left(r) => r } match {
       case Some(reason) => Left(reason)
       case None => Right(compiled.collect { case Right(v) => v })
     }
   }
+
+  /**
+   * A decimal `Sum`'s result, `If(isEmpty, null, CheckOverflowInSum(sum, ...))` over its own buffer
+   * attributes -- the shape and only the shape Spark's `Sum.evaluateExpression` builds for a
+   * decimal. The merge function emits the result in the sum slot already, so the projection is the
+   * ordinal of that slot. Returns None for anything else.
+   */
+  private def wideSumResult(e: Expression, input: Seq[Attribute]): Option[Int] = {
+    val body = e match { case Alias(child, _) => child; case other => other }
+    body match {
+      case If(isEmpty: AttributeReference, Literal(null, _), CheckOverflowInSum(sum: AttributeReference, dt: DecimalType, _, _))
+          if dt.precision > TypeMapping.MAX_DECIMAL_PRECISION && sum.dataType == dt =>
+        val ordinal = input.indexWhere(_.exprId == sum.exprId)
+        if (ordinal >= 0 && input.exists(_.exprId == isEmpty.exprId)) Some(ordinal) else None
+      case _ => None
+    }
+  }
+
+  /** Wide decimal sum buffers a merging aggregate reads: the one wide input the operator accepts. */
+  def wideSumBuffers(a: HashAggregateExec): Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
+    a.aggregateExpressions.collect {
+      case agg if VectorAggregates.merges(agg.mode) && agg.aggregateFunction.isInstanceOf[Sum] && agg.aggregateFunction.dataType.isInstanceOf[DecimalType] =>
+        agg.aggregateFunction.inputAggBufferAttributes.head.exprId
+    }.toSet
 
   /** Maps each result attribute to the grouping key or the (aggregate, buffer slot) producing it. */
   def outputLayout(
@@ -455,19 +483,22 @@ object VectorAggregatePlanner {
       val keyFailures = a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
       val aggFailures = a.aggregateExpressions.flatMap(agg => VectorAggregates.compile(agg, a.child.output).left.toOption.map(r => s"${agg.sql}: $r"))
       val failures = keyFailures ++ aggFailures
-      val layoutCheck: Either[String, Any] =
+      val layoutCheck: Either[String, Seq[Any]] =
         if (results) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.aggregateAttributes, a.resultExpressions)
         else outputLayout(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
       if (failures.nonEmpty) Left(failures.mkString("; "))
-      else layoutCheck.flatMap { _ =>
-        // A wide decimal (p > 18) has no lane, but a buffer-emitting operator may output one as the
-        // `sum` buffer of a decimal sum (Spark's Decimal(p + 10, s)): Spark's own Final reads it.
-        val wideBuffers: Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
-          if (results) Set.empty
+      else layoutCheck.flatMap { compiled =>
+        // A wide decimal (p > 18) has no lane, but an aggregate may output one in two places: a
+        // buffer-emitting operator's `sum` buffer of a decimal sum (Spark's Decimal(p + 10, s)), and
+        // a Final's result of that sum, which the merge emits ready-made and the projection forwards.
+        val wideOutputs: Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
+          if (results) a.resultExpressions.zip(compiled).collect {
+            case (e, ColumnRef(_, dt: DecimalType)) if dt.precision > TypeMapping.MAX_DECIMAL_PRECISION => e.toAttribute.exprId
+          }.toSet
           else a.aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes).collect {
             case attr if attr.dataType.isInstanceOf[DecimalType] => attr.exprId
           }.toSet
-        a.resultExpressions.map(_.toAttribute).find(attr => !TypeMapping.isSupported(attr.dataType) && !wideBuffers.contains(attr.exprId)) match {
+        a.resultExpressions.map(_.toAttribute).find(attr => !TypeMapping.isSupported(attr.dataType) && !wideOutputs.contains(attr.exprId)) match {
           case Some(attr) => Left(s"unsupported output type ${attr.dataType.simpleString} for ${attr.name}")
           case None =>
             Right(VectorHashAggregateExec(

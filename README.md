@@ -402,8 +402,9 @@ an ANSI `sum(bigint)`, and `avg` over one of up to 11 digits into a double avera
 which is also why bigint sums are now overflow-checked in ANSI mode (`AggKernels.sumLongExact`, a
 sign-trick overflow lane carried alongside the accumulator) instead of falling back. A wider decimal
 sum (`Decimal(12,2)` and up) is accumulated in 128 bits per group on the Partial side and emitted as
-Spark's `(sum, isEmpty)` buffer with the `sum` a wide Arrow decimal column; Spark's own Final merges
-those buffers until the merge side lands (#87).
+Spark's `(sum, isEmpty)` buffer with the `sum` a wide Arrow decimal column; the Final merges those
+buffers with Spark's `isEmpty` rules and applies its overflow check at emission (an error in ANSI
+mode, null otherwise), so a wide decimal sum runs on our operators in both stages.
 
 ### Joins
 
