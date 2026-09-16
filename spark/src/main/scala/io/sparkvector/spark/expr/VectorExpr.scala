@@ -269,6 +269,9 @@ final case class ArithExpr(
     val data = ArrowLayout.allocateData(ctx.arena, vecType, n)
     var validity: java.lang.foreign.MemorySegment = null
     var divisorZero: java.lang.foreign.MemorySegment = null
+    // ANSI mode: integer results that did not fit their lane raise for active rows (below).
+    val checkOverflow = ansiDivideByZero && (vecType == VecType.INT32 || vecType == VecType.INT64)
+    var overflow: java.lang.foreign.MemorySegment = null
     (left, right) match {
       case (l, lit: LiteralExpr) =>
         val a = l.eval(ctx)
@@ -278,11 +281,13 @@ final case class ArithExpr(
           divisorZero = ctx.bitmap()
           Bitmap.fill(divisorZero, n, true)
         }
+        if (checkOverflow) { overflow = ctx.bitmap(); OverflowKernels.overflowScalar(op, a, lit.number, data, overflow) }
       case (lit: LiteralExpr, r) =>
         val b = r.eval(ctx)
         ArithKernels.scalarArith(op, lit.number, b, data)
         validity = b.validity()
         if (op == ArithOp.DIV) divisorZero = zeroMask(b, ctx)
+        if (checkOverflow) { overflow = ctx.bitmap(); OverflowKernels.scalarOverflow(op, lit.number, b, data, overflow) }
       case (l, r) =>
         val a = l.eval(ctx)
         val b = r.eval(ctx)
@@ -292,6 +297,10 @@ final case class ArithExpr(
           BitmapKernels.combineValidity(a.validity(), b.validity(), validity, n)
         }
         if (op == ArithOp.DIV) divisorZero = zeroMask(b, ctx)
+        if (checkOverflow) { overflow = ctx.bitmap(); OverflowKernels.overflow(op, a, b, data, overflow) }
+    }
+    if (overflow != null && ArithExpr.anyActive(overflow, validity, ctx)) {
+      throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(vecType), ArithExpr.hint(op), queryContext)
     }
     if (divisorZero != null) {
       // Lanes that are otherwise valid but divide by zero.
@@ -322,6 +331,31 @@ final case class ArithExpr(
   }
 }
 
+object ArithExpr {
+  /**
+   * Whether any lane flagged in `mask` is both valid and active. Rows a filter removed or an earlier
+   * conjunct decided must not raise, exactly as Spark never evaluates them.
+   */
+  private[expr] def anyActive(mask: java.lang.foreign.MemorySegment, validity: java.lang.foreign.MemorySegment, ctx: EvalContext): Boolean = {
+    val n = ctx.numRows
+    if (validity != null) BitmapKernels.and(mask, validity, mask, n)
+    if (ctx.active != null) BitmapKernels.and(mask, ctx.active, mask, n)
+    Bitmap.popcount(mask, n) > 0
+  }
+
+  /** Spark raises `Math.addExact`'s own message: `integer overflow` or `long overflow`. */
+  private[expr] def overflowMessage(vecType: VecType): String =
+    if (vecType == VecType.INT32) "integer overflow" else "long overflow"
+
+  /** The `try_*` function Spark suggests in the error. */
+  private[expr] def hint(op: ArithOp): String = op match {
+    case ArithOp.ADD => "try_add"
+    case ArithOp.SUB => "try_subtract"
+    case ArithOp.MUL => "try_multiply"
+    case ArithOp.DIV => "try_divide"
+  }
+}
+
 /** Widening numeric cast; validity is shared with the child. */
 final case class CastExpr(child: VectorExpr, dataType: DataType) extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
@@ -333,13 +367,25 @@ final case class CastExpr(child: VectorExpr, dataType: DataType) extends VectorE
   }
 }
 
-final case class NegateExpr(child: VectorExpr) extends VectorExpr {
+/**
+ * Unary minus. In ANSI mode an integer `MIN_VALUE` cannot be negated and raises Spark's overflow
+ * error for active rows (`Math.negateExact`'s message, no `try_*` hint); doubles and decimals of at
+ * most 18 digits never overflow here.
+ */
+final case class NegateExpr(child: VectorExpr, ansi: Boolean = false, queryContext: org.apache.spark.QueryContext = null) extends VectorExpr {
   override def dataType: DataType = child.dataType
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val a = child.eval(ctx)
     val data = ArrowLayout.allocateData(ctx.arena, vecType, ctx.numRows)
     ArithKernels.negate(a, data)
+    if (ansi && (vecType == VecType.INT32 || vecType == VecType.INT64)) {
+      val overflow = ctx.bitmap()
+      OverflowKernels.negateOverflow(a, overflow)
+      if (ArithExpr.anyActive(overflow, a.validity(), ctx)) {
+        throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(vecType), "", queryContext)
+      }
+    }
     SegmentVectorBuffers.fixedWidth(vecType, ctx.numRows, a.validity(), data)
   }
 }

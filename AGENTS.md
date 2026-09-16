@@ -79,11 +79,13 @@ that pin it.
   `sum(decimal <= 8 digits)` into `MakeDecimal(sum(UnscaledValue(x)))`, an ANSI bigint sum, and
   `avg(decimal <= 11 digits)` into a double average: that is the path decimal aggregates take.
 - Spark 4 defaults to ANSI mode. Double arithmetic is bit-identical in both modes, so it is
-  compiled; integer `+ - *` in ANSI mode needs overflow checks the kernels do not do, so it falls
-  back with a reason, but ANSI `sum(bigint)` is overflow-checked (`AggKernels.sumLongExact` carries
-  a sign-trick overflow lane; `GroupedAccumulators.LongSum(checked)` uses `Math.addExact`). ANSI
-  errors (division by zero, decimal overflow) are raised only for rows that are active (survive
-  earlier conjuncts / the selection), matching Spark's short-circuit semantics.
+  compiled; integer `+ - *` and negation are computed wrapping and then checked with an overflow
+  lane mask (`OverflowKernels`: the sign trick for add/subtract, the exact product for multiply,
+  `MIN_VALUE` for negation), raising Spark's `ARITHMETIC_OVERFLOW` with `Math.*Exact`'s message and
+  the `try_*` hint; ANSI `sum(bigint)` is overflow-checked the same way (`AggKernels.sumLongExact`
+  carries a sign-trick overflow lane; `GroupedAccumulators.LongSum(checked)` uses `Math.addExact`).
+  ANSI errors (overflow, division by zero, decimal overflow) are raised only for rows that are active
+  (survive earlier conjuncts / the selection), matching Spark's short-circuit semantics.
 - Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`,
   `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
   `CaseWhenExpr` for `CASE WHEN`/`IF`/`COALESCE`: per-branch win masks carried forward as `active`,
@@ -389,7 +391,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 109 kernel tests, 122 Spark tests (95 without the Comet and Iceberg profiles;
+Current counts: 112 kernel tests, 123 Spark tests (96 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
