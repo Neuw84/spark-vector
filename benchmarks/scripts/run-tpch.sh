@@ -15,6 +15,9 @@
 #   COMET_JAR   path to comet-spark-spark4.1_2.13-<version>.jar (enables the Comet configurations)
 #   JVM_MEM     heap for the local Spark JVM (default 6g)
 #   THREADS     local[N] parallelism (default: all cores)
+#   JVM_EXTRA   extra JVM options, e.g. -XX:StartFlightRecording=filename=q1.jfr,settings=profile
+#   RESULTS_DIR where .jsonl measurements and reports go (default benchmarks/results); point it
+#               elsewhere for profiling runs that should not enter the report
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -32,7 +35,7 @@ fi
 JAVA="${JAVA_HOME:?set JAVA_HOME to a JDK 25}/bin/java"
 JVM_MEM="${JVM_MEM:-6g}"
 THREADS="${THREADS:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)}"
-OUT="$ROOT/benchmarks/results"
+OUT="${RESULTS_DIR:-$ROOT/benchmarks/results}"
 mkdir -p "$OUT"
 
 # Classpath: benchmark classes + every dependency (Spark is 'provided', so this includes it).
@@ -58,6 +61,10 @@ JVM_OPTS=(
   -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
   -Dlog4j2.level=warn -Dspark.log.level=WARN
 )
+# JVM_EXTRA applies to the benchmark JVMs only, not to the report step (a JFR recording named there
+# would otherwise be overwritten by the report JVM's own).
+EXTRA=()
+if [ -n "${JVM_EXTRA:-}" ]; then read -ra EXTRA <<< "$JVM_EXTRA"; fi
 
 LIST=()
 if [ -n "$CONFIGS" ]; then IFS=',' read -ra LIST <<< "$CONFIGS"; fi
@@ -66,7 +73,7 @@ for cfg in ${LIST[@]+"${LIST[@]}"}; do
     comet*) if [ -z "${COMET_JAR:-}" ]; then echo "skipping $cfg: COMET_JAR not set"; continue; fi ;;
   esac
   echo "=== $cfg"
-  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.sparkvector.benchmarks.TpchRunner \
+  "$JAVA" "${JVM_OPTS[@]}" ${EXTRA[@]+"${EXTRA[@]}"} -cp "$CP" io.sparkvector.benchmarks.TpchRunner \
     --config "$cfg" --data "$DATA" --threads "$THREADS" --out "$OUT" "$@"
 done
 

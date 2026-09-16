@@ -41,6 +41,24 @@ public final class GroupKeyTable {
    */
   private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
 
+  /** UTF8 keys up to this length are compared byte by byte rather than with MemorySegment.mismatch. */
+  private static final int SHORT_KEY_BYTES = 16;
+
+  /**
+   * Plain (non-dictionary) UTF8 keys whose values in a batch all fit in a long are
+   * dictionary-encoded on the fly, against a per-column dictionary kept across batches, so the
+   * memoised path above applies to them too. Comet's native scan hands over plain Arrow strings
+   * for columns Spark's reader would keep dictionary encoded; without this, TPC-H Q1 over that
+   * scan hashed and compared every row's group key.
+   */
+  private static final int PACKED_KEY_BYTES = 8;
+
+  private ShortStringDict[] shortDicts;
+  private VectorBuffers[] encodedKeys;
+  private int[] offsetScratch = new int[0];
+  private byte[] byteScratch = new byte[0];
+  private int[][] indexScratch;
+
   public GroupKeyTable(VecType[] types) {
     this.types = types.clone();
     this.slots = new int[INITIAL_CAPACITY * 2];
@@ -94,6 +112,10 @@ public final class GroupKeyTable {
    * group.
    */
   public int assign(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection) {
+    VectorBuffers[] encoded = encodeShortStrings(keys, n);
+    if (encoded != null) {
+      keys = encoded;
+    }
     long combinations = dictionaryCombinations(keys);
     if (combinations > 0 && combinations <= MEMO_MAX_COMBINATIONS) {
       return assignMemoised(keys, n, outIds, (int) combinations, selection);
@@ -142,6 +164,186 @@ public final class GroupKeyTable {
     return combinations;
   }
 
+  /**
+   * Returns {@code keys} with every plain UTF8 column replaced by a dictionary-encoded view over a
+   * {@link ShortStringDict}, or {@code null} when that does not apply: no plain UTF8 key, a key of
+   * another type (the memoised path needs every key dictionary encoded), or a value longer than
+   * {@link #PACKED_KEY_BYTES} in this batch.
+   */
+  private VectorBuffers[] encodeShortStrings(VectorBuffers[] keys, int n) {
+    boolean any = false;
+    for (VectorBuffers k : keys) {
+      if (k.isDictionaryEncoded()) {
+        continue;
+      }
+      if (k.type() != VecType.UTF8) {
+        return null;
+      }
+      any = true;
+    }
+    if (!any || n == 0) {
+      return null;
+    }
+    int k = keys.length;
+    if (shortDicts == null) {
+      shortDicts = new ShortStringDict[k];
+      encodedKeys = new VectorBuffers[k];
+      indexScratch = new int[k][];
+    }
+    if (offsetScratch.length < n + 1) {
+      offsetScratch = new int[Math.max(n + 1, offsetScratch.length * 2)];
+    }
+    int[] offs = offsetScratch;
+    for (int c = 0; c < k; c++) {
+      VectorBuffers key = keys[c];
+      if (key.isDictionaryEncoded()) {
+        encodedKeys[c] = key;
+        continue;
+      }
+      MemorySegment.copy(key.offsets(), VectorBuffers.LE_INT, 0, offs, 0, n + 1);
+      int first = offs[0];
+      int total = offs[n] - first;
+      if (total > (long) n * PACKED_KEY_BYTES) {
+        return null; // some value is too long; exact check below
+      }
+      if (byteScratch.length < total) {
+        byteScratch = new byte[Math.max(total, byteScratch.length * 2)];
+      }
+      byte[] bytes = byteScratch;
+      MemorySegment.copy(key.data(), ValueLayout.JAVA_BYTE, first, bytes, 0, total);
+      if (shortDicts[c] == null) {
+        shortDicts[c] = new ShortStringDict();
+      }
+      ShortStringDict dict = shortDicts[c];
+      if (indexScratch[c] == null || indexScratch[c].length < n) {
+        indexScratch[c] = new int[Math.max(n, indexScratch[c] == null ? 0 : indexScratch[c].length * 2)];
+      }
+      int[] idx = indexScratch[c];
+      MemorySegment validity = key.validity();
+      for (int i = 0; i < n; i++) {
+        int start = offs[i] - first;
+        int len = offs[i + 1] - offs[i];
+        if (len > PACKED_KEY_BYTES) {
+          return null;
+        }
+        if (validity != null && !Bitmap.isSet(validity, i)) {
+          idx[i] = 0;
+          continue;
+        }
+        long packed = 0L;
+        for (int b = len - 1; b >= 0; b--) {
+          packed = (packed << 8) | (bytes[start + b] & 0xFFL);
+        }
+        idx[i] = dict.indexOf(packed, len, bytes, start);
+      }
+      encodedKeys[c] = SegmentVectorBuffers.dictionaryUtf8(n, validity, MemorySegment.ofArray(idx), dict.view());
+    }
+    return encodedKeys;
+  }
+
+  /**
+   * Distinct strings of at most {@link #PACKED_KEY_BYTES} bytes, keyed by their packed bytes and
+   * length, stored contiguously so the dictionary can be read as a UTF8 {@link VectorBuffers}.
+   */
+  static final class ShortStringDict {
+    private long[] bits = new long[64];
+    private byte[] lens = new byte[64];
+    private int[] ids = new int[64];
+    private int mask = 63;
+    private int size;
+    private byte[] data = new byte[256];
+    private int used;
+    private int[] offsets = new int[33];
+    private MemorySegment dataSegment = MemorySegment.ofArray(data);
+    private MemorySegment offsetSegment = MemorySegment.ofArray(offsets);
+
+    int size() {
+      return size;
+    }
+
+    /** Direct index for single-byte values (TPC-H's flag columns), bypassing the probe. */
+    private final int[] singleByte = new int[256];
+
+    ShortStringDict() {
+      Arrays.fill(ids, -1);
+      Arrays.fill(singleByte, -1);
+    }
+
+    int indexOf(long packed, int len, byte[] src, int from) {
+      if (len == 1) {
+        int b = (int) packed; // 0..255
+        int id = singleByte[b];
+        if (id < 0) {
+          id = probe(packed, len, src, from);
+          singleByte[b] = id;
+        }
+        return id;
+      }
+      return probe(packed, len, src, from);
+    }
+
+    private int probe(long packed, int len, byte[] src, int from) {
+      int pos = HashKernels.finish(HashKernels.mix32(HashKernels.fold(packed), len)) & mask;
+      while (true) {
+        int id = ids[pos];
+        if (id < 0) {
+          return insert(packed, len, src, from, pos);
+        }
+        if (bits[id] == packed && lens[id] == len) {
+          return id;
+        }
+        pos = (pos + 1) & mask;
+      }
+    }
+
+    private int insert(long packed, int len, byte[] src, int from, int pos) {
+      int id = size;
+      if (id == bits.length) {
+        bits = Arrays.copyOf(bits, id * 2);
+        lens = Arrays.copyOf(lens, id * 2);
+      }
+      if (id + 1 >= offsets.length) {
+        offsets = Arrays.copyOf(offsets, offsets.length * 2);
+        offsetSegment = MemorySegment.ofArray(offsets);
+      }
+      if (used + len > data.length) {
+        data = Arrays.copyOf(data, Math.max(data.length * 2, used + len));
+        dataSegment = MemorySegment.ofArray(data);
+      }
+      bits[id] = packed;
+      lens[id] = (byte) len;
+      System.arraycopy(src, from, data, used, len);
+      used += len;
+      offsets[id + 1] = used;
+      ids[pos] = id;
+      size++;
+      if (size * 2 > ids.length) {
+        rehash();
+      }
+      return id;
+    }
+
+    private void rehash() {
+      int[] newIds = new int[ids.length * 2];
+      Arrays.fill(newIds, -1);
+      int newMask = newIds.length - 1;
+      for (int id = 0; id < size; id++) {
+        int pos = HashKernels.finish(HashKernels.mix32(HashKernels.fold(bits[id]), lens[id])) & newMask;
+        while (newIds[pos] >= 0) {
+          pos = (pos + 1) & newMask;
+        }
+        newIds[pos] = id;
+      }
+      ids = newIds;
+      mask = newMask;
+    }
+
+    /** The dictionary as a UTF8 column; valid until the next {@link #indexOf} that inserts. */
+    VectorBuffers view() {
+      return SegmentVectorBuffers.utf8(size, null, offsetSegment, dataSegment);
+    }
+  }
+
   private int assignMemoised(VectorBuffers[] keys, int n, int[] outIds, int combinations, MemorySegment selection) {
     if (memo.length < combinations) {
       memo = new int[Math.max(combinations, memo.length * 2)];
@@ -168,17 +370,31 @@ public final class GroupKeyTable {
         }
       }
     }
-    for (int i = 0; i < n; i++) {
-      if (selection != null && !Bitmap.isSet(selection, i)) {
-        outIds[i] = -1;
-        continue;
+    int[] memo = this.memo;
+    if (selection == null) {
+      for (int i = 0; i < n; i++) {
+        int gid = memo[combined[i]];
+        if (gid < 0) {
+          gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));
+          memo[combined[i]] = gid;
+        }
+        outIds[i] = gid;
       }
-      int gid = memo[combined[i]];
-      if (gid < 0) {
-        gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));
-        memo[combined[i]] = gid;
+    } else {
+      Arrays.fill(outIds, 0, n, -1);
+      for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+        long bits = Bitmap.wordAt(selection, w, n);
+        while (bits != 0L) {
+          int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+          bits &= bits - 1;
+          int gid = memo[combined[i]];
+          if (gid < 0) {
+            gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));
+            memo[combined[i]] = gid;
+          }
+          outIds[i] = gid;
+        }
       }
-      outIds[i] = gid;
     }
     return size;
   }
@@ -295,7 +511,17 @@ public final class GroupKeyTable {
     if (rowLen != len) {
       return false;
     }
-    if (len == 0) {
+    if (len <= SHORT_KEY_BYTES) {
+      // Group-by strings are mostly codes of a few bytes. MemorySegment.mismatch costs more in
+      // set-up (two liveness checks, a vectorized-mismatch call) than the comparison itself at
+      // these lengths; TPC-H Q1 over plain (non-dictionary) Arrow strings spent a third of the
+      // aggregate's time there.
+      byte[] store = strBytes[c];
+      for (int i = 0; i < len; i++) {
+        if (store[start + i] != data.get(ValueLayout.JAVA_BYTE, rowStart + i)) {
+          return false;
+        }
+      }
       return true;
     }
     return MemorySegment.mismatch(strSegments[c], start, start + len, data, rowStart, rowStart + len) == -1;

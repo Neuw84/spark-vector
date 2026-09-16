@@ -19,7 +19,7 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 | Module | Language | Contents |
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), SIMD kernels: compare, bitmap logic, compaction, arithmetic, casts, reductions, group hashing, grouped accumulators; scalar references used as test oracles |
-| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet) |
+| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet), the Vector Acceleration UI tab |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H Q1/Q6 runner |
 
 ## Building
@@ -58,6 +58,8 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
+| `spark.vector.ui.enabled` | attach the Vector Acceleration tab to the Spark UI (default `true`) |
+| `spark.vector.ui.retainedExecutions` | queries kept by that tab (default `100`) |
 | `spark.vector.explainFallback.enabled` | log why each operator was left to Spark (default `false`) |
 
 JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forces a vector shape
@@ -95,6 +97,44 @@ ShuffleExchange   -> CometShuffleExchange        Arrow C Data export -> CometVec
 when its child is already columnar with supported types (a vectorized Parquet scan, a Comet scan, or
 another spark-vector operator) and every expression compiles to the kernel IR. Otherwise the reason
 is stored as a tree-node tag; `VectorFallback.reasons(plan)` lists them.
+
+### The Vector Acceleration tab
+
+`spark.plugins` also attaches a **Vector Acceleration** tab to the Spark UI (disable with
+`spark.vector.ui.enabled=false`). It lists every SQL execution and, per execution, draws the final
+physical plan as a DAG with each operator coloured by the engine that runs it:
+
+| Colour | Engine | Counts as accelerated |
+|---|---|---|
+| green | our SIMD kernels (`VectorFilter`, `VectorProject`, `VectorHashAggregate`) | yes |
+| blue | Comet's native operators (any class under `org.apache.spark.sql.comet` / `org.apache.comet`) | yes |
+| purple | `VectorToComet`, the zero-copy hand-off to Comet's shuffle | yes |
+| teal | a Spark scan that already emits batches, i.e. the vectorized Parquet reader | plumbing |
+| grey, dashed | left to Spark | **no** |
+| yellow | `ColumnarToRow` / `RowToColumnar` / `AQEShuffleRead` | plumbing |
+
+A **Fully Accelerated** badge is shown when no operator is grey: every operator runs on the kernels
+or on Comet, with only supported columnar sources and unavoidable row transitions around them. A
+vectorized scan and a transition are plumbing rather than missed operators, so they do not block the
+badge; a Spark exchange or sort does, because those are operators we do not implement (without
+Comet's shuffle, any query with a stage boundary is therefore only partly accelerated).
+
+Grey operators that the planner rule *tried* to convert are listed under "Why operators were not
+accelerated" with the reason it recorded — the same information `spark.vector.explainFallback.enabled`
+logs, and it reads as a cascade, since one uncompilable expression makes every operator above it
+non-columnar:
+
+```
+Filter          unsupported expression StartsWith: startswith(lineitem.l_comment, 'cmt1')
+Project         child Filter is not columnar
+HashAggregate   child Project is not columnar
+```
+
+Node classification comes from the operator's identity, not from a tag: a `VectorExec` is ours, a
+class in Comet's packages is Comet's, and anything we declined to convert is the original Spark class
+carrying the fallback tag. The tab prefers the final plan objects (captured from
+`SparkListenerSQLExecutionEnd`) and falls back to matching node names on the listener event's
+serialised plan for queries still running, which it labels *approximate*.
 
 Between two of our operators a filter (or projection) does not compact: when at least half of the
 rows survive it forwards the child's columns with a selection bitmap (`SelectedColumnarBatch`), and
@@ -185,7 +225,9 @@ one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` an
 Spark), the operators found in each final plan and a checksum proving all configurations returned
 the same rows (to 10 significant digits). Regenerate them without benchmarking with
 `benchmarks/scripts/run-tpch.sh --report`. See [docs/results.md](docs/results.md) for numbers
-measured on an Apple M3 Pro.
+measured on an Apple M3 Pro; at SF10, Q1 runs 1.58x faster than Spark over Spark's own scan and
+1.86x over Comet's scan (Comet end to end: 1.59x), while the highly selective Q6 stays at 0.84x
+over Spark's scan.
 
 ### Vector API lessons
 

@@ -3,6 +3,7 @@ package io.sparkvector.kernels;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.foreign.Arena;
@@ -223,6 +224,39 @@ class GroupedAggregationTest {
       int[] again = new int[8];
       assertEquals(plainTable.size(), dictTable.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, flags), ArrowLayout.ofStrings(arena, status)}, 8, again));
       assertArrayEquals(dictIds, again);
+    }
+  }
+
+  @Test
+  void shortPlainStringsAreEncodedOnTheFlyAndLongOnesFallBack() {
+    try (Arena arena = Arena.ofConfined()) {
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8});
+      // All values fit in 8 bytes: the batch is dictionary encoded on the fly. Empty strings,
+      // 8-byte values differing only in the last byte and a null must stay distinct.
+      String[] shortKeys = {"", "abcdefgh", "abcdefgX", "a", null, "", "abcdefgh", "\u00e9"};
+      int[] ids = new int[shortKeys.length];
+      assertEquals(6, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, shortKeys)}, shortKeys.length, ids));
+      assertEquals(ids[0], ids[5], "empty strings");
+      assertEquals(ids[1], ids[6], "8-byte value");
+      assertNotEquals(ids[1], ids[2], "last byte differs");
+      assertTrue(table.isNull(0, ids[4]));
+      assertEquals("\u00e9", table.getString(0, ids[7]));
+
+      // A batch with a longer value takes the hashing path over the same table and must reuse
+      // the groups the encoded batch created.
+      String[] mixed = {"a", "a value longer than eight bytes", "abcdefgh", null, ""};
+      int[] ids2 = new int[mixed.length];
+      assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, mixed)}, mixed.length, ids2));
+      assertEquals(ids[3], ids2[0], "a");
+      assertEquals(ids[1], ids2[2], "abcdefgh");
+      assertEquals(ids[4], ids2[3], "null");
+      assertEquals(ids[0], ids2[4], "empty");
+      assertEquals(mixed[1], table.getString(0, ids2[1]));
+
+      // And a short batch after that finds the long group untouched and the short ones by memo.
+      int[] ids3 = new int[shortKeys.length];
+      assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, shortKeys)}, shortKeys.length, ids3));
+      assertArrayEquals(ids, ids3);
     }
   }
 
