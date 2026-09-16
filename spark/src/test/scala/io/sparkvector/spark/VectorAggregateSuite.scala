@@ -93,13 +93,10 @@ class VectorAggregateSuite extends VectorQuerySuite {
   }
 
   test("unsupported aggregates fall back") {
-    // Spark rewrites DISTINCT into a grouped partial aggregate, which is not vectorized yet.
-    checkFallback("SELECT count(DISTINCT i) FROM t", Seq(Agg), "not supported")
-    checkFallback("SELECT first(d2) FROM t", Seq(Agg), "unsupported aggregate function")
-    // FILTER applies while updating, so only the Partial stage falls back; the Final merge is ours.
-    val filtered = checkVectorized("SELECT sum(d2) FILTER (WHERE i > 5), count(*) FROM t", Seq(Agg))
-    assert(nodesOf[HashAggregateExec](filtered).exists(_.aggregateExpressions.forall(_.mode == org.apache.spark.sql.catalyst.expressions.aggregate.Partial)))
-    assert(nodesOf[VectorHashAggregateExec](filtered).forall(_.isFinal))
+    // first without ignoreNulls has no kernel (a null first value is a real value there); with it, it is ours.
+    checkFallback("SELECT first(d2) FROM t", Seq(Agg), "first over double without ignoreNulls not supported")
+    // first over a string is planned by Spark as SortAggregateExec, which we never touch (see min(s) below).
+    checkVectorized("SELECT first(d2, true), first(l, true), first(b, true), first(dt, true) FROM t WHERE i > 3", Seq(Agg))
     checkFallback("SELECT min(b) FROM t", Seq(Agg), "not supported")
     // min over strings is planned by Spark as SortAggregateExec, which we never touch.
     val df = withPlugin(enabled = true)(spark.sql("SELECT min(s) FROM t"))
@@ -110,19 +107,61 @@ class VectorAggregateSuite extends VectorQuerySuite {
   test("PartialMerge: the second stage of a count(distinct) plan merges over the exchange") {
     // Spark's rewrite: Partial(sum) over (s, i) -> exchange -> PartialMerge(sum) over (s, i) ->
     // PartialMerge(sum) + Partial(count, distinct) over s -> exchange -> Final + Final(distinct).
-    // The first two stages are ours; the distinct stages still fall back with a reason.
+    // All four stages are ours: the distinct function runs over already-deduplicated input.
     val df = checkVectorized("SELECT s, count(DISTINCT i) AS cd, sum(l) AS sl FROM t GROUP BY s", Seq(Agg))
     val ours = nodesOf[VectorHashAggregateExec](df)
-    assert(ours.size === 2, finalPlan(df).treeString)
-    assert(ours.exists(_.modes == Seq(org.apache.spark.sql.catalyst.expressions.aggregate.Partial)), finalPlan(df).treeString)
+    assert(ours.size === 4, org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ") + "\n" + finalPlan(df).treeString)
+    assert(nodesOf[HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
     val merge = ours.find(_.modes == Seq(org.apache.spark.sql.catalyst.expressions.aggregate.PartialMerge))
     assert(merge.isDefined, finalPlan(df).treeString)
     assert(!merge.get.emitsResults && !merge.get.isFinal)
-    val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map(_._2)
-    assert(reasons.exists(_.contains("distinct aggregates not supported")), reasons.mkString("; "))
+    assert(ours.exists(_.modes.toSet == Set(org.apache.spark.sql.catalyst.expressions.aggregate.PartialMerge, org.apache.spark.sql.catalyst.expressions.aggregate.Partial)), finalPlan(df).treeString)
     // Ungrouped: the same shape with an empty key set, plus a second non-distinct function.
     val df2 = checkVectorized("SELECT count(DISTINCT s), sum(d2), max(i) FROM t WHERE i > 100", Seq(Agg))
-    assert(nodesOf[VectorHashAggregateExec](df2).exists(_.modes == Seq(org.apache.spark.sql.catalyst.expressions.aggregate.PartialMerge)), finalPlan(df2).treeString)
+    assert(nodesOf[HashAggregateExec](df2).isEmpty, finalPlan(df2).treeString)
+  }
+
+  test("distinct aggregation: one distinct group, TPC-H Q16 shape, nullable columns, sum(distinct)") {
+    // planAggregateWithOneDistinct (no Expand): every stage is ours. Nulls are never counted.
+    checkVectorized("SELECT count(DISTINCT i) AS c FROM t", Seq(Agg))
+    checkVectorized("SELECT count(DISTINCT l) AS c, count(l) AS all FROM t", Seq(Agg))
+    checkVectorized("SELECT s, count(DISTINCT l) AS cl, sum(DISTINCT i % 5) AS sd, max(d2) AS m FROM t GROUP BY s", Seq(Agg))
+    checkVectorized("SELECT b, count(DISTINCT s) AS cs, avg(d2) AS a FROM t WHERE i > 10 GROUP BY b", Seq(Agg))
+    val q16 = checkVectorized("SELECT l_returnflag, count(DISTINCT l_suppkey) AS supplier_cnt FROM lineitem WHERE l_quantity > 40 GROUP BY l_returnflag", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](q16).isEmpty, finalPlan(q16).treeString)
+  }
+
+  test("distinct aggregation: several distinct groups and a plain aggregate go through Expand") {
+    // RewriteDistinctAggregates: a keys-only first aggregate over (s, i, l, gid), then a second whose
+    // functions all carry FILTER (WHERE gid = k) and whose plain aggregate is first(..., ignoreNulls).
+    val df = checkVectorized("SELECT s, count(DISTINCT i) AS di, count(DISTINCT l) AS dl, sum(i) AS si, max(d2) AS m FROM t GROUP BY s", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
+    // With plain aggregates present the first aggregate carries them; without, it is keys-only (below).
+    val ko = checkVectorized("SELECT count(DISTINCT i) AS di, count(DISTINCT s) AS ds FROM t WHERE i > 1000", Seq(Agg))
+    assert(nodesOf[VectorHashAggregateExec](ko).exists(_.aggregateExpressions.isEmpty), "the keys-only stage is ours\n" + finalPlan(ko).treeString)
+    checkVectorized("SELECT count(DISTINCT i) AS di, count(DISTINCT s) AS ds, count(*) AS c FROM t WHERE i > 1000", Seq(Agg))
+    // A distinct with FILTER is also rewritten through Expand, but its first aggregate folds the filter
+    // condition with max over a boolean, which has no accumulator yet (#45): pinned as a fallback with
+    // that reason; the second aggregate (count FILTER, first FILTER) is ours.
+    val f = checkVectorized("SELECT s, count(DISTINCT i) FILTER (WHERE l IS NOT NULL) AS d, sum(l) AS sl FROM t GROUP BY s", Seq(Agg))
+    val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(f)).map(_._2)
+    assert(reasons.exists(_.contains("min/max over boolean not supported")), reasons.mkString("; ") + "\n" + finalPlan(f).treeString)
+  }
+
+  test("FILTER clauses apply in the update stage, grouped and ungrouped") {
+    checkVectorized("SELECT sum(d2) FILTER (WHERE i > 5) AS s1, count(*) FILTER (WHERE b) AS c1, count(*) AS c, min(i) FILTER (WHERE l IS NULL) AS m FROM t", Seq(Agg))
+    val grouped = checkVectorized("SELECT s, sum(i) FILTER (WHERE i % 2 = 0) AS even, avg(d2) FILTER (WHERE d2 > 1.0) AS a, count(l) FILTER (WHERE i > 19990) AS few FROM t GROUP BY s", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](grouped).isEmpty, finalPlan(grouped).treeString)
+    // A FILTER whose predicate is never true leaves Spark's initial buffers: null sums, zero counts.
+    checkVectorized("SELECT s, sum(i) FILTER (WHERE i < 0) AS none, count(*) FILTER (WHERE i < 0) AS zero FROM t GROUP BY s", Seq(Agg))
+  }
+
+  test("keys-only aggregates: SELECT DISTINCT and UNION are ours in both stages") {
+    val df = checkVectorized("SELECT DISTINCT s, b FROM t WHERE i > 100", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
+    assert(nodesOf[VectorHashAggregateExec](df).size === 2, finalPlan(df).treeString)
+    checkVectorized("SELECT DISTINCT i % 7 AS m FROM t", Seq(Agg))
+    checkVectorized("SELECT count(*) FROM (SELECT DISTINCT s, l FROM t)", Seq(Agg))
   }
 
   test("Complete: update functions with the Final result expressions in one operator") {

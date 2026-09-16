@@ -25,7 +25,7 @@ trait GroupedAggState {
 }
 
 /** Serializable description of a supported aggregate function; states are created per task. */
-sealed trait VectorAggFunction extends Serializable {
+trait VectorAggFunction extends Serializable {
   def bufferTypes: Seq[DataType]
   def newState(): AggState
   def newGroupedState(): GroupedAggState
@@ -242,15 +242,20 @@ object VectorAggregates {
    * merge the partial buffers (`inputAggBufferAttributes`) found in `input`. What the operator then
    * emits -- buffers or results -- is the planner's decision, not the function's.
    */
-  def compile(agg: AggregateExpression, input: Seq[Attribute]): Either[String, VectorAggFunction] = {
-    if (agg.isDistinct) Left("distinct aggregates not supported")
-    else agg.mode match {
-      case Partial | Complete if agg.filter.isDefined => Left("aggregates with FILTER not supported")
-      case Partial | Complete => compileFunction(agg.aggregateFunction, input)
+  def compile(agg: AggregateExpression, input: Seq[Attribute]): Either[String, VectorAggFunction] =
+    agg.mode match {
+      // `isDistinct` is only a marker in a physical plan: Spark's distinct rewrites have already
+      // grouped by the distinct column below, so the function runs over deduplicated input as is.
+      case Partial | Complete =>
+        compileFunction(agg.aggregateFunction, input).flatMap { f =>
+          agg.filter match {
+            case None => Right(f)
+            case Some(p) => FilteredAgg.predicate(p, input).map(FilteredAgg(f, _))
+          }
+        }
       // The FILTER clause is applied while updating; merging buffers does not see it (Spark drops it).
       case PartialMerge | Final => compileMerge(agg.aggregateFunction, input)
     }
-  }
 
   /** Whether `mode` advances the state by merging buffers rather than by reading the function's input. */
   def merges(mode: AggregateMode): Boolean = mode == PartialMerge || mode == Final
@@ -274,6 +279,9 @@ object VectorAggregates {
       case a: Average =>
         if (a.dataType != DoubleType || buffers.length != 2) Left(s"avg producing ${a.dataType.simpleString} not supported")
         else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count)
+      case f: First if f.ignoreNulls && buffers.length == 2 && FirstAgg.supports(f.dataType) =>
+        for (first <- ref(0); valueSet <- ref(1)) yield FirstMergeAgg(first, valueSet, f.dataType)
+      case f: First => Left(s"first over ${f.dataType.simpleString}${if (f.ignoreNulls) "" else " without ignoreNulls"} not supported")
       case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
     }
   }
@@ -317,6 +325,13 @@ object VectorAggregates {
       else numericChild(a.child, input).map { child =>
         AverageAgg(if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType))
       }
+
+    case f: First if f.ignoreNulls && FirstAgg.supports(f.dataType) =>
+      ExpressionCompiler.compile(f.child, input).flatMap {
+        case _: LiteralExpr => Left("first of a literal")
+        case e => Right(FirstAgg(e, f.dataType))
+      }
+    case f: First => Left(s"first over ${f.dataType.simpleString}${if (f.ignoreNulls) "" else " without ignoreNulls"} not supported")
 
     case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
   }

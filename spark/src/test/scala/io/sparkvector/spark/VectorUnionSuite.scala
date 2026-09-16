@@ -51,9 +51,10 @@ class VectorUnionSuite extends VectorQuerySuite {
   }
 
   test("UNION (distinct) is a keys-only aggregate over our union") {
-    // The aggregate has no functions, a shape our aggregate does not take today; the union below it is ours.
+    // The aggregate has no functions: a keys-only aggregate, ours in both stages, over our union.
     val df = checkVectorized("SELECT s FROM (SELECT s FROM t UNION SELECT s FROM t WHERE i < 100)", Seq(Union))
     assert(nodesOf[UnionExec](df).isEmpty)
+    assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
   }
 
   test("coalesce below an aggregate and at the top of a query") {

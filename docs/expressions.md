@@ -91,7 +91,7 @@ matching Spark's short-circuit behaviour.
 
 ### Aggregate functions
 
-Compiled by `VectorAggregates` for `HashAggregateExec` in `Partial` and `Final` mode (see
+Compiled by `VectorAggregates` for `HashAggregateExec` in every mode (see
 [docs/operators.md](operators.md) for the operator's own conditions).
 
 | Function | Types | Notes / fallback reasons |
@@ -100,8 +100,9 @@ Compiled by `VectorAggregates` for `HashAggregateExec` in `Partial` and `Final` 
 | `sum` | INT32, INT64, FLOAT64, decimal with a buffer of <= 18 digits | ANSI `sum(bigint)` is overflow-checked (a sign-trick overflow lane, `Math.addExact` on the grouped path). `sum(decimal(p <= 8))` arrives as `MakeDecimal(sum(UnscaledValue))` and is supported; wider: `sum buffer <type> exceeds 18 digits` (#27), `sum over <type> producing <type> not supported`. Double sums add in lane-parallel, interleaved order (`sparkvector.agg.interleave`, default 4): results can differ from Spark's in the last bits; `interleave=1` reproduces Spark's rounding |
 | `min`, `max` | INT32, INT64, FLOAT64 (incl. date, timestamp, decimal(<=18)) | `min/max over <type> not supported` (strings, booleans) |
 | `avg` | INT32, INT64, FLOAT64 producing `double`; decimal only through the optimizer's rewrite for p <= 11 | `avg producing <type> not supported`, `avg buffer <type> exceeds 18 digits` (#27) |
-| any of the above with `FILTER (WHERE ...)` | -- | `aggregates with FILTER not supported` |
-| any of the above with `DISTINCT` | -- | `distinct aggregates not supported` (#7) |
+| `first(x, ignoreNulls = true)` / `first_value(x, true)` | INT32, INT64, FLOAT64, date, boolean | `FirstAgg` / `FirstMergeAgg` with Spark's `(first, valueSet)` buffer: the first non-null value in row order per group (row order within a task; across the shuffle Spark's own result is order-dependent too). Spark's distinct rewrite wraps every plain aggregate in this form. `first over <type> without ignoreNulls not supported` (a null first value is a real value there), `first over <type> not supported` (strings, decimals) |
+| any of the above with `FILTER (WHERE ...)` | the predicate must compile as a boolean | `FilteredAgg`: applied in the update modes only (`Partial`, `Complete`) as a narrowed selection for that function -- Spark drops the clause in the merge modes. `FILTER <sql>: <reason>` when the predicate does not compile |
+| any of the above with `DISTINCT` | as the function | The `isDistinct` flag is only a marker in a physical plan: Spark's `planAggregateWithOneDistinct` (one distinct group) groups by the distinct column in the two inner stages and the flagged function runs over deduplicated input as a plain one; several distinct groups go through Expand with a keys-only first aggregate, `FILTER (WHERE gid = k)` on every function and `first(..., true)` around the plain ones -- all of which compile. A distinct **with** `FILTER` folds its condition with `max` over a boolean in the first aggregate, which falls back (`min/max over boolean not supported`, #45) |
 | any other function | -- | `unsupported aggregate function <Class>: <sql>` (#45, #46) |
 
 `aggregate over a literal`, `aggregate over <type> not supported` (non-numeric input) and
@@ -126,7 +127,7 @@ the remaining reasons on the aggregate's inputs.
 | Hash functions (`hash`, `xxhash64`, `md5`, `sha1`, `sha2`, `crc32`) | #42 |
 | The rest of the cast matrix (narrowing, boolean, string <-> number, string <-> date/timestamp, date -> timestamp, timestamp -> date under zone rules) | #43 |
 | The rest of the datetime family (`date_trunc` on timestamps, ISO weeks, `add_months`, `last_day`, `unix_timestamp`, timestamp functions under zones with rules) | #44 |
-| Aggregate functions beyond `count`/`sum`/`min`/`max`/`avg`; `count(distinct)` | #45, #7 |
+| Aggregate functions beyond `count`/`sum`/`min`/`max`/`avg`/`first(ignoreNulls)`; `min`/`max` over booleans and strings | #45 |
 | `stddev`, `variance`, `covar`, `corr` | #46 |
 | `try_add`, `try_divide`, `try_cast`, `try_sum`, `try_avg` | #47 |
 | Optimizer-injected: `InSet`, `ScalarSubquery`, bloom-filter probes, normalisation | #48 |
