@@ -481,17 +481,20 @@ and `upper` (2). The best plans are the star-join aggregates: q22 and q96 at 15/
 at 19/24, q3/q42/q43/q52/q55 at 12/15, where the remaining Spark operators are the final sort and the
 `TakeOrderedAndProject` above it.
 
-**Correctness: three checksums differ.** q33, q56 and q60 -- the same template, three sales channels
-aggregated per item and combined with `UNION ALL` -- return 100 rows under both configurations but
-with different sums (for q33, `i_manufact_id` 1000 totals 8756.30 under Spark and 525.60 under the
-plugin, and 59 of the 62 manufacturers both top-100 lists share disagree). Bisected with the
-runner's `--conf` switches: identical results with `spark.vector.exec.aggregate.final.enabled=false`
-(Spark merges our Partial buffers), still different with the union, the selection, AQE or its
-partition coalescing disabled. The fault is therefore in our Final aggregate stage of that plan --
-`sum(UnscaledValue(<decimal(7,2)>))` grouped by one key with a `MakeDecimal(..., 17, 2)` result,
-whose output feeds Spark's `ColumnarToRow` and a Spark aggregate rather than one of our operators
-(the shape q3 shares up to the consumer, and q3 agrees). Tracked on the queries' issues (#128,
-#152, #156); every other query agrees to 10 significant digits.
+**Correctness: three checksums differed, now fixed (#128).** q33, q56 and q60 -- the same template,
+three sales channels aggregated per item and combined with `UNION ALL` -- returned 100 rows under both
+configurations but with different sums (for q33, `i_manufact_id` 1000 totalled 8756.30 under Spark
+and 525.60 under the plugin). The cause was the union's partitioning contract: every channel's Final
+aggregate is hash-partitioned by the key, so Spark's `UnionExec` reports that partitioning and
+`EnsureRequirements` plans no shuffle between the union and the aggregate above it -- the union must
+then keep the children's i-th partitions together. `VectorUnionExec` reported `UnknownPartitioning`
+(too late: the shuffle was already gone) and concatenated the children's RDDs, so every key came out
+once per channel with that channel's sum, and `ORDER BY total_sales LIMIT 100` picked the small
+per-channel sums. The union now reports what Spark's would and reads co-partitioned children through
+`SQLPartitioningAwareUnionRDD`; the bisect that pointed at the Final aggregate was misread -- with
+Spark's Final the union's children were Spark's, whose union is partition-aware. Spark 4.1.3's own
+columnar `UnionExec` has the same concatenation (fixed upstream later), which is why disabling ours
+did not help. All 103 queries now agree to 10 significant digits.
 
 ## AVX2 / AVX-512
 
