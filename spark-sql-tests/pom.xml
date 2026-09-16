@@ -22,6 +22,8 @@
   <properties>
     <!-- Regex over test case names; -DsqlTests.filter=... selects a subset (see the script). -->
     <sqlTests.filter>.*</sqlTests.filter>
+    <!-- Regex over test case names to skip; empty (^$) means none. The default is in the suite. -->
+    <sqlTests.exclude></sqlTests.exclude>
     <spark.test.home>${project.build.directory}/spark-home</spark.test.home>
   </properties>
 
@@ -137,7 +139,7 @@
           <junitxml>.</junitxml>
           <filereports>SparkSqlTests.txt</filereports>
           <stdout>W</stdout>
-          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx6g -Dspark.ui.enabled=false -Dspark.driver.host=localhost -Dspark.test.home=${spark.test.home} -Dspark.vector.sqlTests.filter=${sqlTests.filter}</argLine>
+          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx6g -XX:-OmitStackTraceInFastThrow -Dspark.ui.enabled=false -Dspark.driver.host=localhost -Dspark.test.home=${spark.test.home} -Dspark.testing=true -Dspark.vector.sqlTests.filter=${sqlTests.filter} -Dspark.vector.sqlTests.exclude=${sqlTests.exclude}</argLine>
         </configuration>
         <executions>
           <execution>

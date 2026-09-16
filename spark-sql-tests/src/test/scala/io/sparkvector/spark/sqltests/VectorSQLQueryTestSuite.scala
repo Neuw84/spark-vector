@@ -27,9 +27,11 @@ class VectorSQLQueryTestSuite extends SQLQueryTestSuite {
     // Spark's parquet-backed test tables are small; make sure the vectorized reader is in play.
     .set("spark.sql.parquet.enableVectorizedReader", "true")
 
-  // Called from the parent constructor, before this class's fields exist: read the property here.
+  // Called from the parent constructor, before this class's fields exist: read the properties here.
   private def selected(name: String): Boolean =
-    System.getProperty("spark.vector.sqlTests.filter", ".*").r.findFirstIn(name).isDefined
+    System.getProperty("spark.vector.sqlTests.filter", ".*").r.findFirstIn(name).isDefined &&
+      Option(System.getProperty("spark.vector.sqlTests.exclude")).filter(_.nonEmpty)
+        .getOrElse(VectorSQLQueryTestSuite.defaultExclude).r.findFirstIn(name).isEmpty
 
   override protected def createScalaTestCase(testCase: TestCase): Unit =
     if (selected(testCase.name)) super.createScalaTestCase(testCase)
@@ -48,6 +50,20 @@ class VectorSQLQueryTestSuite extends SQLQueryTestSuite {
       // scalastyle:on println
     }
   }
+}
+
+object VectorSQLQueryTestSuite {
+  /**
+   * Excluded by default (`-DsqlTests.exclude=<regex>` overrides, `-DsqlTests.exclude=^$` runs all):
+   *  - `explain*.sql`: the golden files spell out Spark's physical plan, which is exactly what the
+   *    extension replaces (Comet skips them for the same reason);
+   *  - `hll`, `kllquantiles`, `thetasketch`: DataSketches' memory library refuses to initialise on
+   *    any JDK newer than 21 (`Unsupported JDK Major Version`), which is Spark's dependency, not
+   *    ours; the failure aborts the whole run;
+   *  - `udtf/udtf.sql`: needs `pyspark` installed for `python3` (the Python UDF cases skip
+   *    themselves when it is missing, this one fails instead).
+   */
+  val defaultExclude: String = "^(explain(-[a-z]+)?|hll|kllquantiles|thetasketch|udtf/udtf)\\.sql"
 }
 
 /** Counts, over the whole suite, how often a spark-vector operator ended up in an executed plan. */
