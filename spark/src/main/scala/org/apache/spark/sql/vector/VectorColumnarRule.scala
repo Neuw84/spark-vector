@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SortExec, SparkPlan}
+import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
@@ -70,6 +70,18 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
               if (failures.isEmpty) VectorProjectExec(projectList, child)
               else fallback(p, failures.mkString("; "))
+          }
+
+        case t: TakeOrderedAndProjectExec if VectorConf.takeOrderedEnabled(conf) =>
+          // ORDER BY ... LIMIT over a columnar child: the per-partition top-N is ours, the final
+          // merge of at most limit rows per partition goes through Spark's single-partition shuffle.
+          columnarInputReason(t.child) match {
+            case Some(reason) => fallback(t, reason)
+            case None =>
+              VectorTakeOrderedPlanner.plan(t) match {
+                case Right(v) => v
+                case Left(reason) => fallback(t, reason)
+              }
           }
 
         case s: SortExec if VectorConf.sortEnabled(conf) =>

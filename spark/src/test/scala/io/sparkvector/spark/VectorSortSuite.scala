@@ -2,8 +2,8 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.execution.SortExec
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorSortExec}
+import org.apache.spark.sql.execution.{SortExec, TakeOrderedAndProjectExec}
+import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorSortExec, VectorTakeOrderedAndProjectExec}
 
 /**
  * VectorSortExec against Spark's SortExec. Result sets are compared as usual and, on top, the
@@ -103,6 +103,60 @@ class VectorSortSuite extends VectorQuerySuite {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM t SORT BY i"); d.collect(); d }
       assert(nodesOf[VectorSortExec](df).isEmpty)
       assert(nodesOf[SortExec](df).nonEmpty)
+    }
+  }
+
+  private val TopN = classOf[VectorTakeOrderedAndProjectExec]
+
+  /** Rows must come back in exactly Spark's order: the keys are compared positionally. */
+  private def checkOrdered(sql: String, key: Row => Any, extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil): Array[Row] = {
+    val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
+    val df = checkVectorized(sql, TopN +: extra)
+    val actual = df.collect()
+    assert(actual.map(key).toSeq === expected.map(key).toSeq, s"key order differs for: $sql")
+    assert(nodesOf[TakeOrderedAndProjectExec](df).isEmpty, "Spark's operator should be gone")
+    actual
+  }
+
+  test("ORDER BY ... LIMIT over the scan: every key type, both directions, nulls, projections") {
+    // t has 3 Parquet partitions, so the per-partition top-N and the final merge both run.
+    val top = checkOrdered("SELECT i, s FROM t ORDER BY i DESC LIMIT 10", _.getInt(0))
+    assert(top.length === 10 && top.head.getInt(0) === 19999)
+    checkOrdered("SELECT i FROM t ORDER BY i LIMIT 1", _.getInt(0))
+    checkOrdered("SELECT l, i FROM t ORDER BY l NULLS FIRST, i LIMIT 25", r => (if (r.isNullAt(0)) None else Some(r.getLong(0)), r.getInt(1)))
+    checkOrdered("SELECT d, i FROM t ORDER BY d DESC NULLS LAST, i LIMIT 25", r => (if (r.isNullAt(0)) "null" else r.getDouble(0).toString, r.getInt(1))) // NaN sorts greatest; compared as text since NaN != NaN
+    checkOrdered("SELECT dt, i FROM t ORDER BY dt, i DESC LIMIT 7", r => (r.getDate(0), r.getInt(1)))
+    checkOrdered("SELECT s, i FROM t ORDER BY s DESC, i LIMIT 12", r => (r.getString(0), r.getInt(1)))
+    // Projection on top: computed columns and a reordered subset, key not in the output.
+    checkOrdered("SELECT i * 2 AS twice, s FROM t ORDER BY i LIMIT 5", _.getInt(0))
+    checkOrdered("SELECT s FROM t WHERE i > 100 ORDER BY i LIMIT 5", _.getString(0), Seq(classOf[VectorFilterExec]))
+    checkOrdered("SELECT i, b, d2 FROM t ORDER BY i LIMIT 3", _.getInt(0))
+    // Limit beyond the partition sizes and beyond the data.
+    checkOrdered("SELECT i FROM t WHERE i < 50 ORDER BY i DESC LIMIT 1000", _.getInt(0))
+    val none = checkOrdered("SELECT i FROM t WHERE i < 0 ORDER BY i LIMIT 10", _.getInt(0))
+    assert(none.isEmpty)
+    // A computed key.
+    checkOrdered("SELECT i FROM t ORDER BY i * -1 LIMIT 4", _.getInt(0))
+  }
+
+  test("TPC-H Q3/Q10 shape: ORDER BY ... LIMIT above our Final aggregate") {
+    val q = """SELECT l_returnflag, l_linestatus, sum(l_extendedprice) AS revenue, count(*) AS c
+              |FROM lineitem WHERE l_shipdate < DATE '1996-01-01'
+              |GROUP BY l_returnflag, l_linestatus ORDER BY revenue DESC LIMIT 2""".stripMargin
+    val rows = checkOrdered(q, r => (r.getString(0), r.getString(1)), Seq(classOf[VectorHashAggregateExec]))
+    assert(rows.length === 2)
+    assert(rows(0).getDouble(2) >= rows(1).getDouble(2))
+    // Q10 orders on an aggregate and limits to 20; here every group survives the limit.
+    checkOrdered("SELECT l_orderkey, sum(l_quantity) AS q FROM lineitem GROUP BY l_orderkey ORDER BY q DESC, l_orderkey LIMIT 20", _.getLong(0), Seq(classOf[VectorHashAggregateExec]))
+  }
+
+  test("ORDER BY ... LIMIT falls back with a reason: offset, unsupported key, disabled") {
+    checkFallback("SELECT i FROM t ORDER BY i LIMIT 5 OFFSET 2", Seq(TopN), "offset 2 not supported")
+    checkFallback("SELECT i FROM t ORDER BY s LIKE 'a%b%c' LIMIT 5", Seq(TopN), "Like")
+    withConf(VectorConf.TakeOrderedEnabled -> "false") {
+      val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM t ORDER BY i LIMIT 5"); d.collect(); d }
+      assert(nodesOf[VectorTakeOrderedAndProjectExec](df).isEmpty)
+      assert(nodesOf[TakeOrderedAndProjectExec](df).nonEmpty)
     }
   }
 }
