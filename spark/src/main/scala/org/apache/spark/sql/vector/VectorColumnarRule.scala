@@ -165,7 +165,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
           // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
           // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
-          val isFinal = VectorAggregatePlanner.mergesBuffers(a.aggregateExpressions.map(_.mode).distinct)
+          val isFinal = VectorAggregatePlanner.readsExchange(a)
           val inputReason = if (isFinal) typeReason(a.child) else columnarInputReason(a.child)
           inputReason match {
             case Some(reason) => fallback(a, reason)

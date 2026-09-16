@@ -86,7 +86,7 @@ case class VectorHashAggregateExec(
     VectorAggregatePlanner.bufferAttributes(groupingExpressions, aggregateExpressions)
 
   @transient private lazy val resultProjection: Array[VectorExpr] =
-    VectorAggregatePlanner.compileFinalResults(groupingExpressions, aggregateExpressions, resultExpressions) match {
+    VectorAggregatePlanner.compileFinalResults(groupingExpressions, aggregateExpressions, aggregateAttributes, resultExpressions) match {
       case Right(exprs) => exprs.toArray
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate results: $reason")
     }
@@ -360,12 +360,16 @@ object VectorAggregatePlanner {
   def compileFinalResults(
       groupingExpressions: Seq[NamedExpression],
       aggregateExpressions: Seq[AggregateExpression],
+      aggregateAttributes: Seq[Attribute],
       resultExpressions: Seq[NamedExpression]): Either[String, Seq[VectorExpr]] = {
     val input = bufferAttributes(groupingExpressions, aggregateExpressions)
-    val evaluate: Map[org.apache.spark.sql.catalyst.expressions.ExprId, Expression] = aggregateExpressions.flatMap { agg =>
+    // The result expressions reference the operator's `aggregateAttributes`, positionally aligned with
+    // its aggregate expressions -- not necessarily each expression's own `resultAttribute`: Spark's
+    // distinct rewrite builds the Final distinct expression afresh but keeps the original attribute.
+    val evaluate: Map[org.apache.spark.sql.catalyst.expressions.ExprId, Expression] = aggregateExpressions.zip(aggregateAttributes).flatMap { case (agg, attr) =>
       agg.aggregateFunction match {
-        case d: DeclarativeAggregate => Some(agg.resultAttribute.exprId -> d.evaluateExpression)
-        case _ => None
+        case d: DeclarativeAggregate => Seq(attr.exprId -> d.evaluateExpression, agg.resultAttribute.exprId -> d.evaluateExpression)
+        case _ => Nil
       }
     }.toMap
     val compiled = resultExpressions.map { e =>
@@ -414,6 +418,16 @@ object VectorAggregatePlanner {
   def mergesBuffers(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(VectorAggregates.merges)
 
   /**
+   * Whether the operator reads an exchange (so only its input types matter): the merge modes, or a
+   * keys-only aggregate (`SELECT DISTINCT`, the first aggregate of Spark's distinct rewrite) whose
+   * required child distribution is set -- Spark plans those as a Partial with no distribution and a
+   * Final over the exchange with the keys as distribution, and both merely emit the keys.
+   */
+  def readsExchange(a: HashAggregateExec): Boolean =
+    if (a.aggregateExpressions.isEmpty) a.requiredChildDistributionExpressions.isDefined
+    else mergesBuffers(a.aggregateExpressions.map(_.mode).distinct)
+
+  /**
    * Attempts to convert a Spark HashAggregateExec; Left explains the fallback. Two independent
    * decisions: each aggregate expression's mode says whether its state is updated from the input
    * (`Partial`, `Complete`) or merged from buffers (`PartialMerge`, `Final`); the operator's mode set
@@ -422,16 +436,18 @@ object VectorAggregatePlanner {
    */
   def plan(a: HashAggregateExec, finalEnabled: Boolean): Either[String, VectorHashAggregateExec] = {
     val modes = a.aggregateExpressions.map(_.mode).distinct
-    val results = emitsResults(modes)
-    if (a.aggregateExpressions.isEmpty) Left("aggregate without functions (distinct-style) not supported")
-    else if (!results && !emitsBuffers(modes)) Left(s"aggregation modes ${modes.mkString(", ")} mix buffer and result output")
-    else if (mergesBuffers(modes) && !finalEnabled) Left("merging aggregation stages disabled by configuration")
+    val keysOnly = a.aggregateExpressions.isEmpty
+    // A keys-only aggregate emits its keys in both of Spark's stages: the buffer layout fits both.
+    val results = !keysOnly && emitsResults(modes)
+    if (keysOnly && a.groupingExpressions.isEmpty) Left("aggregate without keys or functions")
+    else if (!keysOnly && !results && !emitsBuffers(modes)) Left(s"aggregation modes ${modes.mkString(", ")} mix buffer and result output")
+    else if (readsExchange(a) && !finalEnabled) Left("merging aggregation stages disabled by configuration")
     else {
       val keyFailures = a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
       val aggFailures = a.aggregateExpressions.flatMap(agg => VectorAggregates.compile(agg, a.child.output).left.toOption.map(r => s"${agg.sql}: $r"))
       val failures = keyFailures ++ aggFailures
       val layoutCheck: Either[String, Any] =
-        if (results) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
+        if (results) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.aggregateAttributes, a.resultExpressions)
         else outputLayout(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
       if (failures.nonEmpty) Left(failures.mkString("; "))
       else layoutCheck.flatMap { _ =>

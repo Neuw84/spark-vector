@@ -175,8 +175,12 @@ that pin it.
 - All four aggregate modes are ours: update vs merge is decided per aggregate expression (`Partial` / `Complete` read the input, `PartialMerge` / `Final` merge buffers), buffers vs results per operator (`VectorAggregatePlanner.emitsResults`; a mix is refused). The merge modes consume Spark's row shuffle through a
   `RowToColumnarExec` or, with Comet, Comet's columnar shuffle directly; merge functions
   (`CountMergeAgg`, `AverageMergeAgg`, sum/min/max over buffers) reuse the accumulators; result
-  expressions are compiled with `evaluateExpression` substituted. `FILTER` clauses are not
-  supported (the Partial aggregate falls back with `aggregates with FILTER not supported`).
+  expressions are compiled with `evaluateExpression` substituted, keyed on the operator's
+  `aggregateAttributes` (Spark's distinct rewrite gives the Final distinct expression a fresh
+  `resultId`). `FILTER` clauses apply in the update modes through `FilteredAgg` (a narrowed
+  selection per function; grouped, a copy of the assignment with the other ids cleared).
+  `DISTINCT` is a marker only; keys-only aggregates emit their keys; `first(x, ignoreNulls)` exists
+  for the distinct rewrite's plain aggregates (`FirstAgg` / `FirstMergeAgg`).
   `spark.vector.exec.aggregate.final.enabled` turns the Final conversion off.
 - `GroupKeyTable` memoises group ids per combination of dictionary indices when every key is
   dictionary encoded and the product of dictionary sizes is small. Plain UTF8 keys are dictionary
@@ -434,7 +438,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 135 kernel tests, 157 Spark tests (130 without the Comet and Iceberg profiles;
+Current counts: 135 kernel tests, 161 Spark tests (134 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

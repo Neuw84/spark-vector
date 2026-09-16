@@ -42,12 +42,12 @@ class VectorExpandSuite extends VectorQuerySuite {
       Seq(Expand, Agg), tolerance = 1e-9)
   }
 
-  test("count(distinct) lowers to an expand; the expand is ours even where the aggregate is not yet") {
-    // RewriteDistinctAggregates: Expand with null literals per distinct group, then a two-level
-    // aggregate whose first level is a keys-plus-count shape. The expand converts; whatever the
-    // aggregate does today, the results must match Spark.
+  test("count(distinct) lowers to an expand; the expand and every aggregate stage are ours") {
+    // RewriteDistinctAggregates: Expand with null literals per distinct group, then a keys-only
+    // aggregate and a filtered one (see VectorAggregateSuite). Nothing of Spark's is left.
     val df = checkVectorized("SELECT s, count(DISTINCT i) AS di, count(DISTINCT l) AS dl, sum(i) AS si FROM t GROUP BY s", Seq(Expand))
     assert(nodesOf[ExpandExec](df).isEmpty)
+    assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
   }
 
   test("expand can be disabled") {
