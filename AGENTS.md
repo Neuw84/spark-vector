@@ -41,6 +41,7 @@ mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
 mvn -pl spark install -Dsuites=io.sparkvector.spark.VectorAggregateSuite   # one suite
 benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated eight tables, decimals as doubles; 10 for SF10 (gitignored)
+benchmarks/scripts/gen-tpch.sh 1 benchmarks/data --decimals   # same tables with real DECIMAL(15,2), into sf1-decimal
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
 ```

@@ -245,6 +245,7 @@ TPC-H, all 22 queries over the eight tables (decimals replaced by doubles, gener
 brew install duckdb
 benchmarks/scripts/gen-tpch.sh 1                      # benchmarks/data/sf1/<table>  (lineitem: 6M rows, 207 MB)
 benchmarks/scripts/gen-tpch.sh 10                     # benchmarks/data/sf10/<table> (lineitem: 60M rows, 2.1 GB)
+benchmarks/scripts/gen-tpch.sh 1 benchmarks/data --decimals   # benchmarks/data/sf1-decimal: real DECIMAL(15,2) columns
 mvn -DskipTests install
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # spark + vector, q1..q22 (--queries q1,q6 for a subset)
@@ -258,8 +259,9 @@ one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` an
 `benchmarks/results/results.html` with bar charts (median, p90 whisker, speedup against plain
 Spark), an accelerated-operators table per query (operators executed by our kernels or Comet over
 the operators that count, the same classification the Vector Acceleration UI tab uses, so each closed
-compatibility gap shows up as a query moving), the operators found in each final plan and a checksum
-proving all configurations returned the same rows (to 10 significant digits). Regenerate them
+compatibility gap shows up as a query moving), the operators found in each final plan with the
+reason for every one the planner declined to convert, and a checksum proving all configurations
+returned the same rows (to 10 significant digits). Regenerate them
 without benchmarking with
 `benchmarks/scripts/run-tpch.sh --report`. See [docs/results.md](docs/results.md) for numbers
 measured on an Apple M3 Pro; at SF10, Q1 runs 1.64x faster than Spark over Spark's own scan and

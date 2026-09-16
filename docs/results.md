@@ -368,6 +368,87 @@ aggregate stage boundaries are available to a JVM operator.
   path per row; a wider packed key (two longs) or hashing the batch's distinct offsets first
   would extend the on-the-fly dictionary to them.
 
+## Real TPC-H decimals versus doubles, scale factor 1
+
+The benchmark data has always had prices, discounts and quantities as doubles (`gen-tpch.sh`),
+because TPC-H's price arithmetic leaves 18 digits. `gen-tpch.sh 1 <dir> --decimals` now writes the
+same tables with DuckDB's native `DECIMAL(15,2)` into `sf1-decimal`, and the runner records every
+operator the planner rule declined to convert with its reason (`fallbacks` in the `.jsonl`, listed
+under each query in the reports). This is what the 22 queries look like over both schemas, `spark`
+against `vector`, medians of 3 runs after 1 warm-up, `local[8]`, 6 GB heap.
+
+Hardware caveat: an 8-core x86 host (Xeon 8488C, AVX-512) shared with other work, not the M3 the
+rest of this document uses, so the absolute medians are noisy (±10%) and the double-schema speedups
+below do not match the M3 tables above. Read the decimal columns against the double columns of the
+same row, and read the accelerated-operator counts and the reason list, which are deterministic.
+
+| query | doubles: spark | vector (speedup) | accel. | decimals: spark | vector (speedup) | accel. |
+|---|---:|---:|---:|---:|---:|---:|
+| q1 | 472 | 361 (1.31x) | 4/7 | 1939 | 1991 (0.97x) | 2/7 |
+| q2 | 475 | 490 (0.97x) | 17/44 | 538 | 456 (1.18x) | 17/44 |
+| q3 | 538 | 547 (0.98x) | 6/16 | 540 | 598 (0.90x) | 5/16 |
+| q4 | 496 | 511 (0.97x) | 5/15 | 464 | 456 (1.02x) | 5/15 |
+| q5 | 794 | 884 (0.90x) | 9/31 | 822 | 955 (0.86x) | 8/31 |
+| q6 | 130 | 160 (0.81x) | 4/5 | 160 | 149 (1.07x) | 2/5 |
+| q7 | 581 | 610 (0.95x) | 7/29 | 582 | 653 (0.89x) | 6/29 |
+| q8 | 426 | 390 (1.09x) | 11/39 | 399 | 441 (0.90x) | 10/39 |
+| q9 | 907 | 936 (0.97x) | 10/30 | 941 | 935 (1.01x) | 9/30 |
+| q10 | 496 | 512 (0.97x) | 4/25 | 672 | 1276 (0.53x) | 6/22 |
+| q11 | 246 | 215 (1.14x) | 8/16 | 258 | 280 (0.92x) | 6/16 |
+| q12 | 348 | 313 (1.11x) | 2/13 | 332 | 320 (1.04x) | 2/13 |
+| q13 | 608 | 625 (0.97x) | 3/15 | 584 | 591 (0.99x) | 3/15 |
+| q14 | 231 | 434 (0.53x) | 6/9 | 234 | 387 (0.60x) | 5/9 |
+| q15 | 310 | 316 (0.98x) | 0/1 | 406 | 404 (1.00x) | 3/11 |
+| q16 | 263 | 279 (0.94x) | 1/17 | 262 | 264 (0.99x) | 1/17 |
+| q17 | 509 | 550 (0.93x) | 11/18 | 923 | 896 (1.03x) | 4/18 |
+| q18 | 969 | 994 (0.97x) | 13/29 | 1273 | 1337 (0.95x) | 3/29 |
+| q19 | 220 | 185 (1.19x) | 1/9 | 186 | 240 (0.77x) | 0/9 |
+| q20 | 242 | 281 (0.86x) | 11/32 | 264 | 271 (0.97x) | 6/32 |
+| q21 | 1466 | 1467 (1.00x) | 6/30 | 1418 | 1513 (0.94x) | 6/30 |
+| q22 | 491 | 532 (0.92x) | 1/9 | 498 | 491 (1.02x) | 0/9 |
+
+Doubles: 21 of 22 checksums identical between `spark` and `vector`. Decimals: 22 of 22. The one
+double mismatch is Q15, and it is a finding in its own right: the query joins on
+`total_revenue = (select max(total_revenue) ...)`, an equality between two separately computed
+double sums. Spark sums each partition in one order and the two aggregations agree bit for bit;
+our interleaved accumulators (`sparkvector.agg.interleave=4`) can sum the same rows in a different
+order in the two aggregations, the last bits differ, the equality finds nothing and AQE replaces the
+join with an `EmptyRelation` -- `vector` returns 0 rows where Spark returns 1. Over decimals the
+sums are exact and both engines agree. `interleave=1` restores Spark's order; whether Q15-shaped
+equality on a double sum should force that automatically is an open question.
+
+### What the reason list says
+
+Every decimal-only fallback is on the aggregate, and it comes in two shapes:
+
+- **The `sum` buffer widens past 18 digits even for a plain column.** `sum(l_quantity)` over
+  `DECIMAL(15,2)` has a `DECIMAL(25,2)` buffer (Spark adds 10 digits), so Q1, Q17, Q18, Q20 and Q22
+  lose their aggregate on `sum` or `avg` of an unmodified column: `sum buffer decimal(25,2) exceeds
+  18 digits`, `avg buffer decimal(25,2) exceeds 18 digits`. This is #27's case and it is the one
+  that unlocks the most: it is the only decimal reason in Q17, Q18, Q20 and Q22.
+- **The multiply's declared result type is `DECIMAL(38,4)` and the sum over it needs a wider buffer
+  still.** `l_extendedprice * (1 - l_discount)` is `DECIMAL(38,4)` (`(15,2) * (17,2)` capped at 38),
+  so `unsupported column type decimal(38,4) for sum` appears in ten queries (Q3, Q5, Q6, Q7, Q8, Q9,
+  Q10, Q14, Q15, Q19) and `decimal(38,6)` / `decimal(36,2)` in Q1 and Q11. The multiply itself never
+  shows up as a `Project` fallback: Spark folds it into the aggregate's input expression, so the
+  aggregate is the operator that gives up. Keeping these products on INT64 lanes when the values
+  fit (#26) only helps if the `sum` buffer over them can be wide too, i.e. #26 depends on #27; #27
+  alone already unlocks the plain-column sums.
+- **Nothing in TPC-H needs a genuinely wide declared input (#28):** every base column is `(15,2)`.
+  The division in Q1's `avg` does not appear either -- `avg` fails earlier, on its buffer.
+
+The rest of the decimal-only list is the cascade: `Filter: child HashAggregate is not columnar`,
+`BroadcastHashJoin: child Filter is not columnar`, `Project`/`Sort: child ... is not columnar` --
+operators that would have been ours had the aggregate below them stayed columnar (Q11, Q15, Q17,
+Q18, Q20). Fixing the aggregate takes them back for free.
+
+Two performance notes rather than conclusions, given the host: Spark itself is 4x slower on Q1 with
+real decimals (472 -> 1939 ms; its decimal `sum` is a `BigDecimal` path), so the gap a wide
+accumulator would open is larger than the double numbers suggest; and Q10 with decimals is the one
+query where `vector` is markedly slower than Spark (0.53x) while still accelerating 6 of 22
+operators -- worth a profile before #27 lands, since it is the shape that will run more of our code
+afterwards.
+
 ## AVX2 / AVX-512
 
 Not measured: this document is written from an Apple M3. The kernels select the platform's
