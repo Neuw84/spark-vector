@@ -233,8 +233,13 @@ into these rather than adding special cases to operators.
   application start.
 - Engine classification is by operator identity (`VectorExec`, a class in Comet's packages, a
   columnar leaf, a transition), not by tags we set; fallback reasons come from `VectorFallback`.
-  A plan is "fully accelerated" when no operator runs on plain Spark; scans and row/columnar
-  transitions are plumbing and count for neither side.
+  A plan is "fully accelerated" when no operator runs on plain Spark; scans, row/columnar
+  transitions and AQE's shuffle reader/reuse markers are plumbing and count for neither side.
+  Only `ColumnarToRow`/`RowToColumnar` are transitions: `AQEShuffleRead` hands over whatever the
+  exchange wrote and must not be coloured as a conversion. The one conversion the colours cannot
+  show is inside Comet's JVM shuffle (`CometColumnarExchange`), which reads its child with
+  `execute()` (rows); over one of our operators the UI says so in the node's tooltip. Prefer
+  Comet's native shuffle for every partitioning the bridge supports, range partitioning included.
 - Spark 4 ships Bootstrap 4 and jQuery 3.5: use Spark's own `collapseTable` from `webui.js` and
   its CSS classes, not Bootstrap 5 `data-bs-*` attributes (they silently do nothing). The DAG is
   rendered client side with the d3/dagre-d3/graphlib-dot bundles Spark already serves.

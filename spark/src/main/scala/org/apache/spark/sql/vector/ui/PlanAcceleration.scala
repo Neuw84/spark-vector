@@ -45,15 +45,22 @@ object Engine {
   }
 
   /**
-   * Row/columnar transitions and reuse markers. They cost real time but are not an operator we
-   * either did or did not accelerate, so they do not by themselves disqualify a plan.
+   * Row/columnar transitions. They cost real time but are not an operator we either did or did
+   * not accelerate, so they do not by themselves disqualify a plan.
    */
   case object Transition extends Engine("transition", "Row/columnar transition", "Transition")
 
-  val all: Seq[Engine] = Seq(Vector, Comet, Bridge, ColumnarSource, Spark, Transition)
+  /**
+   * Adaptive execution's shuffle reader (coalescing, skew splitting) and exchange/subquery reuse
+   * markers. They move nothing between row and columnar form: the reader hands over whatever the
+   * exchange wrote, columnar when the exchange is. Plumbing, shown in a neutral colour.
+   */
+  case object ShuffleRead extends Engine("shuffleread", "Shuffle read / reuse (AQE)", "Read")
+
+  val all: Seq[Engine] = Seq(Vector, Comet, Bridge, ColumnarSource, Spark, Transition, ShuffleRead)
 
   /** Engines that are shown but are neither an acceleration nor a missed one. */
-  val plumbing: Set[Engine] = Set(ColumnarSource, Transition)
+  val plumbing: Set[Engine] = Set(ColumnarSource, Transition, ShuffleRead)
 }
 
 /** One operator in the visualised plan. */
@@ -149,17 +156,35 @@ object PlanAcceleration {
     "ShuffleQueryStage", "BroadcastQueryStage", "TableCacheQueryStage")
 
   /**
-   * Row/columnar transitions, reuse markers and AQE's shuffle reader. None of them is an operator
-   * we either did or did not convert, so they are shown but do not count as a fallback.
+   * Row/columnar transitions: the only nodes that convert between rows and batches. Neither is an
+   * operator we either did or did not convert, so they are shown but do not count as a fallback.
    */
-  private val TransitionNames = Set(
-    "ColumnarToRow", "RowToColumnar", "ReusedExchange", "ReusedSubquery", "AQEShuffleRead")
+  private val TransitionNames = Set("ColumnarToRow", "RowToColumnar")
+
+  /** AQE's shuffle reader and reuse markers: plumbing that changes nothing about the format. */
+  private val ShuffleReadNames = Set("AQEShuffleRead", "ReusedExchange", "ReusedSubquery")
+
+  /**
+   * Comet's JVM ("columnar") shuffle reads its child through `execute()`, i.e. as rows, and its
+   * writer re-encodes them as Arrow. Over one of our operators that is a hidden row round-trip the
+   * node's own colour would not show, so the tooltip says so. Its native shuffle takes batches.
+   */
+  private val CometJvmShuffleNames = Set("CometColumnarExchange")
+
+  /** Prepended to the tooltip of a Comet JVM shuffle over one of our operators. */
+  val RowRoundTripNote: String =
+    "reads its child as rows (Comet's JVM shuffle calls execute()): our batches are converted to " +
+      "rows and re-encoded as Arrow. Comet's native shuffle would take the batches directly."
 
   private def isUnwrapped(nodeName: String): Boolean =
     UnwrappedNames.exists(n => nodeName == n || nodeName.startsWith(s"$n ")) ||
       nodeName.startsWith("WholeStageCodegen")
 
   private def isTransition(nodeName: String): Boolean = TransitionNames.contains(nodeName)
+
+  private def isShuffleRead(nodeName: String): Boolean = ShuffleReadNames.contains(nodeName)
+
+  private def isCometJvmShuffle(nodeName: String): Boolean = CometJvmShuffleNames.contains(nodeName)
 
   private def isCometClass(clazz: Class[_]): Boolean = {
     val name = clazz.getName
@@ -188,10 +213,18 @@ object PlanAcceleration {
       case _ if p.nodeName == "VectorToComet" => Engine.Bridge
       case _ if isCometClass(p.getClass) => Engine.Comet
       case _ if isTransition(p.nodeName) => Engine.Transition
+      case _ if isShuffleRead(p.nodeName) => Engine.ShuffleRead
       // A leaf that already emits batches is the vectorized reader our operators are built on; a
       // non-vectorized scan has supportsColumnar false and stays an unaccelerated Spark operator.
       case _ if p.children.isEmpty && p.supportsColumnar => Engine.ColumnarSource
       case _ => Engine.Spark
+    }
+
+    def detailOf(p: SparkPlan): String = {
+      val base = truncate(p.simpleString(maxFields = 20))
+      if (isCometJvmShuffle(p.nodeName) && p.children.exists(_.isInstanceOf[VectorPlan])) {
+        RowRoundTripNote + "\n" + base
+      } else base
     }
 
     def visit(p: SparkPlan, parent: Option[Long]): Unit = {
@@ -203,7 +236,7 @@ object PlanAcceleration {
         nodes += PlanNode(
           id,
           p.nodeName,
-          truncate(p.simpleString(maxFields = 20)),
+          detailOf(p),
           engineOf(p),
           VectorFallback.reason(p))
         parent.foreach(pid => edges += PlanEdge(id, pid))
@@ -246,6 +279,7 @@ object PlanAcceleration {
       else if (isVectorName(name)) Engine.Vector
       else if (isCometName(name)) Engine.Comet
       else if (isTransition(name)) Engine.Transition
+      else if (isShuffleRead(name)) Engine.ShuffleRead
       else if (i.children.isEmpty && name.startsWith("Scan")) Engine.ColumnarSource
       else Engine.Spark
     }

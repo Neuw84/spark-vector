@@ -12,6 +12,7 @@
 .sv-engine-source      { --sv-fill: #d6ecec; --sv-stroke: #3f8f8f; }
 .sv-engine-spark       { --sv-fill: #f8f8f8; --sv-stroke: #999999; }
 .sv-engine-transition  { --sv-fill: #fff2cc; --sv-stroke: #bd9b3a; }
+.sv-engine-shuffleread { --sv-fill: #ececec; --sv-stroke: #8a8a8a; }
 
 /* ---------- legend ---------- */
 

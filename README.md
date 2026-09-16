@@ -123,7 +123,8 @@ The colours:
 | purple | `VectorToComet`, the zero-copy hand-off to Comet's shuffle | yes |
 | teal | a Spark scan that already emits batches, i.e. the vectorized Parquet reader | plumbing |
 | grey, dashed | left to Spark | **no** |
-| yellow | `ColumnarToRow` / `RowToColumnar` / `AQEShuffleRead` | plumbing |
+| yellow | `ColumnarToRow` / `RowToColumnar`, the only nodes that convert between rows and batches | plumbing |
+| light grey | `AQEShuffleRead` (adaptive execution's shuffle reader) and `ReusedExchange`/`ReusedSubquery`; they hand over whatever the exchange wrote, columnar when it is | plumbing |
 
 A **Fully Accelerated** badge is shown when no operator is grey: every operator runs on the kernels
 or on Comet, with only supported columnar sources and unavoidable row transitions around them. A
@@ -141,6 +142,12 @@ Filter          unsupported expression StartsWith: startswith(lineitem.l_comment
 Project         child Filter is not columnar
 HashAggregate   child Project is not columnar
 ```
+
+One conversion the colours alone would hide: Comet's JVM shuffle (`CometColumnarExchange`, used when
+its native writer is not) reads its child through `execute()`, so over one of our operators it turns
+batches into rows and re-encodes them as Arrow. The node stays blue (it is Comet's), but its tooltip
+says so. Comet's native shuffle (`CometExchange`), which the plugin selects for every partitioning
+it can bridge, including range partitioning for global sorts, takes the batches directly.
 
 Node classification comes from the operator's identity, not from a tag: a `VectorExec` is ours, a
 class in Comet's packages is Comet's, and anything we declined to convert is the original Spark class

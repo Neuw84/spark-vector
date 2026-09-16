@@ -1,9 +1,10 @@
 package io.sparkvector.spark.ui
 
-import org.apache.spark.sql.catalyst.expressions.AttributeReference
-import org.apache.spark.sql.comet.{FakeCometScanExec, FakeCometShuffleExchangeExec}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, SortOrder}
+import org.apache.spark.sql.comet.{FakeCometColumnarExchangeExec, FakeCometScanExec, FakeCometShuffleExchangeExec}
 import org.apache.spark.sql.execution.{ColumnarToRowExec, SparkPlanInfo}
 import org.apache.spark.sql.types.LongType
+import org.apache.spark.sql.vector.VectorSortExec
 import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -79,5 +80,37 @@ class PlanAccelerationSuite extends AnyFunSuite {
     // Root is id 0, its child id 1, and the edge runs child -> parent.
     assert(plan.edges === Seq(org.apache.spark.sql.vector.ui.PlanEdge(1, 0)))
     assert(plan.toDotFile.contains("1->0"))
+  }
+
+  test("AQE's shuffle read and reuse markers are plumbing, not transitions") {
+    def info(name: String, children: SparkPlanInfo*): SparkPlanInfo =
+      new SparkPlanInfo(name, name, children.toSeq, Map.empty, Nil)
+    val plan = PlanAcceleration.fromInfo(
+      info("ColumnarToRow",
+        info("VectorSort",
+          info("AQEShuffleRead",
+            info("CometExchange",
+              info("ReusedExchange"))))))
+    assert(plan.nodes.map(n => (n.name, n.engine)) === Seq(
+      ("ColumnarToRow", Engine.Transition),
+      ("VectorSort", Engine.Vector),
+      ("AQEShuffleRead", Engine.ShuffleRead),
+      ("CometExchange", Engine.Comet),
+      ("ReusedExchange", Engine.ShuffleRead)))
+    // The reader does not count against the plan, and only the ColumnarToRow is a transition.
+    assert(plan.countBy(Engine.Transition) === 1)
+    assert(plan.operatorCount === 2, "VectorSort and CometExchange")
+    assert(plan.fullyAccelerated)
+  }
+
+  test("a Comet JVM shuffle over one of our operators is flagged as a row round-trip") {
+    val ours = VectorSortExec(Seq(SortOrder(attrs.head, Ascending)), global = false, FakeCometScanExec(attrs))
+    val flagged = PlanAcceleration.fromPlan(FakeCometColumnarExchangeExec(ours))
+    val exchange = flagged.nodes.head
+    assert(exchange.engine === Engine.Comet, "it is still Comet's operator")
+    assert(exchange.detail.startsWith(PlanAcceleration.RowRoundTripNote))
+    // Over a Comet child there is nothing to flag.
+    val plain = PlanAcceleration.fromPlan(FakeCometColumnarExchangeExec(FakeCometScanExec(attrs)))
+    assert(!plain.nodes.head.detail.contains("rows"))
   }
 }

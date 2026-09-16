@@ -24,3 +24,12 @@ case class FakeCometShuffleExchangeExec(child: SparkPlan) extends UnaryExecNode 
   override protected def doExecute(): RDD[InternalRow] = throw new UnsupportedOperationException
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
 }
+
+/** Stand-in for Comet's JVM shuffle, which reads its child as rows; the UI flags that in the tooltip. */
+case class FakeCometColumnarExchangeExec(child: SparkPlan) extends UnaryExecNode {
+  override def nodeName: String = "CometColumnarExchange"
+  override def output: Seq[Attribute] = child.output
+  override def supportsColumnar: Boolean = true
+  override protected def doExecute(): RDD[InternalRow] = throw new UnsupportedOperationException
+  override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
+}
