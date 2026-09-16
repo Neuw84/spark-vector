@@ -1,8 +1,8 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, MathKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, Hour, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, Not, Or, Quarter, Second, StartsWith, Subtract, TruncDate, UnaryMinus, UnscaledValue, WeekDay, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, IntegralDivide, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Second, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -158,11 +158,89 @@ object ExpressionCompiler {
     // Per-partition prefix plus a running row number; state lives in the node, per task.
     case _: MonotonicallyIncreasingID => Right(MonotonicIdExpr())
 
+    case e @ Abs(child, failOnError) =>
+      numericChild(child, input, "abs").map(c => AbsExpr(c, ansi = failOnError && c.vecType != VecType.FLOAT64, e.origin.context))
+    case UnaryPositive(child) => compile(child, input)
+    case Signum(child) =>
+      if (child.dataType != DoubleType) Left(s"signum over ${child.dataType.simpleString}")
+      else numericChild(child, input, "signum").map(SignumExpr(_))
+
+    case e: Remainder => divideLike(DivideLikeExpr.Rem, e.left, e.right, e.dataType, e.evalMode, e, input)
+    case e: Pmod => divideLike(DivideLikeExpr.Pmod, e.left, e.right, e.dataType, e.evalMode, e, input)
+    case e: IntegralDivide => divideLike(DivideLikeExpr.Div, e.left, e.right, e.dataType, e.evalMode, e, input)
+
+    case e @ Greatest(children) => pick(MathKernels.Pick.GREATEST, children, e.dataType, input)
+    case e @ Least(children) => pick(MathKernels.Pick.LEAST, children, e.dataType, input)
+
+    case NaNvl(l, r) =>
+      if (l.dataType != DoubleType || r.dataType != DoubleType) Left(s"nanvl over ${l.dataType.simpleString}")
+      else
+        for {
+          le <- compile(l, input)
+          re <- compile(r, input)
+          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("nanvl of two literals") else Right(())
+        } yield NanvlExpr(le, re)
+
     case h @ Hour(child, _) => timeField(DateKernels.TimeField.HOUR, child, h.timeZoneId, input)
     case m @ Minute(child, _) => timeField(DateKernels.TimeField.MINUTE, child, m.timeZoneId, input)
     case s @ Second(child, _) => timeField(DateKernels.TimeField.SECOND, child, s.timeZoneId, input)
 
     case other => Left(s"unsupported expression ${other.getClass.getSimpleName}: ${other.sql}")
+  }
+
+  /** A compiled non-literal operand on an INT32 / INT64 / FLOAT64 lane (decimals are #49). */
+  private def numericChild(e: Expression, input: Seq[Attribute], what: String): Result =
+    compile(e, input).flatMap {
+      case _: LiteralExpr => Left(s"$what of a literal")
+      case c if TypeMapping.isDecimal(c.dataType) => Left(s"$what over ${c.dataType.simpleString} not supported")
+      case c if !arithmeticTypes.contains(c.vecType) => Left(s"$what over ${c.dataType.simpleString} not supported")
+      case c => Right(c)
+    }
+
+  /**
+   * `%`, `pmod` and `div`: same Spark type on both sides (Spark's coercion has cast them), numeric
+   * lanes only, `try_*` mode falls back. The kernel handles a zero divisor; ANSI raises it.
+   */
+  private def divideLike(
+      kind: DivideLikeExpr.Kind,
+      l: Expression,
+      r: Expression,
+      resultType: DataType,
+      mode: EvalMode.Value,
+      e: Expression,
+      input: Seq[Attribute]): Result = {
+    val what = kind match { case DivideLikeExpr.Rem => "%"; case DivideLikeExpr.Pmod => "pmod"; case DivideLikeExpr.Div => "div" }
+    if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
+    else if (l.dataType != r.dataType) Left(s"$what operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
+    else if (TypeMapping.isDecimal(l.dataType)) Left(s"$what over ${l.dataType.simpleString} not supported")
+    else if (kind == DivideLikeExpr.Div && TypeMapping.vecTypeOf(l.dataType) == VecType.FLOAT64) Left("div over double not supported")
+    else
+      for {
+        le <- compile(l, input)
+        re <- compile(r, input)
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+        _ <- if (!arithmeticTypes.contains(le.vecType)) Left(s"$what over ${l.dataType.simpleString} not supported") else Right(())
+      } yield DivideLikeExpr(kind, le, re, resultType, mode == EvalMode.ANSI, e.origin.context)
+  }
+
+  /** `greatest` / `least`: every child the same Spark type on a numeric lane, at least one non-literal. */
+  private def pick(pick: MathKernels.Pick, children: Seq[Expression], resultType: DataType, input: Seq[Attribute]): Result = {
+    val what = if (pick == MathKernels.Pick.GREATEST) "greatest" else "least"
+    if (children.size < 2) Left(s"$what with fewer than two arguments")
+    else if (children.exists(_.dataType != resultType)) Left(s"$what operands differ: ${children.map(_.dataType.simpleString).distinct.mkString("/")}")
+    else if (TypeMapping.isDecimal(resultType) || !TypeMapping.isSupported(resultType) || !arithmeticTypes.contains(TypeMapping.vecTypeOf(resultType))) Left(s"$what over ${resultType.simpleString} not supported")
+    else {
+      val compiled = children.map {
+        case Literal(null, _) => Left("null literal")
+        case c => compile(c, input)
+      }
+      compiled.collectFirst { case Left(reason) => reason } match {
+        case Some(reason) => Left(reason)
+        case None =>
+          val exprs = compiled.collect { case Right(c) => c }
+          if (exprs.forall(_.isInstanceOf[LiteralExpr])) Left(s"$what of literals only") else Right(PickExpr(pick, exprs, resultType))
+      }
+    }
   }
 
   /** A compiled non-literal date operand. */

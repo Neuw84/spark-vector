@@ -168,6 +168,35 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT monotonically_increasing_id() + l AS x, i FROM t WHERE l IS NOT NULL", Seq(Filter, Project))
   }
 
+  test("math basics: abs, sign, positive, %, pmod, div, greatest, least, nanvl") {
+    // Values against Spark (ANSI mode, Spark 4's default). i is 0..19999, l nullable, d has NaN and infinities.
+    checkVectorized("SELECT abs(i - 10000) AS a, abs(l - 30000) AS b, abs(d) AS c, sign(d) AS sd, sign(i) AS si, positive(i) AS p, negative(l) AS ng FROM t", Seq(Project))
+    checkVectorized("SELECT i % 7 AS m1, l % 13 AS m2, pmod(i - 10000, 7) AS p1, pmod(l - 30000, -13) AS p2, d % 2.5 AS m3, pmod(d, 3.0) AS p3, (i - 10000) % -7 AS m4 FROM t", Seq(Project))
+    checkVectorized("SELECT i div 3 AS d1, (i - 10000) div -7 AS d2, l div 3 AS d3, 100000 div (i + 1) AS d4, 100 % (i + 1) AS m5, pmod(100, i + 1) AS p5 FROM t", Seq(Project))
+    checkVectorized("SELECT greatest(i, 100, 5000) AS g1, least(i, 100, 5000) AS l1, greatest(l, CAST(i AS BIGINT)) AS g2, least(l, CAST(i AS BIGINT)) AS l2, greatest(d, d2) AS g3, least(d, d2, 1.0) AS l3 FROM t", Seq(Project))
+    checkVectorized("SELECT nanvl(d, 0.0) AS n1, nanvl(d, d2) AS n2, nanvl(d2, d) AS n3, nanvl(d, l) AS n4 FROM t", Seq(Project))
+    checkVectorized("SELECT i FROM t WHERE i % 3 = 0 AND pmod(i, 5) = 1 AND abs(i - 500) < 200", Seq(Filter))
+    // Zero divisors on rows a filter removed never raise; on active rows ANSI raises, legacy nulls.
+    checkVectorized("SELECT i % (i - 5) AS m, i div (i - 5) AS q, pmod(i, i - 5) AS p FROM t WHERE i > 5", Seq(Filter, Project))
+    checkVectorized("SELECT i FROM t WHERE i > 5 AND 100 % (i - 5) = 3", Seq(Filter))
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized("SELECT i % (i - 5) AS m, i div (i - 5) AS q, pmod(i, i - 5) AS p, i % 0 AS z FROM t WHERE i < 20", Seq(Filter, Project))
+      checkVectorized("SELECT abs(i - 2147483647 - 1) AS wrapped FROM t WHERE i < 3", Seq(Filter, Project))
+    }
+    def assertError(sql: String, marker: String): Unit = withPlugin(enabled = true) {
+      val e = intercept[Exception](spark.sql(sql).collect())
+      assert(causes(e).exists(c => c.isInstanceOf[ArithmeticException] && c.getMessage.contains(marker)), s"expected $marker, got $e")
+    }
+    assertError("SELECT i % (i - 5) AS m FROM t", "REMAINDER_BY_ZERO")
+    assertError("SELECT pmod(i, 0) AS p FROM t WHERE i < 10", "REMAINDER_BY_ZERO")
+    assertError("SELECT i div (i - 5) AS q FROM t", "DIVIDE_BY_ZERO")
+    assertError("SELECT abs(i - 2147483647 - 1) AS a FROM t WHERE i < 3", "ARITHMETIC_OVERFLOW")
+    assertError("SELECT abs(CAST(i AS BIGINT) - 9223372036854775807 - 1) AS a FROM t WHERE i < 3", "long overflow")
+    assertError("SELECT (CAST(i AS BIGINT) - 9223372036854775807 - 1) div -1 AS q FROM t WHERE i < 3", "Overflow in integral divide")
+    // Decimal operands stay a fallback with a reason.
+    checkFallback("SELECT CAST(d AS DECIMAL(10, 2)) % CAST(i + 1 AS DECIMAL(10, 2)) AS m FROM t", Seq(Project), "% over decimal(10,2) not supported")
+  }
+
   test("string predicates as projected booleans and in CASE conditions") {
     checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, s LIKE 's1%' AS pre, s LIKE '%3' AS suf, contains(s, '2') AS has, i FROM t", Seq(Project))
     checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))
@@ -216,7 +245,7 @@ class VectorProjectSuite extends VectorQuerySuite {
 
   test("unsupported expressions in a projection fall back") {
     checkFallback("SELECT concat(s, 'x') AS c FROM t WHERE i > 5", Seq(Project), "unsupported expression")
-    checkFallback("SELECT i % 3 AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
+    checkFallback("SELECT i & 3 AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
   }
 
   test("project conversion can be disabled by configuration") {
