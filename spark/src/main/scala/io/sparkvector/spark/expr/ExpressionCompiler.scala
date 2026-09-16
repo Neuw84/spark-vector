@@ -2,7 +2,7 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, Cast, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, Subtract, UnaryMinus, UnscaledValue}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, If, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, Subtract, UnaryMinus, UnscaledValue}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, TimestampType}
 
@@ -59,6 +59,14 @@ object ExpressionCompiler {
 
     case IsNull(child) => nullTestChild(child, input).map(IsNullExpr.apply)
     case IsNotNull(child) => nullTestChild(child, input).map(IsNotNullExpr.apply)
+
+    // Conditionals blend same-typed branches by per-branch masks (CaseWhenExpr). IF is the
+    // one-branch case; COALESCE picks the first non-null operand, i.e. IS NOT NULL conditions over
+    // the operands themselves (an operand is evaluated once for its test and once for its value).
+    case CaseWhen(branches, elseValue) => conditional(branches, elseValue, expr, input)
+    case If(predicate, trueValue, falseValue) => conditional(Seq((predicate, trueValue)), Some(falseValue), expr, input)
+    case Coalesce(children) if children.length >= 2 =>
+      conditional(children.init.map(c => (IsNotNull(c), c)), Some(children.last), expr, input)
 
     case e: Add => arithmetic(ArithOp.ADD, e.left, e.right, e.evalMode, e, input)
     case e: Subtract => arithmetic(ArithOp.SUB, e.left, e.right, e.evalMode, e, input)
@@ -195,6 +203,37 @@ object ExpressionCompiler {
     else compile(c.child, input).flatMap {
       case _: LiteralExpr => Left("cast of a literal")
       case child => Right(DecimalCastExpr(child, from, to, c.evalMode == EvalMode.ANSI, c.origin.context))
+    }
+  }
+
+  private def conditional(
+      branches: Seq[(Expression, Expression)],
+      elseValue: Option[Expression],
+      e: Expression,
+      input: Seq[Attribute]): Result = {
+    if (!TypeMapping.isSupported(e.dataType)) Left(s"unsupported result type ${e.dataType.simpleString} for ${e.sql}")
+    else {
+      def value(v: Expression): Either[String, Option[VectorExpr]] = v match {
+        case Literal(null, _) => Right(None)
+        case Literal(x, dt) if dt == e.dataType && CaseWhenExpr.isBranchLiteralType(dt) => Right(Some(LiteralExpr(x, dt)))
+        case other if other.dataType != e.dataType => Left(s"branch type ${other.dataType.simpleString} differs from ${e.dataType.simpleString}")
+        case other => compile(other, input).map(Some(_))
+      }
+      val compiled = branches.foldLeft[Either[String, Vector[(VectorExpr, Option[VectorExpr])]]](Right(Vector.empty)) {
+        case (acc, (cond, v)) =>
+          for {
+            done <- acc
+            c <- booleanChild(cond, input)
+            bv <- value(v)
+          } yield done :+ ((c, bv))
+      }
+      for {
+        bs <- compiled
+        rest <- elseValue match {
+          case Some(x) => value(x).map(Some(_))
+          case None => Right(None)
+        }
+      } yield CaseWhenExpr(bs, rest, e.dataType)
     }
   }
 

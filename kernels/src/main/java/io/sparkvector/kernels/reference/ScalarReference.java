@@ -200,6 +200,38 @@ public final class ScalarReference {
     }
   }
 
+  // ---------------------------------------------------------------- selection
+
+  /**
+   * Row-wise oracle for {@code SelectKernels.select}: the value of row {@code i} as a boxed Java
+   * value ({@code Integer}, {@code Long}, {@code Double}, {@code Boolean} or {@code String}), or
+   * {@code null}. The first branch whose mask bit is set wins; then {@code otherwise}; then null.
+   * Rows outside {@code active} are null.
+   */
+  public static Object select(
+      int i, MemorySegment[] wins, VectorBuffers[] branches, VectorBuffers otherwise, MemorySegment active) {
+    if (active != null && !Bitmap.isSet(active, i)) {
+      return null;
+    }
+    VectorBuffers src = otherwise;
+    for (int k = 0; k < wins.length; k++) {
+      if (Bitmap.isSet(wins[k], i)) {
+        src = branches[k];
+        break;
+      }
+    }
+    if (src == null || src.isNull(i)) {
+      return null;
+    }
+    return switch (src.type()) {
+      case INT32 -> src.getInt(i);
+      case INT64 -> src.getLong(i);
+      case FLOAT64 -> src.getDouble(i);
+      case BOOL -> src.getBoolean(i);
+      case UTF8 -> src.getString(i);
+    };
+  }
+
   // ---------------------------------------------------------------- aggregation
 
   public static long countValid(VectorBuffers a) {
