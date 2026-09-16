@@ -13,6 +13,7 @@ import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.DateDayVector;
+import org.apache.arrow.vector.DecimalVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
@@ -64,6 +65,11 @@ public final class ArrowOutput {
     if (dt instanceof DecimalType d && d.precision() <= TypeMapping.MAX_DECIMAL_PRECISION) {
       return new BigIntVector(name, allocator); // unscaled values; see VectorDecimalColumnVector
     }
+    if (dt instanceof DecimalType d) {
+      // A wide decimal (a sum buffer of p > 18): Arrow's 128-bit vector, which Spark's own
+      // ArrowColumnVector reads through getDecimal. Never a lane type; only aggregation buffers.
+      return new DecimalVector(name, allocator, d.precision(), d.scale());
+    }
     throw new UnsupportedOperationException("unsupported output type " + dt);
   }
 
@@ -106,9 +112,29 @@ public final class ArrowOutput {
 
   /** The Spark-facing column over a finished vector: decimals need their own wrapper. */
   private static ColumnVector wrap(FieldVector v, DataType sparkType) {
-    if (sparkType instanceof DecimalType d) {
-      return new VectorDecimalColumnVector((BigIntVector) v, d);
+    if (sparkType instanceof DecimalType d && v instanceof BigIntVector lv) {
+      return new VectorDecimalColumnVector(lv, d);
     }
+    return new VectorArrowColumnVector(v);
+  }
+
+  /**
+   * A wide decimal column ({@code p > 18}) from boxed values: {@code null} entries are nulls. Used
+   * for the {@code sum} buffer of a decimal aggregate; the values are the exact 128-bit totals.
+   */
+  public static ColumnVector decimalColumn(
+      String name, DecimalType dt, java.math.BigDecimal[] values, BufferAllocator allocator) {
+    DecimalVector v = new DecimalVector(name, allocator, dt.precision(), dt.scale());
+    v.setInitialCapacity(values.length);
+    v.allocateNew();
+    for (int i = 0; i < values.length; i++) {
+      if (values[i] == null) {
+        v.setNull(i);
+      } else {
+        v.setSafe(i, values[i]);
+      }
+    }
+    v.setValueCount(values.length);
     return new VectorArrowColumnVector(v);
   }
 
@@ -203,6 +229,8 @@ public final class ArrowOutput {
       fv.setSafe(0, ((Number) value).doubleValue());
     } else if (v instanceof BitVector bv) {
       bv.setSafe(0, ((Boolean) value) ? 1 : 0);
+    } else if (v instanceof DecimalVector dv) {
+      dv.setSafe(0, (java.math.BigDecimal) value);
     } else {
       v.close();
       throw new UnsupportedOperationException("scalar output not supported for " + dt);

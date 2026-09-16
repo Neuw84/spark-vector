@@ -5,7 +5,7 @@ import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, Lit
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.types.{DataType, DecimalType, DoubleType, LongType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, DoubleType, LongType}
 
 /**
  * Running state of one aggregate function within one task. `bufferValues` yields the partial
@@ -81,6 +81,40 @@ final case class SumLongAgg(input: VectorExpr, checked: Boolean, queryContext: o
     override def bufferValue(g: Int, slot: Int): Any =
       if (acc.count(g) == 0) null
       else try java.lang.Long.valueOf(acc.sum(g)) catch { case _: ArithmeticException => overflow() }
+  }
+}
+
+/**
+ * SUM over a decimal whose sum type is wider than 18 digits -- Spark's `Decimal(p + 10, s)` buffer
+ * for an input of more than 8 digits, the range `DecimalAggregates` does not rewrite to a long sum.
+ * The update modes only (the merge is #87): the INT64 lane's unscaled values go into a 128-bit
+ * accumulator per group, and the buffer is Spark's own two columns -- `sum` as a wide decimal and
+ * `isEmpty`. A group without a non-null input has `sum = 0, isEmpty = true` like Spark's initial
+ * buffer; a sum that leaves the buffer precision is `null` with `isEmpty = false`, which is what
+ * Spark's non-ANSI decimal add leaves behind and what its Final turns into a null or an overflow error.
+ */
+final case class WideDecimalSumAgg(input: VectorExpr, bufferType: DecimalType) extends VectorAggFunction {
+  override def bufferTypes: Seq[DataType] = Seq(bufferType, BooleanType)
+  private val limit = java.math.BigInteger.TEN.pow(bufferType.precision)
+
+  /** The buffer's `sum` for a group's 128-bit total, or `null` past the buffer precision. */
+  private def sumValue(count: Long, total: => java.math.BigInteger): Any =
+    if (count == 0) java.math.BigDecimal.valueOf(0L, bufferType.scale)
+    else {
+      val t = total
+      if (t.abs.compareTo(limit) >= 0) null else new java.math.BigDecimal(t, bufferType.scale)
+    }
+
+  override def newState(): AggState = new AggState {
+    private val acc = new GroupedAccumulators.WideLongSum
+    override def update(ctx: EvalContext): Unit = acc.updateAll(ctx.masked(input.eval(ctx)))
+    override def bufferValues: Array[Any] = Array(sumValue(acc.count(0), acc.sum(0)), java.lang.Boolean.valueOf(acc.count(0) == 0))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val acc = new GroupedAccumulators.WideLongSum
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+    override def bufferValue(g: Int, slot: Int): Any =
+      if (slot == 0) sumValue(acc.count(g), acc.sum(g)) else java.lang.Boolean.valueOf(acc.count(g) == 0)
   }
 }
 
@@ -292,8 +326,12 @@ object VectorAggregates {
   private def compileFunction(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = f match {
     case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
       // Only reached for decimals of more than 8 digits (the optimizer rewrites smaller ones to a
-      // long sum): the (sum, isEmpty) buffer would need more than 18 digits.
-      Left(s"sum buffer ${s.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+      // long sum): the buffer is Spark's (sum: Decimal(p + 10, s), isEmpty) pair, the sum wider than
+      // 18 digits, accumulated in 128 bits from the unscaled lane values.
+      numericChild(s.child, input).flatMap { child =>
+        if (child.vecType == VecType.FLOAT64) Left(s"sum over ${s.child.dataType.simpleString} producing ${s.dataType.simpleString} not supported")
+        else Right(WideDecimalSumAgg(child, s.dataType.asInstanceOf[DecimalType]))
+      }
     case s: Sum =>
       numericChild(s.child, input).flatMap { child =>
         (s.dataType, child.vecType) match {

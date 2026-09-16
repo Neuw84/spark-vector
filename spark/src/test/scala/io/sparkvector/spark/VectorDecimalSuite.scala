@@ -2,7 +2,7 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.VectorQuerySuite
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec, VectorSortExec}
+import org.apache.spark.sql.vector.{VectorFallback, VectorFilterExec, VectorHashAggregateExec, VectorProjectExec, VectorSortExec}
 
 /**
  * Decimals of up to 18 digits as unscaled long lanes. Results are compared exactly (no double
@@ -27,6 +27,8 @@ class VectorDecimalSuite extends VectorQuerySuite {
         "if(id % 7 = 3, null, cast(cast(id % 10007 as double) / 4 - 900 as decimal(7,2))) as dec7",
         "cast(cast(id * 37 % 1000003 as double) / 100 - 3000 as decimal(12,2)) as dec12",
         "if(id % 5 = 0, null, cast(cast(id as double) / 7 as decimal(18,4))) as dec18",
+        // 17-digit values of either sign whose sum over the table leaves the long range (~1.8e21 unscaled).
+        "if(id % 11 = 0, null, cast((900000000000000 + id) * if(id % 3 = 0, -1, 1) + 0.25 as decimal(18,2))) as big",
         "cast(id % 4 as decimal(3,1)) as k",
         "if(id % 10 = 0, null, concat('s', id % 50)) as s")
       .repartition(3)
@@ -106,7 +108,12 @@ class VectorDecimalSuite extends VectorQuerySuite {
   test("results wider than 18 digits fall back with a reason") {
     checkFallback("SELECT dec12 * dec12 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
     checkFallback("SELECT dec12 / dec7 AS x FROM t WHERE dec7 > 1", Seq(Project), "exceeds 18 digits")
-    checkFallback("SELECT sum(dec12) FROM t", Seq(Agg), "exceeds 18 digits")
+    // The merge side of a wide decimal sum is Spark's for now (#87): the Final stage falls back
+    // with its reason while our Partial runs.
+    val df = withPlugin(enabled = true) { val d = spark.sql("SELECT sum(dec12) FROM t"); d.collect(); d }
+    assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](df).nonEmpty, finalPlan(df).treeString)
+    val reasons = VectorFallback.reasons(finalPlan(df)).map(_._2)
+    assert(reasons.exists(r => r.contains("decimal(22,2)") || r.contains("2-column buffer")), reasons.mkString("; "))
   }
 
   test("aggregates over decimals: sum, avg, min, max, count, grouped and not") {
@@ -118,6 +125,36 @@ class VectorDecimalSuite extends VectorQuerySuite {
     // Decimal grouping key and a decimal sort key.
     checkExact("SELECT k, count(*) FROM t GROUP BY k", Seq(Agg))
     checkVectorized("SELECT dec12, i FROM t SORT BY dec12 DESC", Seq(Sort))
+  }
+
+  test("wide decimal sums: our Partial in 128 bits, Spark's Final merging the (sum, isEmpty) buffer") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    def partialOurs(sql: String): Unit = {
+      val df = checkVectorized(sql, Seq(Agg))
+      val ours = nodesOf[VectorHashAggregateExec](df)
+      assert(ours.exists(a => !a.isFinal), finalPlan(df).treeString)
+      assert(nodesOf[HashAggregateExec](df).nonEmpty, "Spark's Final should merge the wide buffer\n" + finalPlan(df).treeString)
+      // The buffer the Partial emits is Spark's: a wide sum and isEmpty.
+      assert(ours.filter(!_.isFinal).forall(_.output.exists(a => a.dataType.isInstanceOf[org.apache.spark.sql.types.DecimalType] && a.dataType.asInstanceOf[org.apache.spark.sql.types.DecimalType].precision > 18)), finalPlan(df).treeString)
+    }
+    // Grouped and ungrouped, 12 and 18 digits, a sum past 64 bits (`big`), nulls, empty groups.
+    Seq(
+      "SELECT sum(dec12) FROM t",
+      "SELECT k, sum(dec12), sum(dec18) FROM t GROUP BY k",
+      "SELECT sum(big), count(big) FROM t",
+      "SELECT k, sum(big) FROM t GROUP BY k",
+      "SELECT s, sum(big), sum(dec12) FROM t WHERE i > 100 GROUP BY s",
+      // Every partition of some groups without a non-null value: isEmpty must come out of the Partial.
+      "SELECT k, sum(big) FROM t WHERE i % 11 = 0 GROUP BY k",
+      "SELECT sum(big) FROM t WHERE i % 11 = 0",
+      // Mixed with the long-sum rewrite and other functions in the same operator.
+      "SELECT k, sum(dec7), sum(dec12), avg(dec7), max(big), count(*) FROM t GROUP BY k").foreach { sql =>
+      checkExact(sql, Seq(Agg))
+      partialOurs(sql)
+    }
+    // The sum really leaves 64 bits: the exact value, and the row count that gets it there.
+    val total = spark.sql("SELECT sum(big) FROM t").collect().head.getDecimal(0)
+    assert(total.unscaledValue().abs().bitLength() > 63, total.toString)
   }
 
   test("both aggregate stages are ours for a decimal sum") {
