@@ -174,6 +174,16 @@ class VectorAggregateSuite extends VectorQuerySuite {
       Seq(Filter, Agg))
     assert(q12.collect().map(_.getLong(1)).sum > 0)
     checkVectorized("SELECT count(*) FROM lineitem WHERE l_returnflag < l_linestatus", Seq(Filter, Agg))
+  }
+
+  test("TPC-H Q7/Q8/Q9 shape: extract(year) as a group key above our Final aggregate") {
+    val df = checkVectorized(
+      "SELECT extract(year FROM l_shipdate) AS l_year, l_returnflag, sum(l_extendedprice * (1 - l_discount)) AS volume, count(*) AS c FROM lineitem WHERE l_shipdate >= DATE '1995-01-01' AND l_shipdate <= DATE '1996-12-31' GROUP BY extract(year FROM l_shipdate), l_returnflag",
+      Seq(Filter, Agg), tolerance = 1e-6)
+    assert(nodesOf[HashAggregateExec](df).isEmpty)
+    assert(df.collect().map(_.getInt(0)).toSet === Set(1995, 1996))
+    checkVectorized("SELECT year(l_shipdate) AS y, month(l_shipdate) AS m, count(*) FROM lineitem GROUP BY year(l_shipdate), month(l_shipdate)", Seq(Agg))
+    checkVectorized("SELECT trunc(l_shipdate, 'quarter') AS q, sum(l_quantity) FROM lineitem WHERE datediff(l_receiptdate, l_shipdate) > 10 GROUP BY trunc(l_shipdate, 'quarter')", Seq(Filter, Agg), tolerance = 1e-6)
     // Q9 / Q14 / Q16 shapes: LIKE with a leading or trailing wildcard over dictionary pages.
     checkVectorized("SELECT l_returnflag, count(*) FROM lineitem WHERE l_comment LIKE 'cmt1%' GROUP BY l_returnflag", Seq(Filter, Agg))
     checkVectorized("SELECT count(*) FROM lineitem WHERE l_comment NOT LIKE '%9%' AND l_comment LIKE '%5'", Seq(Filter, Agg))

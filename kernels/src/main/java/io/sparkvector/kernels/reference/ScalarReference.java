@@ -3,6 +3,7 @@ package io.sparkvector.kernels.reference;
 import io.sparkvector.kernels.ArithOp;
 import io.sparkvector.kernels.Bitmap;
 import io.sparkvector.kernels.CompareOp;
+import io.sparkvector.kernels.DateKernels;
 import io.sparkvector.kernels.StringMatchKernels;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
@@ -109,6 +110,63 @@ public final class ScalarReference {
         }
       }
       Bitmap.setTo(out, i, hit);
+    }
+  }
+
+  // ---------------------------------------------------------------- dates
+
+  /** Oracle for {@code DateKernels.field}: {@code java.time.LocalDate} on each lane. */
+  public static void dateField(DateKernels.Field field, VectorBuffers a, MemorySegment out) {
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      java.time.LocalDate d = java.time.LocalDate.ofEpochDay(a.getInt(i));
+      int v = switch (field) {
+        case YEAR -> d.getYear();
+        case MONTH -> d.getMonthValue();
+        case DAY -> d.getDayOfMonth();
+        case DAY_OF_YEAR -> d.getDayOfYear();
+        case QUARTER -> (d.getMonthValue() - 1) / 3 + 1;
+        case DAY_OF_WEEK -> d.getDayOfWeek().plus(1).getValue(); // Sunday = 1, as Spark
+        case WEEKDAY -> d.getDayOfWeek().getValue() - 1; // Monday = 0, as Spark
+      };
+      out.setAtIndex(VectorBuffers.LE_INT, i, v);
+    }
+  }
+
+  /** Oracle for {@code DateKernels.trunc}. */
+  public static void dateTrunc(DateKernels.TruncUnit unit, VectorBuffers a, MemorySegment out) {
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      java.time.LocalDate d = java.time.LocalDate.ofEpochDay(a.getInt(i));
+      java.time.LocalDate t = switch (unit) {
+        case YEAR -> d.withDayOfYear(1);
+        case QUARTER -> d.withMonth((d.getMonthValue() - 1) / 3 * 3 + 1).withDayOfMonth(1);
+        case MONTH -> d.withDayOfMonth(1);
+        case WEEK -> d.with(java.time.DayOfWeek.MONDAY);
+      };
+      out.setAtIndex(VectorBuffers.LE_INT, i, (int) t.toEpochDay());
+    }
+  }
+
+  /** Oracle for {@code DateKernels.timestampToDate} / {@code timeField}: {@code java.time} in the given fixed offset. */
+  public static void timestampField(DateKernels.TimeField field, boolean toDate, VectorBuffers a, int offsetSeconds, MemorySegment out) {
+    int n = a.length();
+    java.time.ZoneOffset zone = java.time.ZoneOffset.ofTotalSeconds(offsetSeconds);
+    for (int i = 0; i < n; i++) {
+      long micros = a.getLong(i);
+      java.time.Instant instant = java.time.Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000L);
+      java.time.LocalDateTime local = java.time.LocalDateTime.ofInstant(instant, zone);
+      int v;
+      if (toDate) {
+        v = (int) local.toLocalDate().toEpochDay();
+      } else {
+        v = switch (field) {
+          case HOUR -> local.getHour();
+          case MINUTE -> local.getMinute();
+          case SECOND -> local.getSecond();
+        };
+      }
+      out.setAtIndex(VectorBuffers.LE_INT, i, v);
     }
   }
 

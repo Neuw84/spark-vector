@@ -1,9 +1,10 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, StartsWith, Subtract, UnaryMinus, UnscaledValue}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, Hour, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, Month, Multiply, Not, Or, Quarter, Second, StartsWith, Subtract, TruncDate, UnaryMinus, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
+import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
 
 /**
@@ -108,6 +109,17 @@ object ExpressionCompiler {
     case c: Cast if TypeMapping.isDecimal(c.child.dataType) || TypeMapping.isDecimal(c.dataType) =>
       decimalCast(c, input)
 
+    // timestamp -> date is zone dependent: compiled only under a UTC or fixed-offset session zone.
+    case c @ Cast(child, DateType, _, _) if child.dataType == TimestampType =>
+      DateExprs.fixedOffsetMicros(c.timeZoneId) match {
+        case None => Left(s"cast timestamp -> date needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}")
+        case Some(offset) =>
+          compile(child, input).flatMap {
+            case _: LiteralExpr => Left("cast of a literal")
+            case ce => Right(TimestampToDateExpr(ce, offset))
+          }
+      }
+
     case c: Cast =>
       val child = c.child
       val dt = c.dataType
@@ -119,8 +131,69 @@ object ExpressionCompiler {
         case c => Right(CastExpr(c, dt))
       }
 
+    case Year(child) => dateField(DateKernels.Field.YEAR, child, input)
+    case Month(child) => dateField(DateKernels.Field.MONTH, child, input)
+    case DayOfMonth(child) => dateField(DateKernels.Field.DAY, child, input)
+    case DayOfYear(child) => dateField(DateKernels.Field.DAY_OF_YEAR, child, input)
+    case Quarter(child) => dateField(DateKernels.Field.QUARTER, child, input)
+    case DayOfWeek(child) => dateField(DateKernels.Field.DAY_OF_WEEK, child, input)
+    case WeekDay(child) => dateField(DateKernels.Field.WEEKDAY, child, input)
+
+    case TruncDate(date, format) =>
+      format match {
+        case Literal(f: UTF8String, StringType) =>
+          DateExprs.truncUnit(f.toString) match {
+            case None => Left(s"trunc unit '$f' not supported")
+            case Some(unit) => dateChild(date, input).map(DateTruncExpr(unit, _))
+          }
+        case _ => Left("trunc unit is not a string literal")
+      }
+
+    // date +/- days and date - date are INT32 lane arithmetic; Spark does not overflow-check them.
+    case e @ DateAdd(start, days) => dateArith(ArithOp.ADD, start, days, e.dataType, input)
+    case e @ DateSub(start, days) => dateArith(ArithOp.SUB, start, days, e.dataType, input)
+    case e @ DateDiff(end, start) if end.dataType == DateType && start.dataType == DateType =>
+      dateArith(ArithOp.SUB, end, start, e.dataType, input)
+
+    case h @ Hour(child, _) => timeField(DateKernels.TimeField.HOUR, child, h.timeZoneId, input)
+    case m @ Minute(child, _) => timeField(DateKernels.TimeField.MINUTE, child, m.timeZoneId, input)
+    case s @ Second(child, _) => timeField(DateKernels.TimeField.SECOND, child, s.timeZoneId, input)
+
     case other => Left(s"unsupported expression ${other.getClass.getSimpleName}: ${other.sql}")
   }
+
+  /** A compiled non-literal date operand. */
+  private def dateChild(e: Expression, input: Seq[Attribute]): Result =
+    if (e.dataType != DateType) Left(s"date function over ${e.dataType.simpleString}")
+    else compile(e, input).flatMap {
+      case _: LiteralExpr => Left("date function on a literal")
+      case c => Right(c)
+    }
+
+  private def dateField(field: DateKernels.Field, child: Expression, input: Seq[Attribute]): Result =
+    dateChild(child, input).map(DateFieldExpr(field, _))
+
+  /** `date_add` / `date_sub` take a date and an int; `datediff` two dates. Both are INT32 lanes. */
+  private def dateArith(op: ArithOp, l: Expression, r: Expression, resultType: DataType, input: Seq[Attribute]): Result =
+    if (l.dataType != DateType) Left(s"date arithmetic over ${l.dataType.simpleString}")
+    else if (r.dataType != IntegerType && r.dataType != DateType) Left(s"date arithmetic with ${r.dataType.simpleString} days")
+    else
+      for {
+        le <- compile(l, input)
+        re <- compile(r, input)
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+      } yield ArithExpr(op, le, re, resultType, ansiDivideByZero = false, queryContext = null)
+
+  private def timeField(field: DateKernels.TimeField, child: Expression, zoneId: Option[String], input: Seq[Attribute]): Result =
+    if (child.dataType != TimestampType) Left(s"time field over ${child.dataType.simpleString}")
+    else DateExprs.fixedOffsetMicros(zoneId) match {
+      case None => Left(s"time field needs a fixed-offset session zone, not ${zoneId.getOrElse("none")}")
+      case Some(offset) =>
+        compile(child, input).flatMap {
+          case _: LiteralExpr => Left("time field on a literal")
+          case c => Right(TimeFieldExpr(field, c, offset))
+        }
+    }
 
   private val arithmeticTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64)
 

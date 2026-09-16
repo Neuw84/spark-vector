@@ -89,7 +89,9 @@ that pin it.
 - Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`
   (numbers via `CompareKernels`, strings via `StringCompareKernels` in UTF8_BINARY order), `InExpr`
   (one equality pass per literal), `StringMatchExpr` (`startswith`/`endswith`/`contains`, i.e. the
-  `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
+  `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), the date nodes in `DateExprs.scala`
+  (`DateFieldExpr`/`DateTruncExpr` over `DateKernels`' civil-from-days arithmetic, `TimestampToDateExpr`/`TimeFieldExpr`
+  under a fixed-offset session zone only -- zones with rules fall back), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
   `CaseWhenExpr` for `CASE WHEN`/`IF`/`COALESCE`: per-branch win masks carried forward as `active`,
   a null condition counts as false, `SelectKernels.select` blends -- literal branches, string and
   boolean ones included, are materialised as constant columns).
@@ -402,7 +404,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 118 kernel tests, 130 Spark tests (103 without the Comet and Iceberg profiles;
+Current counts: 121 kernel tests, 133 Spark tests (106 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

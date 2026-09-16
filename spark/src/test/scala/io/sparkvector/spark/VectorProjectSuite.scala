@@ -12,6 +12,48 @@ class VectorProjectSuite extends VectorQuerySuite {
   override protected def beforeAll(): Unit = {
     super.beforeAll()
     TestTables.createMixed(spark, newTempPath("project/t"))
+    // A timestamp table: hourly instants around the epoch with sub-second parts, some negative.
+    val tsPath = newTempPath("project/ts")
+    spark
+      .range(0, 5000)
+      .selectExpr(
+        "cast(id as int) as i",
+        "if(id % 9 = 0, null, timestamp_micros((id - 2500) * 3600000000 + id * 7919 % 1000000)) as ts",
+        "date_add(date '1969-12-01', cast(id % 400 as int)) as d0")
+      .repartition(2)
+      .write
+      .mode("overwrite")
+      .parquet(tsPath)
+    spark.read.parquet(tsPath).createOrReplaceTempView("ts")
+  }
+
+  test("date fields, truncation and arithmetic over date columns") {
+    // dt spans 2020-01-01 .. 2021-12-30 (a leap year and a plain one); d0 straddles the epoch.
+    checkVectorized("SELECT i, year(dt) AS y, month(dt) AS m, dayofmonth(dt) AS d, dayofyear(dt) AS doy, quarter(dt) AS q, dayofweek(dt) AS dow, weekday(dt) AS wd FROM t", Seq(Project))
+    checkVectorized("SELECT extract(year FROM dt) AS y, extract(month FROM dt) AS m, day(dt) AS d FROM t WHERE i > 100", Seq(Filter, Project))
+    checkVectorized("SELECT i, year(d0) AS y, month(d0) AS m, dayofmonth(d0) AS d, dayofyear(d0) AS doy, dayofweek(d0) AS dow FROM ts", Seq(Project))
+    checkVectorized("SELECT trunc(dt, 'YEAR') AS ty, trunc(dt, 'quarter') AS tq, trunc(dt, 'MM') AS tm, trunc(dt, 'week') AS tw, i FROM t", Seq(Project))
+    checkVectorized("SELECT date_add(dt, 90) AS a, date_sub(dt, i) AS b, date_add(dt, i) AS c, datediff(dt, DATE '2020-06-15') AS e, datediff(DATE '2021-01-01', dt) AS f FROM t", Seq(Project))
+    checkVectorized("SELECT datediff(dt, d) AS g FROM (SELECT dt, date_add(dt, 3) AS d FROM t)", Seq(Project))
+    // Nulls propagate: a date that is null where s is null.
+    checkVectorized("SELECT year(IF(s IS NULL, NULL, dt)) AS y, trunc(IF(s IS NULL, NULL, dt), 'MM') AS tm, date_add(IF(s IS NULL, NULL, dt), 1) AS a FROM t", Seq(Project))
+    // The TPC-H Q7/Q8/Q9 shape: extract(year) as a group key on our aggregate.
+    checkVectorized("SELECT year(dt) AS y, count(*) AS c FROM t GROUP BY year(dt)", Seq(classOf[VectorHashAggregateExec]))
+    checkFallback("SELECT trunc(dt, 'DAY') AS x FROM t", Seq(Project), "trunc unit 'DAY' not supported")
+  }
+
+  test("timestamp fields under UTC and fixed-offset session zones; zone rules fall back") {
+    Seq("UTC", "+05:30", "-03:00", "Etc/GMT+7").foreach { zone =>
+      withConf("spark.sql.session.timeZone" -> zone) {
+        checkVectorized("SELECT i, cast(ts AS DATE) AS d, hour(ts) AS h, minute(ts) AS mi, second(ts) AS s FROM ts", Seq(Project))
+        checkVectorized("SELECT year(ts) AS y, month(ts) AS m, dayofmonth(ts) AS d FROM ts WHERE i > 10", Seq(Filter, Project))
+        checkVectorized("SELECT cast(ts AS DATE) AS d, count(*) AS c FROM ts GROUP BY cast(ts AS DATE)", Seq(classOf[VectorHashAggregateExec]))
+      }
+    }
+    withConf("spark.sql.session.timeZone" -> "America/New_York") {
+      checkFallback("SELECT hour(ts) AS h FROM ts", Seq(Project), "fixed-offset session zone")
+      checkFallback("SELECT year(ts) AS y FROM ts", Seq(Project), "fixed-offset session zone")
+    }
   }
 
   test("double arithmetic with columns and literals (ANSI mode, Spark 4 default)") {
