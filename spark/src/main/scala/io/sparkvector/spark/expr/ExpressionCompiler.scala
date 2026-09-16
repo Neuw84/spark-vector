@@ -1,8 +1,8 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, MathKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, MathKernels, RoundKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, IntegralDivide, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Second, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BoundReference, BRound, CaseWhen, Cast, Ceil, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, IntegralDivide, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Second, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -181,6 +181,16 @@ object ExpressionCompiler {
           _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("nanvl of two literals") else Right(())
         } yield NanvlExpr(le, re)
 
+    case e @ Ceil(child) => ceilFloor(child, ceil = true, e.dataType, input)
+    case e @ Floor(child) => ceilFloor(child, ceil = false, e.dataType, input)
+    case Rint(child) =>
+      if (child.dataType != DoubleType) Left(s"rint over ${child.dataType.simpleString}")
+      else numericChild(child, input, "rint").map(RintExpr(_))
+    case r: Round => rounding(RoundKernels.Mode.HALF_UP, "round", r.child, r.scale, r.dataType, r.ansiEnabled, r, input)
+    case r: BRound => rounding(RoundKernels.Mode.HALF_EVEN, "bround", r.child, r.scale, r.dataType, r.ansiEnabled, r, input)
+    case r: RoundCeil => rounding(RoundKernels.Mode.CEILING, "ceil", r.child, r.scale, r.dataType, ansi = false, r, input)
+    case r: RoundFloor => rounding(RoundKernels.Mode.FLOOR, "floor", r.child, r.scale, r.dataType, ansi = false, r, input)
+
     case h @ Hour(child, _) => timeField(DateKernels.TimeField.HOUR, child, h.timeZoneId, input)
     case m @ Minute(child, _) => timeField(DateKernels.TimeField.MINUTE, child, m.timeZoneId, input)
     case s @ Second(child, _) => timeField(DateKernels.TimeField.SECOND, child, s.timeZoneId, input)
@@ -242,6 +252,50 @@ object ExpressionCompiler {
       }
     }
   }
+
+  /** `ceil` / `floor`: long is the identity, double goes to long, decimal to Spark's `bounded(p - s + 1, 0)`. */
+  private def ceilFloor(child: Expression, ceil: Boolean, resultType: DataType, input: Seq[Attribute]): Result = {
+    val what = if (ceil) "ceil" else "floor"
+    child.dataType match {
+      case LongType => compile(child, input)
+      case DoubleType => numericChild(child, input, what).map(CeilFloorExpr(_, ceil, resultType))
+      case d: DecimalType if TypeMapping.isSupported(d) && TypeMapping.isSupported(resultType) =>
+        compile(child, input).flatMap {
+          case _: LiteralExpr => Left(s"$what of a literal")
+          case c => Right(CeilFloorExpr(c, ceil, resultType))
+        }
+      case d: DecimalType => Left(s"$what over ${d.simpleString} -> ${resultType.simpleString} not supported")
+      case t => Left(s"$what over ${t.simpleString} not supported")
+    }
+  }
+
+  /**
+   * `round` / `bround` / two-argument `ceil` / `floor`: the scale must be an int literal (Spark
+   * requires it foldable), the child a numeric or decimal lane, and the result -- which for decimals
+   * Spark widens by a digit -- must still fit 18 digits.
+   */
+  private def rounding(
+      mode: RoundKernels.Mode,
+      what: String,
+      child: Expression,
+      scale: Expression,
+      resultType: DataType,
+      ansi: Boolean,
+      e: Expression,
+      input: Seq[Attribute]): Result =
+    scale match {
+      case Literal(k: Int, IntegerType) =>
+        if (!RoundExpr.supports(child.dataType, resultType)) Left(s"$what over ${child.dataType.simpleString} -> ${resultType.simpleString} not supported")
+        else
+          compile(child, input).flatMap {
+            case _: LiteralExpr => Left(s"$what of a literal")
+            // An integer rounded to a non-negative scale is itself.
+            case c if k >= 0 && !TypeMapping.isDecimal(c.dataType) && c.vecType != VecType.FLOAT64 => Right(c)
+            case c => Right(RoundExpr(c, resultType, mode, k, ansi, e.origin.context))
+          }
+      case Literal(null, _) => Left(s"$what with a null scale")
+      case other => Left(s"$what with a non-literal scale ${other.sql}")
+    }
 
   /** A compiled non-literal date operand. */
   private def dateChild(e: Expression, input: Seq[Attribute]): Result =

@@ -96,7 +96,10 @@ that pin it.
   carried across batches; a forwarded selection numbers only the selected rows), the math nodes in
   `MathExprs.scala` (`AbsExpr`, `SignumExpr`, `DivideLikeExpr` for `%`/`pmod`/`div` with the same
   divisor-zero tail as `ArithExpr` -- `REMAINDER_BY_ZERO` for the remainders, `DIVIDE_BY_ZERO` for `div`
-  -- `PickExpr` for `greatest`/`least`, `NanvlExpr`; all over `MathKernels`), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
+  -- `PickExpr` for `greatest`/`least`, `NanvlExpr`; all over `MathKernels`), the rounding nodes in
+  `RoundExprs.scala` (`CeilFloorExpr`, `RintExpr`, `RoundExpr` for `round`/`bround`/two-argument
+  `ceil`/`floor` over `RoundKernels`; doubles take Spark's BigDecimal-of-toString path, decimals round
+  the unscaled value), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
   `CaseWhenExpr` for `CASE WHEN`/`IF`/`COALESCE`: per-branch win masks carried forward as `active`,
   a null condition counts as false, `SelectKernels.select` blends -- literal branches, string and
   boolean ones included, are materialised as constant columns).
@@ -427,7 +430,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 127 kernel tests, 149 Spark tests (122 without the Comet and Iceberg profiles;
+Current counts: 130 kernel tests, 151 Spark tests (124 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

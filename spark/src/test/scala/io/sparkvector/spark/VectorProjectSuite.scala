@@ -197,6 +197,27 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT CAST(d AS DECIMAL(10, 2)) % CAST(i + 1 AS DECIMAL(10, 2)) AS m FROM t", Seq(Project), "% over decimal(10,2) not supported")
   }
 
+  test("rounding: ceil, floor, rint, round, bround over doubles and integers") {
+    // d2 = (id % 13) / 4 holds exact quarters and halves; d has NaN, infinities and nulls.
+    checkVectorized("SELECT ceil(d) AS c, floor(d) AS f, rint(d) AS r, ceil(d2) AS c2, floor(d2) AS f2, rint(d2) AS r2, ceil(l) AS cl, floor(i) AS fi FROM t", Seq(Project))
+    checkVectorized("SELECT round(d) AS r0, round(d, 2) AS r2, round(d, -1) AS rm, bround(d) AS b0, bround(d, 2) AS b2, bround(d, -1) AS bm FROM t", Seq(Project))
+    checkVectorized("SELECT round(d2) AS r0, bround(d2) AS b0, round(-d2) AS rn, bround(-d2) AS bn, round(d2, 1) AS r1, bround(d2, 1) AS b1, round(d2 * 1.07, 3) AS r3 FROM t", Seq(Project))
+    checkVectorized("SELECT round(i, -2) AS ri, bround(i, -2) AS bi, round(l - 30000, -3) AS rl, bround(l - 30000, -3) AS bl, round(i, 2) AS same, bround(l, 0) AS samel, round(i - 10000, -1) AS rneg FROM t", Seq(Project))
+    checkVectorized("SELECT i FROM t WHERE round(d2) = 2.0 AND floor(d) < 100", Seq(Filter))
+    // Overflow of an integer rounded up past its type: ANSI raises, legacy wraps like BigDecimal.intValue().
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized("SELECT round(2147483600 + i, -3) AS wrapped FROM t WHERE i < 100", Seq(Filter, Project))
+    }
+    withPlugin(enabled = true) {
+      val e = intercept[Exception](spark.sql("SELECT round(2147483600 + i, -3) AS r FROM t WHERE i < 100").collect())
+      assert(causes(e).exists(c => c.isInstanceOf[ArithmeticException] && c.getMessage.contains("ARITHMETIC_OVERFLOW")), s"expected ARITHMETIC_OVERFLOW, got $e")
+    }
+    // Rows a filter removed never raise.
+    checkVectorized("SELECT round(2147483000 + i, -3) AS r FROM t WHERE i < 400", Seq(Filter, Project))
+    // The two-argument ceil over a double goes through decimal(30,15) in Spark and falls back (a non-literal scale is an analysis error in Spark itself).
+    checkFallback("SELECT ceil(d, 1) AS c FROM t", Seq(Project), "not supported")
+  }
+
   test("string predicates as projected booleans and in CASE conditions") {
     checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, s LIKE 's1%' AS pre, s LIKE '%3' AS suf, contains(s, '2') AS has, i FROM t", Seq(Project))
     checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))

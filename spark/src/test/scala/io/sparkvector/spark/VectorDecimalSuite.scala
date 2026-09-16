@@ -90,6 +90,19 @@ class VectorDecimalSuite extends VectorQuerySuite {
     }
   }
 
+  test("rounding on the unscaled value: ceil, floor, round, bround and their scale forms") {
+    // dec7 has exact halves at scale 2 (x.25 / x.75 quarters and x.50), dec18 has scale 4; k is decimal(3,1).
+    checkExact("SELECT i, ceil(dec7) AS c7, floor(dec7) AS f7, ceil(dec12) AS c12, floor(dec12) AS f12, ceil(dec18) AS c18, floor(dec18) AS f18, ceil(k) AS ck, floor(k) AS fk FROM t WHERE i > 5", Seq(Filter, Project))
+    checkExact("SELECT i, round(dec7) AS r7, bround(dec7) AS b7, round(dec7, 1) AS r71, bround(dec7, 1) AS b71, round(dec7, -1) AS r7m, bround(dec7, -2) AS b7m, round(dec7, 5) AS r7wide FROM t WHERE i > 5", Seq(Filter, Project))
+    checkExact("SELECT i, round(dec18, 2) AS r2, bround(dec18, 2) AS b2, round(dec18, 0) AS r0, round(dec18, -3) AS rm, round(dec12, 1) AS r121, bround(dec12, -1) AS b12m, round(k) AS rk, bround(k) AS bk FROM t WHERE i > 5", Seq(Filter, Project))
+    checkExact("SELECT i, ceil(dec7, 1) AS c71, floor(dec7, 1) AS f71, ceil(dec7, -1) AS c7m, floor(dec7, -1) AS f7m, ceil(dec18, 3) AS c183, floor(dec18, -2) AS f18m, ceil(i, -2) AS cim, floor(i, -3) AS fim FROM t WHERE i > 5", Seq(Filter, Project))
+    checkExact("SELECT i FROM t WHERE round(dec7) = 100 OR floor(k) = 2", Seq(Filter))
+    // Spark widens the result by one integral digit: round(dec12, 2) is decimal(13,2) and compiles; round(dec18, 4) is decimal(19,4) and falls back, as does a huge negative scale.
+    checkExact("SELECT i, round(dec12, 2) AS same FROM t WHERE i > 5", Seq(Filter, Project))
+    checkFallback("SELECT round(dec18, 4) AS wide FROM t", Seq(Project), "not supported")
+    checkFallback("SELECT round(dec18, -20) AS wider FROM t", Seq(Project), "not supported")
+  }
+
   test("results wider than 18 digits fall back with a reason") {
     checkFallback("SELECT dec12 * dec12 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
     checkFallback("SELECT dec12 / dec7 AS x FROM t WHERE dec7 > 1", Seq(Project), "exceeds 18 digits")
