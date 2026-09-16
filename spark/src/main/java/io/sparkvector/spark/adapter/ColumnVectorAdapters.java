@@ -2,6 +2,7 @@ package io.sparkvector.spark.adapter;
 
 import io.sparkvector.kernels.VectorBuffers;
 import io.sparkvector.spark.arrow.ArrowVectorBuffers;
+import io.sparkvector.spark.arrow.BorrowedColumnVector;
 import io.sparkvector.spark.arrow.VectorArrowColumnVector;
 import io.sparkvector.spark.arrow.VectorDictionaryColumnVector;
 import java.lang.foreign.Arena;
@@ -38,6 +39,9 @@ public final class ColumnVectorAdapters {
   }
 
   public static VectorBuffers adapt(ColumnVector cv, int numRows, Arena scratch) {
+    if (cv instanceof BorrowedColumnVector b) {
+      return adapt(b.inner(), numRows, scratch);
+    }
     if (cv instanceof VectorArrowColumnVector v) {
       return ArrowVectorBuffers.forRead(v.getValueVector());
     }
@@ -55,6 +59,9 @@ public final class ColumnVectorAdapters {
 
   /** True if {@link #adapt} would not need to copy. */
   public static boolean isZeroCopy(ColumnVector cv, int numRows) {
+    if (cv instanceof BorrowedColumnVector b) {
+      return isZeroCopy(b.inner(), numRows);
+    }
     if (cv instanceof VectorArrowColumnVector || cv instanceof VectorDictionaryColumnVector) {
       return true;
     }

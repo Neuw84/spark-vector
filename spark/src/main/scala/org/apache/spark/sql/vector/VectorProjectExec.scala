@@ -1,6 +1,6 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.arrow.{ArrowOutput, SelectedColumnarBatch, VectorArrowColumnVector, VectorDictionaryColumnVector}
+import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression, SortOrder}
@@ -73,8 +73,9 @@ private[vector] class VectorProjectIterator(
       batch
     } else {
       withEvalContext(batch) { ctx =>
-        // With a selection we either keep it (parent is ours) or apply it now (parent is Spark).
-        val compactTo = if (selected && !emitSelection) ctx.selection else null
+        // With a selection we either keep it (parent is ours, and enough rows survive to make
+        // computing on the whole batch cheaper than compacting) or apply it now.
+        val compactTo = if (selected && (!emitSelection || !SelectionPolicy.keep(ctx.selectedCount, ctx.numRows))) ctx.selection else null
         val outRows = if (compactTo != null) ctx.selectedCount else ctx.numRows
         val columns = new Array[ColumnVector](exprs.length)
         var c = 0
@@ -84,18 +85,15 @@ private[vector] class VectorProjectIterator(
             case ColumnRef(ordinal, _) if compactTo != null =>
               ArrowOutput.compact(name, dt, ctx.input(ordinal), compactTo, outRows, allocator)
             case ColumnRef(ordinal, _) =>
-              batch.column(ordinal) match {
-                case v: VectorArrowColumnVector => v.borrow()
-                case v: VectorDictionaryColumnVector => v.borrow()
-                case _ => ArrowOutput.copy(name, dt, ctx.input(ordinal), allocator)
-              }
+              // Forwarded columns are never copied: the child keeps them alive until its next batch.
+              BorrowedColumnVector.of(batch.column(ordinal))
             case e if compactTo != null => ArrowOutput.compact(name, dt, e.eval(ctx), compactTo, outRows, allocator)
             case e => ArrowOutput.copy(name, dt, e.eval(ctx), allocator)
           }
           c += 1
         }
         metrics.numOutputRows += outRows
-        if (selected && emitSelection) {
+        if (selected && compactTo == null) {
           SelectedColumnarBatch.of(columns, ctx.numRows, ctx.selection, ctx.selectedCount, true)
         } else {
           new ColumnarBatch(columns, outRows)

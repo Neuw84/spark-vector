@@ -87,7 +87,8 @@ object TpchRunner {
       out: String = "benchmarks/results",
       report: Option[String] = None,
       label: String = "",
-      show: Boolean = false)
+      show: Boolean = false,
+      extraConf: Map[String, String] = Map.empty)
 
   def main(argv: Array[String]): Unit = {
     val args = parse(argv.toList, Args())
@@ -110,6 +111,9 @@ object TpchRunner {
     case "--label" :: v :: rest => parse(rest, a.copy(label = v))
     case "--report" :: v :: rest => parse(rest, a.copy(report = Some(v)))
     case "--show" :: rest => parse(rest, a.copy(show = true))
+    case "--conf" :: kv :: rest =>
+      val Array(k, v) = kv.split("=", 2)
+      parse(rest, a.copy(extraConf = a.extraConf + (k -> v)))
     case other :: _ => throw new IllegalArgumentException(s"unknown argument $other")
   }
 
@@ -122,7 +126,7 @@ object TpchRunner {
       .config("spark.sql.shuffle.partitions", args.shufflePartitions.toString)
       .config("spark.sql.adaptive.enabled", "true")
       .config("spark.driver.host", "localhost")
-    conf.foreach { case (k, v) => builder.config(k, v) }
+    (conf ++ args.extraConf).foreach { case (k, v) => builder.config(k, v) }
     val spark = builder.getOrCreate()
     try {
       val lineitem = new File(args.data, "lineitem").getPath
@@ -176,7 +180,9 @@ object TpchRunner {
     val (_, rows, plan) = runs.last
     if (args.show) rows.foreach(r => println(s"[tpch]   row: ${r.mkString(" | ")}"))
     val checksum = rows.map(_.toSeq.map {
-      case d: Double => f"$d%.4f"
+      // 10 significant digits: summation order differs between engines (and our interleaved
+      // accumulators), which moves the last few bits of a 1e11 sum but nothing a user sees.
+      case d: Double => f"$d%.10g"
       case v => String.valueOf(v)
     }.mkString("|")).sorted.mkString("\n").hashCode.toHexString
     val nodes = allNodes(plan)
@@ -242,7 +248,7 @@ object TpchRunner {
       if (sums.size > 1) Some(q) else None
     }
     sb.append("\n")
-    sb.append(if (mismatches.isEmpty) "All configurations returned identical results (to 4 decimals).\n"
+    sb.append(if (mismatches.isEmpty) "All configurations returned identical results (to 10 significant digits).\n"
     else s"WARNING: result checksums differ for ${mismatches.mkString(", ")}\n")
     val md = sb.toString
     Files.writeString(dir.resolve("results.md"), md)

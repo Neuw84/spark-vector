@@ -9,7 +9,8 @@ consumes whatever columnar batches sit below it. Two sources work out of the box
 | Apache DataFusion Comet scan (`CometScanExec` / `CometBatchScanExec`) | zero copy: the Arrow buffers Comet's native reader produced are wrapped as `MemorySegment`s | dictionary-encoded strings stay encoded, so `GROUP BY` string keys hash the dictionary once per batch |
 
 Comet is used in *scan-only* mode: its native Parquet-to-Arrow reader replaces Spark's, its native
-operators stay off, and spark-vector's JVM SIMD operators run above the scan. Comet 1.0 only ships
+operators stay off, and spark-vector's JVM SIMD operators run above the scan. Optionally Comet's
+native shuffle carries the partial aggregates too (see below). Comet 1.0 only ships
 the fully native DataFusion scan (`CometNativeScanExec`), which needs `spark.comet.exec.enabled=true`
 and off-heap memory; "scan-only" therefore means enabling exec and switching every Comet operator
 off individually (`io.sparkvector.benchmarks.TpchRunner.CometScanOnly` lists the full set).
@@ -41,6 +42,35 @@ use if Comet's classes are on the classpath. There is no compile-time dependency
 adapter binds to `org.apache.comet.vector.CometVector`, `CometDictionaryVector` and the shaded
 Arrow classes reflectively, so the same jar works with or without Comet.
 
+## Comet's native shuffle
+
+Add to the configuration above:
+
+```
+--conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
+--conf spark.comet.exec.shuffle.enabled=true
+```
+
+Comet's planner will not hand a Comet shuffle to a columnar child it does not recognise, and its
+row-based "columnar" shuffle would convert our batches to rows and back. spark-vector's rule
+therefore rewrites any exchange (Spark's, or the one Comet chose) sitting on one of its operators
+into Comet's *native* shuffle over `VectorToCometExec`, which is the one piece of glue: each column
+of our batch is exported through the Arrow C Data Interface and imported by Comet's Arrow.
+
+The export is written with the FFM API rather than `arrow-c-data`. Comet bundles that module with
+`org.apache.arrow.c.*` left unshaded (its JNI library resolves those class names literally) but
+with parameter types from the shaded Arrow, so a second `arrow-c-data` on the classpath would
+collide and a relocated copy would break the JNI lookups. Two C structs, a couple of format strings
+and an upcall stub for the release callback need none of that. Comet's `ArrowImporter` (reached
+reflectively) wraps our buffers without copying; when it releases the imported vector the callback
+drops our references. `ArrowCData.liveExports()` counts outstanding exports and is checked by the
+tests. The shuffle output on the reading side is Comet vectors, which our Final aggregate reads
+zero copy through the existing adapter.
+
+Only hash, single-partition and round-robin partitioning are rewritten. Range partitioning (the
+`ORDER BY` above a Final aggregate) stays with whichever shuffle Comet picked, because a native
+Comet shuffle over a non-native child samples the child a second time.
+
 ## Comet on macOS (Apple Silicon)
 
 The Comet jars on Maven Central bundle native libraries for Linux only. On macOS build Comet from
@@ -63,10 +93,10 @@ is what the `comet` Maven profile of this project resolves. The Rust build takes
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25   # or wherever JDK 25 lives
-mvn -Pcomet -pl spark verify -Dsuites=io.sparkvector.spark.comet.CometScanSuite
+mvn -Pcomet -pl spark verify -Dsuites=io.sparkvector.spark.comet.CometScanSuite,io.sparkvector.spark.comet.CometShuffleSuite
 ```
 
-Without `-Pcomet` the suite is excluded by its `CometTest` tag and the rest of the build has no
+Without `-Pcomet` the suites are excluded by their `CometTest` tag and the rest of the build has no
 Comet dependency.
 
 ## Limitations
@@ -76,6 +106,8 @@ Comet dependency.
 - Batch lifecycle follows Spark's columnar contract: Comet may reuse or release a batch as soon as
   the next one is requested, so spark-vector operators finish with a batch (or copy what they
   keep, as the aggregate does) before pulling the next.
-- Comet's own shuffle and native operators are not used. A later phase can bridge spark-vector's
-  unshaded Arrow output to Comet's shaded vectors zero-copy through the Arrow C Data Interface
-  (both are Arrow 18.3.0) to reuse Comet's columnar shuffle.
+- Comet's native operators other than the scan and the shuffle are not combined with ours: a Comet
+  Final aggregate would need Comet's own partial buffers (its `missingCometProducer` guard), and our
+  operators are not `CometNativeExec`s, so Comet cannot inline them into a native block.
+- Dictionary-encoded strings are decoded when crossing into Comet (its stream reader decodes them
+  anyway); everything else crosses as-is.

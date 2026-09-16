@@ -62,7 +62,7 @@ private[vector] class VectorFilterIterator(
         metrics.numOutputBatches += 1
         metrics.numOutputRows += count
         batch
-      } else if (emitSelection) {
+      } else if (emitSelection && SelectionPolicy.keep(count, ctx.numRows)) {
         metrics.numOutputBatches += 1
         metrics.numOutputRows += count
         SelectedColumnarBatch.of(SelectedColumnarBatch.columnsOf(batch), ctx.numRows, selection, count, false)
@@ -80,4 +80,16 @@ private[vector] class VectorFilterIterator(
       }
     }
   }
+}
+
+/**
+ * When to forward a selection instead of compacting. Downstream kernels run over every physical
+ * row of a selected batch, so a sparse selection (Q6 keeps 2%) is cheaper to compact once than to
+ * carry; a dense one (Q1 keeps 98%) is cheaper to carry.
+ */
+object SelectionPolicy {
+  /** Minimum surviving fraction for forwarding a selection; `sparkvector.selection.minFraction`. */
+  val MinFraction: Double = java.lang.Double.parseDouble(System.getProperty("sparkvector.selection.minFraction", "0.5"))
+
+  def keep(selected: Int, numRows: Int): Boolean = selected >= numRows * MinFraction
 }

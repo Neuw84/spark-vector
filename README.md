@@ -1,10 +1,11 @@
 # spark-vector
 
-A Spark SQL plugin that executes Filter, Project and HashAggregate on Arrow-layout batches with
-the Java Vector API (`jdk.incubator.vector`). It follows the architecture of
-[Apache DataFusion Comet](https://github.com/apache/datafusion-comet), but stays entirely on the
-JVM: no native library, no JNI, no serialization boundary. Unsupported operators, expressions or
-types fall back to Spark with a recorded reason.
+A Spark SQL plugin that executes Filter, Project and HashAggregate (Partial and Final) on
+Arrow-layout batches with the Java Vector API (`jdk.incubator.vector`). It follows the
+architecture of [Apache DataFusion Comet](https://github.com/apache/datafusion-comet), but stays
+entirely on the JVM: no native library, no JNI, no serialization boundary. Unsupported operators,
+expressions or types fall back to Spark with a recorded reason. With Comet installed it can sit
+between Comet's native Parquet scan and Comet's native shuffle, both reached zero copy.
 
 - Spark 4.1.x, Scala 2.13, JDK 25 (the Vector API is still an incubator module)
 - Input: Spark's vectorized Parquet reader (copied into Arrow layout once per batch, keeping
@@ -53,8 +54,17 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.enabled` | main switch |
 | `spark.vector.exec.filter.enabled` | convert `FilterExec` |
 | `spark.vector.exec.project.enabled` | convert `ProjectExec` |
-| `spark.vector.exec.aggregate.enabled` | convert Partial `HashAggregateExec` |
+| `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
+| `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
+| `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
+| `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
 | `spark.vector.explainFallback.enabled` | log why each operator was left to Spark (default `false`) |
+
+JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forces a vector shape
+(the default is the platform's preferred one), `sparkvector.agg.interleave=1|2|4` sets how many
+accumulator copies the grouped aggregation rotates through (default 4; 1 reproduces Spark's
+floating-point rounding exactly), `sparkvector.selection.minFraction` (default 0.5) is the
+surviving fraction below which a filter compacts instead of forwarding a selection.
 
 ### JDK 25 and Spark 4.1
 
@@ -76,13 +86,22 @@ Driver                                           Executor (per batch)
 FilterExec        -> VectorFilterExec            ColumnarBatch -> VectorBuffers (adapter)
 ProjectExec       -> VectorProjectExec           kernels over MemorySegment (compare, arith, reduce)
 HashAggregateExec -> VectorHashAggregateExec     Arrow vectors -> ArrowColumnVector -> next operator
-(Partial only; Final stays in Spark)
+(Partial and Final)                              or a selection bitmap over the child's columns
+ShuffleExchange   -> CometShuffleExchange        Arrow C Data export -> CometVector (zero copy)
+(with Comet)         over VectorToComet
 ```
 
 `VectorColumnarRule` runs in Spark's `preColumnarTransitions`, bottom-up. An operator is converted
 when its child is already columnar with supported types (a vectorized Parquet scan, a Comet scan, or
 another spark-vector operator) and every expression compiles to the kernel IR. Otherwise the reason
 is stored as a tree-node tag; `VectorFallback.reasons(plan)` lists them.
+
+Between two of our operators a filter (or projection) does not compact: when at least half of the
+rows survive it forwards the child's columns with a selection bitmap (`SelectedColumnarBatch`), and
+the consumer folds the bitmap into its validity masks or group assignment. Inside a predicate,
+`AND`/`OR` evaluate their right operand only where the left one leaves the row undecided, so the
+compare kernels skip 64-row blocks with no live row and ANSI errors are only raised for rows Spark
+would have evaluated too. Compaction happens once, at the boundary to Spark.
 
 Semantics follow Spark, including the corners: NaN-safe double ordering (`NaN = NaN`, NaN sorts
 last), three-valued `AND`/`OR`, `WHERE` treating null as false, and ANSI mode (Spark 4's default):
@@ -92,13 +111,32 @@ overflow checks) falls back.
 ### Aggregation
 
 The partial aggregate emits exactly Spark's buffer schema (`sum`, `count`, `min`, `max`,
-`(sum, count)` for `avg`), so Spark's exchange and Final aggregate run unchanged. Without grouping
-keys, one buffer row per partition. With keys, a hash table assigns dense group ids across the
+`(sum, count)` for `avg`), so any exchange and Final aggregate run unchanged. Our own Final
+aggregate merges those buffers per group (Spark's or ours) and evaluates the result expressions
+with each aggregate's `evaluateExpression` substituted (`sum / count` for `avg`) through the
+projection kernels; over Spark's row shuffle its input arrives through `RowToColumnarExec`, over
+Comet's shuffle it is read zero copy. Without grouping keys, one buffer row per partition. With keys, a hash table assigns dense group ids across the
 task's batches. When every key is a dictionary-encoded string (the usual case for low-cardinality
 Parquet columns) the ids are memoised per combination of dictionary indices, so a batch probes the
 table at most once per distinct key tuple. Rows are then scattered into per-group accumulators;
 the alternative, one masked SIMD reduction per group, only wins for one group on 128-bit vectors
-(`sparkvector.agg.maskPathMaxGroups` sets the cut-over, default 1 for ≤4 lanes and 8 above).
+(`sparkvector.agg.maskPathMaxGroups` sets the cut-over, default 1 for ≤4 lanes and 8 above). The
+scatter rotates over four independent accumulator copies so consecutive rows of the same group do
+not serialise on one `sum[g] += x` chain (+40% at 4 groups); the price is that double sums are
+rounded in a different order than Spark's sequential loop (12th significant digit on TPC-H Q1).
+
+### Comet shuffle
+
+Comet's planner only gives a Comet shuffle to children it recognises, but at run time its native
+shuffle writer accepts any columnar child whose batches hold `CometVector`s. `VectorToCometExec`
+exports each of our columns through the Arrow C Data Interface, written directly with the FFM API
+(two C structs and an upcall release stub; no `arrow-c-data`, no JNI on our side, which matters
+because Comet ships that library's classes under their original names with shaded signatures), and
+Comet's `ArrowImporter` wraps the same memory in a shaded vector, releasing ours when it is done.
+The rule replaces a Spark exchange, or Comet's row-based columnar exchange, above one of our
+operators with the native `CometShuffleExchangeExec` over the bridge (hash, single and round-robin
+partitioning; range partitioning is left to Spark). Requires `spark.shuffle.manager` set to
+Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/comet.md](docs/comet.md).
 
 ### Supported today
 
@@ -107,7 +145,7 @@ the alternative, one masked SIMD reduction per group, only wins for one group on
 | Types | Int, Long, Double, Date, Timestamp, Boolean, String (strings pass through and serve as group keys) | Float, Short/Byte, Decimal, Binary, nested |
 | Predicates | `=`, `!=`, `<`, `<=`, `>`, `>=` on numeric/date columns vs literal or column; `AND`/`OR`/`NOT`; `IS [NOT] NULL`; boolean columns | string comparisons, `LIKE`, `IN`, functions |
 | Arithmetic | `+ - *` on Int/Long/Double, `/` on Double, unary minus, widening casts | ANSI integer arithmetic, `%`, decimals, other casts |
-| Aggregates | `sum`, `count`, `min`, `max`, `avg`; keys of Int/Long/Boolean/String/Date | `DISTINCT`, `FILTER`, double keys, Final mode, other functions |
+| Aggregates | `sum`, `count`, `min`, `max`, `avg` in Partial and Final mode; keys of Int/Long/Boolean/String/Date | `DISTINCT`, `FILTER` (Partial), double keys, PartialMerge/Complete modes, other functions |
 
 ## Benchmarks
 
@@ -119,6 +157,14 @@ java --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED \
      -jar benchmarks/target/benchmarks.jar "Compare|Compact|Agg"
 ```
 
+The kernel tests can run with the lane counts of other platforms, emulated (slowly) on any machine,
+which is how the AVX2 and AVX-512 code paths (`compress`, 256-entry shuffle tables, 8-lane masks)
+are kept honest on a laptop:
+
+```bash
+mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
+```
+
 TPC-H Q1 and Q6 (decimals replaced by doubles, generated with DuckDB):
 
 ```bash
@@ -128,13 +174,13 @@ mvn -DskipTests install
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # spark + vector
 COMET_JAR=/path/to/comet-spark-spark4.1_2.13-1.0.0.jar \
-benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # + comet-scan, comet-scan-vector, comet
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # + comet-scan, comet-scan-vector, comet-scan-vector-shuffle, comet
 ```
 
 Each configuration runs in its own JVM; the report (`benchmarks/results/results.md`) gives median
 times, speedups against plain Spark, the operators found in each final plan and a checksum proving
-all configurations returned the same rows. See [docs/results.md](docs/results.md) for numbers
-measured on an Apple M3 Pro.
+all configurations returned the same rows (to 10 significant digits). See
+[docs/results.md](docs/results.md) for numbers measured on an Apple M3 Pro.
 
 ### Vector API lessons
 
@@ -162,10 +208,9 @@ Three more came out of profiling TPC-H rather than microbenchmarks (see
 
 ## Not in scope (yet)
 
-- Columnar shuffle. Every stage boundary still goes through Spark's row shuffle via
-  `ColumnarToRowExec`. Two paths are open: Comet's shuffle, reached by bridging our unshaded Arrow
-  vectors to Comet's shaded ones zero-copy through the Arrow C Data Interface (both are Arrow
-  18.3.0), or our own `ShuffleExchangeLike` with a serializer that dumps the Arrow buffers.
+- A columnar shuffle of our own. Without Comet, every stage boundary goes through Spark's row
+  shuffle (`ColumnarToRowExec` above, `RowToColumnarExec` below); a `ShuffleExchangeLike` with a
+  serializer that dumps the Arrow buffers would remove both.
 - A Parquet-to-Arrow reader of our own; Comet's reader covers the zero-copy case.
-- Decimal arithmetic (`Decimal(p<=18)` as long lanes), lazy selection vectors instead of compaction,
-  Sort and joins, running Spark's SQL test suite Comet-style.
+- Decimal arithmetic (`Decimal(p<=18)` as long lanes), range-partitioned Comet shuffles, Sort and
+  joins, running Spark's SQL test suite Comet-style.
