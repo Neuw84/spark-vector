@@ -2,7 +2,7 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorProjectExec}
+import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 class VectorProjectSuite extends VectorQuerySuite {
 
@@ -49,6 +49,27 @@ class VectorProjectSuite extends VectorQuerySuite {
     // A plain decimal literal makes Spark cast the int to a decimal; both run on long lanes.
     checkVectorized("SELECT i + 1.5 AS a FROM t WHERE i > 5", Seq(Project))
     checkFallback("SELECT CAST(d2 AS INT) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
+  }
+
+  // `l` is null on every seventh row (so `l > 3000` is a null condition there), `d` is null on
+  // every eleventh (a null branch value), `s` on every tenth; `d` also carries NaN and infinities.
+  test("CASE WHEN blends branches by mask, with nulls in conditions and branches") {
+    checkVectorized("SELECT i, CASE WHEN i > 15000 THEN d WHEN l > 3000 THEN d2 ELSE 0.0 END AS x FROM t", Seq(Project))
+    checkVectorized("SELECT i, CASE WHEN l > 3000 THEN d WHEN i > 100 THEN d2 END AS no_else FROM t WHERE i < 19000", Seq(Filter, Project))
+    checkVectorized("SELECT CASE WHEN d > 50.0 THEN NULL WHEN d2 > 1.0 THEN d ELSE d2 END AS with_null_branch FROM t", Seq(Project))
+    checkVectorized("SELECT CASE WHEN i > 10000 THEN l ELSE 7L END AS l_or_7, CASE WHEN b THEN d2 ELSE -d2 END AS signed FROM t WHERE l IS NOT NULL", Seq(Filter, Project))
+    checkVectorized("SELECT CASE WHEN i > 10000 THEN s WHEN d IS NULL THEN 'no d' ELSE 'other' END AS label FROM t", Seq(Project))
+    checkVectorized("SELECT CASE WHEN d > 5.0 THEN b ELSE d2 > 1.0 END AS flag, CASE WHEN i > 100 THEN dt END AS day FROM t WHERE d IS NOT NULL", Seq(Filter, Project))
+    // Q14 / Q8 / Q12 shape: the conditional feeds an aggregate.
+    checkVectorized("SELECT SUM(CASE WHEN i > 15000 THEN d * (1.0 - d2) ELSE 0.0 END) AS promo, SUM(d * (1.0 - d2)) AS total FROM t WHERE d IS NOT NULL",
+      Seq(Filter, classOf[VectorHashAggregateExec]))
+  }
+
+  test("IF, COALESCE, NVL and NULLIF compile through the same blend") {
+    checkVectorized("SELECT IF(i > 100, d, d2) AS pick, IF(l > 3000, 1L, 0L) AS flag_with_null_cond FROM t", Seq(Project))
+    checkVectorized("SELECT COALESCE(l, CAST(i AS BIGINT)) AS a, COALESCE(d, d2, 0.0) AS b, COALESCE(s, 'none') AS c FROM t", Seq(Project))
+    checkVectorized("SELECT NVL(l, -1L) AS a, NULLIF(i, 5) AS b, NVL2(l, d, d2) AS c FROM t WHERE i < 1000", Seq(Filter, Project))
+    checkFallback("SELECT CASE WHEN i > 100 THEN CAST(d AS DECIMAL(30, 2)) ELSE NULL END AS wide FROM t", Seq(Project), "unsupported result type")
   }
 
   test("literal columns are materialised, dense or under a selection") {

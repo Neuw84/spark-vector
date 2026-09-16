@@ -59,6 +59,9 @@ matching Spark's short-circuit behaviour.
 | `Cast` | INT32 -> INT64, INT32 -> FLOAT64, INT64 -> FLOAT64; int/bigint/double -> decimal(<=18); decimal -> decimal / double / bigint / int; a cast to the operand's own type | Everything else: `unsupported cast <from> -> <to>` / `unsupported cast target <type>` (#43 -- narrowing, boolean, string <-> number, string <-> date/timestamp, date <-> timestamp). Decimal casts check the range; ANSI raises, legacy nulls. `try_cast not supported` (#47) |
 | `UnscaledValue`, `MakeDecimal` | INT64 (decimal(<=18)) | The optimizer's `DecimalAggregates` rewrite of `sum(decimal(p <= 8))` and `avg(decimal(p <= 11))`; `MakeDecimal` into more than 18 digits falls back (`make_decimal into <type> exceeds 18 digits`), overflow nulls or raises per `nullOnOverflow` (#49 covers `CheckOverflow` and the rest of that family) |
 | `KnownFloatingPointNormalized`, `NormalizeNaNAndZero` | FLOAT64 | Identities: the compare kernels already use the normalised ordering and double grouping keys are refused |
+| `CASE WHEN ... THEN ... [ELSE ...] END` | result of any lane; conditions BOOL | `CaseWhenExpr` over `SelectKernels`: each condition is evaluated only on the rows no earlier branch took, its winning rows are `condition is true` (a null condition counts as false), each branch value only on its winning rows; the result is null where the winner is null or no branch matched and there is no `ELSE`. Branches must share the result's Spark type (`branch type <t> differs from <t>`); `NULL` and literal branches -- string and boolean literals included -- are materialised as constant columns. `unsupported result type <type> for <sql>` for a wide decimal or nested result |
+| `IF(c, a, b)` | as `CASE WHEN` | The one-branch case with an `ELSE` |
+| `COALESCE(a, b, ...)`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` | as `CASE WHEN` | `COALESCE` is `IS NOT NULL` conditions over the operands with the last as `ELSE` (an operand is evaluated once for its test and once for its value); `NVL`/`NVL2`/`NULLIF`/`IFNULL` arrive as `COALESCE`/`IF` through Spark's own rewrites |
 
 ### Aggregate functions
 
@@ -85,7 +88,6 @@ the remaining reasons on the aggregate's inputs.
 |---|---|
 | String comparisons and string literals (`=`, `<>`, `<`, `IN` on strings) | #2 |
 | `LIKE`, `startswith`, `endswith`, `contains` | #3 |
-| `CASE WHEN`, `IF`, `COALESCE` | #4 |
 | `year`, `month`, `extract`, date arithmetic | #5 |
 | Overflow-checked integer `+ - *` and negation in ANSI mode | #8 |
 | `monotonically_increasing_id()` | #18 |
