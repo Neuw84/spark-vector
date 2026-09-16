@@ -156,12 +156,16 @@ that pin it.
   expressions are compiled with `evaluateExpression` substituted. `FILTER` clauses apply at
   Partial only. `spark.vector.exec.aggregate.final.enabled` turns the Final conversion off.
 - `GroupKeyTable` memoises group ids per combination of dictionary indices when every key is
-  dictionary encoded and the product of dictionary sizes is small. Plain UTF8 keys whose values
-  fit in 8 bytes are dictionary encoded on the fly against a per-column dictionary kept across
-  batches (single-byte values through a 256-entry direct table) so the same path applies; longer
-  plain strings take hash-and-compare per row. This exists because Comet's native scan delivers
-  plain strings where Spark's reader keeps dictionaries, and without it the zero-copy
-  configuration lost to the copying one at SF10.
+  dictionary encoded and the product of dictionary sizes is small. Plain UTF8 keys are dictionary
+  encoded on the fly against a per-column dictionary kept across batches so the same path applies:
+  values of up to 8 bytes are keyed by their packed bytes (single-byte values through a 256-entry
+  direct table), longer ones by a 64-bit fingerprint over 8-byte words confirmed with a byte
+  compare. A column whose dictionary grows past `sparkvector.agg.plainDictMaxEntries` (default 512)
+  makes the table stop encoding plain strings for good and hash and compare per row: the memoised
+  path's per-batch reset and miss rate grow with the combinations, and `GroupKeyTableBenchmark`
+  puts the crossover at a few hundred distinct values (2x slower by 4000, for 8- and 24-byte keys
+  alike). This exists because Comet's native scan delivers plain strings where Spark's reader keeps
+  dictionaries, and without it the zero-copy configuration lost to the copying one at SF10.
 - Floating-point sums differ from Spark's in the last bits (lane-parallel and interleaved
   accumulation reorder additions). Tests compare doubles with a tolerance (`1e-9` relative in
   `VectorQuerySuite`), benchmark checksums use 10 significant digits. Never assert bit equality
@@ -380,7 +384,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 104 kernel tests, 120 Spark tests (93 without the Comet and Iceberg profiles;
+Current counts: 106 kernel tests, 120 Spark tests (93 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -423,7 +427,6 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.
-- Group keys longer than 8 bytes arriving as plain strings are hashed and compared per row.
 - Do not reach for `spark.comet.parquet.rowFilterPushdown.enabled` to close the Q6 gap: measured
   2x slower for Comet itself and for us on uniformly spread survivors (`docs/results.md`). Comet's
   default format-level pruning already reaches our configurations.

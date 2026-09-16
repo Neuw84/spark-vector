@@ -75,7 +75,10 @@ JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forc
 (the default is the platform's preferred one), `sparkvector.agg.interleave=1|2|4` sets how many
 accumulator copies the grouped aggregation rotates through (default 4; 1 reproduces Spark's
 floating-point rounding exactly), `sparkvector.selection.minFraction` (default 0.5) is the
-surviving fraction below which a filter compacts instead of forwarding a selection.
+surviving fraction below which a filter compacts instead of forwarding a selection, and
+`sparkvector.agg.plainDictMaxEntries` (default 512) is the number of distinct values above which a
+plain (non-dictionary) string group key stops being dictionary-encoded on the fly and is hashed and
+compared per row instead.
 
 ### JDK 25 and Spark 4.1
 

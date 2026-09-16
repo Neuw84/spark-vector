@@ -2,6 +2,9 @@ package io.sparkvector.kernels;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.BitSet;
 
@@ -45,15 +48,30 @@ public final class GroupKeyTable {
   private static final int SHORT_KEY_BYTES = 16;
 
   /**
-   * Plain (non-dictionary) UTF8 keys whose values in a batch all fit in a long are
-   * dictionary-encoded on the fly, against a per-column dictionary kept across batches, so the
-   * memoised path above applies to them too. Comet's native scan hands over plain Arrow strings
-   * for columns Spark's reader would keep dictionary encoded; without this, TPC-H Q1 over that
-   * scan hashed and compared every row's group key.
+   * Plain (non-dictionary) UTF8 keys are dictionary-encoded on the fly, against a per-column
+   * dictionary kept across batches, so the memoised path above applies to them too and the hashing
+   * path compares dictionary indices rather than bytes. Comet's native scan hands over plain Arrow
+   * strings for columns Spark's reader would keep dictionary encoded; without this, TPC-H Q1 over
+   * that scan hashed and compared every row's group key. Values of up to this many bytes are keyed
+   * in the dictionary by their packed bytes; longer values by a 64-bit hash plus a byte compare.
    */
   private static final int PACKED_KEY_BYTES = 8;
 
-  private ShortStringDict[] shortDicts;
+  /**
+   * Once a plain-string dictionary would exceed this many distinct values the table stops encoding
+   * plain strings and hashes and compares every row instead. The dictionary pays off through the
+   * memoised path, whose per-batch memo reset and miss rate grow with the number of combinations:
+   * measured on 4096-row batches it wins up to a few hundred distinct values and loses by 2x at
+   * 4000, for 8-byte and 24-byte keys alike, so the default sits at the crossover. Read once per
+   * table from the {@code sparkvector.agg.plainDictMaxEntries} system property.
+   */
+  static final int DEFAULT_PLAIN_DICT_MAX_ENTRIES = 512;
+
+  private final int plainDictMaxEntries =
+      Integer.getInteger("sparkvector.agg.plainDictMaxEntries", DEFAULT_PLAIN_DICT_MAX_ENTRIES);
+  private boolean plainDictOverflowed;
+
+  private PlainStringDict[] shortDicts;
   private VectorBuffers[] encodedKeys;
   private int[] offsetScratch = new int[0];
   private byte[] byteScratch = new byte[0];
@@ -96,6 +114,11 @@ public final class GroupKeyTable {
 
   public VecType type(int c) {
     return types[c];
+  }
+
+  /** Whether plain UTF8 keys are still dictionary-encoded on the fly (false once a column overflowed the cap). */
+  boolean encodesPlainStrings() {
+    return !plainDictOverflowed;
   }
 
   /**
@@ -225,11 +248,14 @@ public final class GroupKeyTable {
 
   /**
    * Returns {@code keys} with every plain UTF8 column replaced by a dictionary-encoded view over a
-   * {@link ShortStringDict}, or {@code null} when that does not apply: no plain UTF8 key, a key of
-   * another type (the memoised path needs every key dictionary encoded), or a value longer than
-   * {@link #PACKED_KEY_BYTES} in this batch.
+   * {@link PlainStringDict}, or {@code null} when that does not apply: no plain UTF8 key, a key of
+   * another type (the memoised path needs every key dictionary encoded), or a dictionary that has
+   * grown past {@link #plainDictMaxEntries} -- from then on every batch takes the hashing path.
    */
   private VectorBuffers[] encodeShortStrings(VectorBuffers[] keys, int n) {
+    if (plainDictOverflowed) {
+      return null;
+    }
     boolean any = false;
     for (VectorBuffers k : keys) {
       if (k.isDictionaryEncoded()) {
@@ -245,7 +271,7 @@ public final class GroupKeyTable {
     }
     int k = keys.length;
     if (shortDicts == null) {
-      shortDicts = new ShortStringDict[k];
+      shortDicts = new PlainStringDict[k];
       encodedKeys = new VectorBuffers[k];
       indexScratch = new int[k][];
     }
@@ -262,18 +288,15 @@ public final class GroupKeyTable {
       MemorySegment.copy(key.offsets(), VectorBuffers.LE_INT, 0, offs, 0, n + 1);
       int first = offs[0];
       int total = offs[n] - first;
-      if (total > (long) n * PACKED_KEY_BYTES) {
-        return null; // some value is too long; exact check below
-      }
       if (byteScratch.length < total) {
         byteScratch = new byte[Math.max(total, byteScratch.length * 2)];
       }
       byte[] bytes = byteScratch;
       MemorySegment.copy(key.data(), ValueLayout.JAVA_BYTE, first, bytes, 0, total);
       if (shortDicts[c] == null) {
-        shortDicts[c] = new ShortStringDict();
+        shortDicts[c] = new PlainStringDict();
       }
-      ShortStringDict dict = shortDicts[c];
+      PlainStringDict dict = shortDicts[c];
       if (indexScratch[c] == null || indexScratch[c].length < n) {
         indexScratch[c] = new int[Math.max(n, indexScratch[c] == null ? 0 : indexScratch[c].length * 2)];
       }
@@ -282,18 +305,18 @@ public final class GroupKeyTable {
       for (int i = 0; i < n; i++) {
         int start = offs[i] - first;
         int len = offs[i + 1] - offs[i];
-        if (len > PACKED_KEY_BYTES) {
-          return null;
-        }
         if (validity != null && !Bitmap.isSet(validity, i)) {
           idx[i] = 0;
           continue;
         }
-        long packed = 0L;
-        for (int b = len - 1; b >= 0; b--) {
-          packed = (packed << 8) | (bytes[start + b] & 0xFFL);
+        idx[i] = dict.indexOf(PlainStringDict.fingerprint(bytes, start, len), len, bytes, start);
+        if (dict.size() > plainDictMaxEntries) {
+          // Too many distinct values for the memo to pay: hash and compare from now on. The groups
+          // already assigned are unaffected -- the dictionary only ever named this batch's rows,
+          // never the table's keys.
+          plainDictOverflowed = true;
+          return null;
         }
-        idx[i] = dict.indexOf(packed, len, bytes, start);
       }
       encodedKeys[c] = SegmentVectorBuffers.dictionaryUtf8(n, validity, MemorySegment.ofArray(idx), dict.view());
     }
@@ -301,12 +324,14 @@ public final class GroupKeyTable {
   }
 
   /**
-   * Distinct strings of at most {@link #PACKED_KEY_BYTES} bytes, keyed by their packed bytes and
-   * length, stored contiguously so the dictionary can be read as a UTF8 {@link VectorBuffers}.
+   * Distinct plain strings of any length, stored contiguously so the dictionary can be read as a
+   * UTF8 {@link VectorBuffers}. Each entry is keyed by its length and a 64-bit fingerprint: the
+   * packed bytes themselves for values of up to {@link #PACKED_KEY_BYTES} bytes (so equality is a
+   * long compare), a hash of the bytes for longer ones (confirmed by a byte compare on a hit).
    */
-  static final class ShortStringDict {
+  static final class PlainStringDict {
     private long[] bits = new long[64];
-    private byte[] lens = new byte[64];
+    private int[] lens = new int[64];
     private int[] ids = new int[64];
     private int mask = 63;
     private int size;
@@ -323,9 +348,42 @@ public final class GroupKeyTable {
     /** Direct index for single-byte values (TPC-H's flag columns), bypassing the probe. */
     private final int[] singleByte = new int[256];
 
-    ShortStringDict() {
+    PlainStringDict() {
       Arrays.fill(ids, -1);
       Arrays.fill(singleByte, -1);
+    }
+
+    private static final VarHandle LONG_LE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+
+    /**
+     * The 64-bit key of a value: its bytes packed little-endian when they fit in a long, otherwise
+     * a multiply-xorshift mix over the bytes taken eight at a time (a collision between two long
+     * values is caught by the byte compare).
+     */
+    static long fingerprint(byte[] src, int from, int len) {
+      if (len <= PACKED_KEY_BYTES) {
+        long packed = 0L;
+        for (int b = len - 1; b >= 0; b--) {
+          packed = (packed << 8) | (src[from + b] & 0xFFL);
+        }
+        return packed;
+      }
+      long h = 0x9E3779B97F4A7C15L ^ len;
+      int end = from + len;
+      int p = from;
+      for (; p + 8 <= end; p += 8) {
+        h = (h ^ (long) LONG_LE.get(src, p)) * 0xBF58476D1CE4E5B9L;
+        h ^= h >>> 31;
+      }
+      if (p < end) {
+        long tail = 0L;
+        for (int b = end - 1; b >= p; b--) {
+          tail = (tail << 8) | (src[b] & 0xFFL);
+        }
+        h = (h ^ tail) * 0x94D049BB133111EBL;
+        h ^= h >>> 29;
+      }
+      return h;
     }
 
     int indexOf(long packed, int len, byte[] src, int from) {
@@ -348,11 +406,16 @@ public final class GroupKeyTable {
         if (id < 0) {
           return insert(packed, len, src, from, pos);
         }
-        if (bits[id] == packed && lens[id] == len) {
+        if (bits[id] == packed && lens[id] == len && (len <= PACKED_KEY_BYTES || sameBytes(id, src, from, len))) {
           return id;
         }
         pos = (pos + 1) & mask;
       }
+    }
+
+    private boolean sameBytes(int id, byte[] src, int from, int len) {
+      int off = offsets[id];
+      return Arrays.equals(data, off, off + len, src, from, from + len);
     }
 
     private int insert(long packed, int len, byte[] src, int from, int pos) {
@@ -370,7 +433,7 @@ public final class GroupKeyTable {
         dataSegment = MemorySegment.ofArray(data);
       }
       bits[id] = packed;
-      lens[id] = (byte) len;
+      lens[id] = len;
       System.arraycopy(src, from, data, used, len);
       used += len;
       offsets[id + 1] = used;

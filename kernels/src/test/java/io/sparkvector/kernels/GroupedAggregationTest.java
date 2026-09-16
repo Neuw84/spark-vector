@@ -228,11 +228,11 @@ class GroupedAggregationTest {
   }
 
   @Test
-  void shortPlainStringsAreEncodedOnTheFlyAndLongOnesFallBack() {
+  void plainStringsAreEncodedOnTheFlyWhateverTheirLength() {
     try (Arena arena = Arena.ofConfined()) {
       GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8});
-      // All values fit in 8 bytes: the batch is dictionary encoded on the fly. Empty strings,
-      // 8-byte values differing only in the last byte and a null must stay distinct.
+      // All values fit in 8 bytes: the batch is dictionary encoded on the fly by packed bytes. Empty
+      // strings, 8-byte values differing only in the last byte and a null must stay distinct.
       String[] shortKeys = {"", "abcdefgh", "abcdefgX", "a", null, "", "abcdefgh", "\u00e9"};
       int[] ids = new int[shortKeys.length];
       assertEquals(6, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, shortKeys)}, shortKeys.length, ids));
@@ -242,8 +242,8 @@ class GroupedAggregationTest {
       assertTrue(table.isNull(0, ids[4]));
       assertEquals("\u00e9", table.getString(0, ids[7]));
 
-      // A batch with a longer value takes the hashing path over the same table and must reuse
-      // the groups the encoded batch created.
+      // A batch with a longer value is encoded too (hash plus byte compare) and must reuse the
+      // groups the packed batch created.
       String[] mixed = {"a", "a value longer than eight bytes", "abcdefgh", null, ""};
       int[] ids2 = new int[mixed.length];
       assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, mixed)}, mixed.length, ids2));
@@ -257,6 +257,72 @@ class GroupedAggregationTest {
       int[] ids3 = new int[shortKeys.length];
       assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, shortKeys)}, shortKeys.length, ids3));
       assertArrayEquals(ids, ids3);
+      assertTrue(table.encodesPlainStrings());
+    }
+  }
+
+  @Test
+  void longPlainStringsGroupByBytesNotByFingerprint() {
+    try (Arena arena = Arena.ofConfined()) {
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8});
+      // Nation-like keys: longer than 8 bytes, few distinct, same length and shared prefixes so an
+      // equal (length, hash) pair is not enough and the byte compare has to decide.
+      String[] keys = {"UNITED KINGDOM", "UNITED STATES", "UNITED KINGDOM", null, "UNITED KINGDOm", "UNITED STATES", "SAUDI ARABIA"};
+      int[] ids = new int[keys.length];
+      assertEquals(5, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, keys)}, keys.length, ids));
+      assertEquals(ids[0], ids[2], "same long value");
+      assertNotEquals(ids[0], ids[4], "differs in the last byte only");
+      assertNotEquals(ids[0], ids[1], "same prefix, different length");
+      assertTrue(table.isNull(0, ids[3]));
+      assertEquals("UNITED KINGDOm", table.getString(0, ids[4]));
+
+      // A later batch, plain again, finds the same groups through the dictionary kept across batches.
+      String[] again = {"SAUDI ARABIA", "UNITED STATES", "UNITED KINGDOM", "UNITED KINGDOM"};
+      int[] ids2 = new int[again.length];
+      assertEquals(5, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, again)}, again.length, ids2));
+      assertEquals(ids[6], ids2[0]);
+      assertEquals(ids[1], ids2[1]);
+      assertEquals(ids[0], ids2[2]);
+      assertEquals(ids2[2], ids2[3]);
+      assertTrue(table.encodesPlainStrings());
+
+      // The join probe over the same table encodes with the same dictionary.
+      int[] probe = new int[again.length];
+      assertEquals(4, table.lookup(new VectorBuffers[] {ArrowLayout.ofStrings(arena, again)}, again.length, probe, null));
+      assertArrayEquals(ids2, probe);
+    }
+  }
+
+  @Test
+  void highCardinalityPlainStringsStopBeingEncodedAboveTheCap() {
+    System.setProperty("sparkvector.agg.plainDictMaxEntries", "4");
+    try (Arena arena = Arena.ofConfined()) {
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8});
+      String[] comments = new String[12];
+      for (int i = 0; i < comments.length; i++) {
+        comments[i] = "comment number " + (i % 6) + " of a high-cardinality column";
+      }
+      int[] ids = new int[comments.length];
+      // Six distinct values exceed a cap of four inside the first batch: the batch is finished on
+      // the hashing path and must still produce exactly the six groups, with the repeats matched.
+      assertEquals(6, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, comments)}, comments.length, ids));
+      for (int i = 0; i < 6; i++) {
+        assertEquals(ids[i], ids[i + 6], "row " + i);
+        assertEquals(comments[i], table.getString(0, ids[i]));
+      }
+      assertFalse(table.encodesPlainStrings(), "the table gave up on encoding this column");
+
+      // Later batches, including short values that would have been encoded, take the hashing path
+      // and keep grouping correctly.
+      String[] more = {"a", comments[3], "a", comments[0]};
+      int[] ids2 = new int[more.length];
+      assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, more)}, more.length, ids2));
+      assertEquals(ids2[0], ids2[2]);
+      assertEquals(ids[3], ids2[1]);
+      assertEquals(ids[0], ids2[3]);
+      assertFalse(table.encodesPlainStrings());
+    } finally {
+      System.clearProperty("sparkvector.agg.plainDictMaxEntries");
     }
   }
 
