@@ -53,6 +53,8 @@ trait VectorHashJoinLike extends VectorBinaryExec {
     case RightOuter => left.output.map(_.withNullability(true)) ++ right.output
     case FullOuter => left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
     case LeftSemi | LeftAnti => left.output
+    // EXISTS used as a value: every left row plus the boolean the subquery planner named.
+    case ExistenceJoin(exists) => left.output :+ exists
     case _ => left.output ++ right.output // never planned; see VectorJoinPlanner.supportedType
   }
 
@@ -126,7 +128,7 @@ case class VectorBroadcastHashJoinExec(
 
   override def outputPartitioning: Partitioning = joinType match {
     case _: InnerLike => streamedPlan.outputPartitioning
-    case LeftOuter | LeftSemi | LeftAnti => left.outputPartitioning
+    case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => left.outputPartitioning
     case RightOuter => right.outputPartitioning
     case _ => UnknownPartitioning(0)
   }
@@ -164,7 +166,7 @@ case class VectorShuffledHashJoinExec(
 
   override def outputPartitioning: Partitioning = joinType match {
     case _: InnerLike => PartitioningCollection(Seq(left.outputPartitioning, right.outputPartitioning))
-    case LeftOuter | LeftSemi | LeftAnti => left.outputPartitioning
+    case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => left.outputPartitioning
     case RightOuter => right.outputPartitioning
     case _ => UnknownPartitioning(0)
   }
@@ -355,6 +357,8 @@ private[vector] class VectorHashJoinIterator(
   private val numBuildCols = spec.buildTypes.length
   private val streamedWidth = spec.streamedWidth
   private val isSemiOrAnti = spec.joinType == LeftSemi || spec.joinType == LeftAnti
+  /** `ExistenceJoin`: the semi join's probe, emitting every streamed row plus a match boolean. */
+  private val isExistence = spec.joinType.isInstanceOf[ExistenceJoin]
   private val isFullOuter = spec.joinType == FullOuter
   private val keepUnmatched = spec.joinType == LeftOuter || spec.joinType == RightOuter || isFullOuter
   /** Build rows paired with a streamed row so far; only a full outer join needs to know. */
@@ -394,7 +398,8 @@ private[vector] class VectorHashJoinIterator(
       if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates)
       else java.util.Arrays.fill(idScratch, 0, n, -1)
       spec.condition match {
-        case Some(cond) if isSemiOrAnti || keepUnmatched => emitConditional(ctx, cond)
+        case Some(cond) if isSemiOrAnti || keepUnmatched || isExistence => emitConditional(ctx, cond)
+        case _ if isExistence => emitExistence(ctx, i => idScratch(i) >= 0)
         case _ if isSemiOrAnti => emitSemiAnti(ctx)
         case _ => emitMatches(ctx)
       }
@@ -476,7 +481,8 @@ private[vector] class VectorHashJoinIterator(
     evaluateCondition(ctx, cond, count)
     var p = 0
     while (p < count) { if (passed(p)) rowMatched(probeIdx(p)) = true; p += 1 }
-    if (isSemiOrAnti) {
+    if (isExistence) emitExistence(ctx, i => rowMatched(i))
+    else if (isSemiOrAnti) {
       val sel = ctx.bitmap()
       val wantMatch = spec.joinType == LeftSemi
       i = 0
@@ -486,6 +492,33 @@ private[vector] class VectorHashJoinIterator(
       }
       compactStreamed(ctx, sel)
     } else emitOuterConditional(ctx, count)
+  }
+
+  /**
+   * Existence join: every selected streamed row comes out, borrowed through the same compaction the
+   * semi join uses, followed by the `exists` column -- a BOOL bitmap of the rows that matched, never
+   * null (a null key or an empty build side is simply `false`).
+   */
+  private def emitExistence(ctx: EvalContext, matchedAt: Int => Boolean): Unit = {
+    val n = ctx.numRows
+    val sel = if (ctx.selection != null) ctx.selection else { val all = ctx.bitmap(); Bitmap.fill(all, n, true); all }
+    val count = Bitmap.popcount(sel, n)
+    if (count > 0) {
+      val bits = ctx.bitmap()
+      var i = 0
+      while (i < n) { if (Bitmap.isSet(sel, i) && matchedAt(i)) Bitmap.set(bits, i); i += 1 }
+      val columns = new Array[ColumnVector](spec.outputAttrs.length)
+      var c = 0
+      while (c < streamedWidth) {
+        val (name, dt) = spec.outputAttrs(c)
+        columns(c) = ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
+        c += 1
+      }
+      val (existsName, existsType) = spec.outputAttrs(streamedWidth)
+      val exists = SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, null, bits)
+      columns(streamedWidth) = ArrowOutput.compact(existsName, existsType, exists, sel, count, allocator)
+      pending.add(new ColumnarBatch(columns, count))
+    }
   }
 
   /** Fills `passed(0 until count)`: the condition over the gathered candidate pairs, chunk by chunk. */
@@ -663,7 +696,7 @@ object VectorJoinPlanner {
 
   private def supportedType(joinType: JoinType, buildSide: BuildSide): Either[String, Unit] = joinType match {
     case _: InnerLike | FullOuter => Right(())
-    case LeftOuter | LeftSemi | LeftAnti if buildSide == BuildRight => Right(())
+    case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if buildSide == BuildRight => Right(())
     case RightOuter if buildSide == BuildLeft => Right(())
     case other => Left(s"join type $other with build side $buildSide not supported")
   }

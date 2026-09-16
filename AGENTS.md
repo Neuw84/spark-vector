@@ -262,7 +262,9 @@ that pin it.
 - `VectorShuffledHashJoinExec` replaces `ShuffledHashJoinExec` and, like the Final aggregate, accepts
   exchanges (or their AQE stages) as inputs on types alone: Spark inserts `RowToColumnarExec` under
   us for its row shuffle. `ClusteredDistribution` on both sides, `PartitioningCollection` out.
-- Supported: inner, left/right/full outer, left semi, left anti, each with an optional non-equi
+- Supported: inner, left/right/full outer, left semi, left anti, existence (`ExistenceJoin(exists)`:
+  the semi join's probe, every streamed row emitted plus a BOOL column for `exists`, false where
+  nothing matched), each with an optional non-equi
   condition. An inner join evaluates it on the joined batch and compacts the failing rows; semi,
   anti and outer joins gather every candidate pair of a streamed row as the joined row (the
   condition is compiled against `left ++ right`, not the operator's output), evaluate the condition
@@ -440,7 +442,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 135 kernel tests, 162 Spark tests (135 without the Comet and Iceberg profiles;
+Current counts: 135 kernel tests, 163 Spark tests (136 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
