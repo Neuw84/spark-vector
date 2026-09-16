@@ -12,7 +12,8 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
   dictionary-encoded strings as dictionary indices), Comet's native Parquet and Iceberg readers in
   scan-only mode (read zero-copy), or Iceberg's own JVM vectorized reader (read zero-copy, with
   merge-on-read deletes turned into a selection). See [docs/comet.md](docs/comet.md) and
-  [docs/iceberg.md](docs/iceberg.md).
+  [docs/iceberg.md](docs/iceberg.md). Which operators convert, under what conditions and with
+  which fallback reasons: [docs/operators.md](docs/operators.md).
 - Output: unshaded Arrow 18.3.0 vectors (the version Spark bundles) wrapped in Spark's
   `ArrowColumnVector`, so Spark's own `ColumnarToRowExec` consumes them unchanged.
 
