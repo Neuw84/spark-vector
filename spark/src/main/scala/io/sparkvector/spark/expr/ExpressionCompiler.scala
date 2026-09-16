@@ -1,8 +1,8 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, MathKernels, RoundKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, RoundKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BoundReference, BRound, CaseWhen, Cast, Ceil, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, IntegralDivide, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Second, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BoundReference, BRound, CaseWhen, Cast, Ceil, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, IntegralDivide, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -191,6 +191,16 @@ object ExpressionCompiler {
     case r: RoundCeil => rounding(RoundKernels.Mode.CEILING, "ceil", r.child, r.scale, r.dataType, ansi = false, r, input)
     case r: RoundFloor => rounding(RoundKernels.Mode.FLOOR, "floor", r.child, r.scale, r.dataType, ansi = false, r, input)
 
+    case e @ BitwiseAnd(l, r) => bitwise(BitKernels.BitOp.AND, "&", l, r, e.dataType, input)
+    case e @ BitwiseOr(l, r) => bitwise(BitKernels.BitOp.OR, "|", l, r, e.dataType, input)
+    case e @ BitwiseXor(l, r) => bitwise(BitKernels.BitOp.XOR, "^", l, r, e.dataType, input)
+    case e @ ShiftLeft(l, r) => bitwise(BitKernels.BitOp.SHL, "shiftleft", l, r, e.dataType, input)
+    case e @ ShiftRight(l, r) => bitwise(BitKernels.BitOp.SHR, "shiftright", l, r, e.dataType, input)
+    case e @ ShiftRightUnsigned(l, r) => bitwise(BitKernels.BitOp.USHR, "shiftrightunsigned", l, r, e.dataType, input)
+    case BitwiseNot(child) => integralChild(child, input, "~").map(BitNotExpr(_))
+    case BitwiseCount(child) => integralChild(child, input, "bit_count").map(BitCountExpr(_))
+    case _: BitwiseGet => Left("bit_get returns tinyint, which has no lane")
+
     case h @ Hour(child, _) => timeField(DateKernels.TimeField.HOUR, child, h.timeZoneId, input)
     case m @ Minute(child, _) => timeField(DateKernels.TimeField.MINUTE, child, m.timeZoneId, input)
     case s @ Second(child, _) => timeField(DateKernels.TimeField.SECOND, child, s.timeZoneId, input)
@@ -296,6 +306,31 @@ object ExpressionCompiler {
       case Literal(null, _) => Left(s"$what with a null scale")
       case other => Left(s"$what with a non-literal scale ${other.sql}")
     }
+
+  /** A compiled non-literal INT32 / INT64 operand (bytes, shorts and booleans have no lane here). */
+  private def integralChild(e: Expression, input: Seq[Attribute], what: String): Result =
+    if (e.dataType != IntegerType && e.dataType != LongType) Left(s"$what over ${e.dataType.simpleString} not supported")
+    else
+      compile(e, input).flatMap {
+        case _: LiteralExpr => Left(s"$what of a literal")
+        case c => Right(c)
+      }
+
+  /**
+   * `& | ^` (same integral type on both sides after Spark's coercion) and the shifts (an INT32 amount
+   * on the right); a literal may sit on either side but not both.
+   */
+  private def bitwise(op: BitKernels.BitOp, what: String, l: Expression, r: Expression, resultType: DataType, input: Seq[Attribute]): Result = {
+    val leftOk = l.dataType == IntegerType || l.dataType == LongType
+    val rightOk = if (op.isShift) r.dataType == IntegerType else r.dataType == l.dataType
+    if (!leftOk || !rightOk) Left(s"$what over ${l.dataType.simpleString}, ${r.dataType.simpleString} not supported")
+    else
+      for {
+        le <- compile(l, input)
+        re <- compile(r, input)
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left(s"$what of two literals") else Right(())
+      } yield BitBinaryExpr(op, le, re, resultType)
+  }
 
   /** A compiled non-literal date operand. */
   private def dateChild(e: Expression, input: Seq[Attribute]): Result =

@@ -218,6 +218,20 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT ceil(d, 1) AS c FROM t", Seq(Project), "not supported")
   }
 
+  test("bitwise: & | ^ ~, the three shifts with literal and column amounts, bit_count") {
+    checkVectorized("SELECT i & 255 AS a, i | 4096 AS o, i ^ 21845 AS x, ~i AS n, l & 65535 AS al, l | -1 AS ol, l ^ l AS xl, ~l AS nl, i & (i - 1) AS ii, l ^ CAST(i AS BIGINT) AS mixed FROM t", Seq(Project))
+    // Literal and column amounts, incl. amounts at and past the width and negative ones (Java masks them, as Spark).
+    checkVectorized("SELECT shiftleft(i, 3) AS sl, shiftright(i - 10000, 2) AS sr, shiftrightunsigned(i - 10000, 2) AS su, shiftleft(l, 40) AS sll, shiftright(l - 30000, 5) AS srl, shiftrightunsigned(l - 30000, 5) AS sul FROM t", Seq(Project))
+    checkVectorized("SELECT shiftleft(i, i % 40) AS sl, shiftright(i - 10000, i % 70 - 3) AS sr, shiftrightunsigned(i - 10000, i % 33) AS su, shiftleft(l, i % 70) AS sll, shiftrightunsigned(l - 30000, i % 70) AS sul, shiftleft(1, i % 40) AS one, shiftleft(CAST(-1 AS BIGINT), i % 70) AS onel FROM t", Seq(Project))
+    checkVectorized("SELECT shiftleft(i, 32) AS w32, shiftleft(i, 33) AS w33, shiftright(i - 10000, -1) AS neg, shiftrightunsigned(-1 - i, 1) AS unsigned32, shiftleft(l, 64) AS w64 FROM t", Seq(Project))
+    // bit_count is Long.bitCount of the value widened: negative ints count 64 bits' worth.
+    checkVectorized("SELECT bit_count(i) AS b, bit_count(i - 10000) AS bn, bit_count(l) AS bl, bit_count(~l) AS bnl FROM t", Seq(Project))
+    checkVectorized("SELECT i FROM t WHERE i & 7 = 3 AND shiftright(i, 4) < 500 AND bit_count(i) > 3", Seq(Filter))
+    // bit_get returns tinyint, which has no lane; byte/short/boolean operands likewise.
+    checkFallback("SELECT bit_get(i, 3) AS g FROM t", Seq(Project), "bit_get returns tinyint")
+    checkFallback("SELECT bit_count(b) AS c FROM t", Seq(Project), "bit_count over boolean not supported")
+  }
+
   test("string predicates as projected booleans and in CASE conditions") {
     checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, s LIKE 's1%' AS pre, s LIKE '%3' AS suf, contains(s, '2') AS has, i FROM t", Seq(Project))
     checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))
@@ -266,7 +280,7 @@ class VectorProjectSuite extends VectorQuerySuite {
 
   test("unsupported expressions in a projection fall back") {
     checkFallback("SELECT concat(s, 'x') AS c FROM t WHERE i > 5", Seq(Project), "unsupported expression")
-    checkFallback("SELECT i & 3 AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
+    checkFallback("SELECT hash(i) AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
   }
 
   test("project conversion can be disabled by configuration") {
