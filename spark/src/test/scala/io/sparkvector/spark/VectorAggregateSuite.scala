@@ -107,6 +107,71 @@ class VectorAggregateSuite extends VectorQuerySuite {
     assert(nodesOf[VectorHashAggregateExec](df).isEmpty)
   }
 
+  test("PartialMerge: the second stage of a count(distinct) plan merges over the exchange") {
+    // Spark's rewrite: Partial(sum) over (s, i) -> exchange -> PartialMerge(sum) over (s, i) ->
+    // PartialMerge(sum) + Partial(count, distinct) over s -> exchange -> Final + Final(distinct).
+    // The first two stages are ours; the distinct stages still fall back with a reason.
+    val df = checkVectorized("SELECT s, count(DISTINCT i) AS cd, sum(l) AS sl FROM t GROUP BY s", Seq(Agg))
+    val ours = nodesOf[VectorHashAggregateExec](df)
+    assert(ours.size === 2, finalPlan(df).treeString)
+    assert(ours.exists(_.modes == Seq(org.apache.spark.sql.catalyst.expressions.aggregate.Partial)), finalPlan(df).treeString)
+    val merge = ours.find(_.modes == Seq(org.apache.spark.sql.catalyst.expressions.aggregate.PartialMerge))
+    assert(merge.isDefined, finalPlan(df).treeString)
+    assert(!merge.get.emitsResults && !merge.get.isFinal)
+    val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map(_._2)
+    assert(reasons.exists(_.contains("distinct aggregates not supported")), reasons.mkString("; "))
+    // Ungrouped: the same shape with an empty key set, plus a second non-distinct function.
+    val df2 = checkVectorized("SELECT count(DISTINCT s), sum(d2), max(i) FROM t WHERE i > 100", Seq(Agg))
+    assert(nodesOf[VectorHashAggregateExec](df2).exists(_.modes == Seq(org.apache.spark.sql.catalyst.expressions.aggregate.PartialMerge)), finalPlan(df2).treeString)
+  }
+
+  test("Complete: update functions with the Final result expressions in one operator") {
+    import org.apache.spark.sql.catalyst.expressions.aggregate.{Complete, Final, Partial}
+    import org.apache.spark.sql.execution.ColumnarToRowExec
+    import org.apache.spark.sql.vector.VectorAggregatePlanner
+    // Batch planning in Spark 4.1 never emits Complete (only the streaming planners do), so build the
+    // operator from a real plan's two stages: the Partial stage's columnar child and functions, the
+    // Final stage's result expressions.
+    val sql = "SELECT s, sum(d2) AS sd, count(*) AS c, min(i) AS mi, avg(l) AS al FROM t WHERE i > 50 GROUP BY s"
+    val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
+    val vectorPlan = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); finalPlan(d) }
+    val aggs = org.apache.spark.sql.vector.PlanUtils.allNodes(vectorPlan).collect { case h: VectorHashAggregateExec => h }
+    val partial = aggs.find(_.modes == Seq(Partial)).get
+    val fin = aggs.find(_.modes == Seq(Final)).get
+    val complete = HashAggregateExec(
+      requiredChildDistributionExpressions = None,
+      isStreaming = false,
+      numShufflePartitions = None,
+      groupingExpressions = partial.groupingExpressions,
+      aggregateExpressions = fin.aggregateExpressions.map(_.copy(mode = Complete)),
+      aggregateAttributes = fin.aggregateAttributes,
+      initialInputBufferOffset = 0,
+      resultExpressions = fin.resultExpressions,
+      child = partial.child)
+    val planned = VectorAggregatePlanner.plan(complete, finalEnabled = true)
+    assert(planned.isRight, planned.left.toOption.getOrElse(""))
+    val ours = planned.toOption.get
+    assert(ours.modes === Seq(Complete) && ours.emitsResults && !ours.isFinal)
+    // A Complete aggregate emits one group set per partition, so run it over a single partition.
+    val single = ours.copy(child = org.apache.spark.sql.vector.VectorCoalesceExec(1, partial.child))
+    val rows = ColumnarToRowExec(single).executeCollect().map(_.copy())
+    val actual = rows.map(r => org.apache.spark.sql.Row.fromSeq(single.output.indices.map(i => r.get(i, single.output(i).dataType) match {
+      case u: org.apache.spark.unsafe.types.UTF8String => u.toString
+      case v => v
+    })))
+    assertRowsEqual(expected, actual, 1e-9, "Complete " + sql)
+  }
+
+  test("an operator mixing buffer and result modes is refused with a reason") {
+    import org.apache.spark.sql.catalyst.expressions.aggregate.{Final, Partial}
+    import org.apache.spark.sql.vector.VectorAggregatePlanner
+    val sparkPlan = withPlugin(enabled = false)(spark.sql("SELECT s, sum(d2), count(*) FROM t GROUP BY s").queryExecution.executedPlan)
+    val fin = org.apache.spark.sql.vector.PlanUtils.allNodes(sparkPlan).collect { case h: HashAggregateExec => h }.find(_.aggregateExpressions.forall(_.mode == Final)).get
+    val mixed = fin.copy(aggregateExpressions = fin.aggregateExpressions.head.copy(mode = Partial) +: fin.aggregateExpressions.tail)
+    val planned = VectorAggregatePlanner.plan(mixed, finalEnabled = true)
+    assert(planned.isLeft && planned.left.toOption.get.contains("mix buffer and result output"), planned.toString)
+  }
+
   test("aggregate conversion can be disabled by configuration") {
     withConf(VectorConf.AggregateEnabled -> "false") {
       val df = withPlugin(enabled = true)(spark.sql("SELECT sum(d2) FROM t"))

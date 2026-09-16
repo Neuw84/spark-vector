@@ -1,6 +1,6 @@
 # spark-vector
 
-A Spark SQL plugin that executes Filter, Project, HashAggregate (Partial and Final), Sort and
+A Spark SQL plugin that executes Filter, Project, HashAggregate (all four modes), Sort and
 hash joins on Arrow-layout batches with the Java Vector API (`jdk.incubator.vector`). It follows the
 architecture of [Apache DataFusion Comet](https://github.com/apache/datafusion-comet), but stays
 entirely on the JVM: no native library, no JNI, no serialization boundary. Unsupported operators,
@@ -226,7 +226,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Arithmetic | `+ - *` on Int/Long/Double/Decimal (integers overflow-checked in ANSI mode, raising Spark's error only for rows that survive earlier filters), `/` on Double and Decimal (Spark's half-up rounding; null or ANSI error past the precision), unary minus (ANSI-checked on integers), `abs`, `sign`, `%` / `pmod` / `div` on Int/Long/Double (zero divisors raise in ANSI mode, null otherwise, active rows only), `greatest` / `least`, `nanvl`, `ceil` / `floor` / `rint` / `round` / `bround` with Spark's exact definitions (incl. negative scales and decimals on the unscaled value), bitwise `& | ^ ~`, the three shifts and `bit_count` on Int/Long, widening casts, casts between decimals, integers and doubles, literal columns | `try_*` arithmetic, `%` / `abs` / `div` on decimals, decimal results above 18 digits, other casts |
 | Dates | `year`, `month`, `dayofmonth`, `dayofyear`, `quarter`, `dayofweek`, `weekday`, `extract`, `trunc(date, year/quarter/month/week)`, `date_add`, `date_sub`, `datediff`; `cast(timestamp AS date)`, `hour`, `minute`, `second` under a UTC or fixed-offset session zone | timestamp functions under a zone with rules (DST), `date_trunc`, ISO weeks, the rest of the datetime family |
 | Conditionals | `CASE WHEN ... [ELSE] END`, `IF`, `COALESCE`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` over any supported type, with `NULL`, numeric, string and boolean literal branches; a null condition counts as false, later branches are evaluated only where earlier ones did not match | conditionals producing wide decimals or nested types |
-| Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `min`, `max`, `avg` in Partial and Final mode; `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal | `DISTINCT`, `FILTER` (Partial), double keys, PartialMerge/Complete modes, wider decimal sums, other functions |
+| Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `min`, `max`, `avg` in every aggregate mode (`Partial`, `PartialMerge`, `Final`, `Complete`); `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal | `DISTINCT`, `FILTER` (Partial), double keys, PartialMerge/Complete modes, wider decimal sums, other functions |
 | Sort | `SORT BY`/`ORDER BY` over a columnar child, every supported type as key, in memory | sorts over Spark's row shuffle (kept by Spark), spilling |
 | Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti, each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
 

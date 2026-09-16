@@ -9,7 +9,7 @@ import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSet, Expression, NamedExpression}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, DeclarativeAggregate, Final, Partial}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateMode, Complete, DeclarativeAggregate, Final, Partial, PartialMerge}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
@@ -58,6 +58,15 @@ case class VectorHashAggregateExec(
 
   def isFinal: Boolean = aggregateExpressions.nonEmpty && aggregateExpressions.forall(_.mode == Final)
 
+  /** The modes present, in plan order. */
+  def modes: Seq[AggregateMode] = aggregateExpressions.map(_.mode).distinct
+
+  /**
+   * `Final` and `Complete` evaluate the result expressions over the aggregated state; `Partial` and
+   * `PartialMerge` emit the aggregation buffers for a later stage. The planner refuses any other mix.
+   */
+  def emitsResults: Boolean = VectorAggregatePlanner.emitsResults(modes)
+
   /** Buffer and result attributes originate here (mirrors HashAggregateExec.producedAttributes). */
   override def producedAttributes: AttributeSet =
     AttributeSet(aggregateAttributes) ++
@@ -65,9 +74,9 @@ case class VectorHashAggregateExec(
       AttributeSet(aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes)) ++
       AttributeSet(aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes))
 
-  /** Partial: the emitted columns. Final: the merged-buffer batch the result projection reads. */
+  /** Buffer modes: the emitted columns. Result modes: the aggregated-state batch the result projection reads. */
   @transient private lazy val layout: Array[OutputSlot] =
-    if (isFinal) VectorAggregatePlanner.bufferLayout(groupingExpressions, aggregateExpressions).toArray
+    if (emitsResults) VectorAggregatePlanner.bufferLayout(groupingExpressions, aggregateExpressions).toArray
     else VectorAggregatePlanner.outputLayout(groupingExpressions, aggregateExpressions, resultExpressions) match {
       case Right(l) => l.toArray
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate: $reason")
@@ -100,7 +109,7 @@ case class VectorHashAggregateExec(
     val aggs = compiled
     val keys = compiledKeys
     val l = layout
-    val finalMode = isFinal
+    val finalMode = emitsResults
     val bufferAttrs = (if (finalMode) bufferAttributes else output).map(a => (a.name, a.dataType)).toArray
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
     val results = if (finalMode) resultProjection else Array.empty[VectorExpr]
@@ -121,7 +130,7 @@ case class VectorHashAggregateExec(
 
   override def verboseStringWithOperatorId(): String = {
     s"""$formattedNodeName
-       |Mode: ${if (isFinal) "Final" else "Partial"}
+       |Mode: ${modes.mkString(", ")}
        |Keys: ${groupingExpressions.map(_.sql).mkString(", ")}
        |Functions: ${aggregateExpressions.map(_.sql).mkString(", ")}
        |Output: ${output.map(_.name).mkString(", ")}
@@ -395,18 +404,34 @@ object VectorAggregatePlanner {
     }
   }
 
-  /** Attempts to convert a Spark HashAggregateExec; Left explains the fallback. */
+  /** Every mode evaluates result expressions (`Final`, `Complete`). */
+  def emitsResults(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(m => m == Final || m == Complete)
+
+  /** Every mode emits aggregation buffers for a later stage (`Partial`, `PartialMerge`). */
+  def emitsBuffers(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(m => m == Partial || m == PartialMerge)
+
+  /** Every mode merges buffers (`PartialMerge`, `Final`): the child is an exchange whose types alone matter. */
+  def mergesBuffers(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(VectorAggregates.merges)
+
+  /**
+   * Attempts to convert a Spark HashAggregateExec; Left explains the fallback. Two independent
+   * decisions: each aggregate expression's mode says whether its state is updated from the input
+   * (`Partial`, `Complete`) or merged from buffers (`PartialMerge`, `Final`); the operator's mode set
+   * says whether it emits buffers (`Partial` / `PartialMerge`, as Spark's distinct rewrite mixes
+   * them) or results (`Final` / `Complete`). `finalEnabled` gates the modes that read an exchange.
+   */
   def plan(a: HashAggregateExec, finalEnabled: Boolean): Either[String, VectorHashAggregateExec] = {
     val modes = a.aggregateExpressions.map(_.mode).distinct
+    val results = emitsResults(modes)
     if (a.aggregateExpressions.isEmpty) Left("aggregate without functions (distinct-style) not supported")
-    else if (modes != Seq(Partial) && modes != Seq(Final)) Left(s"aggregation modes ${modes.mkString(", ")} not supported (Partial or Final only)")
-    else if (modes == Seq(Final) && !finalEnabled) Left("Final aggregation disabled by configuration")
+    else if (!results && !emitsBuffers(modes)) Left(s"aggregation modes ${modes.mkString(", ")} mix buffer and result output")
+    else if (mergesBuffers(modes) && !finalEnabled) Left("merging aggregation stages disabled by configuration")
     else {
       val keyFailures = a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
       val aggFailures = a.aggregateExpressions.flatMap(agg => VectorAggregates.compile(agg, a.child.output).left.toOption.map(r => s"${agg.sql}: $r"))
       val failures = keyFailures ++ aggFailures
       val layoutCheck: Either[String, Any] =
-        if (modes == Seq(Final)) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
+        if (results) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
         else outputLayout(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
       if (failures.nonEmpty) Left(failures.mkString("; "))
       else layoutCheck.flatMap { _ =>
