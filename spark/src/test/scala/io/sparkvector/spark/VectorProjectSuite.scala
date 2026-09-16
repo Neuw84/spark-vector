@@ -51,6 +51,12 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT CAST(d2 AS INT) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
   }
 
+  test("literal columns are materialised, dense or under a selection") {
+    checkVectorized("SELECT 1 AS one, i, 2.5D AS x, 7L AS l7, DATE '2020-01-02' AS day FROM t WHERE i > 5", Seq(Filter, Project))
+    checkVectorized("SELECT 1.25 AS dec, i FROM t WHERE d > 5 AND d2 > 0.5", Seq(Filter, Project))
+    checkVectorized("SELECT 1 FROM range(10) HAVING MAX(id) > 0", Seq()) // Spark's own SQL tests tripped on this shape
+  }
+
   test("forwarded and reordered columns, including strings and nulls") {
     checkVectorized("SELECT s, i, l, b, dt FROM t WHERE d > 1", Seq(Filter, Project))
     checkVectorized("SELECT dt AS when, s AS name, d2 * 2.0 AS twice FROM t WHERE l IS NOT NULL", Seq(Project))

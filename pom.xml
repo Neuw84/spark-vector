@@ -217,3 +217,16 @@
     </pluginManagement>
   </build>
 </project>
+
+  <profiles>
+    <!--
+      Spark's own SQL golden-file suite with the plugin enabled (see spark-sql-tests/). Not part of
+      the normal build: it takes far too long. benchmarks/scripts/run-spark-sql-tests.sh runs it.
+    -->
+    <profile>
+      <id>spark-sql-tests</id>
+      <modules>
+        <module>spark-sql-tests</module>
+      </modules>
+    </profile>
+  </profiles>

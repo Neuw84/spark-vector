@@ -247,6 +247,35 @@ public final class ArrowOutput {
     return b.view();
   }
 
+  /** A column of {@code length} copies of a non-null literal (Spark's internal representation). */
+  public static ColumnVector constant(String name, DataType dt, Object value, int length, BufferAllocator allocator) {
+    ArrowVectorBuffers out = allocateFixed(name, dt, length, allocator);
+    MemorySegment data = out.data();
+    switch (out.type()) {
+      case INT32 -> {
+        int v = ((Number) value).intValue();
+        for (int i = 0; i < length; i++) {
+          data.setAtIndex(VectorBuffers.LE_INT, i, v);
+        }
+      }
+      case INT64 -> {
+        long v = value instanceof org.apache.spark.sql.types.Decimal d ? d.toUnscaledLong() : ((Number) value).longValue();
+        for (int i = 0; i < length; i++) {
+          data.setAtIndex(VectorBuffers.LE_LONG, i, v);
+        }
+      }
+      case FLOAT64 -> {
+        double v = ((Number) value).doubleValue();
+        for (int i = 0; i < length; i++) {
+          data.setAtIndex(VectorBuffers.LE_DOUBLE, i, v);
+        }
+      }
+      case BOOL -> Bitmap.fill(data, length, (Boolean) value);
+      default -> throw new UnsupportedOperationException("constant column of " + dt);
+    }
+    return finish(out, length, true);
+  }
+
   /** Copies a whole column (no selection) into a new Arrow vector. */
   public static ColumnVector copy(String name, DataType dt, VectorBuffers in, BufferAllocator allocator) {
     int n = in.length();

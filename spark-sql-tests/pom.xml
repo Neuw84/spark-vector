@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs Apache Spark's own SQL golden-file test suite (SQLQueryTestSuite) with the spark-vector
+  plugin enabled, the way Comet validates itself against Spark's tests. It is not part of the normal
+  build: it only exists under the `spark-sql-tests` profile and takes a long time. See
+  benchmarks/scripts/run-spark-sql-tests.sh.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>spark-vector-spark-sql-tests_${scala.binary.version}</artifactId>
+  <name>spark-vector :: Spark SQL test suite</name>
+
+  <properties>
+    <!-- Regex over test case names; -DsqlTests.filter=... selects a subset (see the script). -->
+    <sqlTests.filter>.*</sqlTests.filter>
+    <spark.test.home>${project.build.directory}/spark-home</spark.test.home>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Spark's test infrastructure: SparkFunSuite, SharedSparkSession, SQLQueryTestSuite. -->
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-core_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!-- The unpacked test data goes on the classpath as files: Spark's suites load it with
+         testFile(), which needs a file: URL, not one inside the jar. -->
+    <testResources>
+      <testResource>
+        <directory>${spark.test.home}/sql/core/src/test/resources</directory>
+      </testResource>
+      <testResource>
+        <directory>src/test/resources</directory>
+      </testResource>
+    </testResources>
+    <plugins>
+      <!-- The golden files ship inside spark-sql's tests jar; SQLQueryTestSuite reads them from
+           $spark.test.home/sql/core/src/test/resources/sql-tests. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>unpack-sql-tests</id>
+            <phase>generate-test-resources</phase>
+            <goals>
+              <goal>unpack</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.apache.spark</groupId>
+                  <artifactId>spark-sql_${scala.binary.version}</artifactId>
+                  <version>${spark.version}</version>
+                  <classifier>tests</classifier>
+                  <includes>sql-tests/**,test-data/**</includes>
+                  <outputDirectory>${spark.test.home}/sql/core/src/test/resources</outputDirectory>
+                </artifactItem>
+              </artifactItems>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>scala-test-compile-first</id>
+            <phase>process-test-resources</phase>
+            <goals>
+              <goal>testCompile</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest-maven-plugin</artifactId>
+        <configuration>
+          <reportsDirectory>${project.build.directory}/scalatest-reports</reportsDirectory>
+          <junitxml>.</junitxml>
+          <filereports>SparkSqlTests.txt</filereports>
+          <stdout>W</stdout>
+          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx6g -Dspark.ui.enabled=false -Dspark.driver.host=localhost -Dspark.test.home=${spark.test.home} -Dspark.vector.sqlTests.filter=${sqlTests.filter}</argLine>
+        </configuration>
+        <executions>
+          <execution>
+            <id>test</id>
+            <goals>
+              <goal>test</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

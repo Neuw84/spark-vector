@@ -1,7 +1,7 @@
 package org.apache.spark.sql.vector
 
 import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch}
-import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, VectorExpr}
+import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression, SortOrder}
 import org.apache.spark.sql.execution.{OrderPreservingUnaryExecNode, PartitioningPreservingUnaryExecNode, SparkPlan}
@@ -87,6 +87,7 @@ private[vector] class VectorProjectIterator(
             case ColumnRef(ordinal, _) =>
               // Forwarded columns are never copied: the child keeps them alive until its next batch.
               BorrowedColumnVector.of(batch.column(ordinal))
+            case lit: LiteralExpr => ArrowOutput.constant(name, dt, lit.value, outRows, allocator)
             case e if compactTo != null => ArrowOutput.compact(name, dt, e.eval(ctx), compactTo, outRows, allocator)
             case e => ArrowOutput.copy(name, dt, e.eval(ctx), allocator)
           }
