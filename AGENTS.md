@@ -91,7 +91,9 @@ that pin it.
   (one equality pass per literal), `StringMatchExpr` (`startswith`/`endswith`/`contains`, i.e. the
   `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), the date nodes in `DateExprs.scala`
   (`DateFieldExpr`/`DateTruncExpr` over `DateKernels`' civil-from-days arithmetic, `TimestampToDateExpr`/`TimeFieldExpr`
-  under a fixed-offset session zone only -- zones with rules fall back), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
+  under a fixed-offset session zone only -- zones with rules fall back), `MonotonicIdExpr`
+  (`monotonically_increasing_id()`: partition prefix from the task context plus a per-task counter
+  carried across batches; a forwarded selection numbers only the selected rows), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
   `CaseWhenExpr` for `CASE WHEN`/`IF`/`COALESCE`: per-branch win masks carried forward as `active`,
   a null condition counts as false, `SelectKernels.select` blends -- literal branches, string and
   boolean ones included, are materialised as constant columns).
@@ -422,7 +424,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 121 kernel tests, 147 Spark tests (120 without the Comet and Iceberg profiles;
+Current counts: 123 kernel tests, 148 Spark tests (121 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -462,8 +464,9 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 ## 7. Known gaps
 
 - Iceberg `MERGE INTO` itself is not accelerated: the rewritten plan projects
-  `monotonically_increasing_id()` and the struct `_partition` metadata column above the target scan,
-  so that project falls back. Reads over the merged table are.
+  `monotonically_increasing_id()` (compiled, `MonotonicIdExpr`) and the struct `_partition` metadata
+  column above the target scan; the struct column (#19) is what makes that project fall back. Reads
+  over the merged table are.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

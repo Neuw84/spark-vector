@@ -2,7 +2,7 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, DateKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, Hour, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, Month, Multiply, Not, Or, Quarter, Second, StartsWith, Subtract, TruncDate, UnaryMinus, UnscaledValue, WeekDay, Year}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, Hour, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, Not, Or, Quarter, Second, StartsWith, Subtract, TruncDate, UnaryMinus, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -154,6 +154,9 @@ object ExpressionCompiler {
     case e @ DateSub(start, days) => dateArith(ArithOp.SUB, start, days, e.dataType, input)
     case e @ DateDiff(end, start) if end.dataType == DateType && start.dataType == DateType =>
       dateArith(ArithOp.SUB, end, start, e.dataType, input)
+
+    // Per-partition prefix plus a running row number; state lives in the node, per task.
+    case _: MonotonicallyIncreasingID => Right(MonotonicIdExpr())
 
     case h @ Hour(child, _) => timeField(DateKernels.TimeField.HOUR, child, h.timeZoneId, input)
     case m @ Minute(child, _) => timeField(DateKernels.TimeField.MINUTE, child, m.timeZoneId, input)

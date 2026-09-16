@@ -63,6 +63,7 @@ matching Spark's short-circuit behaviour.
 | `trunc(date, unit)` | INT32 -> INT32 | Units `YEAR`/`YYYY`/`YY`, `QUARTER`, `MONTH`/`MON`/`MM`, `WEEK` (Monday), case-insensitive, as a string literal. `trunc unit '<u>' not supported`, `trunc unit is not a string literal` |
 | `date_add`, `date_sub`, `datediff` | INT32 lanes | `ArithExpr` add/subtract on days (Spark does not overflow-check these): `date +/- int` and `date - date`; either side may be a literal. `date arithmetic over <type>`, `date arithmetic with <type> days`, `arithmetic on two literals` |
 | `hour`, `minute`, `second` | INT64 micros -> INT32 | Under a UTC or fixed-offset session zone only (`TimeFieldExpr`: local micros = `micros + offset`); a zone with rules falls back: `time field needs a fixed-offset session zone, not <zone>`. `time field over <type>` |
+| `monotonically_increasing_id()` | -> INT64 | `MonotonicIdExpr`: `partitionIndex << 33` (from the task context) plus a running row number carried across the partition's batches -- Spark's contract, and identical values for the same plan since the numbering follows the rows that reach the expression: with a forwarded selection only the selected rows are numbered (`SequenceKernels.iotaSelected`). Rows outside a CASE branch's active mask are still numbered (Spark would skip them); the id is a tag, and uniqueness and monotonicity within the partition hold either way |
 | `UnscaledValue`, `MakeDecimal` | INT64 (decimal(<=18)) | The optimizer's `DecimalAggregates` rewrite of `sum(decimal(p <= 8))` and `avg(decimal(p <= 11))`; `MakeDecimal` into more than 18 digits falls back (`make_decimal into <type> exceeds 18 digits`), overflow nulls or raises per `nullOnOverflow` (#49 covers `CheckOverflow` and the rest of that family) |
 | `KnownFloatingPointNormalized`, `NormalizeNaNAndZero` | FLOAT64 | Identities: the compare kernels already use the normalised ordering and double grouping keys are refused |
 | `CASE WHEN ... THEN ... [ELSE ...] END` | result of any lane; conditions BOOL | `CaseWhenExpr` over `SelectKernels`: each condition is evaluated only on the rows no earlier branch took, its winning rows are `condition is true` (a null condition counts as false), each branch value only on its winning rows; the result is null where the winner is null or no branch matched and there is no `ELSE`. Branches must share the result's Spark type (`branch type <t> differs from <t>`); `NULL` and literal branches -- string and boolean literals included -- are materialised as constant columns. `unsupported result type <type> for <sql>` for a wide decimal or nested result |
@@ -93,7 +94,6 @@ the remaining reasons on the aggregate's inputs.
 | Family | Issue |
 |---|---|
 | General `LIKE` (inner wildcards, `_`, `'a%b'`), `rlike` | #3 follow-up (the `LikeSimplification` shapes are Supported above) |
-| `monotonically_increasing_id()` | #18 |
 | Decimal results wider than 18 digits on narrow operands (`decimal(15,2) * decimal(15,2)`) | #26 |
 | 128-bit `sum` / `avg` buffers for decimals beyond 8 / 11 digits | #27 |
 | Genuinely wide declared decimals (`p > 18`) | #28 (design note first) |
