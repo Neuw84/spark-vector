@@ -88,6 +88,7 @@ object TpchRunner {
       report: Option[String] = None,
       label: String = "",
       show: Boolean = false,
+      keepAlive: Boolean = false,
       extraConf: Map[String, String] = Map.empty)
 
   def main(argv: Array[String]): Unit = {
@@ -111,6 +112,7 @@ object TpchRunner {
     case "--label" :: v :: rest => parse(rest, a.copy(label = v))
     case "--report" :: v :: rest => parse(rest, a.copy(report = Some(v)))
     case "--show" :: rest => parse(rest, a.copy(show = true))
+    case "--keep-alive" :: rest => parse(rest, a.copy(keepAlive = true))
     case "--conf" :: kv :: rest =>
       val Array(k, v) = kv.split("=", 2)
       parse(rest, a.copy(extraConf = a.extraConf + (k -> v)))
@@ -122,7 +124,7 @@ object TpchRunner {
     val builder = SparkSession.builder()
       .master(s"local[${args.threads}]")
       .appName(s"spark-vector-tpch-${args.config}")
-      .config("spark.ui.enabled", "false")
+      .config("spark.ui.enabled", args.keepAlive.toString)
       .config("spark.sql.shuffle.partitions", args.shufflePartitions.toString)
       .config("spark.sql.adaptive.enabled", "true")
       .config("spark.driver.host", "localhost")
@@ -147,6 +149,11 @@ object TpchRunner {
           println(s"[tpch] ${args.config} $q median=${result.medianMs}ms p90=${result.p90Ms}ms min=${result.minMs}ms rows=${result.rows} operators=${result.operators}")
         }
       } finally writer.close()
+      if (args.keepAlive) {
+        // For inspecting the Spark UI (the Vector Acceleration tab) after the queries ran.
+        println(s"[tpch] keeping the session open; Spark UI at ${spark.sparkContext.uiWebUrl.getOrElse("(disabled)")}. Ctrl-C to exit.")
+        Thread.currentThread().join()
+      }
     } finally spark.stop()
   }
 

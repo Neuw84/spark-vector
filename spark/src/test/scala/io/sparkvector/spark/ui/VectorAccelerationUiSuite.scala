@@ -61,6 +61,10 @@ class VectorAccelerationUiSuite extends SparkVectorFunSuite with Eventually {
         .getOrElse(fail(s"no plan among ${ids.mkString(", ")} contains the converted filter"))
     }
     assert(planPage.contains("sv-engine-vector"), "a node should be coloured as Vector API")
+    // The plan text is embedded, collapsed, behind Spark's own collapseTable toggle (Spark 4 ships
+    // Bootstrap 4, so Bootstrap 5 data-bs-* attributes would silently do nothing).
+    assert(planPage.contains("== Physical Plan =="), "the plan details should be on the page")
+    assert(planPage.contains("collapseTable('collapse-sv-plan-details','sv-plan-details')"))
   }
 
   test("an unknown or malformed execution id renders a not-found page, not an error") {

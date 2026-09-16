@@ -8,7 +8,7 @@
  * Uses the d3, dagre-d3 and graphlib-dot bundles that Spark's UI already serves from /static.
  */
 
-/* global d3, dagreD3, graphlibDot */
+/* global d3, dagreD3, graphlibDot, collapseTablePageLoad */
 
 (function () {
   "use strict";
@@ -102,9 +102,21 @@
       .attr("height", height);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", render);
-  } else {
+  /* The "Plan Details" section remembers whether it was expanded, like Spark's own collapsible tables. */
+  function restorePlanDetails() {
+    if (typeof collapseTablePageLoad === "function") {
+      collapseTablePageLoad("collapse-sv-plan-details", "sv-plan-details");
+    }
+  }
+
+  function init() {
     render();
+    restorePlanDetails();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
   }
 })();

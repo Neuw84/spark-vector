@@ -101,13 +101,18 @@ class ExecutionPlanPage(parent: VectorAccelerationTab) extends WebUIPage("execut
     }
   }
 
+  /**
+   * The plan text, collapsed by default. Toggled with `collapseTable` from Spark's `webui.js`, the
+   * same mechanism the Stage page uses for its metrics tables: Spark 4 bundles Bootstrap 4, whose
+   * collapse plugin does not react to the Bootstrap 5 `data-bs-toggle` attributes.
+   */
   private def planText(e: ExecutionSummary): Seq[Node] =
     <div class="sv-section">
-      <span class="collapse-table" data-bs-toggle="collapse" data-bs-target="#sv-plan-details"
-            aria-expanded="false" aria-controls="sv-plan-details">
+      <span class="collapse-sv-plan-details collapse-table"
+            onClick="collapseTable('collapse-sv-plan-details','sv-plan-details')">
         <h4><span class="collapse-table-arrow arrow-closed"></span><a>Plan Details</a></h4>
       </span>
-      <div class="collapsible-table collapse" id="sv-plan-details">
+      <div class="sv-plan-details collapsible-table collapsed" id="sv-plan-details">
         <pre>{e.physicalPlanDescription}</pre>
       </div>
     </div>
