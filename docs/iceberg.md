@@ -73,9 +73,8 @@ plain string and dictionary string columns were adapted rather than copied.
 ## Limitations
 
 - The `MERGE INTO` itself is not accelerated: Iceberg's rewritten plan projects
-  `monotonically_increasing_id()` and the struct-typed `_partition` metadata column above the target
-  scan, neither of which the expression compiler handles, so that project falls back with a reason.
-  The reads before and after the merge are.
-- String literals in predicates (`s = 'abc'`) are not compiled yet; such filters fall back.
+  `monotonically_increasing_id()` (compiled since #18) and the struct-typed `_partition` metadata
+  column above the target scan; the struct column is the remaining reason that project falls back
+  (#19). The reads before and after the merge are accelerated.
 - The per-batch dictionary decode is not cached across the batches of a row group.
 - Comet 1.0 reads v3 tables through the JVM reader; the adapter path above applies to them.

@@ -150,6 +150,24 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT 'BUILDING' AS seg, i FROM t WHERE i > 5 AND s = 's7'", Seq(Filter, Project))
   }
 
+  test("monotonically_increasing_id() numbers exactly the rows Spark numbers, per partition") {
+    // Same plan on both sides (same Parquet splits), so the ids must be identical, not merely
+    // monotonic: the comparison is row for row against Spark.
+    val plain = checkVectorized("SELECT monotonically_increasing_id() AS id, i FROM t", Seq(Project))
+    val ids = plain.collect().map(_.getLong(0))
+    assert(ids.distinct.length === ids.length, "ids are unique across partitions")
+    assert(ids.map(_ >> 33).distinct.length === plain.rdd.getNumPartitions, "one prefix per scan partition")
+    // A dense filter below forwards a selection to the project: only the surviving rows are numbered.
+    checkVectorized("SELECT monotonically_increasing_id() AS id, i FROM t WHERE i > 100", Seq(Filter, Project))
+    // A sparse filter below compacts first: the same rule through the other path.
+    checkVectorized("SELECT monotonically_increasing_id() AS id, i, s FROM t WHERE s = 's7'", Seq(Filter, Project))
+    // A filter above the project sees ids assigned before filtering.
+    checkVectorized("SELECT id, i FROM (SELECT monotonically_increasing_id() AS id, i FROM t) WHERE id > 100 AND i < 15000", Seq(Filter, Project))
+    // Ids feeding an aggregate and arithmetic.
+    checkVectorized("SELECT count(*) AS c, max(id) AS mx, min(id) AS mn FROM (SELECT monotonically_increasing_id() AS id FROM t WHERE d IS NOT NULL)", Seq(Filter, Project, classOf[VectorHashAggregateExec]))
+    checkVectorized("SELECT monotonically_increasing_id() + l AS x, i FROM t WHERE l IS NOT NULL", Seq(Filter, Project))
+  }
+
   test("string predicates as projected booleans and in CASE conditions") {
     checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, s LIKE 's1%' AS pre, s LIKE '%3' AS suf, contains(s, '2') AS has, i FROM t", Seq(Project))
     checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))
