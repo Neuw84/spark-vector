@@ -154,8 +154,9 @@ that pin it.
 - Partial and Final aggregates are both ours. Final consumes Spark's row shuffle through a
   `RowToColumnarExec` or, with Comet, Comet's columnar shuffle directly; merge functions
   (`CountMergeAgg`, `AverageMergeAgg`, sum/min/max over buffers) reuse the accumulators; result
-  expressions are compiled with `evaluateExpression` substituted. `FILTER` clauses apply at
-  Partial only. `spark.vector.exec.aggregate.final.enabled` turns the Final conversion off.
+  expressions are compiled with `evaluateExpression` substituted. `FILTER` clauses are not
+  supported (the Partial aggregate falls back with `aggregates with FILTER not supported`).
+  `spark.vector.exec.aggregate.final.enabled` turns the Final conversion off.
 - `GroupKeyTable` memoises group ids per combination of dictionary indices when every key is
   dictionary encoded and the product of dictionary sizes is small. Plain UTF8 keys are dictionary
   encoded on the fly against a per-column dictionary kept across batches so the same path applies:
@@ -416,8 +417,10 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   from an agent session. Build before committing.
 - Inclusive terminology throughout (allowlist/denylist, primary/replica).
 - Keep the running doc set in sync: `README.md` (usage, keys, lessons), `docs/results.md`
-  (numbers and what they mean), `docs/comet.md` (integration and limitations), this file (design
-  and validation).
+  (numbers and what they mean), `docs/comet.md` (integration and limitations),
+  `docs/operators.md` (the per-operator support matrix: requirements, config keys, fallback
+  strings -- every operator change updates its row in the same commit), this file (design and
+  validation).
 
 ## 7. Known gaps
 
