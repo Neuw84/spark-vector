@@ -67,9 +67,15 @@ drops our references. `ArrowCData.liveExports()` counts outstanding exports and 
 tests. The shuffle output on the reading side is Comet vectors, which our Final aggregate reads
 zero copy through the existing adapter.
 
-Only hash, single-partition and round-robin partitioning are rewritten. Range partitioning (the
-`ORDER BY` above a Final aggregate) stays with whichever shuffle Comet picked, because a native
-Comet shuffle over a non-native child samples the child a second time.
+Hash, single-partition, round-robin and range partitioning are rewritten. For range partitioning
+(the `ORDER BY` above a Final aggregate) Comet computes the bounds with Spark's `RangePartitioner`
+over a sampling pass of the child, which is exactly what Spark's own exchange does, so the child runs
+twice in either case; the sort above the shuffle then becomes `VectorSortExec` because Comet's
+shuffle output is columnar. It follows Comet's own switch
+(`spark.comet.shuffle.native.partitioning.range.enabled`, default on) and can be turned off alone
+with `spark.vector.comet.shuffle.range.enabled=false`. Comet's sampling pass never closes the
+vectors it imports, so the bridge releases whatever is still outstanding when the task completes.
+Decimals cross the bridge widened to Arrow's 128-bit decimal layout.
 
 ## Comet on macOS (Apple Silicon)
 

@@ -7,7 +7,8 @@ considered done. `README.md` is the user-facing description, `docs/results.md` t
 
 ## 1. What this project is
 
-A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (Partial and Final) and `Sort` over
+A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (Partial and Final), `Sort` and
+the two hash joins over
 Arrow-layout columnar batches with the Java Vector API (`jdk.incubator.vector`), in the style of
 Apache DataFusion Comet but entirely on the JVM. It reads batches from Spark's vectorized Parquet
 reader or from Comet's native scan, and emits unshaded Arrow vectors that Spark's own
@@ -24,7 +25,8 @@ Comet-backed tests and benchmarks. Maven builds everything.
 
 | Module | Language | Contents |
 |---|---|---|
-| `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, cast, agg, hash, grouped accumulators, group key table), the sort and chunk kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
+| `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, decimal, cast, agg incl. overflow-checked sums, hash, grouped accumulators, group key table with lookup), the sort, gather and column-builder kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
+| `spark-sql-tests/` | Scala 2.13 | Spark's `SQLQueryTestSuite` with the extension injected; profile `spark-sql-tests` only, run by `benchmarks/scripts/run-spark-sql-tests.sh` |
 | `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the four operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H Q1/Q6 runner with its markdown/HTML report |
 
@@ -35,9 +37,9 @@ breaks Spark's JVM options):
 unset JAVA_TOOL_OPTIONS; export JAVA_HOME=/opt/homebrew/opt/openjdk@25
 mvn -B -q clean install                    # kernels + Spark suites, Comet suites skipped (~3 min)
 mvn -B -q -Pcomet clean install            # also the Comet-backed suites (needs the Comet jar in ~/.m2)
+mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.11 runtime from Maven Central)
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
 mvn -pl spark install -Dsuites=io.sparkvector.spark.VectorAggregateSuite   # one suite
-mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.11 runtime from Maven Central)
 benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated lineitem; 10 for SF10 (2.1 GB, gitignored)
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
@@ -61,18 +63,31 @@ that pin it.
   original operator. There is no silent fallback: tests assert on the reason text
   (`checkFallback(..., reasonContains = ...)`), the UI shows it, and
   `spark.vector.explainFallback.enabled` prints it with `EXPLAIN`.
-- Supported types are exactly `VecType`: BOOL, INT32 (also DateType), INT64 (also TimestampType),
-  FLOAT64, UTF8. Decimals are not supported; the TPC-H data is generated with decimals as doubles
-  for that reason. Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the
-  adapters + `ArrowOutput` + tests at all three vector widths.
+- Supported types are exactly `VecType`: BOOL, INT32 (also DateType), INT64 (also TimestampType and
+  `Decimal(p <= 18)` as the unscaled value), FLOAT64, UTF8. Decimals above 18 digits are not
+  supported, and neither is any decimal result type above 18 digits, which is why the TPC-H data
+  is still generated with decimals as doubles (`Decimal(12,2) * Decimal(12,2)` is 25 digits).
+  Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the adapters +
+  `ArrowOutput` + tests at all three vector widths.
+- Decimals ride on INT64 with the scale kept in the Spark type (`DecimalArithExpr`,
+  `DecimalCastExpr`, `UnscaledValueExpr`, `MakeDecimalExpr` in `expr/DecimalExprs.scala`;
+  `DecimalKernels` for rescaling, range checks and Spark-exact division). Spark's result types for
+  `+ - *` leave room for every result so only `/` and casts check ranges. Output decimals are
+  `VectorDecimalColumnVector` over a `BigIntVector` (Arrow's own `DecimalVector` is 128-bit and
+  read through `BigDecimal` by Spark). Remember that the optimizer's `DecimalAggregates` turns
+  `sum(decimal <= 8 digits)` into `MakeDecimal(sum(UnscaledValue(x)))`, an ANSI bigint sum, and
+  `avg(decimal <= 11 digits)` into a double average: that is the path decimal aggregates take.
 - Spark 4 defaults to ANSI mode. Double arithmetic is bit-identical in both modes, so it is
-  compiled; integer arithmetic in ANSI mode needs overflow checks the kernels do not do, so it
-  falls back with a reason. ANSI division by zero is raised only for rows that are active (survive
+  compiled; integer `+ - *` in ANSI mode needs overflow checks the kernels do not do, so it falls
+  back with a reason, but ANSI `sum(bigint)` is overflow-checked (`AggKernels.sumLongExact` carries
+  a sign-trick overflow lane; `GroupedAccumulators.LongSum(checked)` uses `Math.addExact`). ANSI
+  errors (division by zero, decimal overflow) are raised only for rows that are active (survive
   earlier conjuncts / the selection), matching Spark's short-circuit semantics.
 - Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`,
-  `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`). Anything else is a
-  `Left(reason)`. Do not add an expression without a kernel, a scalar reference and a Spark
-  comparison test.
+  `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes).
+  Anything else is a `Left(reason)`. Do not add an expression without a kernel, a scalar
+  reference and a Spark comparison test. A `LiteralExpr` may be a projection's whole expression
+  (`SELECT 1 FROM ...`); `ArrowOutput.constant` materialises it.
 
 ### 3.2 Memory model: Arrow layout in native `MemorySegment`s
 
@@ -158,10 +173,10 @@ that pin it.
   of our operators for a local `SORT BY`). Over Spark's row shuffle the rule leaves `SortExec` with
   the reason "child ... is not columnar": converting rows to columns to sort them gains nothing.
   `spark.vector.exec.sort.enabled` turns it off.
-- Blocking and in memory: the partition's batches are copied into an operator-owned shared `Arena`
-  (`ChunkKernels.materialize`, applying any forwarded selection), joined per column
-  (`ChunkKernels.concat`, which decodes dictionary strings because every chunk may carry a different
-  dictionary), sorted, and gathered out in 4096-row batches. There is no spill; that is documented
+- Blocking and in memory: the partition's batches are appended to one `ColumnBuilder` per column
+  in an operator-owned shared `Arena` (applying any forwarded selection; dictionary strings are
+  decoded because every chunk may carry a different dictionary), sorted, and gathered out in
+  4096-row batches through `GatherKernels` (shared with the joins; `-1` indices pad outer joins). There is no spill; that is documented
   and the reason the config key exists.
 - `SortKernels.sortIndices` is an LSD sort over order-preserving unsigned 32-bit key passes, each
   pass an `Arrays.sort` of `(key, position)` packed into a `long` (position in the low bits makes
@@ -175,6 +190,26 @@ that pin it.
   compares permutations for every type, direction, null ordering, multi-key combination, and the
   special doubles; `VectorSortSuite` compares against `SortExec` per partition and positionally on
   the key columns (ties in non-key columns may differ in order and are not compared).
+
+### 3.6b Joins
+
+- `VectorBroadcastHashJoinExec` replaces `BroadcastHashJoinExec` when the streamed side is columnar;
+  the build side is deliberately left as Spark's `BroadcastExchangeExec`/`HashedRelation`. Each task
+  reads the relation's rows once into columns (`HashedRelationAccess` in
+  `org.apache.spark.sql.execution.vector`, the relation being `private[execution]`;
+  `valuesWithKeyIndex` for unsafe maps, `keys().flatMap(get)` for `LongHashedRelation`, because
+  `keys()` of an unsafe map repeats a key once per row) and builds a `GroupKeyTable` over the key
+  expressions (`GroupKeyTable.lookup` probes without inserting). No exchange of our own means a
+  Spark join over the same broadcast still works; a columnar broadcast exchange is a listed gap.
+- `VectorShuffledHashJoinExec` replaces `ShuffledHashJoinExec` and, like the Final aggregate, accepts
+  exchanges (or their AQE stages) as inputs on types alone: Spark inserts `RowToColumnarExec` under
+  us for its row shuffle. `ClusteredDistribution` on both sides, `PartitioningCollection` out.
+- Supported: inner, left/right outer, left semi, left anti; a non-equi condition on inner joins only
+  (evaluated on the joined batch, failing rows compacted). Refused with a reason: full outer,
+  existence, null-aware anti, skew joins, double keys (Spark normalises NaN/-0.0 before comparing,
+  the key table compares bits), outer joins with a condition. Sort-merge joins are not converted.
+- Both joins are `VectorBinaryExec`; `VectorPlan` is the base the rule, selection marking, Comet
+  bridging and the UI classify on.
 
 ### 3.7 The Arrow compatibility layer (designed to be replaced natively)
 
@@ -224,11 +259,16 @@ into these rather than adding special cases to operators.
   callbacks and a live-export registry, and Comet's own `ArrowImporter` imports them into a
   `CometVector` over our buffers. `CometShuffleSuite` asserts every export is released.
 - The rule rewrites a `ShuffleExchangeExec` (or Comet's row-based columnar shuffle) above a
-  `VectorExec` into Comet's native shuffle over `VectorToCometExec`, for hash, single and
-  round-robin partitioning only (range partitioning over a non-native child makes Comet sample
-  twice). Requires `spark.shuffle.manager=...CometShuffleManager` and
+  `VectorPlan` into Comet's native shuffle over `VectorToCometExec`, for hash, single, round-robin
+  and range partitioning. Range partitioning makes Comet sample the child through Spark's
+  `RangePartitioner`, exactly as Spark's own exchange does (the child runs twice either way); it is
+  gated by Comet's `spark.comet.shuffle.native.partitioning.range.enabled` and our
+  `spark.vector.comet.shuffle.range.enabled`. That sampling pass reads the bridged batches through
+  `rowIterator()` and never closes the imported vectors, so the bridge remembers its exports and
+  `releaseOutstanding()`s them on task completion (registered after the child iterators, run
+  before them). Requires `spark.shuffle.manager=...CometShuffleManager` and
   `spark.comet.exec.shuffle.enabled=true`; `spark.vector.comet.shuffle.enabled` turns the rewrite
-  off.
+  off. Decimals cross the bridge widened to the 128-bit `d:p,s` layout.
 - Not combined with Comet: Comet's Final aggregate (needs Comet's own partial buffers) and native
   blocks (our operators are not `CometNativeExec`s). Comet's `LargeVarCharVector`
   falls back to the copying adapter. Dictionary strings are decoded when crossing into Comet.
@@ -272,12 +312,32 @@ A change is not done until all of the following that apply have run green, local
    spark-vector operators are in the final (post-AQE) plan. Unsupported cases are validated the same
    way with `checkFallback`, which asserts the Spark operator stayed and the recorded reason
    contains the expected text. Suites: `VectorFilterSuite`, `VectorProjectSuite`,
-   `VectorAggregateSuite`, `VectorSortSuite`, plus adapter/Arrow suites and `SparkOnJdkSmokeSuite`
-   (Spark itself works on this JDK with these flags).
+   `VectorAggregateSuite`, `VectorSortSuite`, `VectorDecimalSuite` (exact comparison, no double
+   tolerance), `VectorJoinSuite`, plus adapter/Arrow suites and `SparkOnJdkSmokeSuite` (Spark
+   itself works on this JDK with these flags).
+   Spark's own SQL golden-file suite runs the same idea at scale, on demand only:
+   `benchmarks/scripts/run-spark-sql-tests.sh [regex]` (profile `spark-sql-tests`, about 15
+   minutes for everything; 642 cases pass, 111 Python UDF variants are ignored without pyspark).
+   `VectorSQLQueryTestSuite.defaultExclude` skips `explain*.sql` (golden plans are Spark's), the
+   DataSketches files (their memory library rejects JDK > 21) and `udtf/udtf.sql` (needs pyspark);
+   `SQL_TESTS_EXCLUDE='^$'` runs them anyway. The test JVM needs `-Dspark.testing=true` (Spark's
+   test-mode defaults, such as the TIME type, and the STANDARD error format the golden files
+   assume) and `-XX:-OmitStackTraceInFastThrow` (a hot ANSI overflow otherwise becomes a
+   message-less exception that Spark's error formatting cannot render). Run at least the files
+   touching a change (`group-by`, `join`, `decimal`, `order-by`) before calling an operator or
+   expression done, and the whole suite before a release; its first run found a gap
+   (`SELECT 1 FROM ...`) the comparison suites had not.
 3. Comet integration. `CometScanSuite` and `CometShuffleSuite` are tagged `CometTest` and run only
    with `-Pcomet`. They cover zero-copy scan adaptation, dictionary strings from Comet, the shuffle
    rewrite for each partitioning, and that every C Data export is released. They need the Comet jar
    built from source (`docs/comet.md` explains why, on macOS).
+   Iceberg integration. `IcebergScanSuite` (tag `IcebergTest`, `-Piceberg`) and `CometIcebergSuite`
+   (both tags, `-Pcomet,iceberg`) run the same merge-on-read battery from `IcebergMorSuiteBase`:
+   positional deletes, deletion vectors (v3), equality deletes written with the Iceberg Java API,
+   a merge-on-read lineitem for Q1/Q6, and a `MERGE INTO` over a heavily mutated table run with the
+   plugin on and off whose results must match row for row. The JVM suite also asserts through
+   adapter counters that batches were normalized and columns (including dictionary strings) adapted
+   in place rather than copied.
 4. UI. `PlanAccelerationSuite` pins the classification rules without a session (stand-ins in
    `org.apache.spark.sql.comet` stand for Comet operators); `VectorAccelerationUiSuite` binds a
    real Spark UI, runs converted queries and fetches both pages over HTTP.
@@ -324,13 +384,6 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 - Results are appended to `benchmarks/results/<config>.jsonl` (committed) and the report takes the
   latest measurement per (dataset, config, query). Outliers stay in the files with older
   timestamps; note discarded runs in `docs/results.md`.
-   Iceberg integration. `IcebergScanSuite` (tag `IcebergTest`, `-Piceberg`) and `CometIcebergSuite`
-   (both tags, `-Pcomet,iceberg`) run the same merge-on-read battery from `IcebergMorSuiteBase`:
-   positional deletes, deletion vectors (v3), equality deletes written with the Iceberg Java API,
-   a merge-on-read lineitem for Q1/Q6, and a `MERGE INTO` over a heavily mutated table run with the
-   plugin on and off whose results must match row for row. The JVM suite also asserts through
-   adapter counters that batches were normalized and columns (including dictionary strings) adapted
-   in place rather than copied.
 - Run on a quiet machine. A video call or a full build minutes earlier moved medians by up to 2x on
   the development laptop; a `spark` Q1 median far from the documented one (1123 ms at SF10) means
   the environment, not the code. Check `uptime` and the top CPU consumers before trusting a run.
@@ -354,6 +407,13 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 
 ## 7. Known gaps
 
+- Iceberg `MERGE INTO` itself is not accelerated: the rewritten plan projects
+  `monotonically_increasing_id()` and the struct `_partition` metadata column above the target scan,
+  so that project falls back. Reads over the merged table are.
+- String literals in predicates are not compiled (`unsupported literal type string`).
+- Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
+  covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
+  native read.
 - Group keys longer than 8 bytes arriving as plain strings are hashed and compared per row.
 - Selective predicates with scattered survivors (TPC-H Q6) lose to Spark's codegen over Spark's
   scan (0.84x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate. Over
@@ -363,15 +423,12 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   aggregate and a `RowToColumnarExec` below the Final. A columnar shuffle of our own is the
   natural next seam to fill (3.7).
 - The sort does not spill, and without Comet the global sort sits above Spark's row shuffle and
-  stays Spark's.
+  stays Spark's. Joins do not spill either (the build side is held in memory per task).
+- The build side of a broadcast join is Spark's `HashedRelation`, re-read into columns by every
+  task; a columnar broadcast exchange would read it once. Sort-merge joins are not converted.
+- Decimals wider than 18 digits, including every `sum` over a decimal of more than 8 digits and
+  the TPC-H price arithmetic, fall back.
 - AVX2/AVX-512 paths are tested emulated, never measured on real hardware.
 - `TpchRunner --keep-alive` leaves the session and the Spark UI up for inspection; the demo JVM's
   Jetty resets some parallel static-resource fetches under load, so reload the page if the tab's
   toggles do not react (jQuery failed to load).
-- Iceberg `MERGE INTO` itself is not accelerated: the rewritten plan projects
-  `monotonically_increasing_id()` and the struct `_partition` metadata column above the target scan,
-  so that project falls back. Reads over the merged table are.
-- String literals in predicates are not compiled (`unsupported literal type string`).
-- Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
-  covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
-  native read.
