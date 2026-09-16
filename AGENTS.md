@@ -244,10 +244,32 @@ A change is not done until all of the following that apply have run green, local
    the checksums differ is a correctness bug, not a performance result.
 6. Performance claims need evidence: a JMH number for a kernel change (`benchmarks` module,
    `-wi 2 -i 3 -w 1 -r 1 -f 1` is the convention in `docs/results.md`) or a TPC-H median plus a
-   JFR profile for an operator change (`JVM_EXTRA="-XX:StartFlightRecording=..."` with
-   `RESULTS_DIR=/tmp/...` so profiling runs stay out of the report). "It should be faster" is not
-   evidence; several intuitive changes in this project's history were slower (see the list of
-   reversed assumptions in `docs/results.md`).
+   JFR profile for an operator change. "It should be faster" is not evidence; several intuitive
+   changes in this project's history were slower (see the list of reversed assumptions in
+   `docs/results.md`).
+7. Unexpected results are profiled with Java Flight Recorder before they are explained. When a
+   number is worse than expected, or better in a way you cannot account for, do not write a
+   hypothesis into the docs or the code: record the run and read the profile first. The
+   procedure:
+
+   ```bash
+   JVM_EXTRA="-XX:StartFlightRecording=filename=/tmp/x.jfr,settings=profile,dumponexit=true" \
+   RESULTS_DIR=/tmp/profiling \
+   benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 <config> --queries q1 --warmup 2 --iterations 5
+   $JAVA_HOME/bin/jfr view hot-methods /tmp/x.jfr
+   $JAVA_HOME/bin/jfr print --events jdk.ExecutionSample --stack-depth 12 /tmp/x.jfr
+   ```
+
+   `RESULTS_DIR` keeps the profiling rows out of the report; `JVM_EXTRA` applies to the benchmark
+   JVMs only (the report JVM would otherwise overwrite the recording). Read the `[tpch]`
+   per-operator kernel times first, then the hot-method list, then the callers of any JDK-internal
+   frame near the top (`MemorySessionImpl.checkValidStateRaw`, `checkBounds`,
+   `isAlignedForElement` mean a `MemorySegment` access that the JIT did not hoist or inline: a
+   megamorphic call site, a segment from a different session per call, or `MemorySegment.mismatch`
+   on tiny ranges). Compare two configurations by recording both. The SF10 `comet-scan-vector`
+   regression (3.5) is the worked example: the first written explanation (thread competition,
+   batch size) was wrong, and the profile showed the real cause in one look. Only when the
+   profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
 Current counts: 78 kernel tests, 76 Spark tests (64 without the Comet profile). If a change lowers
 either number, explain why in the commit.

@@ -101,8 +101,17 @@ is stored as a tree-node tag; `VectorFallback.reasons(plan)` lists them.
 ### The Vector Acceleration tab
 
 `spark.plugins` also attaches a **Vector Acceleration** tab to the Spark UI (disable with
-`spark.vector.ui.enabled=false`). It lists every SQL execution and, per execution, draws the final
-physical plan as a DAG with each operator coloured by the engine that runs it:
+`spark.vector.ui.enabled=false`). It lists every SQL execution and how much of it was accelerated:
+
+![The Vector Acceleration tab listing TPC-H Q1 executions, each 89% accelerated](images/vector-ui.png)
+
+Per execution, it draws the final physical plan as a DAG with each operator coloured by the engine
+that runs it. This is TPC-H Q1 over Comet's scan with Comet's shuffle between our Partial and Final
+aggregates; the only operator left to Spark is the final `Sort`:
+
+![The plan of one Q1 execution: Comet scan, Vector filter, project and aggregates, the bridge into Comet's shuffle, and Spark's Sort](images/query-accel-details.png)
+
+The colours:
 
 | Colour | Engine | Counts as accelerated |
 |---|---|---|
@@ -228,6 +237,26 @@ the same rows (to 10 significant digits). Regenerate them without benchmarking w
 measured on an Apple M3 Pro; at SF10, Q1 runs 1.58x faster than Spark over Spark's own scan and
 1.86x over Comet's scan (Comet end to end: 1.59x), while the highly selective Q6 stays at 0.84x
 over Spark's scan.
+
+When a result is not what you expected, profile before theorising. Java Flight Recorder attaches
+to a benchmark JVM with one environment variable, and `RESULTS_DIR` keeps the profiling run out of
+the report:
+
+```bash
+JVM_EXTRA="-XX:StartFlightRecording=filename=/tmp/q1.jfr,settings=profile,dumponexit=true" \
+RESULTS_DIR=/tmp/profiling \
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 comet-scan-vector --queries q1 --warmup 2 --iterations 5
+$JAVA_HOME/bin/jfr view hot-methods /tmp/q1.jfr
+$JAVA_HOME/bin/jfr print --events jdk.ExecutionSample --stack-depth 12 /tmp/q1.jfr   # callers of a hot frame
+```
+
+Every performance finding in this project came out of such a recording rather than out of the
+median alone: the masked-reduction aggregate, triple string decoding, the two-lane shuffle table,
+and most recently a zero-copy configuration that was slower than a copying one because Comet's scan
+delivers plain strings where Spark's delivers dictionaries (`MemorySegment.mismatch` set-up was a
+third of the aggregate). The `[tpch]` lines the runner prints with per-operator kernel time are the
+first thing to read; the JFR hot-method list and the callers of any JDK-internal frame near the top
+(`checkValidStateRaw`, `checkBounds`) are the second.
 
 ### Vector API lessons
 

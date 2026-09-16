@@ -15,3 +15,4 @@ benchmarks/results/*.md
 !benchmarks/results/.gitkeep
 .DS_Store
 benchmarks/results/*.html
+dependency-reduced-pom.xml
