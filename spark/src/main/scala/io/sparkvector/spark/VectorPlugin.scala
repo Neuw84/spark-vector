@@ -9,7 +9,8 @@ import org.apache.spark.internal.Logging
 /**
  * Spark plugin entry point (`spark.plugins=io.sparkvector.spark.VectorPlugin`). The driver side
  * appends [[VectorSparkSessionExtensions]] to `spark.sql.extensions` so users need a single config
- * key; there is no executor-side component.
+ * key, and attaches the Vector Acceleration tab to the Spark UI; there is no executor-side
+ * component beyond the Comet adapter registration.
  *
  * The JVM must be started with `--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED`
  * on both driver and executors; the plugin fails fast if the Vector API module is missing.
@@ -26,6 +27,12 @@ class VectorPlugin extends SparkPlugin {
         ctx.conf().set(key, (existing :+ ext).mkString(","))
         logInfo(s"spark-vector: registered $ext in $key")
       }
+      // The UI tab needs the SparkContext, which only exists here.
+      val get: String => Option[String] = k => ctx.conf().getOption(k)
+      org.apache.spark.sql.vector.ui.VectorUi.attach(
+        sc,
+        enabled = VectorConf.uiEnabled(get),
+        retainedExecutions = VectorConf.uiRetainedExecutions(get))
       Collections.emptyMap()
     }
   }

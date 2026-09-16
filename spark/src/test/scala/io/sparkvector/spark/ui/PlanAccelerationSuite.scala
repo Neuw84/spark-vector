@@ -1,0 +1,83 @@
+package io.sparkvector.spark.ui
+
+import org.apache.spark.sql.catalyst.expressions.AttributeReference
+import org.apache.spark.sql.comet.{FakeCometScanExec, FakeCometShuffleExchangeExec}
+import org.apache.spark.sql.execution.{ColumnarToRowExec, SparkPlanInfo}
+import org.apache.spark.sql.types.LongType
+import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
+import org.scalatest.funsuite.AnyFunSuite
+
+/**
+ * Classification rules that do not need a SparkSession: Comet operators (matched by package, so
+ * they can be exercised without Comet installed) and the name-based path used for running queries.
+ */
+class PlanAccelerationSuite extends AnyFunSuite {
+
+  private val attrs = Seq(AttributeReference("a", LongType)())
+
+  test("operators in Comet's package are coloured as Comet") {
+    val plan = PlanAcceleration.fromPlan(FakeCometScanExec(attrs))
+    assert(plan.nodes.map(_.engine) === Seq(Engine.Comet))
+    // A Comet scan is a real acceleration, not plumbing, so a plan made of one qualifies.
+    assert(plan.fullyAccelerated)
+  }
+
+  test("a Comet exchange over a Comet scan is fully accelerated") {
+    val plan = PlanAcceleration.fromPlan(
+      FakeCometShuffleExchangeExec(FakeCometScanExec(attrs)))
+    assert(plan.countBy(Engine.Comet) === 2)
+    assert(plan.countBy(Engine.Spark) === 0)
+    assert(plan.fullyAccelerated)
+  }
+
+  test("a row transition is plumbing and does not make a plan accelerated on its own") {
+    val plan = PlanAcceleration.fromPlan(ColumnarToRowExec(FakeCometScanExec(attrs)))
+    assert(plan.countBy(Engine.Transition) === 1)
+    assert(plan.countBy(Engine.Comet) === 1)
+    assert(plan.operatorCount === 1, "the transition must not count as an operator")
+    assert(plan.fullyAccelerated)
+  }
+
+  test("the name-based path recognises our operators, Comet's and the bridge") {
+    def info(name: String, children: SparkPlanInfo*): SparkPlanInfo =
+      new SparkPlanInfo(name, name, children.toSeq, Map.empty, Nil)
+
+    val plan = PlanAcceleration.fromInfo(
+      info("CometShuffleExchange",
+        info("VectorToComet",
+          info("VectorHashAggregate",
+            info("VectorFilter",
+              info("Scan parquet"))))))
+
+    assert(plan.nodes.map(n => (n.name, n.engine)) === Seq(
+      ("CometShuffleExchange", Engine.Comet),
+      ("VectorToComet", Engine.Bridge),
+      ("VectorHashAggregate", Engine.Vector),
+      ("VectorFilter", Engine.Vector),
+      ("Scan parquet", Engine.ColumnarSource)))
+    assert(plan.fullyAccelerated)
+  }
+
+  test("wrappers are unwrapped so the graph shows real operators") {
+    def info(name: String, children: SparkPlanInfo*): SparkPlanInfo =
+      new SparkPlanInfo(name, name, children.toSeq, Map.empty, Nil)
+
+    val plan = PlanAcceleration.fromInfo(
+      info("AdaptiveSparkPlan",
+        info("WholeStageCodegen (1)",
+          info("Filter",
+            info("InputAdapter",
+              info("Scan parquet"))))))
+
+    assert(plan.nodes.map(_.name) === Seq("Filter", "Scan parquet"))
+    assert(!plan.fullyAccelerated, "a Spark filter is a missed operator")
+  }
+
+  test("edges point from child to parent") {
+    val plan = PlanAcceleration.fromPlan(
+      FakeCometShuffleExchangeExec(FakeCometScanExec(attrs)))
+    // Root is id 0, its child id 1, and the edge runs child -> parent.
+    assert(plan.edges === Seq(org.apache.spark.sql.vector.ui.PlanEdge(1, 0)))
+    assert(plan.toDotFile.contains("1->0"))
+  }
+}

@@ -13,6 +13,8 @@ object VectorConf {
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
+  val UiEnabled = "spark.vector.ui.enabled"
+  val UiRetainedExecutions = "spark.vector.ui.retainedExecutions"
 
   def isEnabled(conf: SQLConf): Boolean = bool(conf, Enabled, default = true)
   def filterEnabled(conf: SQLConf): Boolean = bool(conf, FilterEnabled, default = true)
@@ -28,4 +30,14 @@ object VectorConf {
 
   private def bool(conf: SQLConf, key: String, default: Boolean): Boolean =
     conf.getConfString(key, default.toString).trim.equalsIgnoreCase("true")
+
+  /**
+   * The UI tab is attached from the driver plugin, before any session exists, so these two are
+   * read from the [[org.apache.spark.SparkConf]] rather than a session's SQLConf.
+   */
+  def uiEnabled(get: String => Option[String]): Boolean =
+    get(UiEnabled).forall(_.trim.equalsIgnoreCase("true"))
+
+  def uiRetainedExecutions(get: String => Option[String]): Int =
+    get(UiRetainedExecutions).flatMap(v => scala.util.Try(v.trim.toInt).toOption).filter(_ > 0).getOrElse(100)
 }

@@ -1,0 +1,130 @@
+/*
+ * Styling for the spark-vector acceleration tab.
+ *
+ * The engine colours are the point of the page: one hue per execution engine, applied both to the
+ * legend swatches and to the DAG nodes (dagre-d3 copies a DOT node's `class` attribute onto the
+ * SVG group, so `.sv-engine-*` below reaches the node rectangles).
+ */
+
+.sv-engine-vector      { --sv-fill: #d5e8d4; --sv-stroke: #4f8a4f; }
+.sv-engine-comet       { --sv-fill: #dae8fc; --sv-stroke: #3a6ea5; }
+.sv-engine-bridge      { --sv-fill: #e1d5e7; --sv-stroke: #7d5a91; }
+.sv-engine-source      { --sv-fill: #d6ecec; --sv-stroke: #3f8f8f; }
+.sv-engine-spark       { --sv-fill: #f8f8f8; --sv-stroke: #999999; }
+.sv-engine-transition  { --sv-fill: #fff2cc; --sv-stroke: #bd9b3a; }
+
+/* ---------- legend ---------- */
+
+.sv-legend {
+  margin: 8px 0 12px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+
+.sv-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+
+.sv-legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  display: inline-block;
+  background-color: var(--sv-fill);
+  border: 1px solid var(--sv-stroke);
+}
+
+.sv-legend-label { font-size: 12px; color: #333; }
+
+/* ---------- badges ---------- */
+
+.sv-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sv-badge-full {
+  background-color: #d5e8d4;
+  border: 1px solid #4f8a4f;
+  color: #2c5c2c;
+}
+
+.sv-badge-partial {
+  background-color: #fff2cc;
+  border: 1px solid #bd9b3a;
+  color: #6b5417;
+}
+
+/* ---------- page furniture ---------- */
+
+.sv-summary { margin: 4px 0 8px 0; font-size: 13px; }
+.sv-summary li { margin-bottom: 2px; }
+.sv-muted { color: #777; font-size: 12px; }
+.sv-empty { color: #777; font-style: italic; margin: 16px 0; }
+.sv-section { margin-top: 18px; }
+.sv-table { font-size: 13px; }
+
+.sv-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sv-header-badge { padding-top: 4px; }
+
+.sv-counts { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+
+.sv-count {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  background-color: var(--sv-fill);
+  border: 1px solid var(--sv-stroke);
+  color: #333;
+  white-space: nowrap;
+}
+
+/* ---------- the DAG ---------- */
+
+.sv-plan-graph {
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  background-color: #fff;
+  overflow: auto;
+  padding: 8px;
+}
+
+.sv-plan-graph svg { display: block; }
+
+/* dagre-d3 puts our DOT `class` on the node group; colour its rectangle from that. */
+.sv-plan-graph g.node rect {
+  fill: var(--sv-fill, #f8f8f8);
+  stroke: var(--sv-stroke, #999999);
+  stroke-width: 1.5px;
+}
+
+/* An operator left to Spark gets a dashed outline as well as a pale fill, so the plans that are
+   not fully accelerated are recognisable without relying on colour alone. */
+.sv-plan-graph g.node.sv-engine-spark rect {
+  stroke-dasharray: 5, 3;
+}
+
+.sv-plan-graph g.node text {
+  font-family: monospace;
+  font-size: 12px;
+  fill: #222;
+}
+
+.sv-plan-graph g.edgePath path {
+  stroke: #888;
+  stroke-width: 1.5px;
+  fill: none;
+}
+
+.sv-plan-graph g.edgePath marker path { fill: #888; stroke: none; }
