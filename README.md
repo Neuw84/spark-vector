@@ -228,7 +228,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Conditionals | `CASE WHEN ... [ELSE] END`, `IF`, `COALESCE`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` over any supported type, with `NULL`, numeric, string and boolean literal branches; a null condition counts as false, later branches are evaluated only where earlier ones did not match | conditionals producing wide decimals or nested types |
 | Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `min`, `max`, `avg`, `first(x, true)` in every aggregate mode (`Partial`, `PartialMerge`, `Final`, `Complete`), with `FILTER` clauses, `DISTINCT` (Spark's rewrites, incl. TPC-H Q16's `count(distinct)`) and keys-only aggregates (`SELECT DISTINCT`, `UNION`); `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal | `DISTINCT`, `FILTER` (Partial), double keys, PartialMerge/Complete modes, wider decimal sums, other functions |
 | Sort | `SORT BY`/`ORDER BY` over a columnar child, every supported type as key, in memory | sorts over Spark's row shuffle (kept by Spark), spilling |
-| Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti, each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
+| Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti, existence (`EXISTS` as a value), each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
 
 ## Benchmarks
 

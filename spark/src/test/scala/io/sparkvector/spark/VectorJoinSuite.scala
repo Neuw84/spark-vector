@@ -121,6 +121,32 @@ class VectorJoinSuite extends VectorQuerySuite {
     assert(planned.isLeft && planned.left.toOption.get.contains("full outer join over a broadcast"), planned.toString)
   }
 
+  test("existence join: EXISTS used as a value emits every row plus a boolean") {
+    import org.apache.spark.sql.catalyst.plans.ExistenceJoin
+    def isExistence(df: org.apache.spark.sql.DataFrame): Boolean =
+      nodesOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec](df).exists(_.joinType.isInstanceOf[ExistenceJoin]) ||
+        nodesOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec](df).exists(_.joinType.isInstanceOf[ExistenceJoin])
+    // OR of two EXISTS: Spark plans two ExistenceJoins feeding one filter. Broadcast at this size.
+    val or = checkVectorized("SELECT tk.i FROM tk WHERE tk.i < 500 AND (EXISTS (SELECT 1 FROM dim WHERE dim.di = tk.i50 AND dim.weight > 60) OR EXISTS (SELECT 1 FROM dim WHERE dim.dl = tk.l))", Seq(BHJ))
+    assert(isExistence(or), finalPlan(or).treeString)
+    // CASE WHEN EXISTS as a projected value: the boolean itself is visible, false (not null) where nothing matched,
+    // one boolean per streamed row even though di has duplicates on the build side.
+    val cw = checkVectorized("SELECT tk.i, CASE WHEN EXISTS (SELECT 1 FROM dim WHERE dim.di = tk.i50 AND dim.weight > 60) THEN 'hit' ELSE 'miss' END AS tag FROM tk", Seq(BHJ))
+    assert(isExistence(cw), finalPlan(cw).treeString)
+    assert(cw.count() === 20000 && cw.filter("tag = 'hit'").count() > 0 && cw.filter("tag = 'miss'").count() > 0)
+    // Null keys never match: rows with a null l report false, and appear once.
+    val nk = checkVectorized("SELECT tk.i, tk.l, EXISTS (SELECT 1 FROM dim WHERE dim.dl = tk.l) AS e FROM tk WHERE tk.i < 2000", Seq(BHJ))
+    assert(isExistence(nk), finalPlan(nk).treeString)
+    assert(nk.filter("l IS NULL AND e").count() === 0 && nk.filter("l IS NULL").count() > 0)
+    // A non-equi condition alongside the key: evaluated per candidate and ANDed into the match.
+    checkVectorized("SELECT count(*), count_if(e) FROM (SELECT EXISTS (SELECT 1 FROM dim WHERE dim.di = tk.i50 AND dim.weight > tk.d) AS e FROM tk)", Seq(BHJ, classOf[VectorHashAggregateExec]))
+    // The shuffled hash join plans it too.
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "false") {
+      val shj = checkVectorized("SELECT tk.i FROM tk WHERE tk.i < 500 AND (EXISTS (SELECT /*+ SHUFFLE_HASH(dim) */ 1 FROM dim WHERE dim.di = tk.i50 AND dim.weight > 60) OR tk.i < 10)", Seq(SHJ))
+      assert(isExistence(shj), finalPlan(shj).treeString)
+    }
+  }
+
   test("unsupported joins fall back with a reason") {
     checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.d = dim.weight", Seq(BHJ), "join key type double")
     checkFallback("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%y%z'", Seq(BHJ), "unsupported expression")
