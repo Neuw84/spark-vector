@@ -146,6 +146,65 @@ public final class GroupKeyTable {
     return size;
   }
 
+  /**
+   * Probes without inserting: {@code outIds[i]} is the id of the group whose key equals row
+   * {@code i}, or {@code -1} if none exists (or the row is not selected). This is a hash join's
+   * probe side over a table built with {@link #assign}; returns the number of rows that matched.
+   */
+  public int lookup(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection) {
+    VectorBuffers[] encoded = encodeShortStrings(keys, n);
+    if (encoded != null) {
+      keys = encoded;
+    }
+    if (hashScratch.length < n) {
+      hashScratch = new int[Math.max(n, hashScratch.length * 2)];
+    }
+    int[] hashes = hashScratch;
+    HashKernels.init(hashes, n);
+    for (VectorBuffers key : keys) {
+      HashKernels.mixColumn(key, hashes);
+    }
+    int matched = 0;
+    if (selection == null) {
+      for (int i = 0; i < n; i++) {
+        int gid = lookupOnly(keys, i, HashKernels.finish(hashes[i]));
+        outIds[i] = gid;
+        if (gid >= 0) {
+          matched++;
+        }
+      }
+    } else {
+      Arrays.fill(outIds, 0, n, -1);
+      for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+        long bits = Bitmap.wordAt(selection, w, n);
+        while (bits != 0L) {
+          int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+          bits &= bits - 1;
+          int gid = lookupOnly(keys, i, HashKernels.finish(hashes[i]));
+          outIds[i] = gid;
+          if (gid >= 0) {
+            matched++;
+          }
+        }
+      }
+    }
+    return matched;
+  }
+
+  private int lookupOnly(VectorBuffers[] keys, int row, int hash) {
+    int pos = hash & mask;
+    while (true) {
+      int gid = slots[pos];
+      if (gid < 0) {
+        return -1;
+      }
+      if (groupHashes[gid] == hash && equals(gid, keys, row)) {
+        return gid;
+      }
+      pos = (pos + 1) & mask;
+    }
+  }
+
   /** Product of (dictionary size + 1) over the keys, or 0 if any key is not dictionary encoded. */
   private static long dictionaryCombinations(VectorBuffers[] keys) {
     if (keys.length == 0) {

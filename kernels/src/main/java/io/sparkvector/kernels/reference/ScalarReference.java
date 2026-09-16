@@ -433,4 +433,129 @@ public final class ScalarReference {
     }
     outOffsets.set(VectorBuffers.LE_INT, (long) o << 2, pos);
   }
+
+  // ---------------------------------------------------------------- decimals (BigDecimal oracle)
+
+  private static java.math.BigDecimal decimal(VectorBuffers a, int i, int scale) {
+    return new java.math.BigDecimal(java.math.BigInteger.valueOf(a.getLong(i)), scale);
+  }
+
+  /** {@code round_half_up(a / 10^power)}. */
+  public static void divPow10HalfUp(VectorBuffers a, int power, MemorySegment out) {
+    for (int i = 0; i < a.length(); i++) {
+      long v = decimal(a, i, power).setScale(0, java.math.RoundingMode.HALF_UP).longValueExact();
+      out.set(VectorBuffers.LE_LONG, (long) i << 3, v);
+    }
+  }
+
+  /** {@code |a| > bound} as a bitmap; returns the count. */
+  public static int outOfRange(VectorBuffers a, long bound, MemorySegment outBits) {
+    int count = 0;
+    for (int i = 0; i < a.length(); i++) {
+      long v = a.getLong(i);
+      boolean out = v > bound || v < -bound;
+      Bitmap.setTo(outBits, i, out);
+      if (out) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Spark's decimal division: {@code BigDecimal.divide(divisor, 39, HALF_UP)} then {@code
+   * setScale(resultScale, HALF_UP)}; zero divisors give 0, results beyond the precision are flagged.
+   */
+  public static int divide(
+      VectorBuffers a, VectorBuffers b, int s1, int s2, int resultScale, int resultPrecision,
+      MemorySegment out, MemorySegment overflowBits) {
+    int count = 0;
+    java.math.BigInteger bound = java.math.BigInteger.TEN.pow(resultPrecision).subtract(java.math.BigInteger.ONE);
+    for (int i = 0; i < a.length(); i++) {
+      long result = 0L;
+      boolean overflow = false;
+      if (b.getLong(i) != 0L) {
+        java.math.BigInteger u =
+            decimal(a, i, s1).divide(decimal(b, i, s2), 39, java.math.RoundingMode.HALF_UP)
+                .setScale(resultScale, java.math.RoundingMode.HALF_UP).unscaledValue();
+        if (u.abs().compareTo(bound) > 0) {
+          overflow = true;
+        } else {
+          result = u.longValueExact();
+        }
+      }
+      Bitmap.setTo(overflowBits, i, overflow);
+      if (overflow) {
+        count++;
+      }
+      out.set(VectorBuffers.LE_LONG, (long) i << 3, result);
+    }
+    return count;
+  }
+
+  /** {@code BigDecimal.doubleValue()}. */
+  public static void toDouble(VectorBuffers a, int scale, MemorySegment out) {
+    for (int i = 0; i < a.length(); i++) {
+      out.set(VectorBuffers.LE_DOUBLE, (long) i << 3, decimal(a, i, scale).doubleValue());
+    }
+  }
+
+  /** Integer to decimal: {@code v * 10^scale}, flagged when it exceeds the precision. */
+  public static int fromIntegral(VectorBuffers a, int precision, int scale, MemorySegment out, MemorySegment invalidBits) {
+    int count = 0;
+    java.math.BigInteger bound = java.math.BigInteger.TEN.pow(precision).subtract(java.math.BigInteger.ONE);
+    for (int i = 0; i < a.length(); i++) {
+      long v = a.type() == VecType.INT32 ? a.getInt(i) : a.getLong(i);
+      java.math.BigInteger u = java.math.BigInteger.valueOf(v).multiply(java.math.BigInteger.TEN.pow(scale));
+      boolean bad = u.abs().compareTo(bound) > 0;
+      Bitmap.setTo(invalidBits, i, bad);
+      if (bad) {
+        count++;
+      }
+      out.set(VectorBuffers.LE_LONG, (long) i << 3, bad ? 0L : u.longValueExact());
+    }
+    return count;
+  }
+
+  // ---------------------------------------------------------------- gather
+
+  /** {@code out[o] = in[idx[from + o]]}; {@code -1} is a null. */
+  public static void gatherFixed(
+      VectorBuffers in, int[] idx, int from, int to, MemorySegment outData, MemorySegment outValidity) {
+    VecType type = in.isDictionaryEncoded() ? VecType.INT32 : in.type();
+    for (int o = 0; o < to - from; o++) {
+      int i = idx[from + o];
+      boolean valid = i >= 0 && !in.isNull(i);
+      switch (type) {
+        case INT32 -> outData.set(VectorBuffers.LE_INT, (long) o << 2, i < 0 ? 0 : in.getInt(i));
+        case INT64 -> outData.set(VectorBuffers.LE_LONG, (long) o << 3, i < 0 ? 0L : in.getLong(i));
+        case FLOAT64 -> outData.set(VectorBuffers.LE_DOUBLE, (long) o << 3, i < 0 ? 0.0 : in.getDouble(i));
+        case BOOL -> Bitmap.setTo(outData, o, i >= 0 && in.getBoolean(i));
+        default -> throw new IllegalArgumentException("not fixed width: " + type);
+      }
+      if (outValidity != null) {
+        Bitmap.setTo(outValidity, o, valid);
+      }
+    }
+  }
+
+  public static void gatherUtf8(
+      VectorBuffers in, int[] idx, int from, int to,
+      MemorySegment outOffsets, MemorySegment outData, MemorySegment outValidity) {
+    int pos = 0;
+    for (int o = 0; o < to - from; o++) {
+      int i = idx[from + o];
+      outOffsets.set(VectorBuffers.LE_INT, (long) o << 2, pos);
+      boolean valid = i >= 0 && !in.isNull(i);
+      if (valid) {
+        byte[] bytes = in.getUtf8Bytes(i);
+        MemorySegment.copy(bytes, 0, outData, ValueLayout.JAVA_BYTE, pos, bytes.length);
+        pos += bytes.length;
+      }
+      if (outValidity != null) {
+        Bitmap.setTo(outValidity, o, valid);
+      }
+    }
+    outOffsets.set(VectorBuffers.LE_INT, (long) (to - from) << 2, pos);
+  }
 }

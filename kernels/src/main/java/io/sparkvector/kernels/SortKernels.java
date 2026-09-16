@@ -5,8 +5,8 @@ import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 
 /**
- * Columnar sort: a permutation of row indices ordered by one or more key columns, and gathers that
- * apply it to output columns.
+ * Columnar sort: a permutation of row indices ordered by one or more key columns; {@link
+ * GatherKernels} applies it to the output columns.
  *
  * <p>The sort is least-significant-key-first over order-preserving 32-bit key passes. Each pass
  * packs {@code (key, current position)} into a {@code long} and sorts the array with {@link
@@ -286,84 +286,5 @@ public final class SortKernels {
     }
     return Integer.compare(
         data.get(ValueLayout.JAVA_BYTE, sa + mismatch) & 0xFF, data.get(ValueLayout.JAVA_BYTE, sb + mismatch) & 0xFF);
-  }
-
-  // ---------------------------------------------------------------------------------- gathers
-
-  /**
-   * Writes rows {@code perm[from..to)} of a fixed-width or BOOL column into {@code outData} (and
-   * {@code outValidity}, all bits set when the input has no nulls).
-   */
-  public static void gatherFixed(
-      VectorBuffers in, int[] perm, int from, int to, MemorySegment outData, MemorySegment outValidity) {
-    int count = to - from;
-    MemorySegment data = in.data();
-    switch (in.type()) {
-      case INT32 -> {
-        for (int o = 0; o < count; o++) {
-          outData.set(VectorBuffers.LE_INT, (long) o << 2, data.get(VectorBuffers.LE_INT, (long) perm[from + o] << 2));
-        }
-      }
-      case INT64, FLOAT64 -> {
-        for (int o = 0; o < count; o++) {
-          outData.set(VectorBuffers.LE_LONG, (long) o << 3, data.get(VectorBuffers.LE_LONG, (long) perm[from + o] << 3));
-        }
-      }
-      case BOOL -> {
-        for (int o = 0; o < count; o++) {
-          Bitmap.setTo(outData, o, Bitmap.isSet(data, perm[from + o]));
-        }
-      }
-      default -> throw new IllegalArgumentException("not fixed width: " + in.type());
-    }
-    gatherValidity(in, perm, from, to, outValidity);
-  }
-
-  /** Bytes the gathered rows of a plain UTF8 column occupy. */
-  public static long gatherUtf8Bytes(VectorBuffers in, int[] perm, int from, int to) {
-    MemorySegment off = in.offsets();
-    long total = 0;
-    for (int o = from; o < to; o++) {
-      int row = perm[o];
-      total += off.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - off.get(VectorBuffers.LE_INT, (long) row << 2);
-    }
-    return total;
-  }
-
-  /** Writes rows {@code perm[from..to)} of a plain UTF8 column. */
-  public static void gatherUtf8(
-      VectorBuffers in,
-      int[] perm,
-      int from,
-      int to,
-      MemorySegment outOffsets,
-      MemorySegment outData,
-      MemorySegment outValidity) {
-    MemorySegment off = in.offsets();
-    MemorySegment data = in.data();
-    int count = to - from;
-    int pos = 0;
-    outOffsets.set(VectorBuffers.LE_INT, 0, 0);
-    for (int o = 0; o < count; o++) {
-      int row = perm[from + o];
-      int s = off.get(VectorBuffers.LE_INT, (long) row << 2);
-      int len = off.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - s;
-      MemorySegment.copy(data, s, outData, pos, len);
-      pos += len;
-      outOffsets.set(VectorBuffers.LE_INT, (long) (o + 1) << 2, pos);
-    }
-    gatherValidity(in, perm, from, to, outValidity);
-  }
-
-  private static void gatherValidity(VectorBuffers in, int[] perm, int from, int to, MemorySegment outValidity) {
-    int count = to - from;
-    if (!in.hasNulls()) {
-      Bitmap.fill(outValidity, count, true);
-      return;
-    }
-    MemorySegment validity = in.validity();
-    for (int o = 0; o < count; o++) {
-      Bitmap.setTo(outValidity, o, Bitmap.isSet(validity, perm[from + o]));
-    }
   }
 }

@@ -3,6 +3,7 @@ package io.sparkvector.spark.arrow;
 import io.sparkvector.kernels.Bitmap;
 import io.sparkvector.kernels.BitmapKernels;
 import io.sparkvector.kernels.CompactKernels;
+import io.sparkvector.kernels.GatherKernels;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
 import java.lang.foreign.MemorySegment;
@@ -195,6 +196,42 @@ public final class ArrowOutput {
     }
     v.setValueCount(1);
     return new VectorArrowColumnVector(v);
+  }
+
+  /**
+   * Gathers rows {@code idx[from..to)} of {@code in} into a new Arrow vector; an index of {@code -1}
+   * becomes a null (outer-join padding). Dictionary-encoded strings are decoded: the output is a
+   * plain vector Spark can read, and the gathered rows come from a whole partition whose chunks
+   * never shared a dictionary anyway.
+   */
+  public static ColumnVector gather(
+      String name, DataType dt, VectorBuffers in, int[] idx, int from, int to, BufferAllocator allocator) {
+    int count = to - from;
+    boolean padded = false;
+    for (int o = from; o < to && !padded; o++) {
+      padded = idx[o] < 0;
+    }
+    boolean nulls = in.hasNulls() || padded;
+    if (in.type() == VecType.UTF8) {
+      VectorBuffers plain = in.isDictionaryEncoded() ? decodeDictionary(in) : in;
+      long bytes = GatherKernels.gatherUtf8Bytes(plain, idx, from, to);
+      ArrowVectorBuffers out = allocateUtf8(name, count, bytes, allocator);
+      GatherKernels.gatherUtf8(plain, idx, from, to, out.offsets(), out.data(), nulls ? out.validity() : null);
+      return finish(out, count, !nulls);
+    }
+    ArrowVectorBuffers out = allocateFixed(name, dt, count, allocator);
+    GatherKernels.gatherFixed(in, idx, from, to, out.data(), nulls ? out.validity() : null);
+    return finish(out, count, !nulls);
+  }
+
+  /** A plain UTF8 view of a dictionary-encoded column, built in a temporary arena-free copy. */
+  private static VectorBuffers decodeDictionary(VectorBuffers in) {
+    // The gather reads a handful of rows out of a whole column; decoding through a scratch
+    // ColumnBuilder keeps GatherKernels ignorant of dictionaries.
+    java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofAuto();
+    io.sparkvector.kernels.ColumnBuilder b = new io.sparkvector.kernels.ColumnBuilder(arena, VecType.UTF8, in.length());
+    b.append(in);
+    return b.view();
   }
 
   /** Copies a whole column (no selection) into a new Arrow vector. */

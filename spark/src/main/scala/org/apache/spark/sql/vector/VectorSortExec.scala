@@ -2,9 +2,7 @@ package org.apache.spark.sql.vector
 
 import java.lang.foreign.Arena
 
-import scala.collection.mutable.ArrayBuffer
-
-import io.sparkvector.kernels.{ChunkKernels, SortKernels, VecType, VectorBuffers}
+import io.sparkvector.kernels.{ColumnBuilder, SortKernels, VectorBuffers}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.{ArrowOutput, VectorAllocators}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
@@ -20,11 +18,10 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 /**
  * Columnar replacement for SortExec.
  *
- * A blocking operator: every batch of the partition is copied into memory the operator owns
- * (Spark's columnar contract lets the producer reuse a batch as soon as the next one is requested),
- * the copies are joined into one column per output attribute and per computed key, a permutation
- * is computed by [[SortKernels.sortIndices]] and the output is gathered through it in batches of
- * 4096 rows into Arrow vectors. Sort keys that are plain column references reuse the output
+ * A blocking operator: every batch of the partition is appended to one [[ColumnBuilder]] per
+ * output attribute and per computed key (Spark's columnar contract lets the producer reuse a batch
+ * as soon as the next one is requested), a permutation is computed by [[SortKernels.sortIndices]]
+ * and the output is gathered through it in batches of 4096 rows into Arrow vectors. Sort keys that are plain column references reuse the output
  * column rather than being copied twice.
  *
  * Same distribution contract as SortExec: a global sort requires the range partitioning the
@@ -112,8 +109,8 @@ private[vector] class VectorSortIterator(
   private def drainAndSort(): Unit = {
     if (sorted) return
     sorted = true
-    val columnChunks = Array.fill(numColumns)(new ArrayBuffer[VectorBuffers]())
-    val keyChunks = Array.fill(computedKeys.length)(new ArrayBuffer[VectorBuffers]())
+    var columnBuilders: Array[ColumnBuilder] = null
+    var keyBuilders: Array[ColumnBuilder] = null
     while (input.hasNext) {
       val batch = input.next()
       if (batch.numRows() > 0) {
@@ -122,14 +119,18 @@ private[vector] class VectorSortIterator(
           EvalContexts.withBatch(batch) { ctx =>
             val count = ctx.selectedCount
             if (count > 0) {
+              if (columnBuilders == null) {
+                columnBuilders = Array.tabulate(numColumns)(c => new ColumnBuilder(arena, ctx.input(c).`type`(), count))
+                keyBuilders = Array.tabulate(computedKeys.length)(k => new ColumnBuilder(arena, keyExprs(computedKeys(k)).vecType, count))
+              }
               var c = 0
               while (c < numColumns) {
-                columnChunks(c) += ChunkKernels.materialize(ctx.input(c), ctx.selection, count, arena)
+                columnBuilders(c).append(ctx.input(c), ctx.selection, count)
                 c += 1
               }
               var k = 0
               while (k < computedKeys.length) {
-                keyChunks(k) += ChunkKernels.materialize(keyExprs(computedKeys(k)).eval(ctx), ctx.selection, count, arena)
+                keyBuilders(k).append(keyExprs(computedKeys(k)).eval(ctx), ctx.selection, count)
                 k += 1
               }
               total += count
@@ -140,8 +141,8 @@ private[vector] class VectorSortIterator(
     }
     metrics.timed {
       if (total > 0) {
-        columns = columnChunks.map(chunks => ChunkKernels.concat(chunks.toArray, total, arena))
-        val computed = keyChunks.map(chunks => ChunkKernels.concat(chunks.toArray, total, arena))
+        columns = columnBuilders.map(_.view())
+        val computed = keyBuilders.map(_.view())
         val keys = new Array[VectorBuffers](keyExprs.length)
         var computedIdx = 0
         var k = 0
@@ -171,18 +172,7 @@ private[vector] class VectorSortIterator(
       var c = 0
       while (c < numColumns) {
         val (name, dt) = outputAttrs(c)
-        val in = columns(c)
-        out(c) =
-          if (in.`type`() == VecType.UTF8) {
-            val bytes = SortKernels.gatherUtf8Bytes(in, permutation, from, to)
-            val o = ArrowOutput.allocateUtf8(name, count, bytes, allocator)
-            SortKernels.gatherUtf8(in, permutation, from, to, o.offsets(), o.data(), o.validity())
-            ArrowOutput.finish(o, count, false)
-          } else {
-            val o = ArrowOutput.allocateFixed(name, dt, count, allocator)
-            SortKernels.gatherFixed(in, permutation, from, to, o.data(), o.validity())
-            ArrowOutput.finish(o, count, false)
-          }
+        out(c) = ArrowOutput.gather(name, dt, columns(c), permutation, from, to, allocator)
         c += 1
       }
     }

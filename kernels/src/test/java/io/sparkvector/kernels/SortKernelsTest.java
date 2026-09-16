@@ -194,15 +194,15 @@ class SortKernelsTest {
         int count = to - from;
         MemorySegment d = ArrowLayout.allocateData(arena, VecType.FLOAT64, count);
         MemorySegment v = ArrowLayout.allocateBitmap(arena, count);
-        SortKernels.gatherFixed(doubles, perm, from, to, d, v);
+        GatherKernels.gatherFixed(doubles, perm, from, to, d, v);
         MemorySegment b = ArrowLayout.allocateBitmap(arena, count);
         MemorySegment bv = ArrowLayout.allocateBitmap(arena, count);
-        SortKernels.gatherFixed(boolCol, perm, from, to, b, bv);
-        long bytes = SortKernels.gatherUtf8Bytes(strCol, perm, from, to);
+        GatherKernels.gatherFixed(boolCol, perm, from, to, b, bv);
+        long bytes = GatherKernels.gatherUtf8Bytes(strCol, perm, from, to);
         MemorySegment off = ArrowLayout.allocateOffsets(arena, count);
         MemorySegment sd = ArrowLayout.allocateBytes(arena, bytes);
         MemorySegment sv = ArrowLayout.allocateBitmap(arena, count);
-        SortKernels.gatherUtf8(strCol, perm, from, to, off, sd, sv);
+        GatherKernels.gatherUtf8(strCol, perm, from, to, off, sd, sv);
         VectorBuffers gatheredStrings = SegmentVectorBuffers.utf8(count, sv, off, sd);
         for (int o = 0; o < count; o++) {
           int row = perm[from + o];
@@ -236,12 +236,11 @@ class SortKernelsTest {
       Bitmap.set(sel, 0);
       Bitmap.set(sel, 2);
       Bitmap.set(sel, 4);
-      VectorBuffers[] chunks = {
-        ChunkKernels.materialize(ArrowLayout.ofStrings(arena, c1), null, 4, arena),
-        ChunkKernels.materialize(c2, null, 3, arena),
-        ChunkKernels.materialize(ArrowLayout.ofStrings(arena, c3), sel, 3, arena)
-      };
-      VectorBuffers all = ChunkKernels.concat(chunks, 10, arena);
+      ColumnBuilder builder = new ColumnBuilder(arena, VecType.UTF8, 4);
+      builder.append(ArrowLayout.ofStrings(arena, c1));
+      builder.append(c2);
+      builder.append(ArrowLayout.ofStrings(arena, c3), sel, 3);
+      VectorBuffers all = builder.view();
       List<String> expected = new ArrayList<>(List.of("x"));
       expected.add(null);
       expected.addAll(List.of("yy", "zzz", "A"));
@@ -261,9 +260,10 @@ class SortKernelsTest {
       boolean[] nulls2 = TestData.nulls(rnd, n2, 0.3);
       VectorBuffers d1 = TestData.doubles(arena, rnd, n1, null);
       VectorBuffers d2 = TestData.doubles(arena, rnd, n2, nulls2);
-      VectorBuffers joined = ChunkKernels.concat(
-          new VectorBuffers[] {ChunkKernels.materialize(d1, null, n1, arena), ChunkKernels.materialize(d2, null, n2, arena)},
-          n1 + n2, arena);
+      ColumnBuilder doubles2 = new ColumnBuilder(arena, VecType.FLOAT64, 8);
+      doubles2.append(d1);
+      doubles2.append(d2);
+      VectorBuffers joined = doubles2.view();
       for (int i = 0; i < n1; i++) {
         assertEquals(d1.getDouble(i), joined.getDouble(i));
         assertTrue(!joined.isNull(i));
