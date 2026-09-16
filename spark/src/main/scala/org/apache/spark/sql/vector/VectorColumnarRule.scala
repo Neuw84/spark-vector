@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{CollectLimitExec, ColumnarRule, FilterExec, GlobalLimitExec, LocalLimitExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec}
+import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, FilterExec, GlobalLimitExec, LocalLimitExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
@@ -70,6 +70,17 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
               if (failures.isEmpty) VectorProjectExec(projectList, child)
               else fallback(p, failures.mkString("; "))
+          }
+
+        case u: UnionExec if VectorConf.unionEnabled(conf) =>
+          // Columnar whatever the children are, as long as one of them is: Spark's transitions
+          // convert the row children through RowToColumnarExec below us.
+          VectorStructuralPlanner.planUnion(u).fold(reason => fallback(u, reason), v => v)
+
+        case c: CoalesceExec if VectorConf.coalesceEnabled(conf) =>
+          columnarInputReason(c.child) match {
+            case Some(reason) => fallback(c, reason)
+            case None => VectorStructuralPlanner.planCoalesce(c).fold(reason => fallback(c, reason), v => v)
           }
 
         case l: LocalLimitExec if VectorConf.limitEnabled(conf) =>
@@ -211,7 +222,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * its own evaluation. Anything else (Spark operators, exchanges) needs dense batches.
    */
   private def markSelectionProducers(plan: SparkPlan): SparkPlan = plan.transformDown {
-    case parent: VectorPlan =>
+    case parent: VectorPlan if !parent.isInstanceOf[VectorPassThrough] =>
       parent.withNewChildren(parent.children.map {
         case f: VectorFilterExec if !f.emitSelection => f.copy(emitSelection = true)
         case p: VectorProjectExec if !p.emitSelection => p.copy(emitSelection = true)

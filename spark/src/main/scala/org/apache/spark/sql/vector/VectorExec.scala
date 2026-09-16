@@ -38,3 +38,11 @@ trait VectorExec extends UnaryExecNode with VectorPlan
 
 /** A spark-vector operator with two children (joins). */
 trait VectorBinaryExec extends BinaryExecNode with VectorPlan
+
+/**
+ * A spark-vector operator that forwards its children's batches unchanged (union, coalesce). It
+ * evaluates nothing, so a selection a child filter forwarded would reach whatever sits above --
+ * possibly a Spark operator that cannot read one; the rule therefore does not mark the children of
+ * a pass-through operator as selection producers and they compact instead.
+ */
+trait VectorPassThrough extends VectorPlan

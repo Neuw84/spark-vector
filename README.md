@@ -23,7 +23,7 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 | Module | Language | Contents |
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), SIMD kernels: compare, bitmap logic, compaction, arithmetic, decimal rescaling and division, casts, reductions (plain and overflow-checked), group hashing and key table, grouped accumulators, sort, gather, column builder; scalar references used as test oracles |
-| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorTakeOrderedAndProjectExec` / `VectorLocalLimitExec` / `VectorGlobalLimitExec` / `VectorCollectLimitExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
+| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorTakeOrderedAndProjectExec` / `VectorLocalLimitExec` / `VectorGlobalLimitExec` / `VectorCollectLimitExec` / `VectorUnionExec` / `VectorCoalesceExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (all 22 queries) |
 | `spark-sql-tests/` | Scala 2.13 | Spark's own SQL golden-file suite run with the plugin (profile `spark-sql-tests`, on demand only; see below) |
 
@@ -66,6 +66,8 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (in memory, no spill) |
 | `spark.vector.exec.takeOrdered.enabled` | convert `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT`) over a columnar child; the per-partition top-N is columnar, the final merge of at most `limit` rows per partition goes through Spark's single-partition shuffle |
 | `spark.vector.exec.limit.enabled` | convert `LocalLimitExec` / `GlobalLimitExec` / `CollectLimitExec` over a columnar child (no offset); batches pass through until the boundary, the collect limit's final take goes through Spark's single-partition shuffle |
+| `spark.vector.exec.union.enabled` | convert `UnionExec` when at least one child is columnar (row children go through Spark's `RowToColumnarExec`) |
+| `spark.vector.exec.coalesce.enabled` | convert `CoalesceExec` over a columnar child (no shuffle, batches forwarded) |
 | `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
@@ -351,6 +353,13 @@ whole batches through until the boundary and compact only the batch that crosses
 is pulled from the child), and `VectorCollectLimitExec` -- the operator a query ending in `LIMIT` plans
 to -- does that cut per partition and then takes the first `n` rows through Spark's single-partition
 shuffle. `spark.vector.exec.limit.enabled` turns the three off; `OFFSET` falls back.
+
+Two structural operators keep a columnar chain whole without computing anything. `VectorUnionExec`
+concatenates its children's batches and is columnar as soon as one child is -- Spark's own union only is
+when every child is, so a `VALUES` side or a row shuffle used to drop the whole union to rows; Spark's
+transitions convert such a child through `RowToColumnarExec` below us. `VectorCoalesceExec` forwards the
+child's batches through a shuffle-free `coalesce(n)`. `spark.vector.exec.union.enabled` and
+`spark.vector.exec.coalesce.enabled` turn them off.
 
 ### Decimals
 
