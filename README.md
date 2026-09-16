@@ -169,18 +169,23 @@ TPC-H Q1 and Q6 (decimals replaced by doubles, generated with DuckDB):
 
 ```bash
 brew install duckdb
-benchmarks/scripts/gen-tpch.sh 1                      # benchmarks/data/sf1/lineitem
+benchmarks/scripts/gen-tpch.sh 1                      # benchmarks/data/sf1/lineitem  (6M rows, 207 MB)
+benchmarks/scripts/gen-tpch.sh 10                     # benchmarks/data/sf10/lineitem (60M rows, 2.1 GB)
 mvn -DskipTests install
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # spark + vector
 COMET_JAR=/path/to/comet-spark-spark4.1_2.13-1.0.0.jar \
-benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # + comet-scan, comet-scan-vector, comet-scan-vector-shuffle, comet
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf10   # + comet-scan, comet-scan-vector, comet-scan-vector-shuffle, comet
 ```
 
-Each configuration runs in its own JVM; the report (`benchmarks/results/results.md`) gives median
-times, speedups against plain Spark, the operators found in each final plan and a checksum proving
-all configurations returned the same rows (to 10 significant digits). See
-[docs/results.md](docs/results.md) for numbers measured on an Apple M3 Pro.
+Each configuration runs in its own JVM and appends its measurements to
+`benchmarks/results/<config>.jsonl`. The runner then rewrites two reports from every `.jsonl` file,
+one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` and a self-contained
+`benchmarks/results/results.html` with bar charts (median, p90 whisker, speedup against plain
+Spark), the operators found in each final plan and a checksum proving all configurations returned
+the same rows (to 10 significant digits). Regenerate them without benchmarking with
+`benchmarks/scripts/run-tpch.sh --report`. See [docs/results.md](docs/results.md) for numbers
+measured on an Apple M3 Pro.
 
 ### Vector API lessons
 

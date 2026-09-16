@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Runs TPC-H Q1/Q6 under several Spark configurations, one JVM each, then writes a markdown report.
+# Runs TPC-H Q1/Q6 under several Spark configurations, one JVM each, then writes the markdown and
+# HTML reports (benchmarks/results/results.{md,html}) from every measurement recorded so far.
 #
 #   benchmarks/scripts/run-tpch.sh <data-dir> [configs] [extra TpchRunner args...]
+#   benchmarks/scripts/run-tpch.sh --report          # only rewrite the reports
 #
-#   data-dir  directory containing lineitem/ (see gen-tpch.sh)
+#   data-dir  directory containing lineitem/ (see gen-tpch.sh); its basename (sf1, sf10) names
+#             the dataset section in the reports
 #   configs   comma-separated subset of: spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet
 #             (default: spark,vector plus the Comet configs when COMET_JAR is set)
 #
@@ -15,11 +18,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DATA="${1:?usage: run-tpch.sh <data-dir> [configs] [extra args]}"
+DATA="${1:?usage: run-tpch.sh <data-dir> [configs] [extra args] | run-tpch.sh --report}"
 shift
 CONFIGS="${1:-}"
 if [ -n "${CONFIGS}" ]; then shift; fi
-if [ -z "$CONFIGS" ]; then
+if [ "$DATA" = "--report" ]; then
+  CONFIGS=""
+elif [ -z "$CONFIGS" ]; then
   CONFIGS="spark,vector"
   if [ -n "${COMET_JAR:-}" ]; then CONFIGS="$CONFIGS,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet"; fi
 fi
@@ -54,8 +59,9 @@ JVM_OPTS=(
   -Dlog4j2.level=warn -Dspark.log.level=WARN
 )
 
-IFS=',' read -ra LIST <<< "$CONFIGS"
-for cfg in "${LIST[@]}"; do
+LIST=()
+if [ -n "$CONFIGS" ]; then IFS=',' read -ra LIST <<< "$CONFIGS"; fi
+for cfg in ${LIST[@]+"${LIST[@]}"}; do
   case "$cfg" in
     comet*) if [ -z "${COMET_JAR:-}" ]; then echo "skipping $cfg: COMET_JAR not set"; continue; fi ;;
   esac
