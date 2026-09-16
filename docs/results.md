@@ -30,7 +30,7 @@ kernels are memory-bound at this point.
 
 | type | selectivity | nulls | reference | SIMD | speedup |
 |---|---:|---|---:|---:|---:|
-| INT32 | 2% | no | 2434k | 8445k | 3.5x |
+| INT32 | 2% | no | 2434k | 22897k | 9.4x |
 | INT32 | 50% | no | 966k | 1957k | 2.0x |
 | INT32 | 98% | no | 1720k | 3009k | 1.7x |
 | INT32 | 50% | yes | 333k | 1304k | 3.9x |
@@ -43,7 +43,11 @@ Two lessons are baked into these numbers. Selection words that are all ones (the
 98% filter) are bulk-copied, which is why 98% is faster than 50% for both types. For 64-bit
 elements the two-lane `rearrange` on NEON was slower than a scalar walk over the set bits, so that
 is what the kernel does when the species has two lanes; the doubles row at 98% is now a memcpy race
-that both sides tie.
+that both sides tie. The int32 kernel learnt the same lesson later (phase 4): a word with at most
+16 selected rows is walked bit by bit instead of shuffled lane group by lane group, which took the
+2% row from 8445k to 22897k (10%: 3592k to 11209k, 25%: 2386k to 3230k, 50%: unchanged). A Q6
+profile found `compactInt32` on the one date column costing three times the compaction of the
+three double columns; that is where this came from.
 
 ### Ungrouped reductions
 
@@ -251,6 +255,28 @@ selection policy compacts when fewer than half the rows survive, so Q6's aggrega
 batches; an earlier run that forwarded the 2% selection made the projection and aggregate walk all
 6M rows (37 ms of kernel time between them instead of 2 ms).
 
+Q6 at SF10 against Comet end to end (phase 4, 267 versus 210 ms over the same native scan), from
+JFR recordings of `vector`, `comet-scan-vector`, `comet` and `comet-scan`:
+
+- The plan shapes are the same. Comet's `CometColumnarToRowExec` is the row conversion of the one
+  result row for `collect()`, and ours has it in the same place; both pipelines are columnar to
+  the top.
+- Comet's native scan pushes the scan's `dataFilters` into DataFusion whenever
+  `spark.sql.parquet.filterPushdown` is on, regardless of which operator sits above it, so our
+  configuration gets the same row-group, page-index and bloom-filter pruning as Comet's. None of it
+  helps here: `l_shipdate` is uniformly spread, so every row group and page has survivors.
+- Comet's second level, `spark.comet.parquet.rowFilterPushdown.enabled` (DataFusion's
+  `pushdown_filters`, late materialisation), is off by default and measured as a loss for
+  everyone on this query: our filter's kernel time drops to 12 ms because the scan hands it 2% of
+  the rows, but the scan takes twice as long (`comet-scan-vector` 267 to 563 ms, `comet` 210 to
+  562 ms, `comet-scan` 252 to 604 ms). With survivors on every page the reader's second pass over
+  the projected columns costs more than decoding them once.
+- What remains is per-row filter throughput: three compares over 60M rows and the compaction of
+  the survivors. The compaction half was the int32 kernel above (filter kernel time 472 to 365 ms
+  summed over tasks); the compare half is the Vector API at two double lanes against DataFusion's
+  native loops at the same NEON width. Spark's codegen over the same scan (`comet-scan`, 252 ms)
+  sits between the two, evaluating `l_shipdate` first and skipping the rest for 85% of rows.
+
 Things that were true before profiling and are not any more:
 
 1. The first end-to-end run had `vector` at 0.61x on Q1. The grouped aggregate was running masked
@@ -297,7 +323,8 @@ aggregate stage boundaries are available to a JVM operator.
 - Selective predicates with scattered survivors. Block skipping needs whole 64-row blocks to be
   dead; Q6's survivors are spread over 98% of the blocks. Evaluating the second conjunct only on
   the surviving rows (a gather, or a compaction of the operands) is the remaining option, and on
-  2-lane species the gather is a scalar loop.
+  2-lane species the gather is a scalar loop. Comet's late-materialising reader is not the answer
+  either: measured 2x slower for Comet itself on this data (see the Q6 notes above).
 - The grouped aggregate reads every physical row of a selected batch through validity masks. With
   98% selectivity that is the right trade; a middle ground (10-50% survivors) would want the
   aggregate to walk the selection bits instead of the validity words, which the scatter loops

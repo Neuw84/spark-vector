@@ -417,6 +417,9 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.
 - Group keys longer than 8 bytes arriving as plain strings are hashed and compared per row.
+- Do not reach for `spark.comet.parquet.rowFilterPushdown.enabled` to close the Q6 gap: measured
+  2x slower for Comet itself and for us on uniformly spread survivors (`docs/results.md`). Comet's
+  default format-level pruning already reaches our configurations.
 - Selective predicates with scattered survivors (TPC-H Q6) lose to Spark's codegen over Spark's
   scan (0.86x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate. Over
   Comet's scan the copy is gone and the plugin beats Spark (1.12x) but not Comet's scan under

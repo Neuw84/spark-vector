@@ -32,6 +32,14 @@ public final class CompactKernels {
    */
   private static final int MAX_TABLE_LANES = 8;
 
+  /**
+   * A selection word with at most this many bits set is compacted by walking the bits rather than
+   * by lane-group shuffles. Measured by JMH on NEON (4 int lanes), elements/ms without nulls:
+   * 2% selectivity 8.8M to 22.9M (2.6x), 10% 3.6M to 11.2M (3.1x), 25% 2.4M to 3.2M, 50% equal.
+   * The 64-bit kernels already walked sparse words; this brings int32 in line.
+   */
+  static final int SPARSE_WORD_BITS = 16;
+
   private static final VectorShuffle<Integer>[] I_SHUFFLES = shuffles(I);
   private static final VectorShuffle<Long>[] L_SHUFFLES = shuffles(L);
   private static final VectorShuffle<Double>[] D_SHUFFLES = shuffles(D);
@@ -110,6 +118,18 @@ public final class CompactKernels {
         // Every element of the word is selected: one bulk copy instead of per-lane shuffles.
         MemorySegment.copy(data, (long) base << 2, out, (long) o << 2, (long) limit << 2);
         o += limit;
+        continue;
+      }
+      if (Long.bitCount(word) <= SPARSE_WORD_BITS) {
+        // A sparse word (a selective predicate: TPC-H Q6 keeps 1.9% of the rows) is one or two
+        // survivors per 64 rows. Walking the set bits is one load and one store each; the lane
+        // loop below would test every lane group and shuffle for each one that is not empty.
+        while (word != 0L) {
+          int i = base + Long.numberOfTrailingZeros(word);
+          word &= word - 1;
+          out.set(VectorBuffers.LE_INT, (long) o << 2, data.get(VectorBuffers.LE_INT, (long) i << 2));
+          o++;
+        }
         continue;
       }
       for (int k = 0; k < limit; k += lanes) {
