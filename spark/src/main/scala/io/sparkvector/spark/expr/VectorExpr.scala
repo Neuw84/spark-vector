@@ -90,15 +90,26 @@ final case class LiteralExpr(value: Any, dataType: DataType) extends VectorExpr 
     case d: org.apache.spark.sql.types.Decimal => java.lang.Long.valueOf(d.toUnscaledLong)
     case n: Number => n
   }
+  /** A string literal's UTF-8 bytes. */
+  def utf8Bytes: Array[Byte] = value match {
+    case s: org.apache.spark.unsafe.types.UTF8String => s.getBytes
+    case s: String => s.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+  }
   override def eval(ctx: EvalContext): VectorBuffers =
     throw new UnsupportedOperationException("literal cannot be evaluated as a column")
   override def children: Seq[VectorExpr] = Nil
 }
 
-/** Comparison of two same-typed numeric operands, at most one of which is a literal. */
+/**
+ * Comparison of two same-typed operands, at most one of which is a literal. Numbers (and the types
+ * carried as numeric lanes) go through `CompareKernels`; strings through `StringCompareKernels`, in
+ * Spark's default UTF8_BINARY order.
+ */
 final case class CompareExpr(op: CompareOp, left: VectorExpr, right: VectorExpr) extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(left, right)
+
+  private def isString: Boolean = left.vecType == VecType.UTF8
 
   override def eval(ctx: EvalContext): VectorBuffers = {
     val n = ctx.numRows
@@ -106,17 +117,20 @@ final case class CompareExpr(op: CompareOp, left: VectorExpr, right: VectorExpr)
     (left, right) match {
       case (l, lit: LiteralExpr) =>
         val a = l.eval(ctx)
-        CompareKernels.compareScalar(a, lit.number, op, ctx.active, bits)
+        if (isString) StringCompareKernels.compareScalar(a, lit.utf8Bytes, op, ctx.active, bits)
+        else CompareKernels.compareScalar(a, lit.number, op, ctx.active, bits)
         // Result is null exactly where the column is null: share its validity.
         SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, a.validity(), bits)
       case (lit: LiteralExpr, r) =>
         val b = r.eval(ctx)
-        CompareKernels.compareScalar(b, lit.number, op.flip(), ctx.active, bits)
+        if (isString) StringCompareKernels.compareScalar(b, lit.utf8Bytes, op.flip(), ctx.active, bits)
+        else CompareKernels.compareScalar(b, lit.number, op.flip(), ctx.active, bits)
         SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, b.validity(), bits)
       case (l, r) =>
         val a = l.eval(ctx)
         val b = r.eval(ctx)
-        CompareKernels.compare(a, b, op, ctx.active, bits)
+        if (isString) StringCompareKernels.compare(a, b, op, ctx.active, bits)
+        else CompareKernels.compare(a, b, op, ctx.active, bits)
         val validity =
           if (a.validity() == null && b.validity() == null) null
           else {
@@ -170,6 +184,32 @@ final case class OrExpr(left: VectorExpr, right: VectorExpr) extends VectorExpr 
       BitmapKernels.kleeneOr(a.data(), a.validity(), b.data(), b.validity(), bits, validity, n)
       SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, validity, bits)
     }
+  }
+}
+
+/**
+ * `child IN (v1, ..., vN)` over non-null literals of the child's type: true where any literal
+ * matches, null exactly where the child is null (with no null in the list, that is Spark's `In`).
+ * The child is evaluated once and each literal costs one equality pass -- through the dictionary
+ * for a dictionary-encoded string column, so TPC-H's `l_shipmode IN ('MAIL', 'SHIP')` compares
+ * two strings per distinct value, not per row.
+ */
+final case class InExpr(child: VectorExpr, values: Seq[LiteralExpr]) extends VectorExpr {
+  override def dataType: DataType = BooleanType
+  override def children: Seq[VectorExpr] = child +: values
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    val a = child.eval(ctx)
+    val bits = ctx.bitmap()
+    Bitmap.fill(bits, n, false)
+    val hit = ctx.bitmap()
+    val isString = child.vecType == VecType.UTF8
+    values.foreach { lit =>
+      if (isString) StringCompareKernels.compareScalar(a, lit.utf8Bytes, CompareOp.EQ, ctx.active, hit)
+      else CompareKernels.compareScalar(a, lit.number, CompareOp.EQ, ctx.active, hit)
+      BitmapKernels.or(bits, hit, bits, n)
+    }
+    SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, a.validity(), bits)
   }
 }
 

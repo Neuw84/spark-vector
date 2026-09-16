@@ -103,6 +103,15 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT 1 AS one, i, 2.5D AS x, 7L AS l7, DATE '2020-01-02' AS day FROM t WHERE i > 5", Seq(Filter, Project))
     checkVectorized("SELECT 1.25 AS dec, i FROM t WHERE d > 5 AND d2 > 0.5", Seq(Filter, Project))
     checkVectorized("SELECT 1 FROM range(10) HAVING MAX(id) > 0", Seq()) // Spark's own SQL tests tripped on this shape
+    // String literals: a constant UTF8 column, dense and under a selection, incl. the empty string.
+    checkVectorized("SELECT 'MAIL' AS mode, i, '' AS empty, s FROM t", Seq(Project))
+    checkVectorized("SELECT 'BUILDING' AS seg, i FROM t WHERE i > 5 AND s = 's7'", Seq(Filter, Project))
+  }
+
+  test("string predicates as projected booleans and in CASE conditions") {
+    checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, i FROM t", Seq(Project))
+    checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))
+    checkVectorized("SELECT IF(s > 's4', 1, 0) AS flag, i FROM t WHERE i > 100", Seq(Filter, Project))
   }
 
   test("forwarded and reordered columns, including strings and nulls") {
