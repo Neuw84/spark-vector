@@ -7,7 +7,7 @@ considered done. `README.md` is the user-facing description, `docs/results.md` t
 
 ## 1. What this project is
 
-A Spark SQL plugin that runs `Filter`, `Project` and `HashAggregate` (Partial and Final) over
+A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (Partial and Final) and `Sort` over
 Arrow-layout columnar batches with the Java Vector API (`jdk.incubator.vector`), in the style of
 Apache DataFusion Comet but entirely on the JVM. It reads batches from Spark's vectorized Parquet
 reader or from Comet's native scan, and emits unshaded Arrow vectors that Spark's own
@@ -24,8 +24,8 @@ Comet-backed tests and benchmarks. Maven builds everything.
 
 | Module | Language | Contents |
 |---|---|---|
-| `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, cast, agg, hash, grouped accumulators, group key table) and `reference/ScalarReference`, the scalar oracle the tests compare against |
-| `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the three operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
+| `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, cast, agg, hash, grouped accumulators, group key table), the sort and chunk kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
+| `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the four operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H Q1/Q6 runner with its markdown/HTML report |
 
 Commands that are known to work (always unset `JAVA_TOOL_OPTIONS` first; the IDE sets one that
@@ -151,7 +151,31 @@ that pin it.
   `VectorQuerySuite`), benchmark checksums use 10 significant digits. Never assert bit equality
   on a double sum.
 
-### 3.6 The Arrow compatibility layer (designed to be replaced natively)
+### 3.6 Sort
+
+- `VectorSortExec` replaces `SortExec` only over a columnar child (Comet's columnar shuffle, or one
+  of our operators for a local `SORT BY`). Over Spark's row shuffle the rule leaves `SortExec` with
+  the reason "child ... is not columnar": converting rows to columns to sort them gains nothing.
+  `spark.vector.exec.sort.enabled` turns it off.
+- Blocking and in memory: the partition's batches are copied into an operator-owned shared `Arena`
+  (`ChunkKernels.materialize`, applying any forwarded selection), joined per column
+  (`ChunkKernels.concat`, which decodes dictionary strings because every chunk may carry a different
+  dictionary), sorted, and gathered out in 4096-row batches. There is no spill; that is documented
+  and the reason the config key exists.
+- `SortKernels.sortIndices` is an LSD sort over order-preserving unsigned 32-bit key passes, each
+  pass an `Arrays.sort` of `(key, position)` packed into a `long` (position in the low bits makes
+  the pass stable, so passes compose; null rows get a constant value key and a separate null pass).
+  int32/bool: one pass; int64/double: two; strings <= 8 bytes: three (length, then the two halves
+  of the zero-padded big-endian prefix, which is unsigned byte order); longer strings: a rank from
+  a stable merge sort. Doubles use Spark's total order (`-0.0 == 0.0`, NaN greatest, NaN == NaN),
+  strings `UTF8String`'s. It is primitive-array work, not Vector API; a SIMD sort network would be a
+  different kernel behind the same signature.
+- Oracle: `reference/SortReference` (stable comparator sort with Spark's rules). `SortKernelsTest`
+  compares permutations for every type, direction, null ordering, multi-key combination, and the
+  special doubles; `VectorSortSuite` compares against `SortExec` per partition and positionally on
+  the key columns (ties in non-key columns may differ in order and are not compared).
+
+### 3.7 The Arrow compatibility layer (designed to be replaced natively)
 
 Everything that crosses a boundary goes through one of three seams. New sources or sinks must plug
 into these rather than adding special cases to operators.
@@ -171,7 +195,7 @@ into these rather than adding special cases to operators.
   foreign consumer never sees one because the rule only forwards selections into our own operators
   (`markSelectionProducers`).
 
-### 3.7 The Comet compatibility layer (designed to be replaced natively)
+### 3.8 The Comet compatibility layer (designed to be replaced natively)
 
 - No compile-time dependency on Comet. `CometVectorAdapter`, `CometBatchBridge` and
   `VectorToCometExec`/`CometShuffle` resolve Comet classes reflectively and register only if Comet
@@ -192,16 +216,16 @@ into these rather than adding special cases to operators.
   twice). Requires `spark.shuffle.manager=...CometShuffleManager` and
   `spark.comet.exec.shuffle.enabled=true`; `spark.vector.comet.shuffle.enabled` turns the rewrite
   off.
-- Not combined with Comet: Comet's Final aggregate (needs Comet's own partial buffers), Comet's
-  Sort, and native blocks (our operators are not `CometNativeExec`s). Comet's `LargeVarCharVector`
+- Not combined with Comet: Comet's Final aggregate (needs Comet's own partial buffers) and native
+  blocks (our operators are not `CometNativeExec`s). Comet's `LargeVarCharVector`
   falls back to the copying adapter. Dictionary strings are decoded when crossing into Comet.
 - The seams a native replacement would fill: `Adapter` for the scan (replace `CometVectorAdapter`
   with our own reader's vectors), a columnar shuffle exchange of our own where `CometShuffle`
   builds Comet's (this would also remove the `ColumnarToRow`/`RowToColumnar` pair around Spark's
-  row shuffle in the non-Comet configuration), and a vectorized Sort. Keep those boundaries where
-  they are.
+  row shuffle in the non-Comet configuration, and let the global sort be ours without Comet). Keep
+  those boundaries where they are.
 
-### 3.8 The Vector Acceleration UI tab
+### 3.9 The Vector Acceleration UI tab
 
 - Attached from the driver plugin; lives under `org.apache.spark.sql.vector.ui` because
   `SparkUITab`, `WebUIPage` and `UIUtils` are `private[spark]`. It never influences execution: every
@@ -230,8 +254,8 @@ A change is not done until all of the following that apply have run green, local
    spark-vector operators are in the final (post-AQE) plan. Unsupported cases are validated the same
    way with `checkFallback`, which asserts the Spark operator stayed and the recorded reason
    contains the expected text. Suites: `VectorFilterSuite`, `VectorProjectSuite`,
-   `VectorAggregateSuite`, plus adapter/Arrow suites and `SparkOnJdkSmokeSuite` (Spark itself works
-   on this JDK with these flags).
+   `VectorAggregateSuite`, `VectorSortSuite`, plus adapter/Arrow suites and `SparkOnJdkSmokeSuite`
+   (Spark itself works on this JDK with these flags).
 3. Comet integration. `CometScanSuite` and `CometShuffleSuite` are tagged `CometTest` and run only
    with `-Pcomet`. They cover zero-copy scan adaptation, dictionary strings from Comet, the shuffle
    rewrite for each partitioning, and that every C Data export is released. They need the Comet jar
@@ -271,7 +295,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 78 kernel tests, 76 Spark tests (64 without the Comet profile). If a change lowers
+Current counts: 87 kernel tests, 83 Spark tests (71 without the Comet profile). If a change lowers
 either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -313,7 +337,8 @@ either number, explain why in the commit.
 - Without Comet, the shuffle is Spark's row shuffle with a `ColumnarToRowExec` above the partial
   aggregate and a `RowToColumnarExec` below the Final. A columnar shuffle of our own is the
   natural next seam to fill (3.7).
-- The final `Sort` is Spark's.
+- The sort does not spill, and without Comet the global sort sits above Spark's row shuffle and
+  stays Spark's.
 - AVX2/AVX-512 paths are tested emulated, never measured on real hardware.
 - `TpchRunner --keep-alive` leaves the session and the Spark UI up for inspection; the demo JVM's
   Jetty resets some parallel static-resource fetches under load, so reload the page if the tab's

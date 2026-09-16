@@ -1,6 +1,6 @@
 # spark-vector
 
-A Spark SQL plugin that executes Filter, Project and HashAggregate (Partial and Final) on
+A Spark SQL plugin that executes Filter, Project, HashAggregate (Partial and Final) and Sort on
 Arrow-layout batches with the Java Vector API (`jdk.incubator.vector`). It follows the
 architecture of [Apache DataFusion Comet](https://github.com/apache/datafusion-comet), but stays
 entirely on the JVM: no native library, no JNI, no serialization boundary. Unsupported operators,
@@ -56,6 +56,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.project.enabled` | convert `ProjectExec` |
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
+| `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (in memory, no spill) |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
 | `spark.vector.ui.enabled` | attach the Vector Acceleration tab to the Spark UI (default `true`) |
@@ -107,7 +108,9 @@ is stored as a tree-node tag; `VectorFallback.reasons(plan)` lists them.
 
 Per execution, it draws the final physical plan as a DAG with each operator coloured by the engine
 that runs it. This is TPC-H Q1 over Comet's scan with Comet's shuffle between our Partial and Final
-aggregates; the only operator left to Spark is the final `Sort`:
+aggregates, taken before the columnar sort existed: the final `Sort` was the one operator left to
+Spark, which is why the query shows 89% rather than the badge (with `VectorSortExec` it is fully
+accelerated):
 
 ![The plan of one Q1 execution: Comet scan, Vector filter, project and aggregates, the bridge into Comet's shuffle, and Spark's Sort](images/query-accel-details.png)
 
@@ -282,11 +285,30 @@ Three more came out of profiling TPC-H rather than microbenchmarks (see
 6. Per-group masked reductions only pay off for one or two groups on 128-bit vectors; grouped
    aggregation scatters into per-group accumulators otherwise.
 
+### Sort
+
+`SortExec` over a columnar child becomes `VectorSortExec`: every batch of the partition is copied into
+operator-owned native memory (Spark lets the producer reuse a batch once the next one is requested),
+joined into one column per attribute, and a permutation is computed key by key, least significant
+first. Each pass maps the key to an order-preserving unsigned 32-bit value (`int32` and booleans in
+one pass, `int64` and doubles in two, strings of at most 8 bytes in three over their zero-padded
+big-endian prefix, longer strings through a rank from one stable merge sort) and sorts `(key,
+position)` packed into a `long` with `Arrays.sort`, so every pass is stable and the passes compose.
+Nulls take one final pass per key. The output is gathered through the permutation into Arrow vectors
+in batches of 4096 rows. Double ordering is Spark's (`-0.0 = 0.0`, NaN greatest and equal to itself),
+strings compare as unsigned bytes like `UTF8String`.
+
+Two deliberate limits: the sort is in memory only (no spill; turn it off with
+`spark.vector.exec.sort.enabled=false` for partitions that need one), and it is planned only over a
+columnar child. A global `ORDER BY` over Spark's row shuffle keeps `SortExec`: converting rows to
+columns just to sort them gains nothing. Over Comet's columnar shuffle (or one of our operators, for
+`SORT BY`) the sort is ours, which makes TPC-H Q1 with Comet's scan and shuffle fully accelerated.
+
 ## Not in scope (yet)
 
 - A columnar shuffle of our own. Without Comet, every stage boundary goes through Spark's row
   shuffle (`ColumnarToRowExec` above, `RowToColumnarExec` below); a `ShuffleExchangeLike` with a
   serializer that dumps the Arrow buffers would remove both.
 - A Parquet-to-Arrow reader of our own; Comet's reader covers the zero-copy case.
-- Decimal arithmetic (`Decimal(p<=18)` as long lanes), range-partitioned Comet shuffles, Sort and
-  joins, running Spark's SQL test suite Comet-style.
+- Decimal arithmetic (`Decimal(p<=18)` as long lanes), range-partitioned Comet shuffles, a
+  spilling sort, joins, running Spark's SQL test suite Comet-style.

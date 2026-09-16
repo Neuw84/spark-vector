@@ -12,6 +12,7 @@ object VectorConf {
   val FinalAggregateEnabled = "spark.vector.exec.aggregate.final.enabled"
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
+  val SortEnabled = "spark.vector.exec.sort.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
   val UiEnabled = "spark.vector.ui.enabled"
   val UiRetainedExecutions = "spark.vector.ui.retainedExecutions"
@@ -26,6 +27,8 @@ object VectorConf {
   def cometShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometShuffleEnabled, default = true)
   /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
+  /** Convert SortExec over a columnar child (in-memory, no spill). */
+  def sortEnabled(conf: SQLConf): Boolean = bool(conf, SortEnabled, default = true)
   def explainFallback(conf: SQLConf): Boolean = bool(conf, ExplainFallbackEnabled, default = false)
 
   private def bool(conf: SQLConf, key: String, default: Boolean): Boolean =

@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SparkPlan}
+import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SortExec, SparkPlan}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
@@ -68,6 +68,18 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
               if (failures.isEmpty) VectorProjectExec(projectList, child)
               else fallback(p, failures.mkString("; "))
+          }
+
+        case s: SortExec if VectorConf.sortEnabled(conf) =>
+          // Only over a columnar child: a sort above Spark's row shuffle would need a
+          // RowToColumnarExec first and gain nothing over Spark's own sort.
+          columnarInputReason(s.child) match {
+            case Some(reason) => fallback(s, reason)
+            case None =>
+              VectorSortPlanner.plan(s) match {
+                case Right(v) => v
+                case Left(reason) => fallback(s, reason)
+              }
           }
 
         case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
