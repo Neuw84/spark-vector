@@ -81,6 +81,11 @@ object CometShuffle {
 
   def isCometExchange(plan: SparkPlan): Boolean = plan.getClass.getName == ExchangeClass
 
+  /** Comet's own switch for native range partitioning (default on). */
+  def rangePartitioningEnabled(conf: SQLConf): Boolean =
+    conf.getConfString("spark.comet.shuffle.native.partitioning.range.enabled",
+      conf.getConfString("spark.comet.native.shuffle.partitioning.range.enabled", "true")).trim.equalsIgnoreCase("true")
+
   /** True for a Comet exchange already using the native writer. */
   def isNative(plan: SparkPlan): Boolean =
     isCometExchange(plan) && plan.getClass.getMethod("shuffleType").invoke(plan).getClass.getName == NativeType

@@ -13,6 +13,9 @@ object VectorConf {
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
   val SortEnabled = "spark.vector.exec.sort.enabled"
+  val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
+  val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
+  val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
   val UiEnabled = "spark.vector.ui.enabled"
   val UiRetainedExecutions = "spark.vector.ui.retainedExecutions"
@@ -29,6 +32,12 @@ object VectorConf {
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   /** Convert SortExec over a columnar child (in-memory, no spill). */
   def sortEnabled(conf: SQLConf): Boolean = bool(conf, SortEnabled, default = true)
+  /** Convert BroadcastHashJoinExec over a columnar streamed side (the build side stays Spark's broadcast). */
+  def broadcastHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, BroadcastHashJoinEnabled, default = true)
+  /** Convert ShuffledHashJoinExec; over Spark's row shuffle both inputs go through RowToColumnarExec. */
+  def shuffledHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, ShuffledHashJoinEnabled, default = true)
+  /** Also hand range-partitioned exchanges (global sorts) to Comet's native shuffle. */
+  def cometRangeShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometRangeShuffleEnabled, default = true)
   def explainFallback(conf: SQLConf): Boolean = bool(conf, ExplainFallbackEnabled, default = false)
 
   private def bool(conf: SQLConf, key: String, default: Boolean): Boolean =

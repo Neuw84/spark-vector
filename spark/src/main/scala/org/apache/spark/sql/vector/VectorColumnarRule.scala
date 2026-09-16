@@ -10,7 +10,9 @@ import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
 import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SortExec, SparkPlan}
-import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
+import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
+import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
+import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.internal.SQLConf
@@ -82,6 +84,34 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
           }
 
+        case j: BroadcastHashJoinExec if VectorConf.broadcastHashJoinEnabled(conf) =>
+          // The build side is Spark's broadcast relation whatever it is; the streamed side must be
+          // columnar.
+          val (buildPlan, streamedPlan) = j.buildSide match {
+            case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
+            case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
+          }
+          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)) match {
+            case Some(reason) => fallback(j, reason)
+            case None =>
+              VectorJoinPlanner.plan(j) match {
+                case Right(v) => v
+                case Left(reason) => fallback(j, reason)
+              }
+          }
+
+        case j: ShuffledHashJoinExec if VectorConf.shuffledHashJoinEnabled(conf) =>
+          // Both inputs are exchanges: Spark's row shuffle is converted below us by
+          // RowToColumnarExec, Comet's columnar one is read directly.
+          exchangeInputReason(j.left).orElse(exchangeInputReason(j.right)) match {
+            case Some(reason) => fallback(j, reason)
+            case None =>
+              VectorJoinPlanner.plan(j) match {
+                case Right(v) => v
+                case Left(reason) => fallback(j, reason)
+              }
+          }
+
         case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
           // A Final aggregate reads an exchange; Spark inserts RowToColumnarExec below us when the
           // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
@@ -99,7 +129,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
       val withShuffles =
         if (VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(conf, session.sparkContext.getConf.get("spark.shuffle.manager", "sort")))
-          useCometShuffle(withSelections)
+          useCometShuffle(withSelections, conf)
         else withSelections
       if (VectorConf.explainFallback(conf)) {
         VectorFallback.reasons(withShuffles).foreach { case (node, reason) =>
@@ -118,17 +148,25 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * only needs `CometVector` batches, which the bridge provides. Range partitioning is left alone:
    * it samples the child, which a native shuffle over a non-native child does twice.
    */
-  private def useCometShuffle(plan: SparkPlan): SparkPlan = plan.transformUp {
-    case s: ShuffleExchangeExec if s.child.isInstanceOf[VectorExec] && bridgeable(s.child, s.outputPartitioning) =>
+  private def useCometShuffle(plan: SparkPlan, conf: SQLConf): SparkPlan = plan.transformUp {
+    case s: ShuffleExchangeExec if s.child.isInstanceOf[VectorPlan] && bridgeable(s.child, s.outputPartitioning, conf) =>
       CometShuffle.native(s, VectorToCometExec(s.child))
     case c if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) &&
-        c.children.head.isInstanceOf[VectorExec] && bridgeable(c.children.head, c.outputPartitioning) =>
+        c.children.head.isInstanceOf[VectorPlan] && bridgeable(c.children.head, c.outputPartitioning, conf) =>
       CometShuffle.toNative(c, VectorToCometExec(c.children.head))
   }
 
-  private def bridgeable(child: SparkPlan, partitioning: Partitioning): Boolean = {
+  /**
+   * Range partitioning is bridged too when Comet's native range partitioning is on (its default):
+   * Comet samples the child for the bounds through Spark's `RangePartitioner`, exactly as Spark's
+   * own exchange does, so the child runs twice in both cases. `spark.vector.comet.shuffle.range.enabled`
+   * turns just this part off.
+   */
+  private def bridgeable(child: SparkPlan, partitioning: Partitioning, conf: SQLConf): Boolean = {
     val partitioningOk = partitioning match {
-      case _: RangePartitioning => false
+      case r: RangePartitioning =>
+        VectorConf.cometRangeShuffleEnabled(conf) && CometShuffle.rangePartitioningEnabled(conf) &&
+          r.ordering.forall(o => CometBatchBridge.isSupported(o.dataType))
       case _ => true
     }
     partitioningOk && child.output.forall(a => CometBatchBridge.isSupported(a.dataType))
@@ -140,7 +178,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * its own evaluation. Anything else (Spark operators, exchanges) needs dense batches.
    */
   private def markSelectionProducers(plan: SparkPlan): SparkPlan = plan.transformDown {
-    case parent: VectorExec =>
+    case parent: VectorPlan =>
       parent.withNewChildren(parent.children.map {
         case f: VectorFilterExec if !f.emitSelection => f.copy(emitSelection = true)
         case p: VectorProjectExec if !p.emitSelection => p.copy(emitSelection = true)
@@ -156,6 +194,15 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   /** None if `plan` is an acceptable columnar input, else the reason it is not. */
   private def columnarInputReason(plan: SparkPlan): Option[String] = {
     if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar") else typeReason(plan)
+  }
+
+  /**
+   * A join input that is an exchange (or its adaptive stage) is accepted on types alone, like the
+   * Final aggregate's input: Spark inserts RowToColumnarExec below us when the shuffle is row based.
+   */
+  private def exchangeInputReason(plan: SparkPlan): Option[String] = plan match {
+    case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => typeReason(plan)
+    case other => columnarInputReason(other)
   }
 
   private def typeReason(plan: SparkPlan): Option[String] =

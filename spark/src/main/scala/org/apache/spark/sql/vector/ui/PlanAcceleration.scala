@@ -4,13 +4,13 @@ import scala.collection.mutable
 
 import org.apache.commons.text.StringEscapeUtils
 import org.apache.spark.sql.execution.{SparkPlan, SparkPlanInfo}
-import org.apache.spark.sql.vector.{VectorExec, VectorFallback}
+import org.apache.spark.sql.vector.{VectorFallback, VectorPlan}
 
 /**
  * Which engine executes an operator. This is what the UI colours nodes by.
  *
  * The distinction is drawn from the operator's identity, not from a tag we set: a spark-vector
- * operator *is* a [[VectorExec]], a Comet operator *is* a class in Comet's packages, and an
+ * operator *is* a [[VectorPlan]], a Comet operator *is* a class in Comet's packages, and an
  * operator we declined to convert is left as the original Spark class (carrying a
  * [[VectorFallback]] tag with the reason). See `VectorExecRule`.
  */
@@ -184,7 +184,7 @@ object PlanAcceleration {
     var nextId = 0L
 
     def engineOf(p: SparkPlan): Engine = p match {
-      case _: VectorExec => Engine.Vector
+      case _: VectorPlan => Engine.Vector
       case _ if p.nodeName == "VectorToComet" => Engine.Bridge
       case _ if isCometClass(p.getClass) => Engine.Comet
       case _ if isTransition(p.nodeName) => Engine.Transition
