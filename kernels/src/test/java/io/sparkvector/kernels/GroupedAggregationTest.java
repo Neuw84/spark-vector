@@ -371,6 +371,74 @@ class GroupedAggregationTest {
     }
   }
 
+  @Test
+  void wideLongSumIsExactPast64Bits() {
+    Random rnd = new Random(128);
+    GroupedAccumulators.WideLongSum wide = new GroupedAccumulators.WideLongSum();
+    GroupedAccumulators.WideLongSum ungrouped = new GroupedAccumulators.WideLongSum();
+    int groups = 5;
+    java.math.BigInteger[] ref = new java.math.BigInteger[groups];
+    long[] refCount = new long[groups];
+    java.util.Arrays.fill(ref, java.math.BigInteger.ZERO);
+    java.math.BigInteger refAll = java.math.BigInteger.ZERO;
+    for (int n : new int[] {1000, 37, 2048, 64, 999}) {
+      try (Arena arena = Arena.ofConfined()) {
+        long[] vals = new long[n];
+        boolean[] nulls = new boolean[n];
+        int[] ids = new int[n];
+        for (int i = 0; i < n; i++) {
+          // 18-digit unscaled values of either sign: a few hundred of them leave the long range.
+          vals[i] = (rnd.nextBoolean() ? 1 : -1) * (900_000_000_000_000_000L - rnd.nextInt(1_000_000));
+          if (i % 97 == 5) {
+            vals[i] = Long.MIN_VALUE + rnd.nextInt(10); // extremes
+          }
+          nulls[i] = rnd.nextInt(9) == 0;
+          ids[i] = rnd.nextInt(groups);
+        }
+        VectorBuffers longs = ArrowLayout.ofLongs(arena, vals, nulls);
+        java.lang.foreign.MemorySegment selection = TestData.randomBitmap(arena, rnd, n);
+        for (int i = 0; i < n; i++) {
+          if (!Bitmap.isSet(selection, i)) {
+            ids[i] = -1; // the contract: unselected rows have no group
+          }
+        }
+        GroupAssignment a = GroupAssignment.of(ids, n, groups, arena, selection);
+        wide.update(longs, a);
+        ungrouped.updateAll(longs);
+        for (int i = 0; i < n; i++) {
+          if (nulls[i]) {
+            continue;
+          }
+          refAll = refAll.add(java.math.BigInteger.valueOf(vals[i]));
+          if (Bitmap.isSet(selection, i)) {
+            ref[ids[i]] = ref[ids[i]].add(java.math.BigInteger.valueOf(vals[i]));
+            refCount[ids[i]]++;
+          }
+        }
+      }
+    }
+    for (int g = 0; g < groups; g++) {
+      assertEquals(ref[g], wide.sum(g), "group " + g);
+      assertEquals(refCount[g], wide.count(g));
+      assertEquals(ref[g], GroupedAccumulators.WideLongSum.toBigInteger(wide.hi(g), wide.lo(g)));
+    }
+    assertEquals(refAll, ungrouped.sum(0));
+    assertTrue(refAll.abs().bitLength() > 63, "the reference must have left the long range: " + refAll);
+
+    // The masks path and INT32 lanes.
+    try (Arena arena = Arena.ofConfined()) {
+      int[] ints = {Integer.MAX_VALUE, Integer.MIN_VALUE, 7, -7, 1, 0};
+      int[] ids = {0, 0, 1, 1, 2, 2};
+      GroupedAccumulators.WideLongSum masked = new GroupedAccumulators.WideLongSum();
+      masked.update(ArrowLayout.ofInts(arena, ints, new boolean[] {false, false, false, false, false, true}),
+          GroupAssignment.of(ids, 6, 3, arena, true));
+      assertEquals(java.math.BigInteger.valueOf(-1L), masked.sum(0));
+      assertEquals(java.math.BigInteger.ZERO, masked.sum(1));
+      assertEquals(java.math.BigInteger.ONE, masked.sum(2));
+      assertEquals(1L, masked.count(2));
+    }
+  }
+
   private static final class MemorySegmentHolder {
     final java.lang.foreign.MemorySegment validity;
     final java.lang.foreign.MemorySegment intData;

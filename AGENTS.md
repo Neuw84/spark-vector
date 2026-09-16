@@ -453,7 +453,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 135 kernel tests, 164 Spark tests (137 without the Comet and Iceberg profiles;
+Current counts: 136 kernel tests, 165 Spark tests (138 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -513,8 +513,12 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   stays Spark's. Joins do not spill either (the build side is held in memory per task).
 - The build side of a broadcast join is Spark's `HashedRelation`, re-read into columns by every
   task; a columnar broadcast exchange would read it once. Sort-merge joins are not converted.
-- Decimals wider than 18 digits, including every `sum` over a decimal of more than 8 digits and
-  the TPC-H price arithmetic, fall back.
+- Decimals wider than 18 digits fall back, including the TPC-H price arithmetic. The one exception
+  is the `sum` buffer of a decimal of more than 8 digits: the Partial side accumulates it in 128 bits
+  (`GroupedAccumulators.WideLongSum`, scalar two-word adds -- an accumulator is one value per group,
+  not per row) and emits Spark's `(sum: Decimal(p+10, s), isEmpty)` buffer through a wide Arrow
+  `DecimalVector` (`ArrowOutput.newVector`/`decimalColumn`); the planner accepts a wide decimal output
+  column only there. The Final merge of that buffer is Spark's until #87.
 - AVX2/AVX-512 paths are tested emulated, never measured on real hardware.
 - `TpchRunner --keep-alive` leaves the session and the Spark UI up for inspection; the demo JVM's
   Jetty resets some parallel static-resource fetches under load, so reload the page if the tab's

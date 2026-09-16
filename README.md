@@ -400,8 +400,10 @@ into Comet they are widened to the 128-bit C Data layout.
 Spark's optimizer rewrites `sum` over a decimal of up to 8 digits into `MakeDecimal(sum(UnscaledValue(x)))`,
 an ANSI `sum(bigint)`, and `avg` over one of up to 11 digits into a double average; both are compiled,
 which is also why bigint sums are now overflow-checked in ANSI mode (`AggKernels.sumLongExact`, a
-sign-trick overflow lane carried alongside the accumulator) instead of falling back. Wider decimal
-sums keep their `(sum, isEmpty)` buffer of more than 18 digits and stay with Spark.
+sign-trick overflow lane carried alongside the accumulator) instead of falling back. A wider decimal
+sum (`Decimal(12,2)` and up) is accumulated in 128 bits per group on the Partial side and emitted as
+Spark's `(sum, isEmpty)` buffer with the `sum` a wide Arrow decimal column; Spark's own Final merges
+those buffers until the merge side lands (#87).
 
 ### Joins
 

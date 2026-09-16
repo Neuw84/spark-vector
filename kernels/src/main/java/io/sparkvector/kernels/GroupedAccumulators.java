@@ -344,6 +344,127 @@ public final class GroupedAccumulators {
     }
   }
 
+  /**
+   * SUM over INT64 lanes into a 128-bit signed accumulator per group: the unscaled values of a
+   * decimal whose sum type is wider than 18 digits (Spark's {@code Decimal(p + 10, s)} buffer). An
+   * accumulator is one value per group, not per row, so scalar two-word arithmetic with a carry is
+   * all it takes -- no wide lane, no SIMD. Rows are added one at a time (a batch partial sum of
+   * 18-digit values does not reliably fit a long), which also makes the ungrouped path the same
+   * accumulator with every row in group 0. Exact, so the interleaving question of the double sums
+   * does not arise and none is done.
+   */
+  public static final class WideLongSum {
+    private int capacity = 64;
+    private long[] hi = new long[64];
+    private long[] lo = new long[64];
+    private long[] count = new long[64];
+    private final Scratch scratch = new Scratch();
+
+    /** Adds every valid row of {@code v} (INT32 or INT64) to the group {@code ids} says. */
+    public void update(VectorBuffers v, GroupAssignment a) {
+      ensure(a.numGroups());
+      if (a.useMasks()) {
+        for (int g = 0; g < a.numGroups(); g++) {
+          if (a.maskCount(g) == 0) {
+            continue;
+          }
+          addAll(a.restrict(v, g), g);
+        }
+        return;
+      }
+      int[] ids = a.ids();
+      int n = a.numRows();
+      long[] x = v.type() == VecType.INT32 ? scratch.longsFromInts(v.data(), n) : scratch.longs(v.data(), n);
+      MemorySegment validity = a.effectiveValidity(v);
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
+          add(ids[i], x[i]);
+        }
+      } else {
+        for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+          long bits = Bitmap.wordAt(validity, w, n);
+          while (bits != 0L) {
+            int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+            bits &= bits - 1;
+            add(ids[i], x[i]);
+          }
+        }
+      }
+    }
+
+    /** The ungrouped path: every valid row of {@code v} into group 0. */
+    public void updateAll(VectorBuffers v) {
+      ensure(1);
+      addAll(v, 0);
+    }
+
+    private void addAll(VectorBuffers v, int g) {
+      int n = v.length();
+      long[] x = v.type() == VecType.INT32 ? scratch.longsFromInts(v.data(), n) : scratch.longs(v.data(), n);
+      MemorySegment validity = v.validity();
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
+          add(g, x[i]);
+        }
+      } else {
+        for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+          long bits = Bitmap.wordAt(validity, w, n);
+          while (bits != 0L) {
+            int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+            bits &= bits - 1;
+            add(g, x[i]);
+          }
+        }
+      }
+    }
+
+    /** {@code (hi, lo) += sign-extended x}: the carry out of the low word, then the sign word. */
+    private void add(int g, long x) {
+      long l = lo[g];
+      long sum = l + x;
+      long carry = ((l & x) | ((l | x) & ~sum)) >>> 63;
+      lo[g] = sum;
+      hi[g] += (x >> 63) + carry;
+      count[g]++;
+    }
+
+    private void ensure(int groups) {
+      if (groups > capacity) {
+        int cap = grow(capacity, groups);
+        hi = Arrays.copyOf(hi, cap);
+        lo = Arrays.copyOf(lo, cap);
+        count = Arrays.copyOf(count, cap);
+        capacity = cap;
+      }
+    }
+
+    /** High word of the group's signed 128-bit sum. */
+    public long hi(int g) {
+      return hi[g];
+    }
+
+    /** Low word (unsigned) of the group's signed 128-bit sum. */
+    public long lo(int g) {
+      return lo[g];
+    }
+
+    public long count(int g) {
+      return count[g];
+    }
+
+    /** The group's sum as a {@link java.math.BigInteger}. */
+    public java.math.BigInteger sum(int g) {
+      return toBigInteger(hi[g], lo[g]);
+    }
+
+    /** {@code hi * 2^64 + lo} with {@code lo} unsigned: a signed 128-bit value. */
+    public static java.math.BigInteger toBigInteger(long hi, long lo) {
+      java.math.BigInteger high = java.math.BigInteger.valueOf(hi).shiftLeft(64);
+      java.math.BigInteger low = new java.math.BigInteger(Long.toUnsignedString(lo));
+      return high.add(low);
+    }
+  }
+
   /** COUNT(*) or COUNT(expr). */
   public static final class Count {
     private int capacity = 64;
