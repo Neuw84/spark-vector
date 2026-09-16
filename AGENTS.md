@@ -86,8 +86,9 @@ that pin it.
   carries a sign-trick overflow lane; `GroupedAccumulators.LongSum(checked)` uses `Math.addExact`).
   ANSI errors (overflow, division by zero, decimal overflow) are raised only for rows that are active
   (survive earlier conjuncts / the selection), matching Spark's short-circuit semantics.
-- Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`,
-  `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
+- Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`
+  (numbers via `CompareKernels`, strings via `StringCompareKernels` in UTF8_BINARY order), `InExpr`
+  (one equality pass per literal), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
   `CaseWhenExpr` for `CASE WHEN`/`IF`/`COALESCE`: per-branch win masks carried forward as `active`,
   a null condition counts as false, `SelectKernels.select` blends -- literal branches, string and
   boolean ones included, are materialised as constant columns).
@@ -391,7 +392,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 112 kernel tests, 123 Spark tests (96 without the Comet and Iceberg profiles;
+Current counts: 115 kernel tests, 126 Spark tests (99 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -433,7 +434,6 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 - Iceberg `MERGE INTO` itself is not accelerated: the rewritten plan projects
   `monotonically_increasing_id()` and the struct `_partition` metadata column above the target scan,
   so that project falls back. Reads over the merged table are.
-- String literals in predicates are not compiled (`unsupported literal type string`).
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

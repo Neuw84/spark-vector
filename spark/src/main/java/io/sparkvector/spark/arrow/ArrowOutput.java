@@ -249,6 +249,21 @@ public final class ArrowOutput {
 
   /** A column of {@code length} copies of a non-null literal (Spark's internal representation). */
   public static ColumnVector constant(String name, DataType dt, Object value, int length, BufferAllocator allocator) {
+    if (dt instanceof StringType) {
+      byte[] bytes = ((org.apache.spark.unsafe.types.UTF8String) value).getBytes();
+      ArrowVectorBuffers out = allocateUtf8(name, length, (long) bytes.length * length, allocator);
+      MemorySegment offsets = out.offsets();
+      MemorySegment data = out.data();
+      MemorySegment src = MemorySegment.ofArray(bytes);
+      long pos = 0;
+      for (int i = 0; i < length; i++) {
+        offsets.setAtIndex(VectorBuffers.LE_INT, i, (int) pos);
+        MemorySegment.copy(src, 0, data, pos, bytes.length);
+        pos += bytes.length;
+      }
+      offsets.setAtIndex(VectorBuffers.LE_INT, length, (int) pos);
+      return finish(out, length, true);
+    }
     ArrowVectorBuffers out = allocateFixed(name, dt, length, allocator);
     MemorySegment data = out.data();
     switch (out.type()) {

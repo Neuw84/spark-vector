@@ -21,7 +21,7 @@ the UI tooltip and `spark.vector.explainFallback.enabled` show, and what the sui
 | INT32 | `int`, `date` |
 | INT64 | `bigint`, `timestamp`, `decimal(p <= 18)` (unscaled value; the scale stays in the Spark type) |
 | FLOAT64 | `double` |
-| UTF8 | `string` (carried through filters, projections and as a grouping/join key; **not** comparable yet, #2) |
+| UTF8 | `string` (carried through filters, projections and as a grouping/join key; compared in UTF8_BINARY order by `StringCompareKernels`) |
 
 Anything else -- `decimal(p > 18)`, `float`, `short`, `byte`, `binary`, `array`, `map`, `struct`,
 intervals -- has no lane: a column of such a type records `unsupported type <type> for <name>`, a
@@ -30,8 +30,8 @@ decimals are the usual reason in practice (see the TPC-H decimal measurement in
 [docs/results.md](results.md) and #26 / #27 / #28).
 
 **Literals** are compiled only as operands of a supported type: `int`, `bigint`, `double`, `date`,
-`timestamp`, `decimal(p <= 18)`. A `string` or `boolean` literal records `unsupported literal type
-string` / `... boolean`; a `NULL` literal `null literal`. An expression made only of literals is
+`timestamp`, `decimal(p <= 18)`, `string`. A `boolean` literal records `unsupported literal type
+boolean`; a `NULL` literal `null literal`. An expression made only of literals is
 refused where it would be pointless as a kernel (`comparison of two literals`, `arithmetic on two
 literals`, `cast of a literal`, `literal predicate`, ...) -- Spark's optimizer normally folds those away
 before we see them; a bare literal projection (`SELECT 1 FROM t`) is supported and materialised as a
@@ -48,8 +48,9 @@ matching Spark's short-circuit behaviour.
 |---|---|---|
 | Column reference (`AttributeReference`, `BoundReference`) | all lanes | `unbound attribute <name>` if the attribute is not in the operator's input; `unsupported type <type> for <name>` otherwise |
 | `Alias` | any | Transparent |
-| Literal | INT32, INT64, FLOAT64, date, timestamp, decimal(<=18) | Operand only, or a whole projected column. `unsupported literal type <type>`, `null literal` |
-| `=` `<` `<=` `>` `>=` and `!=` / `<>` (`Not(EqualTo)`) | INT32, INT64, FLOAT64 (incl. date, timestamp, decimal(<=18) as their lane) | Operands must have the **same** Spark type -- Spark's coercion inserts casts, which then have to compile (see Cast): `comparison operands differ: <t1> vs <t2>`. Strings and booleans: `comparison not supported for string` (#2). Doubles compare with Spark's ordering (NaN equal to NaN and greatest, `-0.0 == 0.0`); `KnownFloatingPointNormalized` / `NormalizeNaNAndZero` wrappers are identities. |
+| Literal | INT32, INT64, FLOAT64, date, timestamp, decimal(<=18), string | Operand only, or a whole projected column (a string literal becomes a constant UTF8 column). `unsupported literal type <type>`, `null literal` |
+| `=` `<` `<=` `>` `>=` and `!=` / `<>` (`Not(EqualTo)`) | INT32, INT64, FLOAT64 (incl. date, timestamp, decimal(<=18) as their lane), UTF8 | Operands must have the **same** Spark type -- Spark's coercion inserts casts, which then have to compile (see Cast): `comparison operands differ: <t1> vs <t2>`. Strings compare in Spark's default `UTF8_BINARY` order (unsigned byte-wise, a prefix first) against a literal or another string column; a dictionary-encoded column is compared once per dictionary entry. Booleans: `comparison not supported for boolean` (#32). Doubles compare with Spark's ordering (NaN equal to NaN and greatest, `-0.0 == 0.0`); `KnownFloatingPointNormalized` / `NormalizeNaNAndZero` wrappers are identities. |
+| `IN (v1, ..., vN)` | any comparable lane incl. UTF8 | Every element must be a non-null literal of the value's type (`InExpr`: the value is evaluated once, one equality pass per literal, through the dictionary for dictionary-encoded strings). `NULL in IN list`, `IN list is not all literals`, `IN operands differ: ...`, `IN over a literal`, `empty IN list`; above `spark.sql.optimizer.inSetConversionThreshold` literals Spark rewrites to `InSet`, which falls back (#32/#48) |
 | `AND`, `OR`, `NOT` | BOOL | Operands must be non-literal booleans: `boolean literal operand`, `expected boolean, got <type>` |
 | `IS NULL`, `IS NOT NULL` | all lanes | `null test on literal` |
 | `+` `-` `*` on integers | INT32, INT64 | Same-typed operands (`arithmetic operands differ`). Both modes: legacy wraps like Spark; in ANSI mode (Spark's default) the wrapped result is checked with an overflow lane mask (`OverflowKernels`: sign trick for `+ -`, exact product for `*`) and Spark's `ARITHMETIC_OVERFLOW` is raised -- `integer overflow` / `long overflow` with the `try_add` / `try_subtract` / `try_multiply` hint -- only if an **active** row overflowed, so rows a filter removed or an earlier conjunct decided never raise. `try_*`: `try_* arithmetic not supported` (#47) |
@@ -86,7 +87,6 @@ the remaining reasons on the aggregate's inputs.
 
 | Family | Issue |
 |---|---|
-| String comparisons and string literals (`=`, `<>`, `<`, `IN` on strings) | #2 |
 | `LIKE`, `startswith`, `endswith`, `contains` | #3 |
 | `year`, `month`, `extract`, date arithmetic | #5 |
 | `monotonically_increasing_id()` | #18 |

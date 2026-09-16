@@ -2,9 +2,9 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, If, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, Subtract, UnaryMinus, UnscaledValue}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, Subtract, UnaryMinus, UnscaledValue}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
-import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, TimestampType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
 
 /**
  * Translates Catalyst expressions into [[VectorExpr]] trees. Returns a human-readable reason on
@@ -14,11 +14,11 @@ object ExpressionCompiler {
 
   type Result = Either[String, VectorExpr]
 
-  private val comparableTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64)
+  private val comparableTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64, VecType.UTF8)
 
-  /** Types whose literals can be used as compare operands. */
+  /** Types whose literals can be used as compare / IN operands. */
   private def isLiteralType(dt: DataType): Boolean = dt match {
-    case IntegerType | LongType | DoubleType | DateType | TimestampType => true
+    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType => true
     case d: DecimalType => TypeMapping.isSupported(d)
     case _ => false
   }
@@ -52,6 +52,8 @@ object ExpressionCompiler {
     case GreaterThan(l, r) => comparison(CompareOp.GT, l, r, input)
     case GreaterThanOrEqual(l, r) => comparison(CompareOp.GE, l, r, input)
     case Not(EqualTo(l, r)) => comparison(CompareOp.NE, l, r, input)
+
+    case In(value, list) => inList(value, list, input)
 
     case And(l, r) => binaryBoolean(l, r, input)(AndExpr.apply)
     case Or(l, r) => binaryBoolean(l, r, input)(OrExpr.apply)
@@ -249,6 +251,29 @@ object ExpressionCompiler {
       re <- compile(r, input)
       _ <- check(le, re, l, r)
     } yield CompareExpr(op, le, re)
+
+  /**
+   * `value IN (list)` where every element is a non-null literal of the value's type (Spark's own
+   * type coercion has already folded any casts into the literals). A list with a `NULL`, a
+   * non-literal element or a mismatched type falls back; so does `InSet`, the optimizer's rewrite
+   * above `spark.sql.optimizer.inSetConversionThreshold` literals (#48).
+   */
+  private def inList(value: Expression, list: Seq[Expression], input: Seq[Attribute]): Result = {
+    if (list.isEmpty) Left("empty IN list")
+    else if (list.exists { case Literal(null, _) => true; case _ => false }) Left("NULL in IN list")
+    else if (!list.forall(_.isInstanceOf[Literal])) Left("IN list is not all literals")
+    else if (list.exists(_.dataType != value.dataType)) Left(s"IN operands differ: ${value.dataType.simpleString} vs ${list.map(_.dataType.simpleString).distinct.mkString("/")}")
+    else compile(value, input).flatMap {
+      case _: LiteralExpr => Left("IN over a literal")
+      case c if !comparableTypes.contains(c.vecType) => Left(s"IN not supported for ${value.dataType.simpleString}")
+      case c =>
+        val lits = list.map(compile(_, input))
+        lits.collectFirst { case Left(reason) => reason } match {
+          case Some(reason) => Left(reason)
+          case None => Right(InExpr(c, lits.collect { case Right(lit: LiteralExpr) => lit }))
+        }
+    }
+  }
 
   private def check(le: VectorExpr, re: VectorExpr, l: Expression, r: Expression): Either[String, Unit] = {
     if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("comparison of two literals")

@@ -66,6 +66,24 @@ public final class ScalarReference {
     }
   }
 
+  // ---------------------------------------------------------------- string comparison
+
+  /** {@code a[i] <op> s} in UTF8_BINARY order, via {@link Arrays#compareUnsigned} on the bytes. */
+  public static void compareUtf8Scalar(VectorBuffers a, byte[] s, CompareOp op, MemorySegment out) {
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      Bitmap.setTo(out, i, op.test(java.util.Arrays.compareUnsigned(a.getUtf8Bytes(i), s)));
+    }
+  }
+
+  /** {@code a[i] <op> b[i]} in UTF8_BINARY order. */
+  public static void compareUtf8(VectorBuffers a, VectorBuffers b, CompareOp op, MemorySegment out) {
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      Bitmap.setTo(out, i, op.test(java.util.Arrays.compareUnsigned(a.getUtf8Bytes(i), b.getUtf8Bytes(i))));
+    }
+  }
+
   // ---------------------------------------------------------------- arithmetic
 
   public static void arith(ArithOp op, VectorBuffers a, VectorBuffers b, MemorySegment out) {

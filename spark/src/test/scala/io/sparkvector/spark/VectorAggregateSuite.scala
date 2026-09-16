@@ -161,4 +161,18 @@ class VectorAggregateSuite extends VectorQuerySuite {
     assert(revenue > 0.0)
     info(s"Q6 revenue = $revenue\n${df.queryExecution.executedPlan.treeString}")
   }
+
+  test("string predicates over Parquet dictionary pages, the TPC-H Q10/Q12 shapes") {
+    // l_returnflag / l_linestatus / l_comment are low-cardinality strings the Parquet writer
+    // dictionary-encodes, so the literal is compared once per dictionary entry.
+    val q10 = checkVectorized(
+      "SELECT l_linestatus, count(*) AS c, sum(l_extendedprice * (1 - l_discount)) AS rev FROM lineitem WHERE l_returnflag = 'R' GROUP BY l_linestatus",
+      Seq(Filter, Agg), tolerance = 1e-6)
+    assert(nodesOf[HashAggregateExec](q10).isEmpty)
+    val q12 = checkVectorized(
+      "SELECT l_returnflag, count(*) AS c FROM lineitem WHERE l_comment IN ('cmt1', 'cmt50', 'cmt96') AND l_linestatus <> 'O' GROUP BY l_returnflag",
+      Seq(Filter, Agg))
+    assert(q12.collect().map(_.getLong(1)).sum > 0)
+    checkVectorized("SELECT count(*) FROM lineitem WHERE l_returnflag < l_linestatus", Seq(Filter, Agg))
+  }
 }

@@ -75,11 +75,40 @@ class VectorFilterSuite extends VectorQuerySuite {
     }
   }
 
+  test("string comparisons against literals, column versus column, and IN") {
+    // s is 's0'..'s49' with nulls where i % 10 = 0; byte order puts 's10' before 's2'.
+    checkVectorized("SELECT * FROM t WHERE s = 's1'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s <> 's1'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s < 's2'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s <= 's10'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s > 's45'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s >= 's9'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE 's3' = s", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE 's3' < s", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s = ''", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s > ''", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s = 'nowhere'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s IN ('s1', 's17', 's30')", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s NOT IN ('s1', 's17')", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE i IN (1, 2, 300) OR l IN (33, 36)", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s IN ('s1') OR s IS NULL", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s = 's1' AND i > 100 OR s = 's7' AND d IS NULL", Seq(Filter))
+    // Column versus column: a computed string next to s.
+    checkVectorized("SELECT count(*) FROM (SELECT s, s AS s2 FROM t) WHERE s = s2", Seq(Filter))
+    // Nulls: a null string compares to null, so NOT (s = 's1') keeps no null rows.
+    val notEq = checkVectorized("SELECT i FROM t WHERE NOT (s = 's1')", Seq(Filter))
+    assert(notEq.count() === 20000 - 2000 - 400) // 2000 nulls, 400 rows equal to 's1'
+    val in = checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's17', 's30')", Seq(Filter))
+    assert(in.count() === 800) // 400 each for s1 and s17; id % 50 = 30 is one of the null rows, so s30 never occurs
+  }
+
   test("unsupported expressions fall back with a reason") {
     checkFallback("SELECT * FROM t WHERE s LIKE 's1%'", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE i % 2 = 0", Seq(Filter), "unsupported expression")
-    checkFallback("SELECT * FROM t WHERE s = 's1'", Seq(Filter), "string")
     checkFallback("SELECT * FROM t WHERE s = concat(s, 'x')", Seq(Filter), "unsupported expression")
+    // The optimizer turns a long IN list into InSet, which is #48.
+    checkFallback("SELECT * FROM t WHERE s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12')", Seq(Filter), "unsupported expression")
+    checkFallback("SELECT * FROM t WHERE s IN ('s1', NULL)", Seq(Filter), "NULL in IN list")
   }
 
   test("filter conversion can be disabled by configuration") {
