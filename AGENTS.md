@@ -37,6 +37,7 @@ mvn -B -q clean install                    # kernels + Spark suites, Comet suite
 mvn -B -q -Pcomet clean install            # also the Comet-backed suites (needs the Comet jar in ~/.m2)
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
 mvn -pl spark install -Dsuites=io.sparkvector.spark.VectorAggregateSuite   # one suite
+mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.11 runtime from Maven Central)
 benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated lineitem; 10 for SF10 (2.1 GB, gitignored)
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
@@ -183,10 +184,22 @@ into these rather than adding special cases to operators.
 - Input: `ColumnVectorAdapters.adapt(ColumnVector, numRows, arena)` turns any Spark
   `ColumnVector` into `VectorBuffers`. Zero-copy adapters are tried first (our own
   `VectorArrowColumnVector`/`BorrowedColumnVector`, then anything registered through
-  `ColumnVectorAdapters.register(Adapter)`, which is how the Comet adapter joins without a
-  compile-time dependency); anything else is copied by `SparkColumnVectorBuffers`. A future
-  Parquet reader of our own that writes Arrow memory directly would be one more `Adapter`, or
-  better, would emit `VectorArrowColumnVector`s and need none.
+  `ColumnVectorAdapters.register(Adapter)`, which is how the Comet and Iceberg adapters join
+  without a compile-time dependency); anything else is copied by `SparkColumnVectorBuffers`. An
+  adapter receives the batch's scratch arena for small derived buffers (Iceberg keeps nulls in a
+  byte-per-row holder rather than an Arrow validity buffer, and hands strings over as Parquet
+  dictionary indices) while the data buffers stay in place. A future Parquet reader of our own
+  that writes Arrow memory directly would be one more `Adapter`, or better, would emit
+  `VectorArrowColumnVector`s and need none.
+- Foreign batch shapes are normalized where batches enter our operators
+  (`InputBatches.normalize`, called from `VectorBatchIterator.hasNext` and
+  `EvalContexts.withBatch`). Iceberg's JVM reader applies merge-on-read deletes by wrapping every
+  column in a `ColumnVectorWithFilter` over a shared row-id mapping and reporting the live count as
+  the batch size; normalization unwraps that into a `SelectedColumnarBatch` over the physical rows
+  (3.4), so the mapping costs one bitmap per batch instead of an indirection per access. Any
+  consumer that sizes scratch by the input must take the physical count from `ctx.numRows`, not
+  from `batch.numRows()` (the grouped aggregate got this wrong once and silently dropped rows).
+  See `docs/iceberg.md`.
 - Output: `ArrowOutput` writes result columns as unshaded Arrow 18.3.0 vectors (`ArrowSegments`,
   `VectorAllocators`) wrapped in Spark's `ArrowColumnVector`, so `ColumnarToRowExec`, Spark's
   Arrow-based Python/R paths and any Arrow consumer work unchanged. The Arrow version must stay
@@ -300,8 +313,8 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 87 kernel tests, 83 Spark tests (71 without the Comet profile). If a change lowers
-either number, explain why in the commit.
+Current counts: 104 kernel tests, 117 Spark tests (90 without the Comet and Iceberg profiles;
+the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 
@@ -311,6 +324,13 @@ either number, explain why in the commit.
 - Results are appended to `benchmarks/results/<config>.jsonl` (committed) and the report takes the
   latest measurement per (dataset, config, query). Outliers stay in the files with older
   timestamps; note discarded runs in `docs/results.md`.
+   Iceberg integration. `IcebergScanSuite` (tag `IcebergTest`, `-Piceberg`) and `CometIcebergSuite`
+   (both tags, `-Pcomet,iceberg`) run the same merge-on-read battery from `IcebergMorSuiteBase`:
+   positional deletes, deletion vectors (v3), equality deletes written with the Iceberg Java API,
+   a merge-on-read lineitem for Q1/Q6, and a `MERGE INTO` over a heavily mutated table run with the
+   plugin on and off whose results must match row for row. The JVM suite also asserts through
+   adapter counters that batches were normalized and columns (including dictionary strings) adapted
+   in place rather than copied.
 - Run on a quiet machine. A video call or a full build minutes earlier moved medians by up to 2x on
   the development laptop; a `spark` Q1 median far from the documented one (1123 ms at SF10) means
   the environment, not the code. Check `uptime` and the top CPU consumers before trusting a run.
@@ -348,3 +368,10 @@ either number, explain why in the commit.
 - `TpchRunner --keep-alive` leaves the session and the Spark UI up for inspection; the demo JVM's
   Jetty resets some parallel static-resource fetches under load, so reload the page if the tab's
   toggles do not react (jQuery failed to load).
+- Iceberg `MERGE INTO` itself is not accelerated: the rewritten plan projects
+  `monotonically_increasing_id()` and the struct `_partition` metadata column above the target scan,
+  so that project falls back. Reads over the merged table are.
+- String literals in predicates are not compiled (`unsupported literal type string`).
+- Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
+  covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
+  native read.

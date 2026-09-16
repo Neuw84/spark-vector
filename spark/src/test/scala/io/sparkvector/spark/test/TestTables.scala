@@ -1,6 +1,6 @@
 package io.sparkvector.spark.test
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SparkSession}
 
 /** Shared synthetic tables written as Parquet and registered as temp views. */
 object TestTables {
@@ -10,6 +10,16 @@ object TestTables {
    * infinities in `d`, and a second double column `d2` for column-vs-column comparisons.
    */
   def createMixed(spark: SparkSession, path: String, rows: Int = 20000): Unit = {
+    mixedDataFrame(spark, rows)
+      .repartition(3)
+      .write
+      .mode("overwrite")
+      .parquet(path)
+    spark.read.parquet(path).createOrReplaceTempView("t")
+  }
+
+  /** The rows of `t` as a DataFrame, for writers other than Parquet-on-path (Iceberg). */
+  def mixedDataFrame(spark: SparkSession, rows: Int = 20000): DataFrame =
     spark
       .range(0, rows)
       .selectExpr(
@@ -24,18 +34,22 @@ object TestTables {
         "date_add(date '2020-01-01', cast(id % 730 as int)) as dt",
         "id % 3 = 0 as b",
         "if(id % 10 = 0, null, concat('s', id % 50)) as s")
-      .repartition(3)
-      .write
-      .mode("overwrite")
-      .parquet(path)
-    spark.read.parquet(path).createOrReplaceTempView("t")
-  }
 
   /**
    * `lineitem`: a TPC-H shaped table with decimals replaced by doubles (the benchmark variant we
    * target). Distributions loosely follow dbgen so Q1/Q6 predicates have realistic selectivity.
    */
   def createLineitem(spark: SparkSession, path: String, rows: Int = 60000): Unit = {
+    lineitemDataFrame(spark, rows)
+      .repartition(4)
+      .write
+      .mode("overwrite")
+      .parquet(path)
+    spark.read.parquet(path).createOrReplaceTempView("lineitem")
+  }
+
+  /** The rows of `lineitem` as a DataFrame. */
+  def lineitemDataFrame(spark: SparkSession, rows: Int = 60000): DataFrame =
     spark
       .range(0, rows)
       .selectExpr(
@@ -53,12 +67,6 @@ object TestTables {
         "date_add(date '1992-01-01', cast(pmod(id * 40503, 2557) as int)) as l_commitdate",
         "date_add(date '1992-01-01', cast(pmod(id * 69069, 2557) as int)) as l_receiptdate",
         "concat('cmt', id % 97) as l_comment")
-      .repartition(4)
-      .write
-      .mode("overwrite")
-      .parquet(path)
-    spark.read.parquet(path).createOrReplaceTempView("lineitem")
-  }
 
   val TpchQ6: String =
     """SELECT sum(l_extendedprice * l_discount) AS revenue

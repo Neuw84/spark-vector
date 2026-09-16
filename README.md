@@ -9,8 +9,10 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 
 - Spark 4.1.x, Scala 2.13, JDK 25 (the Vector API is still an incubator module)
 - Input: Spark's vectorized Parquet reader (copied into Arrow layout once per batch, keeping
-  dictionary-encoded strings as dictionary indices) or Comet's native Parquet reader in scan-only
-  mode (read zero-copy). See [docs/comet.md](docs/comet.md).
+  dictionary-encoded strings as dictionary indices), Comet's native Parquet and Iceberg readers in
+  scan-only mode (read zero-copy), or Iceberg's own JVM vectorized reader (read zero-copy, with
+  merge-on-read deletes turned into a selection). See [docs/comet.md](docs/comet.md) and
+  [docs/iceberg.md](docs/iceberg.md).
 - Output: unshaded Arrow 18.3.0 vectors (the version Spark bundles) wrapped in Spark's
   `ArrowColumnVector`, so Spark's own `ColumnarToRowExec` consumes them unchanged.
 
@@ -29,6 +31,8 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@25      # any JDK 25
 mvn verify                                          # kernels + Spark suites (Comet suites skipped)
 mvn -Pcomet verify                                  # also runs the Comet-backed suites (see docs/comet.md)
 ```
+mvn -Piceberg verify                                # also runs the Iceberg suites (see docs/iceberg.md)
+mvn -Pcomet,iceberg verify                          # everything, including Comet's native Iceberg scan
 
 The plugin jar is `spark/target/spark-vector-spark_2.13-<version>.jar` (kernels shaded in, nothing
 else). Spark and Arrow are `provided`.

@@ -69,6 +69,46 @@ public final class ArrowLayout {
     return v;
   }
 
+  /**
+   * Builds a validity bitmap from a byte-per-row nullability array where a non-zero byte marks a
+   * null (the layout Iceberg's {@code NullabilityHolder} keeps instead of an Arrow validity
+   * buffer). Bit {@code i} is set when row {@code i} is valid. The caller decides whether the
+   * column has nulls at all; this always allocates.
+   */
+  public static MemorySegment validityFromNullBytes(Arena arena, byte[] isNull, int length) {
+    MemorySegment v = allocateBitmap(arena, length);
+    int words = Bitmap.wordsFor(length);
+    int row = 0;
+    for (int w = 0; w < words; w++) {
+      int end = Math.min(row + 64, length);
+      long word = 0L;
+      for (int i = row; i < end; i++) {
+        if (isNull[i] == 0) {
+          word |= 1L << (i - row);
+        }
+      }
+      Bitmap.setWord(v, w, length, word);
+      row = end;
+    }
+    return v;
+  }
+
+  /**
+   * Builds a selection bitmap of {@code length} bits with the bits at {@code indices[0..count)}
+   * set (the indices are row positions, in any order, each below {@code length}).
+   */
+  public static MemorySegment selectionFromIndices(Arena arena, int[] indices, int count, int length) {
+    MemorySegment s = allocateBitmap(arena, length);
+    for (int i = 0; i < count; i++) {
+      int idx = indices[i];
+      if (idx < 0 || idx >= length) {
+        throw new IndexOutOfBoundsException("selected row " + idx + " outside batch of " + length);
+      }
+      Bitmap.set(s, idx);
+    }
+    return s;
+  }
+
   public static SegmentVectorBuffers ofInts(Arena arena, int[] values, boolean[] nulls) {
     MemorySegment data = allocateData(arena, VecType.INT32, values.length);
     MemorySegment.copy(values, 0, data, VectorBuffers.LE_INT, 0, values.length);

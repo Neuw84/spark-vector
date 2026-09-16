@@ -42,12 +42,19 @@ abstract class VectorBatchIterator(input: Iterator[ColumnarBatch], name: String)
 
   override def hasNext: Boolean = {
     while (pending == null && input.hasNext) {
-      val in = input.next()
-      if (in.numRows() > 0) {
+      val raw = input.next()
+      if (raw.numRows() > 0) {
+        // A foreign reader's row-id-mapped batch becomes a selected batch over its physical rows.
+        // The wrapper owns only its selection bitmap; the columns stay with the child.
+        val in = InputBatches.normalize(raw)
+        val wrapped = in ne raw
         val out = process(in)
-        if (out != null) {
+        if (out == null) {
+          if (wrapped) in.close()
+        } else {
           pending = out
-          pendingOwned = out ne in
+          pendingOwned = (out ne in) || wrapped
+          if (wrapped && (out ne in)) in.close()
         }
       }
     }
@@ -88,8 +95,14 @@ abstract class VectorBatchIterator(input: Iterator[ColumnarBatch], name: String)
 }
 
 object EvalContexts {
-  /** Runs `f` with an evaluation context over `batch`; the scratch arena is closed afterwards. */
-  def withBatch[T](batch: ColumnarBatch)(f: EvalContext => T): T = {
+  /**
+   * Runs `f` with an evaluation context over `batch`; the scratch arena is closed afterwards. A
+   * row-id-mapped batch from a foreign reader is normalized first (see [[InputBatches]]), so
+   * consumers that read batches without going through [[VectorBatchIterator]] (aggregate, sort)
+   * see the physical rows plus a selection too.
+   */
+  def withBatch[T](raw: ColumnarBatch)(f: EvalContext => T): T = {
+    val batch = InputBatches.normalize(raw)
     val arena = Arena.ofConfined()
     try {
       val n = batch.numRows()
@@ -102,8 +115,21 @@ object EvalContexts {
       f(ctx)
     } finally {
       arena.close()
+      if (batch ne raw) batch.close()
     }
   }
+}
+
+/**
+ * Normalization of input batches from readers whose batch shape differs from Spark's plain
+ * `ColumnarBatch`: today Iceberg's JVM reader on merge-on-read tables, whose columns remap row
+ * ids through a shared mapping. The result is either the input itself or a
+ * [[io.sparkvector.spark.arrow.SelectedColumnarBatch]] over the unwrapped columns that the caller
+ * must close (it owns only the selection bitmap).
+ */
+object InputBatches {
+  def normalize(batch: ColumnarBatch): ColumnarBatch =
+    io.sparkvector.spark.iceberg.IcebergVectorAdapter.normalize(batch)
 }
 
 /** Metric bookkeeping shared by the operators. */

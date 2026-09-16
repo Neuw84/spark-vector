@@ -38,6 +38,7 @@
     <scalatest.version>3.2.20</scalatest.version>
     <jmh.version>1.37</jmh.version>
     <comet.version>1.0.0</comet.version>
+    <iceberg.version>1.11.0</iceberg.version>
 
     <maven-compiler-plugin.version>3.14.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.5.3</maven-surefire-plugin.version>
@@ -216,7 +217,6 @@
       </plugins>
     </pluginManagement>
   </build>
-</project>
 
   <profiles>
     <!--
@@ -230,3 +230,4 @@
       </modules>
     </profile>
   </profiles>
+</project>

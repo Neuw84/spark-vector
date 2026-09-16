@@ -5,6 +5,7 @@ import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
 import io.sparkvector.spark.adapter.ColumnVectorAdapters;
 import io.sparkvector.spark.adapter.TypeMapping;
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -101,7 +102,7 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
   }
 
   @Override
-  public VectorBuffers adapt(ColumnVector cv, int numRows) {
+  public VectorBuffers adapt(ColumnVector cv, int numRows, Arena scratch) {
     if (!cometVector.isInstance(cv)) {
       return null;
     }
@@ -114,12 +115,12 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
         return adaptDictionary(cv, numRows, type);
       }
       Object vector = getValueVector.invoke(cv);
-      return wrap(vector, numRows, type);
       if (cv.dataType() instanceof org.apache.spark.sql.types.DecimalType
           && !vector.getClass().getName().endsWith(".BigIntVector")) {
         // Comet's 128-bit decimals (and 32-bit ones): let the copy path read them via getDecimal.
         return null;
       }
+      return wrap(vector, numRows, type);
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException("cannot read Comet vector", e);
     }

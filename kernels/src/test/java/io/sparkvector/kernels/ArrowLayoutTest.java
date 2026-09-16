@@ -101,6 +101,51 @@ class ArrowLayoutTest {
   }
 
   @Test
+  void validityFromNullBytesMatchesBooleanConstruction() {
+    Random rnd = new Random(7);
+    for (int n : new int[] {1, 63, 64, 65, 200, 1024, 1027}) {
+      byte[] isNull = new byte[n + 5]; // Iceberg's holder is sized for the batch, not the read
+      boolean[] nulls = new boolean[n];
+      for (int i = 0; i < n; i++) {
+        nulls[i] = rnd.nextInt(3) == 0;
+        isNull[i] = nulls[i] ? (byte) 1 : 0;
+      }
+      nulls[0] = true; // make sure the boolean variant allocates
+      isNull[0] = 1;
+      try (Arena arena = Arena.ofConfined()) {
+        java.lang.foreign.MemorySegment expected = ArrowLayout.validityFrom(arena, nulls, n);
+        java.lang.foreign.MemorySegment actual = ArrowLayout.validityFromNullBytes(arena, isNull, n);
+        for (int i = 0; i < n; i++) {
+          assertEquals(Bitmap.isSet(expected, i), Bitmap.isSet(actual, i), "row " + i + " of " + n);
+        }
+        // Bits at or beyond n stay clear so popcount over the padded segment is exact.
+        assertEquals(Bitmap.popcount(expected, n), Bitmap.popcount(actual, n));
+        for (int i = n; i < actual.byteSize() * 8; i++) {
+          assertFalse(Bitmap.isSet(actual, i), "padding bit " + i);
+        }
+      }
+    }
+  }
+
+  @Test
+  void selectionFromIndicesSetsExactlyTheListedRows() {
+    int[] indices = {0, 3, 4, 63, 64, 65, 126, 999, 1000};
+    int n = 1001;
+    try (Arena arena = Arena.ofConfined()) {
+      java.lang.foreign.MemorySegment sel = ArrowLayout.selectionFromIndices(arena, indices, indices.length - 1, n);
+      assertEquals(indices.length - 1, Bitmap.popcount(sel, n));
+      for (int i = 0; i < indices.length - 1; i++) {
+        assertTrue(Bitmap.isSet(sel, indices[i]));
+      }
+      assertFalse(Bitmap.isSet(sel, 1000)); // beyond count
+      assertFalse(Bitmap.isSet(sel, 1));
+      org.junit.jupiter.api.Assertions.assertThrows(
+          IndexOutOfBoundsException.class,
+          () -> ArrowLayout.selectionFromIndices(arena, new int[] {5}, 1, 5));
+    }
+  }
+
+  @Test
   void dictionaryEncodedUtf8ResolvesThroughDictionary() {
     try (Arena arena = Arena.ofConfined()) {
       VectorBuffers dict = ArrowLayout.ofStrings(arena, new String[] {"A", "F", "N", "O", "R"});

@@ -1,6 +1,6 @@
 package io.sparkvector.spark.comet
 
-import io.sparkvector.spark.{VectorConf, VectorPlugin}
+import io.sparkvector.spark.VectorConf
 import io.sparkvector.spark.test.{CometTest, TestTables, VectorQuerySuite}
 import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
@@ -15,38 +15,7 @@ class CometScanSuite extends VectorQuerySuite {
   private val Project = classOf[VectorProjectExec]
   private val Agg = classOf[VectorHashAggregateExec]
 
-  override protected def extraSparkConf: Map[String, String] = Map(
-    // Both plugins register their session extensions, Comet first so its scan rule runs first.
-    "spark.plugins" -> s"org.apache.spark.CometPlugin,${classOf[VectorPlugin].getName}",
-    "spark.comet.enabled" -> "true",
-    "spark.comet.scan.enabled" -> "true",
-    // Comet 1.0's only scan is the native DataFusion one, which requires exec to be enabled; keep
-    // every Comet operator off so the scan is the only native piece and Spark's shuffle is used.
-    "spark.comet.exec.enabled" -> "true",
-    "spark.comet.exec.shuffle.enabled" -> "false",
-    "spark.comet.exec.project.enabled" -> "false",
-    "spark.comet.exec.filter.enabled" -> "false",
-    "spark.comet.exec.aggregate.enabled" -> "false",
-    "spark.comet.exec.sort.enabled" -> "false",
-    "spark.comet.exec.localLimit.enabled" -> "false",
-    "spark.comet.exec.globalLimit.enabled" -> "false",
-    "spark.comet.exec.takeOrderedAndProject.enabled" -> "false",
-    "spark.comet.exec.hashJoin.enabled" -> "false",
-    "spark.comet.exec.sortMergeJoin.enabled" -> "false",
-    "spark.comet.exec.broadcastHashJoin.enabled" -> "false",
-    "spark.comet.exec.broadcastExchange.enabled" -> "false",
-    "spark.comet.exec.expand.enabled" -> "false",
-    "spark.comet.exec.union.enabled" -> "false",
-    "spark.comet.exec.window.enabled" -> "false",
-    "spark.comet.exec.coalesce.enabled" -> "false",
-    "spark.comet.exec.collectLimit.enabled" -> "false",
-    "spark.comet.exec.explode.enabled" -> "false",
-    "spark.comet.exec.sample.enabled" -> "false",
-    "spark.memory.offHeap.enabled" -> "true",
-    "spark.memory.offHeap.size" -> "1g",
-    "spark.comet.explainFallback.enabled" -> "false",
-    "spark.sql.parquet.enableVectorizedReader" -> "true",
-    "spark.sql.adaptive.enabled" -> "true")
+  override protected def extraSparkConf: Map[String, String] = CometTestConf.scanOnly
 
   /** Comet 1.0 plans its scan as CometNativeScanExec (or CometScanExec / CometBatchScanExec). */
   private def cometScans(df: org.apache.spark.sql.DataFrame) =

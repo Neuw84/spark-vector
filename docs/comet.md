@@ -97,7 +97,8 @@ mvn -Pcomet -pl spark verify -Dsuites=io.sparkvector.spark.comet.CometScanSuite,
 ```
 
 Without `-Pcomet` the suites are excluded by their `CometTest` tag and the rest of the build has no
-Comet dependency.
+Comet dependency. The Iceberg-over-Comet suite (`CometIcebergSuite`) carries both the `CometTest`
+and the `IcebergTest` tag and runs with `-Pcomet,iceberg`; see [iceberg.md](iceberg.md).
 
 ## Limitations
 

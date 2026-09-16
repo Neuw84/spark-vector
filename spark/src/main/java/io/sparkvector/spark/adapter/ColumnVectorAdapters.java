@@ -20,17 +20,24 @@ import org.apache.spark.sql.vectorized.ColumnVector;
  */
 public final class ColumnVectorAdapters {
 
-  /** Zero-copy adapter for a foreign columnar vector class. Returns {@code null} to decline. */
+  /**
+   * Zero-copy adapter for a foreign columnar vector class. Returns {@code null} to decline. The
+   * scratch arena lives as long as the batch is being evaluated; adapters that need small side
+   * buffers (a validity bitmap derived from a foreign nullability structure, a decoded dictionary)
+   * allocate them there and still hand the column's own data buffers over without a copy.
+   */
   @FunctionalInterface
   public interface Adapter {
-    VectorBuffers adapt(ColumnVector cv, int numRows);
+    VectorBuffers adapt(ColumnVector cv, int numRows, Arena scratch);
   }
 
   private static final List<Adapter> ADAPTERS = new CopyOnWriteArrayList<>();
 
   static {
-    // Comet's scan vectors are read zero-copy when Comet is on the classpath (executor side).
+    // Comet's and Iceberg's scan vectors are read zero-copy when their jars are on the classpath
+    // (executor side); registration is a no-op otherwise.
     io.sparkvector.spark.comet.CometVectorAdapter.tryRegister();
+    io.sparkvector.spark.iceberg.IcebergVectorAdapter.tryRegister();
   }
 
   private ColumnVectorAdapters() {}
@@ -49,16 +56,16 @@ public final class ColumnVectorAdapters {
     if (cv instanceof VectorDictionaryColumnVector d) {
       return d.buffers();
     }
+    if (cv instanceof VectorDecimalColumnVector d) {
+      return ArrowVectorBuffers.forRead(d.vector());
+    }
     for (Adapter adapter : ADAPTERS) {
-      VectorBuffers vb = adapter.adapt(cv, numRows);
+      VectorBuffers vb = adapter.adapt(cv, numRows, scratch);
       if (vb != null) {
         return vb;
       }
     }
     return SparkColumnVectorBuffers.copy(cv, numRows, scratch);
-    if (cv instanceof VectorDecimalColumnVector d) {
-      return ArrowVectorBuffers.forRead(d.vector());
-    }
   }
 
   /** True if {@link #adapt} would not need to copy. */
@@ -70,9 +77,11 @@ public final class ColumnVectorAdapters {
         || cv instanceof VectorDecimalColumnVector) {
       return true;
     }
-    for (Adapter adapter : ADAPTERS) {
-      if (adapter.adapt(cv, numRows) != null) {
-        return true;
+    try (Arena scratch = Arena.ofConfined()) {
+      for (Adapter adapter : ADAPTERS) {
+        if (adapter.adapt(cv, numRows, scratch) != null) {
+          return true;
+        }
       }
     }
     return false;

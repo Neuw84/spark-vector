@@ -92,7 +92,7 @@
           <filereports>SparkVectorTestSuite.txt</filereports>
           <stdout>W</stdout>
           <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx3g -Dspark.ui.enabled=false -Dspark.driver.host=localhost</argLine>
-          <tagsToExclude>${test.tags.exclude}</tagsToExclude>
+          <tagsToExclude>${test.tags.exclude.comet},${test.tags.exclude.iceberg}</tagsToExclude>
         </configuration>
         <executions>
           <execution>
@@ -129,15 +129,19 @@
   </build>
 
   <properties>
-    <!-- Comet-backed suites are excluded unless the comet profile is active. -->
-    <test.tags.exclude>io.sparkvector.spark.test.CometTest</test.tags.exclude>
+    <!--
+      Comet-backed suites are excluded unless the comet profile is active, Iceberg-backed ones
+      unless the iceberg profile is; a suite tagged with both needs both profiles (-Pcomet,iceberg).
+    -->
+    <test.tags.exclude.comet>io.sparkvector.spark.test.CometTest</test.tags.exclude.comet>
+    <test.tags.exclude.iceberg>io.sparkvector.spark.test.IcebergTest</test.tags.exclude.iceberg>
   </properties>
 
   <profiles>
     <profile>
       <id>comet</id>
       <properties>
-        <test.tags.exclude>io.sparkvector.spark.test.NoTest</test.tags.exclude>
+        <test.tags.exclude.comet>io.sparkvector.spark.test.NoTest</test.tags.exclude.comet>
       </properties>
       <dependencies>
         <dependency>
@@ -145,6 +149,21 @@
           <artifactId>comet-spark-spark4.1_${scala.binary.version}</artifactId>
           <version>${comet.version}</version>
           <scope>provided</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>iceberg</id>
+      <properties>
+        <test.tags.exclude.iceberg>io.sparkvector.spark.test.NoTest</test.tags.exclude.iceberg>
+      </properties>
+      <dependencies>
+        <!-- Iceberg is only ever reached reflectively from src/main; the runtime jar is for tests. -->
+        <dependency>
+          <groupId>org.apache.iceberg</groupId>
+          <artifactId>iceberg-spark-runtime-4.1_${scala.binary.version}</artifactId>
+          <version>${iceberg.version}</version>
+          <scope>test</scope>
         </dependency>
       </dependencies>
     </profile>

@@ -56,6 +56,19 @@ public final class SelectedColumnarBatch extends ColumnarBatch {
     return new SelectedColumnarBatch(columns, numRows, arena, copy, selectedCount, ownsColumns);
   }
 
+  /**
+   * Wraps {@code columns} ({@code numRows} physical rows) selecting the rows whose positions are
+   * {@code indices[0..selectedCount)}; the selection bitmap lives in a fresh arena owned by the
+   * batch. This is how a foreign reader's row-id mapping (Iceberg's {@code ColumnVectorWithFilter})
+   * becomes a selection our operators evaluate over the full batch.
+   */
+  public static SelectedColumnarBatch ofIndices(
+      ColumnVector[] columns, int numRows, int[] indices, int selectedCount, boolean ownsColumns) {
+    Arena arena = Arena.ofConfined();
+    MemorySegment selection = ArrowLayout.selectionFromIndices(arena, indices, selectedCount, numRows);
+    return new SelectedColumnarBatch(columns, numRows, arena, selection, selectedCount, ownsColumns);
+  }
+
   /** The columns of {@code batch}, in order (borrowed, not copied). */
   public static ColumnVector[] columnsOf(ColumnarBatch batch) {
     ColumnVector[] columns = new ColumnVector[batch.numCols()];
