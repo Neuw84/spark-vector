@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec}
+import org.apache.spark.sql.execution.{CollectLimitExec, ColumnarRule, FilterExec, GlobalLimitExec, LocalLimitExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
@@ -70,6 +70,27 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
               if (failures.isEmpty) VectorProjectExec(projectList, child)
               else fallback(p, failures.mkString("; "))
+          }
+
+        case l: LocalLimitExec if VectorConf.limitEnabled(conf) =>
+          columnarInputReason(l.child) match {
+            case Some(reason) => fallback(l, reason)
+            case None => VectorLimitPlanner.planLocal(l).fold(reason => fallback(l, reason), v => v)
+          }
+
+        case g: GlobalLimitExec if VectorConf.limitEnabled(conf) =>
+          // Only over a columnar child: above Spark's row shuffle the limit stays Spark's.
+          columnarInputReason(g.child) match {
+            case Some(reason) => fallback(g, reason)
+            case None => VectorLimitPlanner.planGlobal(g).fold(reason => fallback(g, reason), v => v)
+          }
+
+        case c: CollectLimitExec if VectorConf.limitEnabled(conf) =>
+          // Per-partition cut stays columnar; the final take goes through Spark's single-partition
+          // shuffle like the top-N operator.
+          columnarInputReason(c.child) match {
+            case Some(reason) => fallback(c, reason)
+            case None => VectorLimitPlanner.planCollect(c).fold(reason => fallback(c, reason), v => v)
           }
 
         case t: TakeOrderedAndProjectExec if VectorConf.takeOrderedEnabled(conf) =>

@@ -1,6 +1,5 @@
 package org.apache.spark.sql.vector
 
-import scala.jdk.CollectionConverters._
 
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.expr.VectorExpr
@@ -9,13 +8,11 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, NamedExpression, NullsFirst, SortOrder, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.codegen.LazilyGeneratedOrdering
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, SinglePartition}
-import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan, TakeOrderedAndProjectExec, UnsafeRowSerializer}
-import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
+import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics, SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
-import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
-import org.apache.spark.sql.types.{BooleanType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, StructType, TimestampType}
-import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.collection.Utils
 
 /**
@@ -69,11 +66,7 @@ case class VectorTakeOrderedAndProjectExec(
     val n = limit
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter =>
-      val sorted = new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n)
-      val toUnsafe = UnsafeProjection.create(childOutput, childOutput)
-      // The shuffle serialiser needs UnsafeRows; a batch is released when the next is requested,
-      // so every row is copied out of it.
-      sorted.flatMap(batch => batch.rowIterator().asScala.map(row => toUnsafe(row).copy()))
+      VectorRowStages.toUnsafeRows(new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n), childOutput)
     }
   }
 
@@ -85,10 +78,7 @@ case class VectorTakeOrderedAndProjectExec(
     val schema = DataTypeUtils.fromAttributes(output)
     val numOutputBatches = longMetric("numOutputBatches")
     val numOutputRows = longMetric("numOutputRows")
-    val shuffled = new ShuffledRowRDD(
-      ShuffleExchangeExec.prepareShuffleDependency(
-        localTopK(), childOutput, SinglePartition, new UnsafeRowSerializer(childOutput.size), writeMetrics),
-      readMetrics)
+    val shuffled = VectorRowStages.singlePartition(localTopK(), childOutput, writeMetrics, readMetrics)
     shuffled.mapPartitionsInternal { iter =>
       val topK = Utils.takeOrdered(iter.map(_.copy()), n)(ord)
       val projected: Iterator[InternalRow] =
@@ -102,7 +92,7 @@ case class VectorTakeOrderedAndProjectExec(
       else {
         numOutputBatches += 1
         numOutputRows += rows.length
-        Iterator.single(VectorTakeOrderedAndProjectExec.toBatch(schema, rows))
+        Iterator.single(VectorRowStages.toBatch(schema, rows))
       }
     }
   }
@@ -118,41 +108,6 @@ case class VectorTakeOrderedAndProjectExec(
        |Sort: ${sortOrder.map(_.sql).mkString(", ")}
        |Output: ${output.map(_.name).mkString(", ")}
        |""".stripMargin
-  }
-}
-
-object VectorTakeOrderedAndProjectExec {
-
-  /**
-   * One columnar batch of on-heap vectors holding `rows`. Covers exactly the Spark types
-   * `TypeMapping` supports (the planner refuses any other output type), so every case is a plain
-   * `WritableColumnVector` put.
-   */
-  private[vector] def toBatch(schema: StructType, rows: Array[InternalRow]): ColumnarBatch = {
-    val n = rows.length
-    val vectors: Array[OnHeapColumnVector] = OnHeapColumnVector.allocateColumns(n, schema)
-    var c = 0
-    while (c < vectors.length) {
-      val v = vectors(c)
-      val dt = schema(c).dataType
-      var i = 0
-      while (i < n) {
-        val row = rows(i)
-        if (row.isNullAt(c)) v.putNull(i)
-        else dt match {
-          case BooleanType => v.putBoolean(i, row.getBoolean(c))
-          case IntegerType | DateType => v.putInt(i, row.getInt(c))
-          case LongType | TimestampType => v.putLong(i, row.getLong(c))
-          case DoubleType => v.putDouble(i, row.getDouble(c))
-          case d: DecimalType => v.putDecimal(i, row.getDecimal(c, d.precision, d.scale), d.precision)
-          case StringType => val b = row.getUTF8String(c).getBytes; v.putByteArray(i, b, 0, b.length)
-          case other => throw new IllegalStateException(s"unsupported output type ${other.simpleString}")
-        }
-        i += 1
-      }
-      c += 1
-    }
-    new ColumnarBatch(vectors.map(v => v: ColumnVector), n)
   }
 }
 

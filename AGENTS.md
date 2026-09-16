@@ -197,6 +197,12 @@ that pin it.
   list (copy each projected row -- the projection reuses one buffer) and the rows become one
   columnar batch of `OnHeapColumnVector`s for the `ColumnarToRowExec` above. `OFFSET` falls back.
   `spark.vector.exec.takeOrdered.enabled` turns it off.
+- `VectorLocalLimitExec` / `VectorGlobalLimitExec` / `VectorCollectLimitExec` share `VectorLimitIterator`
+  (a `VectorBatchIterator` with the `exhausted` hook: whole batches pass through, the boundary batch is
+  compacted to its first surviving live rows through `ArrowOutput.compact` -- a forwarded selection is
+  honoured -- and the child is not pulled again once the limit is reached). The collect limit's final
+  take reuses `VectorRowStages` (UnsafeRow copies -> single-partition shuffle -> one on-heap batch),
+  the same tail as the top-N operator. `spark.vector.exec.limit.enabled`; `OFFSET` falls back.
 - Blocking and in memory: the partition's batches are appended to one `ColumnBuilder` per column
   in an operator-owned shared `Arena` (applying any forwarded selection; dictionary strings are
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
@@ -404,7 +410,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 121 kernel tests, 133 Spark tests (106 without the Comet and Iceberg profiles;
+Current counts: 121 kernel tests, 137 Spark tests (110 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
