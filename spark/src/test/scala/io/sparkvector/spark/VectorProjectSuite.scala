@@ -35,12 +35,39 @@ class VectorProjectSuite extends VectorQuerySuite {
     }
   }
 
-  test("integer arithmetic is vectorized in legacy mode and falls back in ANSI mode") {
+  test("integer arithmetic is vectorized in legacy mode and, overflow-checked, in ANSI mode") {
+    val queries = Seq(
+      "SELECT i + 1 AS a, i * 3 AS b, l - 7 AS c, 100 - i AS d, -i AS e, l * l AS f FROM t WHERE i > 10",
+      "SELECT i + i AS a, l + l AS b, CAST(i AS BIGINT) + l AS c FROM t WHERE d IS NULL")
     withConf("spark.sql.ansi.enabled" -> "false") {
-      checkVectorized("SELECT i + 1 AS a, i * 3 AS b, l - 7 AS c, 100 - i AS d, -i AS e, l * l AS f FROM t WHERE i > 10", Seq(Project))
-      checkVectorized("SELECT i + i AS a, l + l AS b, CAST(i AS BIGINT) + l AS c FROM t WHERE d IS NULL", Seq(Project))
+      queries.foreach(q => checkVectorized(q, Seq(Project)))
     }
-    checkFallback("SELECT i + 1 AS a FROM t WHERE i > 10", Seq(Project), "ANSI integer arithmetic")
+    // Spark 4's default. Nothing here overflows, so the results are the same and the plan is ours.
+    queries.foreach(q => checkVectorized(q, Seq(Project)))
+    checkVectorized("SELECT i * 2 + 1 AS k, -l AS nl FROM t WHERE i > 10", Seq(Project))
+  }
+
+  test("ANSI integer overflow raises Spark's ARITHMETIC_OVERFLOW, for active rows only") {
+    def assertOverflow(sql: String, message: String, hint: String): Unit = withPlugin(enabled = true) {
+      val e = intercept[Exception](spark.sql(sql).collect())
+      val cause = causes(e).find(_.isInstanceOf[ArithmeticException]).getOrElse(fail(s"expected ARITHMETIC_OVERFLOW, got $e"))
+      assert(cause.getMessage.contains("ARITHMETIC_OVERFLOW"), cause.getMessage)
+      assert(cause.getMessage.contains(message), cause.getMessage)
+      if (hint.nonEmpty) assert(cause.getMessage.contains(hint), cause.getMessage)
+    }
+    // i ranges 0..19999, so i * 2147483 overflows an int for i >= 1000 and l * l a long for large l.
+    assertOverflow("SELECT i * 2147483 AS x FROM t", "integer overflow", "try_multiply")
+    assertOverflow("SELECT i + 2147483000 AS x FROM t", "integer overflow", "try_add")
+    assertOverflow("SELECT -2147483000 - i AS x FROM t", "integer overflow", "try_subtract")
+    assertOverflow("SELECT l * l * l * l AS x FROM t WHERE l IS NOT NULL", "long overflow", "try_multiply")
+    assertOverflow("SELECT -CAST(i - 2147483647 - 1 AS INT) AS x FROM t WHERE i = 0", "integer overflow", "")
+    // Rows removed by the filter, or decided by an earlier conjunct, are never evaluated: no error.
+    checkVectorized("SELECT i * 2147483 AS x FROM t WHERE i < 1000", Seq(Filter, Project))
+    checkVectorized("SELECT i FROM t WHERE i < 1000 AND i * 2147483 > 0", Seq(Filter))
+    // Legacy mode wraps, matching Spark.
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized("SELECT i * 2147483 AS x, i + 2147483000 AS y FROM t", Seq(Project))
+    }
   }
 
   test("widening casts and implicit casts inserted by the analyzer") {

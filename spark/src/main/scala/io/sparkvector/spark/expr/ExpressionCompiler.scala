@@ -73,14 +73,12 @@ object ExpressionCompiler {
     case e: Multiply => arithmetic(ArithOp.MUL, e.left, e.right, e.evalMode, e, input)
     case e: Divide => arithmetic(ArithOp.DIV, e.left, e.right, e.evalMode, e, input)
 
-    case UnaryMinus(child, failOnError) =>
+    case e @ UnaryMinus(child, failOnError) =>
       compile(child, input).flatMap {
         case _: LiteralExpr => Left("negation of a literal")
         case c if !arithmeticTypes.contains(c.vecType) => Left(s"negation not supported for ${c.dataType.simpleString}")
-        // A decimal of at most 18 digits negated is still one: no overflow check needed.
-        case c if failOnError && c.vecType != VecType.FLOAT64 && !TypeMapping.isDecimal(c.dataType) =>
-          Left("ANSI integer negation (overflow check) not supported")
-        case c => Right(NegateExpr(c))
+        // Doubles and decimals of at most 18 digits cannot overflow here; integers raise in ANSI mode.
+        case c => Right(NegateExpr(c, ansi = failOnError && c.vecType != VecType.FLOAT64 && !TypeMapping.isDecimal(c.dataType), e.origin.context))
       }
 
     // The optimizer's DecimalAggregates rewrite: sum(decimal) becomes MakeDecimal(sum(UnscaledValue(x))).
@@ -123,7 +121,8 @@ object ExpressionCompiler {
   /**
    * Spark 4 defaults to ANSI mode. Double arithmetic is identical in both modes except that
    * division by zero raises instead of yielding null, which the kernel wrapper handles. Integer
-   * arithmetic in ANSI mode needs overflow checks the kernels do not implement, so it falls back.
+   * arithmetic in ANSI mode is computed wrapping and checked afterwards with an overflow lane mask
+   * (`OverflowKernels`); the error is raised only if an active row overflowed.
    */
   private def arithmetic(
       op: ArithOp,
@@ -151,7 +150,6 @@ object ExpressionCompiler {
     else if (!arithmeticTypes.contains(le.vecType)) Left(s"arithmetic not supported for ${l.dataType.simpleString}")
     else if (op == ArithOp.DIV && le.vecType != VecType.FLOAT64) Left(s"division not supported for ${l.dataType.simpleString}")
     else if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
-    else if (mode == EvalMode.ANSI && le.vecType != VecType.FLOAT64) Left("ANSI integer arithmetic (overflow checks) not supported")
     else Right(())
   }
 

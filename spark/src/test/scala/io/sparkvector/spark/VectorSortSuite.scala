@@ -67,11 +67,11 @@ class VectorSortSuite extends VectorQuerySuite {
     val df = checkVectorized("SELECT d, i FROM t WHERE i > 100 SORT BY d DESC", Seq(Sort, classOf[VectorFilterExec]))
     assert(df.count() === 20000 - 101)
     checkSorted("SELECT d, i FROM t WHERE i > 100 SORT BY d DESC", 1)
-    // A computed key is evaluated with the kernels and kept alongside the output columns (double
-    // arithmetic: integer arithmetic in ANSI mode is a documented fallback).
+    // A computed key is evaluated with the kernels and kept alongside the output columns; integer
+    // keys are overflow-checked in ANSI mode (the issue's own example).
     checkVectorized("SELECT i, d FROM t SORT BY d * 2.0 + 1 DESC", Seq(Sort))
     checkVectorized("SELECT i, l FROM t SORT BY CAST(l AS DOUBLE) / 3", Seq(Sort))
-    checkFallback("SELECT i, l FROM t SORT BY i * 2 + 1", Seq(Sort), "ANSI integer arithmetic")
+    checkVectorized("SELECT i, l FROM t SORT BY i * 2 + 1", Seq(Sort))
   }
 
   test("global sort over a Spark row shuffle stays with Spark") {

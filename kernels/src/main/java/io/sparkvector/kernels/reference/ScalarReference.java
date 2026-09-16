@@ -200,6 +200,64 @@ public final class ScalarReference {
     }
   }
 
+  // ---------------------------------------------------------------- overflow
+
+  /**
+   * Row-wise oracle for {@code OverflowKernels}: whether {@code a[i] <op> b[i]} (or against the
+   * scalar {@code s} when {@code b} is null; {@code s <op> a[i]} when {@code reversed}) overflows
+   * the lane, decided by {@link Math#addExact} and friends.
+   */
+  public static boolean overflows(ArithOp op, VectorBuffers a, VectorBuffers b, Number s, boolean reversed, int i) {
+    try {
+      if (a.type() == VecType.INT32) {
+        int x = a.getInt(i);
+        int y = b != null ? b.getInt(i) : s.intValue();
+        if (reversed) {
+          int t = x;
+          x = y;
+          y = t;
+        }
+        switch (op) {
+          case ADD -> Math.addExact(x, y);
+          case SUB -> Math.subtractExact(x, y);
+          case MUL -> Math.multiplyExact(x, y);
+          default -> throw new IllegalArgumentException("no overflow check for " + op);
+        }
+      } else {
+        long x = a.getLong(i);
+        long y = b != null ? b.getLong(i) : s.longValue();
+        if (reversed) {
+          long t = x;
+          x = y;
+          y = t;
+        }
+        switch (op) {
+          case ADD -> Math.addExact(x, y);
+          case SUB -> Math.subtractExact(x, y);
+          case MUL -> Math.multiplyExact(x, y);
+          default -> throw new IllegalArgumentException("no overflow check for " + op);
+        }
+      }
+      return false;
+    } catch (ArithmeticException e) {
+      return true;
+    }
+  }
+
+  /** Whether {@code -a[i]} overflows. */
+  public static boolean negateOverflows(VectorBuffers a, int i) {
+    try {
+      if (a.type() == VecType.INT32) {
+        Math.negateExact(a.getInt(i));
+      } else {
+        Math.negateExact(a.getLong(i));
+      }
+      return false;
+    } catch (ArithmeticException e) {
+      return true;
+    }
+  }
+
   // ---------------------------------------------------------------- selection
 
   /**
