@@ -682,6 +682,10 @@ object VectorJoinPlanner {
 
   def plan(j: BroadcastHashJoinExec): Either[String, VectorBroadcastHashJoinExec] = {
     if (j.isNullAwareAntiJoin) Left("null-aware anti join not supported")
+    // Spark never broadcasts a full outer join (JoinSelection.canBuildBroadcastLeft / Right exclude
+    // it): the build side is shared by every task, so the trailing pass over unmatched build rows
+    // would emit them once per task. Refused with a reason rather than assumed away.
+    else if (j.joinType == FullOuter) Left("full outer join over a broadcast not supported (Spark plans it as a shuffled join)")
     else {
       val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
       check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
