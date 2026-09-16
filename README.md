@@ -22,7 +22,7 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), SIMD kernels: compare, bitmap logic, compaction, arithmetic, decimal rescaling and division, casts, reductions (plain and overflow-checked), group hashing and key table, grouped accumulators, sort, gather, column builder; scalar references used as test oracles |
 | `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
-| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H Q1/Q6 runner |
+| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (all 22 queries) |
 | `spark-sql-tests/` | Scala 2.13 | Spark's own SQL golden-file suite run with the plugin (profile `spark-sql-tests`, on demand only; see below) |
 
 ## Building
@@ -236,15 +236,15 @@ are kept honest on a laptop:
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
 ```
 
-TPC-H Q1 and Q6 (decimals replaced by doubles, generated with DuckDB):
+TPC-H, all 22 queries over the eight tables (decimals replaced by doubles, generated with DuckDB):
 
 ```bash
 brew install duckdb
-benchmarks/scripts/gen-tpch.sh 1                      # benchmarks/data/sf1/lineitem  (6M rows, 207 MB)
-benchmarks/scripts/gen-tpch.sh 10                     # benchmarks/data/sf10/lineitem (60M rows, 2.1 GB)
+benchmarks/scripts/gen-tpch.sh 1                      # benchmarks/data/sf1/<table>  (lineitem: 6M rows, 207 MB)
+benchmarks/scripts/gen-tpch.sh 10                     # benchmarks/data/sf10/<table> (lineitem: 60M rows, 2.1 GB)
 mvn -DskipTests install
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25
-benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # spark + vector
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # spark + vector, q1..q22 (--queries q1,q6 for a subset)
 COMET_JAR=/path/to/comet-spark-spark4.1_2.13-1.0.0.jar \
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10   # + comet-scan, comet-scan-vector, comet-scan-vector-shuffle, comet
 ```
@@ -253,8 +253,11 @@ Each configuration runs in its own JVM and appends its measurements to
 `benchmarks/results/<config>.jsonl`. The runner then rewrites two reports from every `.jsonl` file,
 one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` and a self-contained
 `benchmarks/results/results.html` with bar charts (median, p90 whisker, speedup against plain
-Spark), the operators found in each final plan and a checksum proving all configurations returned
-the same rows (to 10 significant digits). Regenerate them without benchmarking with
+Spark), an accelerated-operators table per query (operators executed by our kernels or Comet over
+the operators that count, the same classification the Vector Acceleration UI tab uses, so each closed
+compatibility gap shows up as a query moving), the operators found in each final plan and a checksum
+proving all configurations returned the same rows (to 10 significant digits). Regenerate them
+without benchmarking with
 `benchmarks/scripts/run-tpch.sh --report`. See [docs/results.md](docs/results.md) for numbers
 measured on an Apple M3 Pro; at SF10, Q1 runs 1.64x faster than Spark over Spark's own scan and
 1.84x over Comet's scan and shuffle (Comet end to end: 1.62x), while the highly selective Q6 stays

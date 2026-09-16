@@ -28,7 +28,7 @@ Comet-backed tests and benchmarks. Maven builds everything.
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, decimal, cast, agg incl. overflow-checked sums, hash, grouped accumulators, group key table with lookup), the sort, gather and column-builder kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
 | `spark-sql-tests/` | Scala 2.13 | Spark's `SQLQueryTestSuite` with the extension injected; profile `spark-sql-tests` only, run by `benchmarks/scripts/run-spark-sql-tests.sh` |
 | `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the four operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
-| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H Q1/Q6 runner with its markdown/HTML report |
+| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (`TpchQueries`: all 22 queries, `TpchRunner`) with its markdown/HTML report and per-query accelerated-operator counts |
 
 Commands that are known to work (always unset `JAVA_TOOL_OPTIONS` first; the IDE sets one that
 breaks Spark's JVM options):
@@ -40,7 +40,7 @@ mvn -B -q -Pcomet clean install            # also the Comet-backed suites (needs
 mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.11 runtime from Maven Central)
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
 mvn -pl spark install -Dsuites=io.sparkvector.spark.VectorAggregateSuite   # one suite
-benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated lineitem; 10 for SF10 (2.1 GB, gitignored)
+benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated eight tables, decimals as doubles; 10 for SF10 (gitignored)
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
 ```

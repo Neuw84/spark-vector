@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Runs TPC-H Q1/Q6 under several Spark configurations, one JVM each, then writes the markdown and
+# Runs the TPC-H queries under several Spark configurations, one JVM each, then writes the markdown and
 # HTML reports (benchmarks/results/results.{md,html}) from every measurement recorded so far.
 #
 #   benchmarks/scripts/run-tpch.sh <data-dir> [configs] [extra TpchRunner args...]
 #   benchmarks/scripts/run-tpch.sh --report          # only rewrite the reports
 #
-#   data-dir  directory containing lineitem/ (see gen-tpch.sh); its basename (sf1, sf10) names
+#   data-dir  directory containing the table directories (see gen-tpch.sh); its basename (sf1, sf10) names
 #             the dataset section in the reports
 #   configs   comma-separated subset of: spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet
 #             (default: spark,vector plus the Comet configs when COMET_JAR is set)
