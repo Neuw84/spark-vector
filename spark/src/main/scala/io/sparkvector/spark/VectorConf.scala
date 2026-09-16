@@ -17,6 +17,7 @@ object VectorConf {
   val LimitEnabled = "spark.vector.exec.limit.enabled"
   val UnionEnabled = "spark.vector.exec.union.enabled"
   val CoalesceEnabled = "spark.vector.exec.coalesce.enabled"
+  val ExpandEnabled = "spark.vector.exec.expand.enabled"
   val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
   val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
@@ -44,6 +45,8 @@ object VectorConf {
   def unionEnabled(conf: SQLConf): Boolean = bool(conf, UnionEnabled, default = true)
   /** Convert CoalesceExec over a columnar child. */
   def coalesceEnabled(conf: SQLConf): Boolean = bool(conf, CoalesceEnabled, default = true)
+  /** Convert ExpandExec (grouping sets, the distinct rewrite) over a columnar child. */
+  def expandEnabled(conf: SQLConf): Boolean = bool(conf, ExpandEnabled, default = true)
   /** Convert BroadcastHashJoinExec over a columnar streamed side (the build side stays Spark's broadcast). */
   def broadcastHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, BroadcastHashJoinEnabled, default = true)
   /** Convert ShuffledHashJoinExec; over Spark's row shuffle both inputs go through RowToColumnarExec. */

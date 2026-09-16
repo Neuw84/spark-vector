@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, FilterExec, GlobalLimitExec, LocalLimitExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
+import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GlobalLimitExec, LocalLimitExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
@@ -70,6 +70,12 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
               if (failures.isEmpty) VectorProjectExec(projectList, child)
               else fallback(p, failures.mkString("; "))
+          }
+
+        case e: ExpandExec if VectorConf.expandEnabled(conf) =>
+          columnarInputReason(e.child) match {
+            case Some(reason) => fallback(e, reason)
+            case None => VectorExpandPlanner.plan(e).fold(reason => fallback(e, reason), v => v)
           }
 
         case u: UnionExec if VectorConf.unionEnabled(conf) =>

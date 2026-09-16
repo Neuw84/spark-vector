@@ -209,6 +209,12 @@ that pin it.
   The union is columnar whatever its children are, provided one is: Spark's transitions insert
   `RowToColumnarExec` under the row children. Spark's own `UnionExec` is columnar only when every
   child is, and the UI classifies it as a Spark operator either way.
+- `VectorExpandExec` (also `VectorPassThrough`) emits one output batch per projection per input batch:
+  `ColumnRef` slots are `BorrowedColumnVector`s of the input, `NULL` literals `ArrowOutput.nulls`, other
+  literals `ArrowOutput.constant`; the planner refuses any other slot shape. Literal slots bypass the
+  expression compiler (which refuses `NULL` and boolean operands) and become `LiteralExpr` directly. The
+  iterator holds the input batch until its last projection has been emitted and released, and only then
+  asks the child for the next one; a normalized (row-id-mapped) input is compacted instead of borrowed.
 - Blocking and in memory: the partition's batches are appended to one `ColumnBuilder` per column
   in an operator-owned shared `Arena` (applying any forwarded selection; dictionary strings are
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
@@ -416,7 +422,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 121 kernel tests, 143 Spark tests (116 without the Comet and Iceberg profiles;
+Current counts: 121 kernel tests, 147 Spark tests (120 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

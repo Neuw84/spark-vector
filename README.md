@@ -23,7 +23,7 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 | Module | Language | Contents |
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), SIMD kernels: compare, bitmap logic, compaction, arithmetic, decimal rescaling and division, casts, reductions (plain and overflow-checked), group hashing and key table, grouped accumulators, sort, gather, column builder; scalar references used as test oracles |
-| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorTakeOrderedAndProjectExec` / `VectorLocalLimitExec` / `VectorGlobalLimitExec` / `VectorCollectLimitExec` / `VectorUnionExec` / `VectorCoalesceExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
+| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorTakeOrderedAndProjectExec` / `VectorLocalLimitExec` / `VectorGlobalLimitExec` / `VectorCollectLimitExec` / `VectorUnionExec` / `VectorCoalesceExec` / `VectorExpandExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (all 22 queries) |
 | `spark-sql-tests/` | Scala 2.13 | Spark's own SQL golden-file suite run with the plugin (profile `spark-sql-tests`, on demand only; see below) |
 
@@ -68,6 +68,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.limit.enabled` | convert `LocalLimitExec` / `GlobalLimitExec` / `CollectLimitExec` over a columnar child (no offset); batches pass through until the boundary, the collect limit's final take goes through Spark's single-partition shuffle |
 | `spark.vector.exec.union.enabled` | convert `UnionExec` when at least one child is columnar (row children go through Spark's `RowToColumnarExec`) |
 | `spark.vector.exec.coalesce.enabled` | convert `CoalesceExec` over a columnar child (no shuffle, batches forwarded) |
+| `spark.vector.exec.expand.enabled` | convert `ExpandExec` (`ROLLUP` / `CUBE` / `GROUPING SETS`, the `count(distinct)` rewrite) over a columnar child: one borrowed-column batch per grouping set, no data copy |
 | `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
@@ -360,6 +361,14 @@ when every child is, so a `VALUES` side or a row shuffle used to drop the whole 
 transitions convert such a child through `RowToColumnarExec` below us. `VectorCoalesceExec` forwards the
 child's batches through a shuffle-free `coalesce(n)`. `spark.vector.exec.union.enabled` and
 `spark.vector.exec.coalesce.enabled` turn them off.
+
+`ROLLUP`, `CUBE` and `GROUPING SETS` (and the rewrite Spark applies to `count(distinct)`) go through
+`ExpandExec`, which duplicates every row once per grouping set with the unused keys nulled and a
+grouping id appended. `VectorExpandExec` does that without copying a byte: for each grouping set the
+output batch borrows the retained columns of the input batch, nulled keys are all-invalid constant
+columns and the grouping id is a constant column, so an `n`-set expand emits `n` batches per input
+batch and the aggregate above it -- the expensive part -- stays ours. The input batch is held until
+its last projection has been consumed. `spark.vector.exec.expand.enabled` turns it off.
 
 ### Decimals
 
