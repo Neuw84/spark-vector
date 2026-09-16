@@ -386,7 +386,9 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   timestamps; note discarded runs in `docs/results.md`.
 - Run on a quiet machine. A video call or a full build minutes earlier moved medians by up to 2x on
   the development laptop; a `spark` Q1 median far from the documented one (1123 ms at SF10) means
-  the environment, not the code. Check `uptime` and the top CPU consumers before trusting a run.
+  the environment, not the code. Check `uptime` and the top CPU consumers before trusting a run,
+  and make sure no other agent or test job (`run-spark-sql-tests.sh`, a Maven build) is using the
+  machine for the whole run: one that started mid-run moved `spark` Q1 from 1106 to 1451 ms.
 - Update `docs/results.md` tables from the report and keep the earlier phase tables for history.
   Speedups are always relative to plain Spark on the same dataset and session.
 
@@ -416,9 +418,9 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   native read.
 - Group keys longer than 8 bytes arriving as plain strings are hashed and compared per row.
 - Selective predicates with scattered survivors (TPC-H Q6) lose to Spark's codegen over Spark's
-  scan (0.84x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate. Over
-  Comet's scan the copy is gone and the plugin beats Spark (1.09x) but not Comet's scan under
-  Spark's codegen (1.20x).
+  scan (0.86x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate. Over
+  Comet's scan the copy is gone and the plugin beats Spark (1.12x) but not Comet's scan under
+  Spark's codegen (1.17x).
 - Without Comet, the shuffle is Spark's row shuffle with a `ColumnarToRowExec` above the partial
   aggregate and a `RowToColumnarExec` below the Final. A columnar shuffle of our own is the
   natural next seam to fill (3.7).

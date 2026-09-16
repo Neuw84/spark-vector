@@ -256,9 +256,9 @@ one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` an
 Spark), the operators found in each final plan and a checksum proving all configurations returned
 the same rows (to 10 significant digits). Regenerate them without benchmarking with
 `benchmarks/scripts/run-tpch.sh --report`. See [docs/results.md](docs/results.md) for numbers
-measured on an Apple M3 Pro; at SF10, Q1 runs 1.58x faster than Spark over Spark's own scan and
-1.86x over Comet's scan (Comet end to end: 1.59x), while the highly selective Q6 stays at 0.84x
-over Spark's scan.
+measured on an Apple M3 Pro; at SF10, Q1 runs 1.64x faster than Spark over Spark's own scan and
+1.84x over Comet's scan and shuffle (Comet end to end: 1.62x), while the highly selective Q6 stays
+at 0.86x over Spark's scan.
 
 When a result is not what you expected, profile before theorising. Java Flight Recorder attaches
 to a benchmark JVM with one environment variable, and `RESULTS_DIR` keeps the profiling run out of
