@@ -449,6 +449,50 @@ query where `vector` is markedly slower than Spark (0.53x) while still accelerat
 operators -- worth a profile before #27 lands, since it is the shape that will run more of our code
 afterwards.
 
+## TPC-DS coverage, scale factor 1
+
+TPC-DS (#90) is the compatibility target after TPC-H: 24 tables, 103 queries (Spark's own
+`tpcds/q*.sql`), and the parts of Spark this plugin does not convert yet. `gen-tpcds.sh` writes the
+tables with Spark's `TPCDSSchema` types -- `DECIMAL(7,2)` money, `DATE`, `INT` identifiers and counts
+-- so the plans are the approved ones the per-query issues quote; `run-tpcds.sh` runs the same
+measurement, checksum and acceleration code as TPC-H. The first run of all 103 queries was made on a
+shared x86 build host (8 threads, JDK 25, `--warmup 0 --iterations 1`), which is a **coverage and
+correctness** reading, not a timing one: no time from it is reported here.
+
+Acceleration column (`spark,vector`, SF1, `spark.sql.shuffle.partitions=8`):
+
+| operators run by our kernels | queries |
+|---|---:|
+| 100% | 0 |
+| 75% or more | 25 |
+| 50% or more | 56 |
+| 25% or more | 20 |
+| under 25% | 2 |
+
+2785 of the 4734 operators that count across the 103 plans are ours (59%). No query is fully
+accelerated at SF1, and the reasons are the ones the per-query issues list, in this order of how many
+queries each touches once the "child X is not columnar" cascades are followed to their root:
+Spark's global `Sort` above its row shuffle (37 queries, by design without Comet's shuffle), decimal
+`sum`/`avg` results wider than 18 digits (#27/#87: 27 queries -- 24 end in a Spark aggregate over a
+`decimal(27,2)` `sum`, others have a `sum` or `avg` buffer past 18 digits inside), sort-merge joins
+(#10: 19 at SF1), window functions (#58: 15), `substr` (#39: 10), scalar subqueries (#48: 5),
+broadcast nested loop joins (#60: 3), a TINYINT cast in `ROLLUP` plans (3), `stddev_samp` (#46: 2)
+and `upper` (2). The best plans are the star-join aggregates: q22 and q96 at 15/19, q7 and q26
+at 19/24, q3/q42/q43/q52/q55 at 12/15, where the remaining Spark operators are the final sort and the
+`TakeOrderedAndProject` above it.
+
+**Correctness: three checksums differ.** q33, q56 and q60 -- the same template, three sales channels
+aggregated per item and combined with `UNION ALL` -- return 100 rows under both configurations but
+with different sums (for q33, `i_manufact_id` 1000 totals 8756.30 under Spark and 525.60 under the
+plugin, and 59 of the 62 manufacturers both top-100 lists share disagree). Bisected with the
+runner's `--conf` switches: identical results with `spark.vector.exec.aggregate.final.enabled=false`
+(Spark merges our Partial buffers), still different with the union, the selection, AQE or its
+partition coalescing disabled. The fault is therefore in our Final aggregate stage of that plan --
+`sum(UnscaledValue(<decimal(7,2)>))` grouped by one key with a `MakeDecimal(..., 17, 2)` result,
+whose output feeds Spark's `ColumnarToRow` and a Spark aggregate rather than one of our operators
+(the shape q3 shares up to the consumer, and q3 agrees). Tracked on the queries' issues (#128,
+#152, #156); every other query agrees to 10 significant digits.
+
 ## AVX2 / AVX-512
 
 Not measured: this document is written from an Apple M3. The kernels select the platform's

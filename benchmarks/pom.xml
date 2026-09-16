@@ -34,6 +34,14 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
+      <!-- Spark's own TPC-DS query text (tpcds/q*.sql), read by TpcdsRunner from the classpath. -->
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+      <classifier>tests</classifier>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>org.openjdk.jmh</groupId>
       <artifactId>jmh-core</artifactId>
     </dependency>
