@@ -57,6 +57,11 @@ object TpchRunner {
       "spark.plugins" -> "io.sparkvector.spark.VectorPlugin"),
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
     "comet-scan-vector" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
+    // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.
+    "comet-scan-vector-shuffle" -> (Map(
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
+      "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
+      CometScanOnly ++ Map("spark.comet.exec.shuffle.enabled" -> "true")),
     "comet" -> Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin",
       "spark.comet.enabled" -> "true",
@@ -67,7 +72,7 @@ object TpchRunner {
       "spark.memory.offHeap.enabled" -> "true",
       "spark.memory.offHeap.size" -> "3g"))
 
-  val ConfigOrder: Seq[String] = Seq("spark", "vector", "comet-scan", "comet-scan-vector", "comet")
+  val ConfigOrder: Seq[String] = Seq("spark", "vector", "comet-scan", "comet-scan-vector", "comet-scan-vector-shuffle", "comet")
 
   val Queries: Map[String, String] = Map("q1" -> TpchQueries.Q1, "q6" -> TpchQueries.Q6)
 
@@ -178,7 +183,7 @@ object TpchRunner {
     val ops = nodes.map(_.getClass.getSimpleName).filter(n => n.startsWith("Vector") || n.startsWith("Comet"))
       .groupBy(identity).view.mapValues(_.size).toSeq.sortBy(_._1).map { case (n, c) => s"$n x$c" }.mkString(", ")
     // Per-operator kernel time of the last run (summed over tasks, so it exceeds wall clock).
-    nodes.filter(_.getClass.getSimpleName.startsWith("Vector")).foreach { n =>
+    nodes.filter(n => n.getClass.getSimpleName.startsWith("Vector") && n.metrics.contains("time")).foreach { n =>
       val t = n.metrics.get("time").map(m => f"${m.value / 1e6}%.1f ms").getOrElse("-")
       val r = n.metrics.get("numOutputRows").map(_.value).getOrElse(-1L)
       println(s"[tpch]   ${n.getClass.getSimpleName}: kernel time $t, output rows $r")

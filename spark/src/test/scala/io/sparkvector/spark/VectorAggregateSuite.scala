@@ -45,11 +45,30 @@ class VectorAggregateSuite extends VectorQuerySuite {
     checkVectorized("SELECT count(*) FROM t", Seq(Agg))
   }
 
-  test("final aggregation stays in Spark and consumes the partial buffers") {
-    val df = checkVectorized("SELECT sum(d2), count(*) FROM t WHERE i >= 0", Seq(Agg))
-    val sparkAggs = nodesOf[HashAggregateExec](df)
-    assert(sparkAggs.nonEmpty, "expected Spark's Final HashAggregateExec")
-    assert(nodesOf[VectorHashAggregateExec](df).size === 1)
+  test("final aggregation merges the partial buffers over the shuffle") {
+    // Ungrouped: one partial row per partition, one final row; avg is sum / count of the merged buffers.
+    val df = checkVectorized("SELECT sum(d2), count(*), count(l), min(d), max(i), avg(d2), avg(i) FROM t WHERE i >= 0", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](df).isEmpty, df.queryExecution.executedPlan.treeString)
+    val aggs = nodesOf[VectorHashAggregateExec](df)
+    assert(aggs.size === 2 && aggs.count(_.isFinal) === 1, df.queryExecution.executedPlan.treeString)
+    // Grouped, with result expressions that are not plain attributes.
+    val grouped = checkVectorized("SELECT s, count(*) AS n, sum(d) + 1.0 AS s1, avg(d2) * 2.0 AS a2, max(dt) FROM t GROUP BY s", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](grouped).isEmpty)
+    assert(nodesOf[VectorHashAggregateExec](grouped).count(_.isFinal) === 1)
+    // Empty input: Spark's initial buffers (count 0, sum null, avg null).
+    checkVectorized("SELECT count(*), sum(d), avg(d), min(i) FROM t WHERE i < 0", Seq(Agg))
+    // (With AQE on, Spark replaces an empty grouped aggregate by EmptyRelation before we run.)
+    withConf("spark.sql.adaptive.enabled" -> "false") {
+      checkVectorized("SELECT s, count(*) FROM t WHERE i < 0 GROUP BY s", Seq(Agg))
+    }
+  }
+
+  test("final aggregation stays in Spark when disabled by configuration") {
+    withConf(VectorConf.FinalAggregateEnabled -> "false") {
+      val df = checkVectorized("SELECT sum(d2), count(*) FROM t WHERE i >= 0", Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).nonEmpty, "expected Spark's Final HashAggregateExec")
+      assert(nodesOf[VectorHashAggregateExec](df).size === 1)
+    }
   }
 
   test("sum of bigint falls back in ANSI mode and is vectorized in legacy mode") {
@@ -63,7 +82,10 @@ class VectorAggregateSuite extends VectorQuerySuite {
     // Spark rewrites DISTINCT into a grouped partial aggregate, which is not vectorized yet.
     checkFallback("SELECT count(DISTINCT i) FROM t", Seq(Agg), "not supported")
     checkFallback("SELECT first(d2) FROM t", Seq(Agg), "unsupported aggregate function")
-    checkFallback("SELECT sum(d2) FILTER (WHERE i > 5) FROM t", Seq(Agg), "FILTER")
+    // FILTER applies while updating, so only the Partial stage falls back; the Final merge is ours.
+    val filtered = checkVectorized("SELECT sum(d2) FILTER (WHERE i > 5), count(*) FROM t", Seq(Agg))
+    assert(nodesOf[HashAggregateExec](filtered).exists(_.aggregateExpressions.forall(_.mode == org.apache.spark.sql.catalyst.expressions.aggregate.Partial)))
+    assert(nodesOf[VectorHashAggregateExec](filtered).forall(_.isFinal))
     checkFallback("SELECT min(b) FROM t", Seq(Agg), "not supported")
     // min over strings is planned by Spark as SortAggregateExec, which we never touch.
     val df = withPlugin(enabled = true)(spark.sql("SELECT min(s) FROM t"))
@@ -113,6 +135,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
 
   test("TPC-H Q1 end to end") {
     val df = checkVectorized(TestTables.TpchQ1, Seq(Filter, Agg), tolerance = 1e-9)
+    assert(nodesOf[HashAggregateExec](df).isEmpty, "both aggregation stages should be vectorized")
     val rows = df.collect()
     assert(rows.length === 3, rows.mkString("\n")) // synthetic data yields (A,F), (N,O), (R,F)
     info(s"Q1 rows:\n${rows.mkString("\n")}\n${df.queryExecution.executedPlan.treeString}")

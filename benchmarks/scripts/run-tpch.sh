@@ -4,7 +4,7 @@
 #   benchmarks/scripts/run-tpch.sh <data-dir> [configs] [extra TpchRunner args...]
 #
 #   data-dir  directory containing lineitem/ (see gen-tpch.sh)
-#   configs   comma-separated subset of: spark,vector,comet-scan,comet-scan-vector,comet
+#   configs   comma-separated subset of: spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet
 #             (default: spark,vector plus the Comet configs when COMET_JAR is set)
 #
 # Environment:
@@ -21,7 +21,7 @@ CONFIGS="${1:-}"
 if [ -n "${CONFIGS}" ]; then shift; fi
 if [ -z "$CONFIGS" ]; then
   CONFIGS="spark,vector"
-  if [ -n "${COMET_JAR:-}" ]; then CONFIGS="$CONFIGS,comet-scan,comet-scan-vector,comet"; fi
+  if [ -n "${COMET_JAR:-}" ]; then CONFIGS="$CONFIGS,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet"; fi
 fi
 
 JAVA="${JAVA_HOME:?set JAVA_HOME to a JDK 25}/bin/java"

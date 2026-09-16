@@ -174,17 +174,100 @@ final case class AverageAgg(input: VectorExpr) extends VectorAggFunction {
   }
 }
 
+/** COUNT in Final mode: the partial counts are summed; never null, 0 for empty input. */
+final case class CountMergeAgg(count: VectorExpr) extends VectorAggFunction {
+  override def bufferTypes: Seq[DataType] = Seq(LongType)
+  override def newState(): AggState = new AggState {
+    private var total = 0L
+    override def update(ctx: EvalContext): Unit = {
+      val v = ctx.masked(count.eval(ctx))
+      if (AggKernels.countValid(v) > 0) total += AggKernels.sumLong(v)
+    }
+    override def bufferValues: Array[Any] = Array(java.lang.Long.valueOf(total))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val acc = new GroupedAccumulators.LongSum
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(count.eval(ctx), groups)
+    override def bufferValue(g: Int, slot: Int): Any = java.lang.Long.valueOf(acc.sum(g))
+  }
+}
+
+/**
+ * AVG in Final mode: partial (sum, count) buffers are summed component-wise. Empty input yields
+ * (0.0, 0), Spark's initial buffer, so `sum / count` evaluates to null.
+ */
+final case class AverageMergeAgg(sum: VectorExpr, count: VectorExpr) extends VectorAggFunction {
+  override def bufferTypes: Seq[DataType] = Seq(DoubleType, LongType)
+  override def newState(): AggState = new AggState {
+    private var s = 0.0
+    private var c = 0L
+    override def update(ctx: EvalContext): Unit = {
+      val sv = ctx.masked(sum.eval(ctx))
+      if (AggKernels.countValid(sv) > 0) s += AggKernels.sumDouble(sv)
+      val cv = ctx.masked(count.eval(ctx))
+      if (AggKernels.countValid(cv) > 0) c += AggKernels.sumLong(cv)
+    }
+    override def bufferValues: Array[Any] = Array(java.lang.Double.valueOf(s), java.lang.Long.valueOf(c))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val sums = new GroupedAccumulators.DoubleSum
+    private val counts = new GroupedAccumulators.LongSum
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
+      sums.update(sum.eval(ctx), groups)
+      counts.update(count.eval(ctx), groups)
+    }
+    override def bufferValue(g: Int, slot: Int): Any =
+      if (slot == 0) java.lang.Double.valueOf(sums.sum(g)) else java.lang.Long.valueOf(counts.sum(g))
+  }
+}
+
 object VectorAggregates {
 
   private val numeric: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64)
 
-  /** Compiles a Partial-mode aggregate expression, or explains why it cannot be vectorized. */
+  /**
+   * Compiles an aggregate expression, or explains why it cannot be vectorized. Partial mode reads
+   * the function's input; Final mode merges the partial buffers (`inputAggBufferAttributes`) found
+   * in `input`.
+   */
   def compile(agg: AggregateExpression, input: Seq[Attribute]): Either[String, VectorAggFunction] = {
-    if (agg.mode != Partial) Left(s"aggregate mode ${agg.mode} not supported (only Partial)")
-    else if (agg.isDistinct) Left("distinct aggregates not supported")
-    else if (agg.filter.isDefined) Left("aggregates with FILTER not supported")
-    else compileFunction(agg.aggregateFunction, input)
+    if (agg.isDistinct) Left("distinct aggregates not supported")
+    else agg.mode match {
+      case Partial if agg.filter.isDefined => Left("aggregates with FILTER not supported")
+      case Partial => compileFunction(agg.aggregateFunction, input)
+      // The FILTER clause is applied while updating (Partial); merging buffers does not see it.
+      case Final => compileMerge(agg.aggregateFunction, input)
+      case other => Left(s"aggregate mode $other not supported (Partial and Final only)")
+    }
   }
+
+  private def compileMerge(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = {
+    val buffers = f.inputAggBufferAttributes
+    def ref(i: Int): Either[String, VectorExpr] = ExpressionCompiler.compile(buffers(i), input)
+    f match {
+      case s: Sum if buffers.length != 1 => Left(s"sum with a ${buffers.length}-column buffer not supported")
+      case s: Sum =>
+        ref(0).flatMap { b =>
+          (s.dataType, b.vecType) match {
+            case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(b))
+            case (LongType, VecType.INT64) if s.evalContext.evalMode == EvalMode.ANSI =>
+              Left("ANSI sum of bigint (overflow check) not supported")
+            case (LongType, VecType.INT64) => Right(SumLongAgg(b))
+            case (dt, _) => Left(s"merging sum buffers of ${dt.simpleString} not supported")
+          }
+        }
+      case _: Count => ref(0).map(CountMergeAgg.apply)
+      case m: Min => ref(0).flatMap(numericBuffer(m.dataType)).map(b => MinMaxAgg(b, isMin = true, m.dataType))
+      case m: Max => ref(0).flatMap(numericBuffer(m.dataType)).map(b => MinMaxAgg(b, isMin = false, m.dataType))
+      case a: Average =>
+        if (a.dataType != DoubleType || buffers.length != 2) Left(s"avg producing ${a.dataType.simpleString} not supported")
+        else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count)
+      case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
+    }
+  }
+
+  private def numericBuffer(dt: DataType)(b: VectorExpr): Either[String, VectorExpr] =
+    if (numeric.contains(b.vecType)) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
 
   private def compileFunction(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = f match {
     case s: Sum =>

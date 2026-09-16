@@ -9,13 +9,19 @@ object VectorConf {
   val FilterEnabled = "spark.vector.exec.filter.enabled"
   val ProjectEnabled = "spark.vector.exec.project.enabled"
   val AggregateEnabled = "spark.vector.exec.aggregate.enabled"
+  val FinalAggregateEnabled = "spark.vector.exec.aggregate.final.enabled"
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
+  val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
 
   def isEnabled(conf: SQLConf): Boolean = bool(conf, Enabled, default = true)
   def filterEnabled(conf: SQLConf): Boolean = bool(conf, FilterEnabled, default = true)
   def projectEnabled(conf: SQLConf): Boolean = bool(conf, ProjectEnabled, default = true)
   def aggregateEnabled(conf: SQLConf): Boolean = bool(conf, AggregateEnabled, default = true)
+  /** Convert Final-mode aggregates too (their input is a shuffle, converted to columnar by Spark). */
+  def finalAggregateEnabled(conf: SQLConf): Boolean = bool(conf, FinalAggregateEnabled, default = true)
+  /** Feed Comet's native shuffle from spark-vector operators when Comet's shuffle is configured. */
+  def cometShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometShuffleEnabled, default = true)
   /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   def explainFallback(conf: SQLConf): Boolean = bool(conf, ExplainFallbackEnabled, default = false)

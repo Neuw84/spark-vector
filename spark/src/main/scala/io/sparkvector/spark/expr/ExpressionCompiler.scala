@@ -72,6 +72,9 @@ object ExpressionCompiler {
         case c => Right(NegateExpr(c))
       }
 
+    // Casts to the operand's own type (Spark's Average emits `sum.cast(double)` on a double sum).
+    case c: Cast if c.child.dataType == c.dataType => compile(c.child, input)
+
     case c: Cast =>
       val child = c.child
       val dt = c.dataType

@@ -7,7 +7,11 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
+import io.sparkvector.spark.comet.CometBatchBridge
+import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
 import org.apache.spark.sql.execution.{ColumnarRule, FilterExec, ProjectExec, SparkPlan}
+import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
+import org.apache.spark.sql.catalyst.expressions.aggregate.Final
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.internal.SQLConf
 
@@ -67,23 +71,55 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           }
 
         case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
-          columnarInputReason(a.child) match {
+          // A Final aggregate reads an exchange; Spark inserts RowToColumnarExec below us when the
+          // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
+          val isFinal = a.aggregateExpressions.nonEmpty && a.aggregateExpressions.forall(_.mode == Final)
+          val inputReason = if (isFinal) typeReason(a.child) else columnarInputReason(a.child)
+          inputReason match {
             case Some(reason) => fallback(a, reason)
             case None =>
-              VectorAggregatePlanner.plan(a) match {
+              VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf)) match {
                 case Right(v) => v
                 case Left(reason) => fallback(a, reason)
               }
           }
       }
       val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
+      val withShuffles =
+        if (VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(conf, session.sparkContext.getConf.get("spark.shuffle.manager", "sort")))
+          useCometShuffle(withSelections)
+        else withSelections
       if (VectorConf.explainFallback(conf)) {
-        VectorFallback.reasons(withSelections).foreach { case (node, reason) =>
+        VectorFallback.reasons(withShuffles).foreach { case (node, reason) =>
           logInfo(s"spark-vector fallback for ${node.nodeName}: $reason")
         }
       }
-      withSelections
+      withShuffles
     }
+  }
+
+  /**
+   * An exchange fed by one of our operators becomes Comet's native shuffle over a
+   * [[VectorToCometExec]], whether Spark still owns it or Comet already turned it into its
+   * row-based columnar shuffle (which would have converted our batches to rows and back). Comet's
+   * own planner declines because it does not recognise our operators; at run time its native writer
+   * only needs `CometVector` batches, which the bridge provides. Range partitioning is left alone:
+   * it samples the child, which a native shuffle over a non-native child does twice.
+   */
+  private def useCometShuffle(plan: SparkPlan): SparkPlan = plan.transformUp {
+    case s: ShuffleExchangeExec if s.child.isInstanceOf[VectorExec] && bridgeable(s.child, s.outputPartitioning) =>
+      CometShuffle.native(s, VectorToCometExec(s.child))
+    case c if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) &&
+        c.children.head.isInstanceOf[VectorExec] && bridgeable(c.children.head, c.outputPartitioning) =>
+      CometShuffle.toNative(c, VectorToCometExec(c.children.head))
+  }
+
+  private def bridgeable(child: SparkPlan, partitioning: Partitioning): Boolean = {
+    val partitioningOk = partitioning match {
+      case _: RangePartitioning => false
+      case _ => true
+    }
+    partitioningOk && child.output.forall(a => CometBatchBridge.isSupported(a.dataType))
   }
 
   /**
@@ -107,14 +143,13 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
   /** None if `plan` is an acceptable columnar input, else the reason it is not. */
   private def columnarInputReason(plan: SparkPlan): Option[String] = {
-    if (!plan.supportsColumnar) {
-      Some(s"child ${plan.nodeName} is not columnar")
-    } else {
-      plan.output.find(a => !TypeMapping.isSupported(a.dataType)).map { a =>
-        s"unsupported column type ${a.dataType.simpleString} for ${a.name}"
-      }
-    }
+    if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar") else typeReason(plan)
   }
+
+  private def typeReason(plan: SparkPlan): Option[String] =
+    plan.output.find(a => !TypeMapping.isSupported(a.dataType)).map { a =>
+      s"unsupported column type ${a.dataType.simpleString} for ${a.name}"
+    }
 }
 
 object PlanUtils {
