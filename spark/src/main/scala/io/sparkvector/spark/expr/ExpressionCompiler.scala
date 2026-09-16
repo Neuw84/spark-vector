@@ -1,8 +1,8 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, RoundKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BoundReference, BRound, CaseWhen, Cast, Ceil, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualTo, EvalMode, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, IntegralDivide, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BoundReference, BRound, CaseWhen, Cast, Ceil, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -55,6 +55,11 @@ object ExpressionCompiler {
     case Not(EqualTo(l, r)) => comparison(CompareOp.NE, l, r, input)
 
     case In(value, list) => inList(value, list, input)
+    case InSet(value, hset) => inSet(value, hset, input)
+    case EqualNullSafe(l, r) => nullSafeEquality(l, r, input)
+    case IsNaN(child) =>
+      if (child.dataType != DoubleType) Left(s"isnan over ${child.dataType.simpleString}")
+      else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
     case EndsWith(l, r) => stringMatch(StringMatchKernels.Kind.SUFFIX, l, r, input)
@@ -493,11 +498,64 @@ object ExpressionCompiler {
     }
 
   private def comparison(op: CompareOp, l: Expression, r: Expression, input: Seq[Attribute]): Result =
-    for {
-      le <- compile(l, input)
-      re <- compile(r, input)
-      _ <- check(le, re, l, r)
-    } yield CompareExpr(op, le, re)
+    if (l.dataType == BooleanType && r.dataType == BooleanType) booleanComparison(op, l, r, input)
+    else
+      for {
+        le <- compile(l, input)
+        re <- compile(r, input)
+        _ <- check(le, re, l, r)
+      } yield CompareExpr(op, le, re)
+
+  /** Comparisons between BOOL columns, or a BOOL column and a boolean literal, on the packed words. */
+  private def booleanComparison(op: CompareOp, l: Expression, r: Expression, input: Seq[Attribute]): Result =
+    (l, r) match {
+      case (Literal(null, _), _) | (_, Literal(null, _)) => Left("comparison against NULL")
+      case (_: Literal, _: Literal) => Left("comparison of two literals")
+      case (Literal(v: Boolean, _), c) => booleanChild(c, input).map(BoolCompareScalarExpr(op.flip(), _, v))
+      case (c, Literal(v: Boolean, _)) => booleanChild(c, input).map(BoolCompareScalarExpr(op, _, v))
+      case (a, b) => binaryBoolean(a, b, input)(BoolCompareExpr(op, _, _))
+    }
+
+  /** `a <=> b`: same type on both sides, never null; a `NULL` literal side is `IS NULL` of the other. */
+  private def nullSafeEquality(l: Expression, r: Expression, input: Seq[Attribute]): Result =
+    (l, r) match {
+      case (Literal(null, _), Literal(null, _)) => Left("<=> of two literals")
+      case (Literal(null, _), c) => nullTestChild(c, input).map(IsNullExpr.apply)
+      case (c, Literal(null, _)) => nullTestChild(c, input).map(IsNullExpr.apply)
+      case _ if l.dataType == BooleanType && r.dataType == BooleanType =>
+        if (l.isInstanceOf[Literal] || r.isInstanceOf[Literal]) Left("<=> of a boolean literal")
+        else binaryBoolean(l, r, input)(NullSafeEqExpr(_, _))
+      case _ =>
+        for {
+          le <- compile(l, input)
+          re <- compile(r, input)
+          _ <- check(le, re, l, r)
+        } yield NullSafeEqExpr(le, re)
+    }
+
+  /**
+   * `value IN set` for the optimizer's `InSet`: numeric lanes take one binary search per row over
+   * the sorted keys; strings go through the same per-literal path as `IN`. A set holding `NULL`
+   * falls back (Spark's result is then null for non-members).
+   */
+  private def inSet(value: Expression, hset: Set[Any], input: Seq[Attribute]): Result = {
+    if (hset.isEmpty) Left("empty IN set")
+    else if (hset.contains(null)) Left("NULL in IN set")
+    else compile(value, input).flatMap {
+      case _: LiteralExpr => Left("IN over a literal")
+      case c if c.vecType == VecType.UTF8 =>
+        if (!hset.forall(_.isInstanceOf[UTF8String])) Left("IN set elements are not strings")
+        else Right(InExpr(c, hset.toSeq.map(v => LiteralExpr(v, value.dataType))))
+      case c if c.vecType == VecType.FLOAT64 =>
+        if (!hset.forall(_.isInstanceOf[Double])) Left("IN set elements are not doubles")
+        else Right(InSetExpr(c, PredicateKernels.doubleKeys(hset.toArray.map(_.asInstanceOf[Double]))))
+      case c if c.vecType == VecType.INT32 || c.vecType == VecType.INT64 =>
+        val keys = hset.toArray.map(LiteralExpr(_, value.dataType).number.longValue())
+        java.util.Arrays.sort(keys)
+        Right(InSetExpr(c, keys))
+      case _ => Left(s"IN not supported for ${value.dataType.simpleString}")
+    }
+  }
 
   /**
    * `value IN (list)` where every element is a non-null literal of the value's type (Spark's own

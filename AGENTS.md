@@ -97,6 +97,8 @@ that pin it.
   `MathExprs.scala` (`AbsExpr`, `SignumExpr`, `DivideLikeExpr` for `%`/`pmod`/`div` with the same
   divisor-zero tail as `ArithExpr` -- `REMAINDER_BY_ZERO` for the remainders, `DIVIDE_BY_ZERO` for `div`
   -- `PickExpr` for `greatest`/`least`, `NanvlExpr`; all over `MathKernels`), the rounding nodes in
+  `PredicateExprs.scala` (`NullSafeEqExpr`, `IsNaNExpr`, `BoolCompareExpr`/`BoolCompareScalarExpr` on
+  packed words, `InSetExpr` with a sorted-key binary search; over `PredicateKernels`),
   `BitExprs.scala` (`BitBinaryExpr` for `& | ^` and the shifts, `BitNotExpr`, `BitCountExpr` over
   `BitKernels`; Java's semantics, `bit_count` on the value widened to a long like Spark's),
   `RoundExprs.scala` (`CeilFloorExpr`, `RintExpr`, `RoundExpr` for `round`/`bround`/two-argument
@@ -432,7 +434,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 132 kernel tests, 152 Spark tests (125 without the Comet and Iceberg profiles;
+Current counts: 135 kernel tests, 154 Spark tests (127 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

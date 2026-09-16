@@ -125,9 +125,34 @@ class VectorFilterSuite extends VectorQuerySuite {
     checkFallback("SELECT * FROM t WHERE hash(i) = 2", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE s = concat(s, 'x')", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE startswith(s, s)", Seq(Filter), "string pattern is not a literal")
-    // The optimizer turns a long IN list into InSet, which is #48.
-    checkFallback("SELECT * FROM t WHERE s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12')", Seq(Filter), "unsupported expression")
+    // The optimizer turns a long IN list into InSet; one holding NULL still falls back (Spark's result is null for non-members).
+    checkFallback("SELECT * FROM t WHERE i IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 11, NULL)", Seq(Filter), "NULL in IN set")
     checkFallback("SELECT * FROM t WHERE s IN ('s1', NULL)", Seq(Filter), "NULL in IN list")
+  }
+
+  test("null-safe equality, isnan, boolean comparisons, BETWEEN and InSet") {
+    // <=> : both-null rows match, one-null rows do not, and the result is never null (so NOT flips every row).
+    checkVectorized("SELECT i FROM t WHERE l <=> CAST(i AS BIGINT) * 3", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE NOT (l <=> CAST(i AS BIGINT) * 3)", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE s <=> 's7' OR d <=> d2", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE l <=> NULL", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE b <=> (i % 2 = 0)", Seq(Filter))
+    // isnan: d has NaN, infinities and nulls; null is false, not null.
+    checkVectorized("SELECT i FROM t WHERE isnan(d)", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE NOT isnan(d) AND d > 100", Seq(Filter))
+    // Boolean columns against literals and each other (false < true).
+    checkVectorized("SELECT i FROM t WHERE b = true", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE b <> false OR (i % 2 = 0) < b", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE b >= (i % 5 = 0) AND true > b", Seq(Filter))
+    // BETWEEN is two comparisons after Spark's rewrite; pin it.
+    checkVectorized("SELECT i FROM t WHERE i BETWEEN 100 AND 200 AND d NOT BETWEEN 1.5 AND 2.5", Seq(Filter))
+    // InSet: the optimizer rewrites lists above spark.sql.optimizer.inSetConversionThreshold (10).
+    checkVectorized("SELECT i FROM t WHERE i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946)", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE l IN (0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45)", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE d2 IN (0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75) AND s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12')", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE i NOT IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", Seq(Filter))
+    val hits = checkVectorized("SELECT i FROM t WHERE i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946)", Seq(Filter)).count()
+    assert(hits === 20, "every Fibonacci number below 20000 is a row")
   }
 
   test("filter conversion can be disabled by configuration") {
