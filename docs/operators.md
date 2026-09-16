@@ -4,7 +4,7 @@ One row per Spark physical operator: whether spark-vector converts it, what has 
 conversion to happen, the `spark.vector.*` key that turns it off, and the exact fallback reason the
 planner records when it does not convert. Modelled on Comet's
 [Spark Operator Support](https://datafusion.apache.org/comet/user-guide/latest/operators.html) page;
-the companion for expressions is `docs/expressions.md` (#30).
+the companion for expressions is [docs/expressions.md](expressions.md).
 
 **How to read a plan.** `VectorExecRule` (`VectorColumnarRule.scala`) walks the physical plan bottom-up
 and replaces an operator only when (a) its input already produces columnar batches of supported types
