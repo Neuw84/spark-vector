@@ -40,8 +40,14 @@ abstract class VectorBatchIterator(input: Iterator[ColumnarBatch], name: String)
    */
   protected def process(batch: ColumnarBatch): ColumnarBatch
 
+  /**
+   * True once no further input batch should be pulled (a limit that is reached). A batch already
+   * processed and pending is still emitted; the child is simply not asked for more.
+   */
+  protected def exhausted: Boolean = false
+
   override def hasNext: Boolean = {
-    while (pending == null && input.hasNext) {
+    while (pending == null && !exhausted && input.hasNext) {
       val raw = input.next()
       if (raw.numRows() > 0) {
         // A foreign reader's row-id-mapped batch becomes a selected batch over its physical rows.
