@@ -28,7 +28,7 @@ Comet-backed tests and benchmarks. Maven builds everything.
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, decimal, cast, agg incl. overflow-checked sums, hash, grouped accumulators, group key table with lookup), the sort, gather and column-builder kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
 | `spark-sql-tests/` | Scala 2.13 | Spark's `SQLQueryTestSuite` with the extension injected; profile `spark-sql-tests` only, run by `benchmarks/scripts/run-spark-sql-tests.sh` |
 | `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the four operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
-| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (`TpchQueries`: all 22 queries, `TpchRunner`) with its markdown/HTML report and per-query accelerated-operator counts |
+| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H / TPC-DS runners (`TpchQueries`: all 22 queries, `TpchRunner`; `TpcdsRunner`: the 103 queries from Spark's `tpcds/q*.sql` test resources, sharing `TpchRunner`'s engine through `TpchRunner.Suite`) with their markdown/HTML reports and per-query accelerated-operator counts |
 
 Commands that are known to work (always unset `JAVA_TOOL_OPTIONS` first; the IDE sets one that
 breaks Spark's JVM options):
@@ -44,6 +44,9 @@ benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated eight tables, deci
 benchmarks/scripts/gen-tpch.sh 1 benchmarks/data --decimals   # same tables with real DECIMAL(15,2), into sf1-decimal
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
+benchmarks/scripts/gen-tpcds.sh 1          # DuckDB dsdgen, 24 tables with real DECIMAL(7,2)/DATE columns, into benchmarks/data/tpcds-sf1
+benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1 spark,vector --queries q10,q35,q45   # results under benchmarks/results/tpcds
+benchmarks/scripts/run-tpcds.sh --report   # rewrite benchmarks/results/tpcds/results.{md,html}
 ```
 
 Maven output is large: redirect to a log file and grep it. Full builds take about three minutes;
@@ -410,9 +413,11 @@ A change is not done until all of the following that apply have run green, local
 4. UI. `PlanAccelerationSuite` pins the classification rules without a session (stand-ins in
    `org.apache.spark.sql.comet` stand for Comet operators); `VectorAccelerationUiSuite` binds a
    real Spark UI, runs converted queries and fetches both pages over HTTP.
-5. End-to-end results. `TpchRunner` computes a checksum of every configuration's result rows to 10
-   significant digits; the report states whether all configurations agree. A benchmark run where
-   the checksums differ is a correctness bug, not a performance result.
+5. End-to-end results. `TpchRunner` (and `TpcdsRunner`, which shares its engine) computes a
+   checksum of every configuration's result rows to 10 significant digits; the report states whether
+   all configurations agree. A benchmark run where the checksums differ is a correctness bug, not a
+   performance result. The per-query acceleration column (`k/n` operators ours) is what the TPC-DS
+   per-query issues are closed against.
 6. Performance claims need evidence: a JMH number for a kernel change (`benchmarks` module,
    `-wi 2 -i 3 -w 1 -r 1 -f 1` is the convention in `docs/results.md`) or a TPC-H median plus a
    JFR profile for an operator change. "It should be faster" is not evidence; several intuitive

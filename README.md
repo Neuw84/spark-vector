@@ -262,8 +262,20 @@ COMET_JAR=/path/to/comet-spark-spark4.1_2.13-1.0.0.jar \
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10   # + comet-scan, comet-scan-vector, comet-scan-vector-shuffle, comet
 ```
 
+TPC-DS, the 99 queries (103 with the a/b variants) over the 24 tables, keeping the real
+`DECIMAL(7,2)` and `DATE` columns; the query text is Spark's own (`tpcds/q*.sql` from the spark-sql
+tests jar, the files its plan-stability suite runs), so each query's plan is the one Spark's optimizer
+is tested against:
+
+```bash
+benchmarks/scripts/gen-tpcds.sh 1                     # benchmarks/data/tpcds-sf1/<table> (store_sales: 2.9M rows)
+benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1                      # spark + vector, q1..q99 -> benchmarks/results/tpcds
+benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1 spark,vector --queries q10,q35,q45
+benchmarks/scripts/run-tpcds.sh --report
+```
+
 Each configuration runs in its own JVM and appends its measurements to
-`benchmarks/results/<config>.jsonl`. The runner then rewrites two reports from every `.jsonl` file,
+`benchmarks/results/<config>.jsonl` (`benchmarks/results/tpcds/<config>.jsonl` for TPC-DS). The runner then rewrites two reports from every `.jsonl` file,
 one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` and a self-contained
 `benchmarks/results/results.html` with bar charts (median, p90 whisker, speedup against plain
 Spark), an accelerated-operators table per query (operators executed by our kernels or Comet over
