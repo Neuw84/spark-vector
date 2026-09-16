@@ -151,7 +151,7 @@ logs, and it reads as a cascade, since one uncompilable expression makes every o
 non-columnar:
 
 ```
-Filter          unsupported expression StartsWith: startswith(lineitem.l_comment, 'cmt1')
+Filter          unsupported expression Like: lineitem.l_comment LIKE '%special%requests%'
 Project         child Filter is not columnar
 HashAggregate   child Project is not columnar
 ```
@@ -217,7 +217,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Area | Supported | Falls back |
 |---|---|---|
 | Types | Int, Long, Double, Date, Timestamp, Boolean, String (strings pass through and serve as group keys), Decimal of at most 18 digits (unscaled long lanes) | Float, Short/Byte, Decimal above 18 digits, Binary, nested |
-| Predicates | `=`, `!=`, `<`, `<=`, `>`, `>=` on numeric/date/decimal/string columns vs literal or column (strings in `UTF8_BINARY` order, once per dictionary entry on dictionary pages); `IN (literals)`; `AND`/`OR`/`NOT`; `IS [NOT] NULL`; boolean columns | `LIKE`, `InSet` (long `IN` lists), functions |
+| Predicates | `=`, `!=`, `<`, `<=`, `>`, `>=` on numeric/date/decimal/string columns vs literal or column (strings in `UTF8_BINARY` order, once per dictionary entry on dictionary pages); `IN (literals)`; `LIKE 'p%'` / `'%p'` / `'%p%'` and `startswith` / `endswith` / `contains` against a literal; `AND`/`OR`/`NOT`; `IS [NOT] NULL`; boolean columns | `LIKE` with inner wildcards or `_`, `InSet` (long `IN` lists), functions |
 | Arithmetic | `+ - *` on Int/Long/Double/Decimal (integers overflow-checked in ANSI mode, raising Spark's error only for rows that survive earlier filters), `/` on Double and Decimal (Spark's half-up rounding; null or ANSI error past the precision), unary minus (ANSI-checked on integers), widening casts, casts between decimals, integers and doubles, literal columns | `try_*` arithmetic, `%`, decimal results above 18 digits, other casts |
 | Conditionals | `CASE WHEN ... [ELSE] END`, `IF`, `COALESCE`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` over any supported type, with `NULL`, numeric, string and boolean literal branches; a null condition counts as false, later branches are evaluated only where earlier ones did not match | conditionals producing wide decimals or nested types |
 | Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `min`, `max`, `avg` in Partial and Final mode; `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal | `DISTINCT`, `FILTER` (Partial), double keys, PartialMerge/Complete modes, wider decimal sums, other functions |

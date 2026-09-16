@@ -3,6 +3,7 @@ package io.sparkvector.kernels.reference;
 import io.sparkvector.kernels.ArithOp;
 import io.sparkvector.kernels.Bitmap;
 import io.sparkvector.kernels.CompareOp;
+import io.sparkvector.kernels.StringMatchKernels;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
 import java.lang.foreign.MemorySegment;
@@ -81,6 +82,33 @@ public final class ScalarReference {
     int n = a.length();
     for (int i = 0; i < n; i++) {
       Bitmap.setTo(out, i, op.test(java.util.Arrays.compareUnsigned(a.getUtf8Bytes(i), b.getUtf8Bytes(i))));
+    }
+  }
+
+  /**
+   * Oracle for {@code StringMatchKernels}: prefix / suffix / substring on the UTF-8 bytes, decided
+   * by a byte-array scan independent of the kernel's {@code mismatch} tricks.
+   */
+  public static void matchUtf8(StringMatchKernels.Kind kind, VectorBuffers a, byte[] pattern, MemorySegment out) {
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      byte[] s = a.getUtf8Bytes(i);
+      boolean hit;
+      if (pattern.length > s.length) {
+        hit = false;
+      } else {
+        switch (kind) {
+          case PREFIX -> hit = java.util.Arrays.equals(s, 0, pattern.length, pattern, 0, pattern.length);
+          case SUFFIX -> hit = java.util.Arrays.equals(s, s.length - pattern.length, s.length, pattern, 0, pattern.length);
+          default -> {
+            hit = false;
+            for (int p = 0; p + pattern.length <= s.length && !hit; p++) {
+              hit = java.util.Arrays.equals(s, p, p + pattern.length, pattern, 0, pattern.length);
+            }
+          }
+        }
+      }
+      Bitmap.setTo(out, i, hit);
     }
   }
 

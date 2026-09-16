@@ -109,7 +109,7 @@ class VectorProjectSuite extends VectorQuerySuite {
   }
 
   test("string predicates as projected booleans and in CASE conditions") {
-    checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, i FROM t", Seq(Project))
+    checkVectorized("SELECT s = 's1' AS eq, s <> 's1' AS ne, s < 's2' AS lt, s IN ('s1', 's17') AS inl, s LIKE 's1%' AS pre, s LIKE '%3' AS suf, contains(s, '2') AS has, i FROM t", Seq(Project))
     checkVectorized("SELECT CASE WHEN s = 's1' THEN 'one' WHEN s IN ('s2', 's3') THEN 'few' ELSE s END AS tag FROM t", Seq(Project))
     checkVectorized("SELECT IF(s > 's4', 1, 0) AS flag, i FROM t WHERE i > 100", Seq(Filter, Project))
   }

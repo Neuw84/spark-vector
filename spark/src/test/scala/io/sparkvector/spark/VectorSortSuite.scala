@@ -81,7 +81,8 @@ class VectorSortSuite extends VectorQuerySuite {
   }
 
   test("unsupported sort keys fall back with a reason") {
-    checkFallback("SELECT i, s FROM t SORT BY s LIKE 'a%'", Seq(Sort), "StartsWith")
+    checkFallback("SELECT i, s FROM t SORT BY s LIKE 'a%b%c'", Seq(Sort), "Like")
+    checkVectorized("SELECT i, s FROM t SORT BY s LIKE 's1%', i", Seq(Sort)) // the simplified shape compiles
   }
 
   test("TPC-H Q1 shape: sort above our Final aggregate, single partition") {

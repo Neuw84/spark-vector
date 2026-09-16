@@ -213,6 +213,23 @@ final case class InExpr(child: VectorExpr, values: Seq[LiteralExpr]) extends Vec
   }
 }
 
+/**
+ * `startswith(child, p)`, `endswith(child, p)` and `contains(child, p)` against a string literal
+ * -- what Spark's `LikeSimplification` makes of `LIKE 'p%'`, `LIKE '%p'` and `LIKE '%p%'`. Null
+ * exactly where the child is null (the pattern is a non-null literal), so the child's validity is
+ * shared; the match runs once per dictionary entry on a dictionary-encoded column.
+ */
+final case class StringMatchExpr(kind: StringMatchKernels.Kind, child: VectorExpr, pattern: LiteralExpr) extends VectorExpr {
+  override def dataType: DataType = BooleanType
+  override def children: Seq[VectorExpr] = Seq(child, pattern)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val bits = ctx.bitmap()
+    StringMatchKernels.`match`(kind, a, pattern.utf8Bytes, ctx.active, bits)
+    SegmentVectorBuffers.fixedWidth(VecType.BOOL, ctx.numRows, a.validity(), bits)
+  }
+}
+
 final case class NotExpr(child: VectorExpr) extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(child)
