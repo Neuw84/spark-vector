@@ -93,7 +93,12 @@ object EvalContexts {
     val arena = Arena.ofConfined()
     try {
       val n = batch.numRows()
-      val ctx = new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
+      val ctx = batch match {
+        case s: io.sparkvector.spark.arrow.SelectedColumnarBatch =>
+          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena), s.selection(), s.selectedCount())
+        case _ =>
+          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
+      }
       f(ctx)
     } finally {
       arena.close()

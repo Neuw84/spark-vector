@@ -17,8 +17,8 @@ import jdk.incubator.vector.VectorSpecies;
  */
 public final class HashKernels {
 
-  static final VectorSpecies<Integer> I = IntVector.SPECIES_PREFERRED;
-  static final VectorSpecies<Long> L = LongVector.SPECIES_PREFERRED;
+  static final VectorSpecies<Integer> I = Species.I;
+  static final VectorSpecies<Long> L = Species.L;
   static final VectorSpecies<Integer> IH = CastKernels.IH;
   static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;
 

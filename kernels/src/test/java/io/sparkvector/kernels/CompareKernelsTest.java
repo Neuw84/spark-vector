@@ -1,6 +1,7 @@
 package io.sparkvector.kernels;
 
 import static io.sparkvector.kernels.TestData.assertBitmapEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -126,6 +127,43 @@ class CompareKernelsTest {
       CompareKernels.compareScalar(withNulls, 3, CompareOp.GT, o1);
       CompareKernels.compareScalar(noNulls, 3, CompareOp.GT, o2);
       assertBitmapEquals(o1, o2, n, "validity independence");
+    }
+  }
+
+  @Test
+  void activeBitmapSkipsBlocksAndClearsTheirBits() {
+    Random rnd = new Random(21);
+    int n = 1000;
+    try (Arena arena = Arena.ofConfined()) {
+      VectorBuffers a = TestData.doubles(arena, rnd, n, null);
+      VectorBuffers b = TestData.doubles(arena, rnd, n, null);
+      // Active: whole blocks on or off, plus one sparse block.
+      MemorySegment active = ArrowLayout.allocateBitmap(arena, n);
+      for (int i = 0; i < n; i++) {
+        int w = i >> 6;
+        boolean on = w % 3 != 1 && (w != 4 || i % 17 == 0);
+        if (on) {
+          Bitmap.set(active, i);
+        }
+      }
+      for (CompareOp op : CompareOp.values()) {
+        MemorySegment full = ArrowLayout.allocateBitmap(arena, n);
+        MemorySegment skipped = ArrowLayout.allocateBitmap(arena, n);
+        CompareKernels.compareScalar(a, 0.25, op, full);
+        CompareKernels.compareScalar(a, 0.25, op, active, skipped);
+        check(full, skipped, active, n, op + " scalar");
+        CompareKernels.compare(a, b, op, full);
+        CompareKernels.compare(a, b, op, active, skipped);
+        check(full, skipped, active, n, op + " column");
+      }
+    }
+  }
+
+  private static void check(MemorySegment full, MemorySegment skipped, MemorySegment active, int n, String what) {
+    for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      long act = Bitmap.wordAt(active, w, n);
+      long expected = act == 0L ? 0L : Bitmap.wordAt(full, w, n);
+      assertEquals(expected, Bitmap.wordAt(skipped, w, n), what + " word " + w);
     }
   }
 }

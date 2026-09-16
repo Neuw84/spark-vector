@@ -1,6 +1,6 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDictionaryColumnVector}
+import io.sparkvector.spark.arrow.{ArrowOutput, SelectedColumnarBatch, VectorArrowColumnVector, VectorDictionaryColumnVector}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression, SortOrder}
@@ -13,8 +13,12 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * scratch arena and copied into Arrow vectors; forwarded input columns are borrowed when the child
  * already produced Arrow memory and copied otherwise. A projection that is exactly the child's
  * output passes batches through.
+ *
+ * A [[SelectedColumnarBatch]] from the child is forwarded as such when the parent is a spark-vector
+ * operator (`emitSelection`); otherwise the selection is applied here and only surviving rows are
+ * materialised for Spark.
  */
-case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
+case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan, emitSelection: Boolean = false)
     extends VectorExec
     with PartitioningPreservingUnaryExecNode
     with OrderPreservingUnaryExecNode {
@@ -39,8 +43,9 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
     val identity = isIdentity
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
     val m = vectorMetrics
+    val selectionOut = emitSelection
     child.executeColumnar().mapPartitionsInternal { iter =>
-      new VectorProjectIterator(iter, exprs, identity, outputAttrs, m)
+      new VectorProjectIterator(iter, exprs, identity, outputAttrs, selectionOut, m)
     }
   }
 
@@ -52,33 +57,49 @@ private[vector] class VectorProjectIterator(
     exprs: Array[VectorExpr],
     identity: Boolean,
     outputAttrs: Array[(String, DataType)],
+    emitSelection: Boolean,
     metrics: VectorMetrics)
     extends VectorBatchIterator(input, "VectorProjectExec") {
 
   override protected def process(batch: ColumnarBatch): ColumnarBatch = metrics.timed {
     metrics.numInputBatches += 1
     metrics.numOutputBatches += 1
-    metrics.numOutputRows += batch.numRows()
-    if (identity) {
+    val selected = batch.isInstanceOf[SelectedColumnarBatch]
+    if (identity && (emitSelection || !selected)) {
+      metrics.numOutputRows += (batch match {
+        case s: SelectedColumnarBatch => s.selectedCount()
+        case _ => batch.numRows()
+      })
       batch
     } else {
       withEvalContext(batch) { ctx =>
+        // With a selection we either keep it (parent is ours) or apply it now (parent is Spark).
+        val compactTo = if (selected && !emitSelection) ctx.selection else null
+        val outRows = if (compactTo != null) ctx.selectedCount else ctx.numRows
         val columns = new Array[ColumnVector](exprs.length)
         var c = 0
         while (c < columns.length) {
           val (name, dt) = outputAttrs(c)
           columns(c) = exprs(c) match {
+            case ColumnRef(ordinal, _) if compactTo != null =>
+              ArrowOutput.compact(name, dt, ctx.input(ordinal), compactTo, outRows, allocator)
             case ColumnRef(ordinal, _) =>
               batch.column(ordinal) match {
                 case v: VectorArrowColumnVector => v.borrow()
                 case v: VectorDictionaryColumnVector => v.borrow()
                 case _ => ArrowOutput.copy(name, dt, ctx.input(ordinal), allocator)
               }
+            case e if compactTo != null => ArrowOutput.compact(name, dt, e.eval(ctx), compactTo, outRows, allocator)
             case e => ArrowOutput.copy(name, dt, e.eval(ctx), allocator)
           }
           c += 1
         }
-        new ColumnarBatch(columns, ctx.numRows)
+        metrics.numOutputRows += outRows
+        if (selected && emitSelection) {
+          SelectedColumnarBatch.of(columns, ctx.numRows, ctx.selection, ctx.selectedCount, true)
+        } else {
+          new ColumnarBatch(columns, outRows)
+        }
       }
     }
   }

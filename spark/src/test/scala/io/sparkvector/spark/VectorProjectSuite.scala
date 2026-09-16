@@ -62,6 +62,35 @@ class VectorProjectSuite extends VectorQuerySuite {
     assert(project.child.isInstanceOf[VectorFilterExec], project.treeString)
   }
 
+  test("a filter below a projection forwards a selection bitmap instead of compacting") {
+    val df = checkVectorized("SELECT s, i, d * d2 AS p, l FROM t WHERE d > 5 AND d2 > 0.5 AND s IS NOT NULL", Seq(Filter, Project))
+    val filter = nodesOf[VectorFilterExec](df).head
+    val project = nodesOf[VectorProjectExec](df).head
+    assert(filter.emitSelection, "filter feeding our projection should emit a selection")
+    assert(!project.emitSelection, "projection feeding Spark must compact")
+    // Same query with selections disabled: identical rows, dense batches everywhere.
+    withConf(VectorConf.SelectionEnabled -> "false") {
+      val dense = checkVectorized("SELECT s, i, d * d2 AS p, l FROM t WHERE d > 5 AND d2 > 0.5 AND s IS NOT NULL", Seq(Filter, Project))
+      assert(!nodesOf[VectorFilterExec](dense).head.emitSelection)
+    }
+  }
+
+  test("ANSI errors are not raised for rows the filter removed") {
+    // d2 is zero where id % 13 = 0; Spark never evaluates the projection for those rows.
+    checkVectorized("SELECT i, 10.0 / d2 AS r FROM t WHERE d2 > 0.0", Seq(Filter, Project))
+    // Same inside a conjunction: the right operand only matters where the left one holds.
+    checkVectorized("SELECT i FROM t WHERE d2 > 0.0 AND 10.0 / d2 > 3.0", Seq(Filter))
+  }
+
+  test("selection survives an identity projection and reaches the aggregate") {
+    val df = checkVectorized("SELECT count(*), sum(d), min(i), max(l), avg(d2) FROM t WHERE d > 5 AND d2 > 0.5", Seq(Filter, classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+    assert(nodesOf[VectorFilterExec](df).head.emitSelection)
+    val grouped = checkVectorized("SELECT s, count(*), sum(d), count(l) FROM t WHERE d > 5 GROUP BY s", Seq(Filter, classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+    assert(nodesOf[VectorFilterExec](grouped).head.emitSelection)
+    // Groups that only occur in filtered-out rows must not appear.
+    checkVectorized("SELECT s, count(*) FROM t WHERE i < 30 GROUP BY s", Seq(Filter, classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+  }
+
   test("unsupported expressions in a projection fall back") {
     checkFallback("SELECT concat(s, 'x') AS c FROM t WHERE i > 5", Seq(Project), "unsupported expression")
     checkFallback("SELECT i % 3 AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")

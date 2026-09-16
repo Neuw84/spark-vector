@@ -1,6 +1,6 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.arrow.ArrowOutput
+import io.sparkvector.spark.arrow.{ArrowOutput, SelectedColumnarBatch}
 import io.sparkvector.spark.expr.{ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortOrder}
@@ -10,10 +10,13 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
  * Columnar replacement for FilterExec. Evaluates the condition with SIMD kernels to a selection
- * bitmap, then compacts every column into new Arrow vectors. Batches with no surviving rows are
- * dropped; batches where every row survives are passed through without copying.
+ * bitmap. When the parent is another spark-vector operator (`emitSelection`) the child's columns
+ * are forwarded untouched together with the bitmap as a [[SelectedColumnarBatch]]; otherwise every
+ * column is compacted into new Arrow vectors for Spark. Batches with no surviving rows are dropped;
+ * batches where every row survives are passed through without copying.
  */
-case class VectorFilterExec(condition: Expression, child: SparkPlan) extends VectorExec {
+case class VectorFilterExec(condition: Expression, child: SparkPlan, emitSelection: Boolean = false)
+    extends VectorExec {
 
   override def output: Seq[Attribute] = child.output
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
@@ -30,8 +33,9 @@ case class VectorFilterExec(condition: Expression, child: SparkPlan) extends Vec
     val predicate = compiled
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
     val m = vectorMetrics
+    val selectionOut = emitSelection
     child.executeColumnar().mapPartitionsInternal { iter =>
-      new VectorFilterIterator(iter, predicate, outputAttrs, m)
+      new VectorFilterIterator(iter, predicate, outputAttrs, selectionOut, m)
     }
   }
 
@@ -42,6 +46,7 @@ private[vector] class VectorFilterIterator(
     input: Iterator[ColumnarBatch],
     predicate: VectorExpr,
     outputAttrs: Array[(String, org.apache.spark.sql.types.DataType)],
+    emitSelection: Boolean,
     metrics: VectorMetrics)
     extends VectorBatchIterator(input, "VectorFilterExec") {
 
@@ -52,10 +57,15 @@ private[vector] class VectorFilterIterator(
       val (selection, count) = VectorExpr.selection(pred, ctx)
       if (count == 0) {
         null
-      } else if (count == ctx.numRows) {
+      } else if (count == ctx.numRows && !ctx.hasSelection) {
+        // Every physical row survives: pass through.
         metrics.numOutputBatches += 1
         metrics.numOutputRows += count
         batch
+      } else if (emitSelection) {
+        metrics.numOutputBatches += 1
+        metrics.numOutputRows += count
+        SelectedColumnarBatch.of(SelectedColumnarBatch.columnsOf(batch), ctx.numRows, selection, count, false)
       } else {
         val columns = new Array[ColumnVector](outputAttrs.length)
         var c = 0

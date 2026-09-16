@@ -39,6 +39,17 @@ class GroupedAggregationTest {
   @ParameterizedTest
   @ValueSource(ints = {1, 4, 64, 65, 300, 5000})
   void groupedAccumulatorsMatchReference(int cardinality) {
+    run(cardinality, false);
+  }
+
+  /** Same, with a per-batch selection bitmap: unselected rows get id -1 and count nowhere. */
+  @ParameterizedTest
+  @ValueSource(ints = {1, 4, 64, 65, 300, 5000})
+  void groupedAccumulatorsHonourSelection(int cardinality) {
+    run(cardinality, true);
+  }
+
+  private void run(int cardinality, boolean withSelection) {
     Random rnd = new Random(cardinality);
     GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.INT32, VecType.UTF8});
     GroupedAccumulators.DoubleSum dsum = new GroupedAccumulators.DoubleSum();
@@ -73,9 +84,10 @@ class GroupedAggregationTest {
         VectorBuffers values = ArrowLayout.ofDoubles(arena, vals, valNulls);
         VectorBuffers longs = ArrowLayout.ofLongs(arena, lvals, valNulls);
 
+        java.lang.foreign.MemorySegment selection = withSelection ? TestData.randomBitmap(arena, rnd, n) : null;
         int[] ids = new int[n];
-        int groups = table.assign(new VectorBuffers[] {key1, key2}, n, ids);
-        GroupAssignment a = GroupAssignment.of(ids, n, groups, arena);
+        int groups = table.assign(new VectorBuffers[] {key1, key2}, n, ids, selection);
+        GroupAssignment a = GroupAssignment.of(ids, n, groups, arena, selection);
         dsum.update(values, a);
         lsum.update(longs, a);
         countAll.updateAll(a);
@@ -84,6 +96,10 @@ class GroupedAggregationTest {
         dmax.update(values, a);
 
         for (int i = 0; i < n; i++) {
+          if (selection != null && !Bitmap.isSet(selection, i)) {
+            assertEquals(-1, ids[i], "unselected row has no group");
+            continue;
+          }
           List<Object> key = List.of(keyNulls[i] ? "<null>" : k1[i], Objects.requireNonNullElse(k2[i], "<null>"));
           Integer prev = idOf.putIfAbsent(key, ids[i]);
           if (prev != null) {

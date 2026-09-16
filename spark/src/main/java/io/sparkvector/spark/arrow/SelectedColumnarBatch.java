@@ -1,0 +1,85 @@
+package io.sparkvector.spark.arrow;
+
+import io.sparkvector.kernels.ArrowLayout;
+import io.sparkvector.kernels.BitmapKernels;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import org.apache.spark.sql.vectorized.ColumnVector;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
+
+/**
+ * A batch whose rows are qualified by a selection bitmap instead of being compacted. Emitted by a
+ * spark-vector operator only when its parent is another spark-vector operator (Spark's own
+ * consumers would read every row), so a filter feeding an aggregate never copies the surviving
+ * rows: the aggregate folds the selection into its validity masks.
+ *
+ * <p>{@link #numRows()} is the physical row count of the columns; {@link #selectedCount()} the
+ * number of qualifying rows. The selection lives in this batch's own arena, which is released when
+ * the batch is closed. Columns are closed only if {@code ownsColumns}; a filter borrows its child's
+ * columns (the child releases them when it produces its next batch), a projection owns the vectors
+ * it built.
+ */
+public final class SelectedColumnarBatch extends ColumnarBatch {
+
+  private final Arena arena;
+  private final MemorySegment selection;
+  private final int selectedCount;
+  private final boolean ownsColumns;
+
+  private SelectedColumnarBatch(
+      ColumnVector[] columns,
+      int numRows,
+      Arena arena,
+      MemorySegment selection,
+      int selectedCount,
+      boolean ownsColumns) {
+    super(columns, numRows);
+    this.arena = arena;
+    this.selection = selection;
+    this.selectedCount = selectedCount;
+    this.ownsColumns = ownsColumns;
+  }
+
+  /**
+   * Wraps {@code columns} with a copy of {@code selection} ({@code numRows} bits, {@code
+   * selectedCount} set), taken into a fresh arena owned by the batch.
+   */
+  public static SelectedColumnarBatch of(
+      ColumnVector[] columns,
+      int numRows,
+      MemorySegment selection,
+      int selectedCount,
+      boolean ownsColumns) {
+    Arena arena = Arena.ofConfined();
+    MemorySegment copy = ArrowLayout.allocateBitmap(arena, numRows);
+    BitmapKernels.copy(selection, copy, numRows);
+    return new SelectedColumnarBatch(columns, numRows, arena, copy, selectedCount, ownsColumns);
+  }
+
+  /** The columns of {@code batch}, in order (borrowed, not copied). */
+  public static ColumnVector[] columnsOf(ColumnarBatch batch) {
+    ColumnVector[] columns = new ColumnVector[batch.numCols()];
+    for (int i = 0; i < columns.length; i++) {
+      columns[i] = batch.column(i);
+    }
+    return columns;
+  }
+
+  public MemorySegment selection() {
+    return selection;
+  }
+
+  public int selectedCount() {
+    return selectedCount;
+  }
+
+  @Override
+  public void close() {
+    if (ownsColumns) {
+      for (int i = 0; i < numCols(); i++) {
+        column(i).close();
+      }
+    }
+    arena.close();
+  }
+}

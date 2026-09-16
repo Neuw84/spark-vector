@@ -9,12 +9,15 @@ object VectorConf {
   val FilterEnabled = "spark.vector.exec.filter.enabled"
   val ProjectEnabled = "spark.vector.exec.project.enabled"
   val AggregateEnabled = "spark.vector.exec.aggregate.enabled"
+  val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
 
   def isEnabled(conf: SQLConf): Boolean = bool(conf, Enabled, default = true)
   def filterEnabled(conf: SQLConf): Boolean = bool(conf, FilterEnabled, default = true)
   def projectEnabled(conf: SQLConf): Boolean = bool(conf, ProjectEnabled, default = true)
   def aggregateEnabled(conf: SQLConf): Boolean = bool(conf, AggregateEnabled, default = true)
+  /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */
+  def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   def explainFallback(conf: SQLConf): Boolean = bool(conf, ExplainFallbackEnabled, default = false)
 
   private def bool(conf: SQLConf, key: String, default: Boolean): Boolean =

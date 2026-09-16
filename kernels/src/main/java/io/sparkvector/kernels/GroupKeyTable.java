@@ -85,9 +85,18 @@ public final class GroupKeyTable {
    * groups as needed. Returns the number of groups after the batch.
    */
   public int assign(VectorBuffers[] keys, int n, int[] outIds) {
+    return assign(keys, n, outIds, null);
+  }
+
+  /**
+   * As {@link #assign(VectorBuffers[], int, int[])} restricted to the rows set in {@code
+   * selection} ({@code null} for all rows): unselected rows get id {@code -1} and never create a
+   * group.
+   */
+  public int assign(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection) {
     long combinations = dictionaryCombinations(keys);
     if (combinations > 0 && combinations <= MEMO_MAX_COMBINATIONS) {
-      return assignMemoised(keys, n, outIds, (int) combinations);
+      return assignMemoised(keys, n, outIds, (int) combinations, selection);
     }
     if (hashScratch.length < n) {
       hashScratch = new int[Math.max(n, hashScratch.length * 2)];
@@ -97,8 +106,20 @@ public final class GroupKeyTable {
     for (VectorBuffers key : keys) {
       HashKernels.mixColumn(key, hashes);
     }
-    for (int i = 0; i < n; i++) {
-      outIds[i] = lookupOrInsert(keys, i, HashKernels.finish(hashes[i]));
+    if (selection == null) {
+      for (int i = 0; i < n; i++) {
+        outIds[i] = lookupOrInsert(keys, i, HashKernels.finish(hashes[i]));
+      }
+    } else {
+      Arrays.fill(outIds, 0, n, -1);
+      for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+        long bits = Bitmap.wordAt(selection, w, n);
+        while (bits != 0L) {
+          int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+          bits &= bits - 1;
+          outIds[i] = lookupOrInsert(keys, i, HashKernels.finish(hashes[i]));
+        }
+      }
     }
     return size;
   }
@@ -121,7 +142,7 @@ public final class GroupKeyTable {
     return combinations;
   }
 
-  private int assignMemoised(VectorBuffers[] keys, int n, int[] outIds, int combinations) {
+  private int assignMemoised(VectorBuffers[] keys, int n, int[] outIds, int combinations, MemorySegment selection) {
     if (memo.length < combinations) {
       memo = new int[Math.max(combinations, memo.length * 2)];
     }
@@ -148,6 +169,10 @@ public final class GroupKeyTable {
       }
     }
     for (int i = 0; i < n; i++) {
+      if (selection != null && !Bitmap.isSet(selection, i)) {
+        outIds[i] = -1;
+        continue;
+      }
       int gid = memo[combined[i]];
       if (gid < 0) {
         gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));

@@ -192,8 +192,8 @@ private[vector] class VectorGroupedAggregateIterator(
           EvalContexts.withBatch(batch) { ctx =>
             var k = 0
             while (k < keys.length) { keys(k) = keyExprs(k).eval(ctx); k += 1 }
-            val numGroups = table.assign(keys, n, idScratch)
-            val assignment = GroupAssignment.of(idScratch, n, numGroups, ctx.arena)
+            val numGroups = table.assign(keys, n, idScratch, ctx.selection)
+            val assignment = GroupAssignment.of(idScratch, n, numGroups, ctx.arena, ctx.selection)
             var i = 0
             while (i < states.length) { states(i).update(ctx, assignment); i += 1 }
           }

@@ -37,7 +37,7 @@ final case class SumDoubleAgg(input: VectorExpr) extends VectorAggFunction {
     private var sum = 0.0
     private var count = 0L
     override def update(ctx: EvalContext): Unit = {
-      val v = input.eval(ctx)
+      val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
       if (c > 0) { sum += AggKernels.sumDouble(v); count += c }
     }
@@ -57,7 +57,7 @@ final case class SumLongAgg(input: VectorExpr) extends VectorAggFunction {
     private var sum = 0L
     private var count = 0L
     override def update(ctx: EvalContext): Unit = {
-      val v = input.eval(ctx)
+      val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
       if (c > 0) {
         sum += (if (v.`type`() == VecType.INT32) AggKernels.sumInt(v) else AggKernels.sumLong(v))
@@ -79,8 +79,8 @@ final case class CountAgg(input: Option[VectorExpr]) extends VectorAggFunction {
   override def newState(): AggState = new AggState {
     private var count = 0L
     override def update(ctx: EvalContext): Unit = input match {
-      case None => count += ctx.numRows
-      case Some(e) => count += AggKernels.countValid(e.eval(ctx))
+      case None => count += ctx.selectedCount
+      case Some(e) => count += AggKernels.countValid(ctx.masked(e.eval(ctx)))
     }
     override def bufferValues: Array[Any] = Array(java.lang.Long.valueOf(count))
   }
@@ -102,7 +102,7 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
     private var bestLong = 0L
     private var bestDouble = 0.0
     override def update(ctx: EvalContext): Unit = {
-      val v = input.eval(ctx)
+      val v = ctx.masked(input.eval(ctx))
       if (AggKernels.countValid(v) > 0) {
         v.`type`() match {
           case VecType.FLOAT64 =>
@@ -160,7 +160,7 @@ final case class AverageAgg(input: VectorExpr) extends VectorAggFunction {
     private var sum = 0.0
     private var count = 0L
     override def update(ctx: EvalContext): Unit = {
-      val v = input.eval(ctx)
+      val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
       if (c > 0) { sum += AggKernels.sumDouble(v); count += c }
     }

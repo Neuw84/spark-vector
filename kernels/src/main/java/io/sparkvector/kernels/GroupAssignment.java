@@ -18,11 +18,8 @@ public final class GroupAssignment {
 
   /** Maximum number of groups for the masked-reduction path; scatter above it. */
   public static final int LOW_CARDINALITY =
-      Integer.getInteger("sparkvector.agg.maskPathMaxGroups", DoubleVectorLanes() >= 8 ? 8 : 1);
+      Integer.getInteger("sparkvector.agg.maskPathMaxGroups", Species.DOUBLE_LANES >= 8 ? 8 : 1);
 
-  private static int DoubleVectorLanes() {
-    return jdk.incubator.vector.DoubleVector.SPECIES_PREFERRED.length();
-  }
 
   private final int[] ids;
   private final int n;
@@ -30,17 +27,22 @@ public final class GroupAssignment {
   private final Arena arena;
   private final MemorySegment[] masks; // null when scattering
   private final int[] maskCounts;
+  private final MemorySegment selection; // rows of the batch that take part; null = all
 
-  private GroupAssignment(int[] ids, int n, int numGroups, Arena arena, boolean lowCardinality) {
+  private GroupAssignment(int[] ids, int n, int numGroups, Arena arena, boolean lowCardinality, MemorySegment selection) {
     this.ids = ids;
     this.n = n;
     this.numGroups = numGroups;
     this.arena = arena;
+    this.selection = selection;
     if (lowCardinality) {
       masks = new MemorySegment[numGroups];
       maskCounts = new int[numGroups];
       for (int i = 0; i < n; i++) {
         int g = ids[i];
+        if (g < 0) {
+          continue; // unselected row (see GroupKeyTable.assign with a selection)
+        }
         MemorySegment m = masks[g];
         if (m == null) {
           m = ArrowLayout.allocateBitmap(arena, n);
@@ -57,12 +59,48 @@ public final class GroupAssignment {
 
   /** {@code numGroups} is the total number of groups seen so far in the task. */
   public static GroupAssignment of(int[] ids, int n, int numGroups, Arena arena) {
-    return of(ids, n, numGroups, arena, numGroups <= LOW_CARDINALITY);
+    return of(ids, n, numGroups, arena, numGroups <= LOW_CARDINALITY, null);
+  }
+
+  /**
+   * As {@link #of(int[], int, int, Arena)} for a batch carrying a selection bitmap: rows outside
+   * it have id {@code -1} and are ignored by every accumulator.
+   */
+  public static GroupAssignment of(int[] ids, int n, int numGroups, Arena arena, MemorySegment selection) {
+    return of(ids, n, numGroups, arena, numGroups <= LOW_CARDINALITY, selection);
   }
 
   /** Explicit choice of path, for benchmarks and tests. */
   public static GroupAssignment of(int[] ids, int n, int numGroups, Arena arena, boolean useMasks) {
-    return new GroupAssignment(ids, n, numGroups, arena, useMasks);
+    return new GroupAssignment(ids, n, numGroups, arena, useMasks, null);
+  }
+
+  public static GroupAssignment of(
+      int[] ids, int n, int numGroups, Arena arena, boolean useMasks, MemorySegment selection) {
+    return new GroupAssignment(ids, n, numGroups, arena, useMasks, selection);
+  }
+
+  /** The batch's selection bitmap, or {@code null} when every row takes part. */
+  public MemorySegment selection() {
+    return selection;
+  }
+
+  /**
+   * The rows of {@code v} an accumulator must visit: the column's validity ANDed with the
+   * selection. {@code null} means every row. Scatter-path accumulators use this instead of
+   * {@code v.validity()} so unselected rows (id -1) are never touched.
+   */
+  public MemorySegment effectiveValidity(VectorBuffers v) {
+    MemorySegment validity = v.validity();
+    if (selection == null) {
+      return validity;
+    }
+    if (validity == null) {
+      return selection;
+    }
+    MemorySegment combined = ArrowLayout.allocateBitmap(arena, n);
+    BitmapKernels.and(validity, selection, combined, n);
+    return combined;
   }
 
   public int[] ids() {

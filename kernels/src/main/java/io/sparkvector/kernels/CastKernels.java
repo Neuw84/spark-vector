@@ -2,12 +2,10 @@ package io.sparkvector.kernels;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteOrder;
-import jdk.incubator.vector.DoubleVector;
 import jdk.incubator.vector.IntVector;
 import jdk.incubator.vector.LongVector;
 import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
-import jdk.incubator.vector.VectorShape;
 import jdk.incubator.vector.VectorSpecies;
 
 /**
@@ -20,11 +18,10 @@ import jdk.incubator.vector.VectorSpecies;
  */
 public final class CastKernels {
 
-  static final VectorSpecies<Long> L = LongVector.SPECIES_PREFERRED;
-  static final VectorSpecies<Double> D = DoubleVector.SPECIES_PREFERRED;
+  static final VectorSpecies<Long> L = Species.L;
+  static final VectorSpecies<Double> D = Species.D;
   /** Int species with as many lanes as {@link #D} / {@link #L}. */
-  static final VectorSpecies<Integer> IH =
-      VectorSpecies.of(int.class, VectorShape.forBitSize(D.vectorBitSize() / 2));
+  static final VectorSpecies<Integer> IH = Species.IH;
   static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;
 
   private CastKernels() {}

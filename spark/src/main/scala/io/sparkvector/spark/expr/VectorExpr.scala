@@ -9,9 +9,46 @@ import org.apache.spark.sql.types.{BooleanType, DataType}
 /**
  * Per-batch evaluation context. Input columns are adapted lazily so that a predicate touching two
  * columns out of twenty never pays for adapting the other eighteen unless the batch survives.
+ *
+ * `selection` (null for all rows) qualifies the batch's rows when the producer emitted a
+ * [[io.sparkvector.spark.arrow.SelectedColumnarBatch]]; `active` is the subset of rows whose result
+ * anybody will read while evaluating the current sub-expression. It starts as the selection and is
+ * narrowed by `AND`/`OR` for their right operands, so kernels can skip 64-row blocks with no live
+ * row and ANSI errors are only raised for rows that survive.
  */
-final class EvalContext(val arena: Arena, val numRows: Int, adaptColumn: Int => VectorBuffers) {
+final class EvalContext(
+    val arena: Arena,
+    val numRows: Int,
+    adaptColumn: Int => VectorBuffers,
+    val selection: java.lang.foreign.MemorySegment,
+    val selectedCount: Int) {
   private val adapted = new java.util.HashMap[Int, VectorBuffers]()
+
+  /** Rows whose values matter for the sub-expression under evaluation (null = all). */
+  var active: java.lang.foreign.MemorySegment = selection
+
+  def this(arena: Arena, numRows: Int, adaptColumn: Int => VectorBuffers) =
+    this(arena, numRows, adaptColumn, null, numRows)
+
+  def hasSelection: Boolean = selection != null
+
+  /** `v` with the batch selection folded into its validity, so reductions skip unselected rows. */
+  def masked(v: VectorBuffers): VectorBuffers = {
+    if (selection == null) v
+    else if (v.validity() == null) new SegmentVectorBuffers(v.`type`(), numRows, selection, v.data(), v.offsets(), v.dictionary())
+    else {
+      val combined = bitmap()
+      BitmapKernels.and(v.validity(), selection, combined, numRows)
+      new SegmentVectorBuffers(v.`type`(), numRows, combined, v.data(), v.offsets(), v.dictionary())
+    }
+  }
+
+  /** Evaluates `f` with `active` narrowed to `rows`, restoring it afterwards. */
+  def withActive[T](rows: java.lang.foreign.MemorySegment)(f: => T): T = {
+    val saved = active
+    active = rows
+    try f finally active = saved
+  }
 
   def input(ordinal: Int): VectorBuffers = {
     var v = adapted.get(ordinal)
@@ -65,17 +102,17 @@ final case class CompareExpr(op: CompareOp, left: VectorExpr, right: VectorExpr)
     (left, right) match {
       case (l, lit: LiteralExpr) =>
         val a = l.eval(ctx)
-        CompareKernels.compareScalar(a, lit.number, op, bits)
+        CompareKernels.compareScalar(a, lit.number, op, ctx.active, bits)
         // Result is null exactly where the column is null: share its validity.
         SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, a.validity(), bits)
       case (lit: LiteralExpr, r) =>
         val b = r.eval(ctx)
-        CompareKernels.compareScalar(b, lit.number, op.flip(), bits)
+        CompareKernels.compareScalar(b, lit.number, op.flip(), ctx.active, bits)
         SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, b.validity(), bits)
       case (l, r) =>
         val a = l.eval(ctx)
         val b = r.eval(ctx)
-        CompareKernels.compare(a, b, op, bits)
+        CompareKernels.compare(a, b, op, ctx.active, bits)
         val validity =
           if (a.validity() == null && b.validity() == null) null
           else {
@@ -88,14 +125,18 @@ final case class CompareExpr(op: CompareOp, left: VectorExpr, right: VectorExpr)
   }
 }
 
-/** Spark's three-valued AND. */
+/**
+ * Spark's three-valued AND. The right operand is only evaluated where the left one is not
+ * definitely false (true or null): a false left operand decides the row on its own. Rows outside
+ * that set get whatever the skipped kernels left (zero bits), which the Kleene combination ignores.
+ */
 final case class AndExpr(left: VectorExpr, right: VectorExpr) extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(left, right)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val n = ctx.numRows
     val a = left.eval(ctx)
-    val b = right.eval(ctx)
+    val b = ctx.withActive(LogicalExprs.narrow(ctx, a, keepTrue = true))(right.eval(ctx))
     val bits = ctx.bitmap()
     if (a.validity() == null && b.validity() == null) {
       BitmapKernels.and(a.data(), b.data(), bits, n)
@@ -108,14 +149,14 @@ final case class AndExpr(left: VectorExpr, right: VectorExpr) extends VectorExpr
   }
 }
 
-/** Spark's three-valued OR. */
+/** Spark's three-valued OR; the right operand is only evaluated where the left is not true. */
 final case class OrExpr(left: VectorExpr, right: VectorExpr) extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(left, right)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val n = ctx.numRows
     val a = left.eval(ctx)
-    val b = right.eval(ctx)
+    val b = ctx.withActive(LogicalExprs.narrow(ctx, a, keepTrue = false))(right.eval(ctx))
     val bits = ctx.bitmap()
     if (a.validity() == null && b.validity() == null) {
       BitmapKernels.or(a.data(), b.data(), bits, n)
@@ -161,6 +202,29 @@ final case class IsNotNullExpr(child: VectorExpr) extends VectorExpr {
   }
 }
 
+private[expr] object LogicalExprs {
+  /**
+   * Rows still undecided after seeing `a` as the left operand of AND (`keepTrue`: rows where `a`
+   * is true or null) or OR (rows where `a` is false or null), intersected with the current active
+   * set. Returns null when nothing narrows.
+   */
+  def narrow(ctx: EvalContext, a: VectorBuffers, keepTrue: Boolean): java.lang.foreign.MemorySegment = {
+    val n = ctx.numRows
+    val undecided = ctx.bitmap()
+    if (keepTrue) {
+      // true or null == not (false and valid) == data | ~validity
+      if (a.validity() == null) BitmapKernels.copy(a.data(), undecided, n)
+      else { BitmapKernels.andNot(a.validity(), a.data(), undecided, n); BitmapKernels.not(undecided, undecided, n) }
+    } else {
+      // false or null == not (true and valid)
+      if (a.validity() == null) BitmapKernels.not(a.data(), undecided, n)
+      else { BitmapKernels.and(a.data(), a.validity(), undecided, n); BitmapKernels.not(undecided, undecided, n) }
+    }
+    if (ctx.active != null) BitmapKernels.and(undecided, ctx.active, undecided, n)
+    undecided
+  }
+}
+
 object VectorExpr {
 
   /** All column ordinals an expression reads. */
@@ -175,6 +239,7 @@ object VectorExpr {
   def selection(pred: VectorBuffers, ctx: EvalContext): (java.lang.foreign.MemorySegment, Int) = {
     val sel = ctx.bitmap()
     BitmapKernels.selection(pred.data(), pred.validity(), sel, ctx.numRows)
+    if (ctx.selection != null) BitmapKernels.and(sel, ctx.selection, sel, ctx.numRows)
     (sel, Bitmap.popcount(sel, ctx.numRows))
   }
 }
@@ -229,6 +294,9 @@ final case class ArithExpr(
       val affected = ctx.bitmap()
       if (validity == null) BitmapKernels.copy(divisorZero, affected, n)
       else BitmapKernels.and(divisorZero, validity, affected, n)
+      // Rows nobody will read (filtered out, or decided by the other side of a conjunction) must
+      // not raise, exactly as Spark never evaluates them.
+      if (ctx.active != null) BitmapKernels.and(affected, ctx.active, affected, n)
       val count = Bitmap.popcount(affected, n)
       if (count > 0) {
         if (ansiDivideByZero) {

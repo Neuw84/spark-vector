@@ -23,9 +23,9 @@ import jdk.incubator.vector.VectorSpecies;
  */
 public final class AggKernels {
 
-  static final VectorSpecies<Integer> I = IntVector.SPECIES_PREFERRED;
-  static final VectorSpecies<Long> L = LongVector.SPECIES_PREFERRED;
-  static final VectorSpecies<Double> D = DoubleVector.SPECIES_PREFERRED;
+  static final VectorSpecies<Integer> I = Species.I;
+  static final VectorSpecies<Long> L = Species.L;
+  static final VectorSpecies<Double> D = Species.D;
   /** Int species with as many lanes as {@link #L}, for widening int sums. */
   static final VectorSpecies<Integer> IH = CastKernels.IH;
   static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;

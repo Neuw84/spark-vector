@@ -26,15 +26,25 @@ import jdk.incubator.vector.VectorSpecies;
  */
 public final class CompareKernels {
 
-  static final VectorSpecies<Integer> I = IntVector.SPECIES_PREFERRED;
-  static final VectorSpecies<Long> L = LongVector.SPECIES_PREFERRED;
-  static final VectorSpecies<Double> D = DoubleVector.SPECIES_PREFERRED;
+  static final VectorSpecies<Integer> I = Species.I;
+  static final VectorSpecies<Long> L = Species.L;
+  static final VectorSpecies<Double> D = Species.D;
   static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;
 
   private CompareKernels() {}
 
   /** {@code a <op> scalar}. The scalar is widened/narrowed to the column's type. */
   public static void compareScalar(VectorBuffers a, Number scalar, CompareOp op, MemorySegment out) {
+    compareScalar(a, scalar, op, null, out);
+  }
+
+  /**
+   * As {@link #compareScalar(VectorBuffers, Number, CompareOp, MemorySegment)}, but 64-row blocks
+   * whose {@code active} word is zero are skipped (their output bits are cleared). {@code active}
+   * may be {@code null}.
+   */
+  public static void compareScalar(
+      VectorBuffers a, Number scalar, CompareOp op, MemorySegment active, MemorySegment out) {
     MemorySegment d = a.data();
     int n = a.length();
     boolean negate = op == CompareOp.NE || op == CompareOp.GT || op == CompareOp.GE;
@@ -42,28 +52,28 @@ public final class CompareKernels {
       case INT32 -> {
         int s = scalar.intValue();
         switch (op) {
-          case EQ, NE -> i32EqScalar(d, n, s, negate, out);
-          case LT, GE -> i32LtScalar(d, n, s, negate, out);
-          case LE, GT -> i32LeScalar(d, n, s, negate, out);
+          case EQ, NE -> i32EqScalar(d, n, s, negate, active, out);
+          case LT, GE -> i32LtScalar(d, n, s, negate, active, out);
+          case LE, GT -> i32LeScalar(d, n, s, negate, active, out);
         }
       }
       case INT64 -> {
         long s = scalar.longValue();
         switch (op) {
-          case EQ, NE -> i64EqScalar(d, n, s, negate, out);
-          case LT, GE -> i64LtScalar(d, n, s, negate, out);
-          case LE, GT -> i64LeScalar(d, n, s, negate, out);
+          case EQ, NE -> i64EqScalar(d, n, s, negate, active, out);
+          case LT, GE -> i64LtScalar(d, n, s, negate, active, out);
+          case LE, GT -> i64LeScalar(d, n, s, negate, active, out);
         }
       }
       case FLOAT64 -> {
         double s = scalar.doubleValue();
         if (Double.isNaN(s)) {
-          f64NaNScalar(d, n, op, out);
+          f64NaNScalar(d, n, op, active, out);
         } else {
           switch (op) {
-            case EQ, NE -> f64EqScalar(d, n, s, negate, out);
-            case LT, GE -> f64LtScalar(d, n, s, negate, out);
-            case LE, GT -> f64LeScalar(d, n, s, negate, out);
+            case EQ, NE -> f64EqScalar(d, n, s, negate, active, out);
+            case LT, GE -> f64LtScalar(d, n, s, negate, active, out);
+            case LE, GT -> f64LeScalar(d, n, s, negate, active, out);
           }
         }
       }
@@ -73,6 +83,12 @@ public final class CompareKernels {
 
   /** {@code a <op> b}; both columns must share a fixed-width type and length. */
   public static void compare(VectorBuffers a, VectorBuffers b, CompareOp op, MemorySegment out) {
+    compare(a, b, op, null, out);
+  }
+
+  /** As {@link #compare(VectorBuffers, VectorBuffers, CompareOp, MemorySegment)} with block skipping. */
+  public static void compare(
+      VectorBuffers a, VectorBuffers b, CompareOp op, MemorySegment active, MemorySegment out) {
     if (a.type() != b.type() || a.length() != b.length()) {
       throw new IllegalArgumentException("operands differ: " + a.type() + "/" + b.type());
     }
@@ -83,23 +99,23 @@ public final class CompareKernels {
     switch (a.type()) {
       case INT32 -> {
         switch (op) {
-          case EQ, NE -> i32Eq(da, db, n, negate, out);
-          case LT, GE -> i32Lt(da, db, n, negate, out);
-          case LE, GT -> i32Le(da, db, n, negate, out);
+          case EQ, NE -> i32Eq(da, db, n, negate, active, out);
+          case LT, GE -> i32Lt(da, db, n, negate, active, out);
+          case LE, GT -> i32Le(da, db, n, negate, active, out);
         }
       }
       case INT64 -> {
         switch (op) {
-          case EQ, NE -> i64Eq(da, db, n, negate, out);
-          case LT, GE -> i64Lt(da, db, n, negate, out);
-          case LE, GT -> i64Le(da, db, n, negate, out);
+          case EQ, NE -> i64Eq(da, db, n, negate, active, out);
+          case LT, GE -> i64Lt(da, db, n, negate, active, out);
+          case LE, GT -> i64Le(da, db, n, negate, active, out);
         }
       }
       case FLOAT64 -> {
         switch (op) {
-          case EQ, NE -> f64Eq(da, db, n, negate, out);
-          case LT, GE -> f64Lt(da, db, n, negate, out);
-          case LE, GT -> f64Le(da, db, n, negate, out);
+          case EQ, NE -> f64Eq(da, db, n, negate, active, out);
+          case LT, GE -> f64Lt(da, db, n, negate, active, out);
+          case LE, GT -> f64Le(da, db, n, negate, active, out);
         }
       }
       default -> throw new IllegalArgumentException("unsupported compare type " + a.type());
@@ -118,10 +134,14 @@ public final class CompareKernels {
 
   // ================================================================== int32
 
-  static void i32EqScalar(MemorySegment d, int n, int s, boolean neg, MemorySegment out) {
+  static void i32EqScalar(MemorySegment d, int n, int s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = I.length();
     IntVector sv = IntVector.broadcast(I, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -135,10 +155,14 @@ public final class CompareKernels {
     }
   }
 
-  static void i32LtScalar(MemorySegment d, int n, int s, boolean neg, MemorySegment out) {
+  static void i32LtScalar(MemorySegment d, int n, int s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = I.length();
     IntVector sv = IntVector.broadcast(I, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -152,10 +176,14 @@ public final class CompareKernels {
     }
   }
 
-  static void i32LeScalar(MemorySegment d, int n, int s, boolean neg, MemorySegment out) {
+  static void i32LeScalar(MemorySegment d, int n, int s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = I.length();
     IntVector sv = IntVector.broadcast(I, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -169,9 +197,13 @@ public final class CompareKernels {
     }
   }
 
-  static void i32Eq(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void i32Eq(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = I.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -187,9 +219,13 @@ public final class CompareKernels {
     }
   }
 
-  static void i32Lt(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void i32Lt(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = I.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -205,9 +241,13 @@ public final class CompareKernels {
     }
   }
 
-  static void i32Le(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void i32Le(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = I.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -225,10 +265,14 @@ public final class CompareKernels {
 
   // ================================================================== int64
 
-  static void i64EqScalar(MemorySegment d, int n, long s, boolean neg, MemorySegment out) {
+  static void i64EqScalar(MemorySegment d, int n, long s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = L.length();
     LongVector sv = LongVector.broadcast(L, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -242,10 +286,14 @@ public final class CompareKernels {
     }
   }
 
-  static void i64LtScalar(MemorySegment d, int n, long s, boolean neg, MemorySegment out) {
+  static void i64LtScalar(MemorySegment d, int n, long s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = L.length();
     LongVector sv = LongVector.broadcast(L, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -259,10 +307,14 @@ public final class CompareKernels {
     }
   }
 
-  static void i64LeScalar(MemorySegment d, int n, long s, boolean neg, MemorySegment out) {
+  static void i64LeScalar(MemorySegment d, int n, long s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = L.length();
     LongVector sv = LongVector.broadcast(L, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -276,9 +328,13 @@ public final class CompareKernels {
     }
   }
 
-  static void i64Eq(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void i64Eq(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = L.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -294,9 +350,13 @@ public final class CompareKernels {
     }
   }
 
-  static void i64Lt(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void i64Lt(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = L.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -312,9 +372,13 @@ public final class CompareKernels {
     }
   }
 
-  static void i64Le(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void i64Le(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = L.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -336,10 +400,14 @@ public final class CompareKernels {
   // and NaN sorts above the scalar, so NaN < s and NaN <= s are false, and so is NaN == s). Their
   // complements (NE/GE/GT) therefore come out right too. Column-vs-column needs the NaN fix-ups.
 
-  static void f64EqScalar(MemorySegment d, int n, double s, boolean neg, MemorySegment out) {
+  static void f64EqScalar(MemorySegment d, int n, double s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = D.length();
     DoubleVector sv = DoubleVector.broadcast(D, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -353,10 +421,14 @@ public final class CompareKernels {
     }
   }
 
-  static void f64LtScalar(MemorySegment d, int n, double s, boolean neg, MemorySegment out) {
+  static void f64LtScalar(MemorySegment d, int n, double s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = D.length();
     DoubleVector sv = DoubleVector.broadcast(D, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -370,10 +442,14 @@ public final class CompareKernels {
     }
   }
 
-  static void f64LeScalar(MemorySegment d, int n, double s, boolean neg, MemorySegment out) {
+  static void f64LeScalar(MemorySegment d, int n, double s, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = D.length();
     DoubleVector sv = DoubleVector.broadcast(D, s);
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -388,10 +464,14 @@ public final class CompareKernels {
   }
 
   /** Comparisons against a NaN scalar only depend on whether each lane is NaN. */
-  static void f64NaNScalar(MemorySegment d, int n, CompareOp op, MemorySegment out) {
+  static void f64NaNScalar(MemorySegment d, int n, CompareOp op, MemorySegment active, MemorySegment out) {
     // isNaN bitmap, then a fixed truth table: NaN equals NaN and is greater than everything.
     int lanes = D.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long nan = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -415,9 +495,13 @@ public final class CompareKernels {
     }
   }
 
-  static void f64Eq(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void f64Eq(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = D.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -440,9 +524,13 @@ public final class CompareKernels {
     }
   }
 
-  static void f64Lt(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void f64Lt(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = D.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {
@@ -465,9 +553,13 @@ public final class CompareKernels {
     }
   }
 
-  static void f64Le(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment out) {
+  static void f64Le(MemorySegment a, MemorySegment b, int n, boolean neg, MemorySegment active, MemorySegment out) {
     int lanes = D.length();
     for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L); // no live row in this block: skip the compares
+        continue;
+      }
       int base = w << 6, limit = Math.min(64, n - base), k = 0;
       long word = 0L;
       for (; k + lanes <= limit; k += lanes) {

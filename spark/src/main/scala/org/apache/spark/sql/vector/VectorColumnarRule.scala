@@ -76,13 +76,28 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
           }
       }
+      val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
       if (VectorConf.explainFallback(conf)) {
-        VectorFallback.reasons(converted).foreach { case (node, reason) =>
+        VectorFallback.reasons(withSelections).foreach { case (node, reason) =>
           logInfo(s"spark-vector fallback for ${node.nodeName}: $reason")
         }
       }
-      converted
+      withSelections
     }
+  }
+
+  /**
+   * A filter or projection whose parent is another spark-vector operator forwards its child's
+   * columns with a selection bitmap instead of compacting them; the consumer folds the bitmap into
+   * its own evaluation. Anything else (Spark operators, exchanges) needs dense batches.
+   */
+  private def markSelectionProducers(plan: SparkPlan): SparkPlan = plan.transformDown {
+    case parent: VectorExec =>
+      parent.withNewChildren(parent.children.map {
+        case f: VectorFilterExec if !f.emitSelection => f.copy(emitSelection = true)
+        case p: VectorProjectExec if !p.emitSelection => p.copy(emitSelection = true)
+        case other => other
+      })
   }
 
   private def fallback(plan: SparkPlan, reason: String): SparkPlan = {
