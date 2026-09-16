@@ -186,6 +186,15 @@ that pin it.
   of our operators for a local `SORT BY`). Over Spark's row shuffle the rule leaves `SortExec` with
   the reason "child ... is not columnar": converting rows to columns to sort them gains nothing.
   `spark.vector.exec.sort.enabled` turns it off.
+- `VectorTakeOrderedAndProjectExec` replaces `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT n`)
+  over a columnar child. Per partition it is the sort iterator with a `limit` (the partition is
+  still fully sorted, only the first `n` rows are gathered); those at most `n` rows per partition
+  go as `UnsafeRow`s through Spark's own single-partition shuffle (`ShuffleExchangeExec.
+  prepareShuffleDependency` + `ShuffledRowRDD`, the same as Spark's operator), Spark's
+  `LazilyGeneratedOrdering` takes the final top `n`, Spark's `UnsafeProjection` applies the select
+  list (copy each projected row -- the projection reuses one buffer) and the rows become one
+  columnar batch of `OnHeapColumnVector`s for the `ColumnarToRowExec` above. `OFFSET` falls back.
+  `spark.vector.exec.takeOrdered.enabled` turns it off.
 - Blocking and in memory: the partition's batches are appended to one `ColumnBuilder` per column
   in an operator-owned shared `Arena` (applying any forwarded selection; dictionary strings are
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
@@ -393,7 +402,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 118 kernel tests, 127 Spark tests (100 without the Comet and Iceberg profiles;
+Current counts: 118 kernel tests, 130 Spark tests (103 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

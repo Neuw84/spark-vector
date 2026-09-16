@@ -23,7 +23,7 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 | Module | Language | Contents |
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), SIMD kernels: compare, bitmap logic, compaction, arithmetic, decimal rescaling and division, casts, reductions (plain and overflow-checked), group hashing and key table, grouped accumulators, sort, gather, column builder; scalar references used as test oracles |
-| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
+| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorTakeOrderedAndProjectExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (all 22 queries) |
 | `spark-sql-tests/` | Scala 2.13 | Spark's own SQL golden-file suite run with the plugin (profile `spark-sql-tests`, on demand only; see below) |
 
@@ -64,6 +64,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
 | `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (in memory, no spill) |
+| `spark.vector.exec.takeOrdered.enabled` | convert `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT`) over a columnar child; the per-partition top-N is columnar, the final merge of at most `limit` rows per partition goes through Spark's single-partition shuffle |
 | `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
@@ -333,6 +334,15 @@ Two deliberate limits: the sort is in memory only (no spill; turn it off with
 columnar child. A global `ORDER BY` over Spark's row shuffle keeps `SortExec`: converting rows to
 columns just to sort them gains nothing. Over Comet's columnar shuffle (or one of our operators, for
 `SORT BY`) the sort is ours, which makes TPC-H Q1 with Comet's scan and shuffle fully accelerated.
+
+`ORDER BY ... LIMIT n` (`TakeOrderedAndProjectExec`) over a columnar child becomes
+`VectorTakeOrderedAndProjectExec`, which runs the same per-partition sort with a limit and gathers only
+the first `n` rows of each partition -- the part that touches every row stays columnar. Those at most
+`n` rows per partition then go as rows through Spark's own single-partition shuffle, where Spark's
+ordering takes the final top `n`, Spark's projection applies the select list and the result is
+materialised as one columnar batch: the merge sees at most `n x partitions` rows. `OFFSET` falls back.
+This is the operator TPC-H Q2, Q3, Q10, Q18 and Q21 end in; `spark.vector.exec.takeOrdered.enabled`
+turns it off.
 
 ### Decimals
 

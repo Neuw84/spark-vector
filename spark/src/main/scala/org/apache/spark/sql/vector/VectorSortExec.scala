@@ -71,14 +71,15 @@ case class VectorSortExec(sortOrder: Seq[SortOrder], global: Boolean, child: Spa
   }
 }
 
-/** Drains the partition, sorts it, then emits the rows in order. */
+/** Drains the partition, sorts it, then emits the rows in order -- at most `limit` of them. */
 private[vector] class VectorSortIterator(
     input: Iterator[ColumnarBatch],
     keyExprs: Array[VectorExpr],
     ascending: Array[Boolean],
     nullsFirst: Array[Boolean],
     outputAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
+    metrics: VectorMetrics,
+    limit: Int = Int.MaxValue)
     extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
@@ -152,6 +153,8 @@ private[vector] class VectorSortIterator(
           k += 1
         }
         permutation = SortKernels.sortIndices(keys, ascending, nullsFirst, total)
+        // A top-N emits only the head of the permutation (the whole partition was still sorted).
+        total = math.min(total, limit)
       }
     }
   }

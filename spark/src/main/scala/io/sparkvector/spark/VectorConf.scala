@@ -13,6 +13,7 @@ object VectorConf {
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
   val SortEnabled = "spark.vector.exec.sort.enabled"
+  val TakeOrderedEnabled = "spark.vector.exec.takeOrdered.enabled"
   val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
   val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
@@ -32,6 +33,8 @@ object VectorConf {
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   /** Convert SortExec over a columnar child (in-memory, no spill). */
   def sortEnabled(conf: SQLConf): Boolean = bool(conf, SortEnabled, default = true)
+  /** Convert TakeOrderedAndProjectExec (ORDER BY ... LIMIT) over a columnar child. */
+  def takeOrderedEnabled(conf: SQLConf): Boolean = bool(conf, TakeOrderedEnabled, default = true)
   /** Convert BroadcastHashJoinExec over a columnar streamed side (the build side stays Spark's broadcast). */
   def broadcastHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, BroadcastHashJoinEnabled, default = true)
   /** Convert ShuffledHashJoinExec; over Spark's row shuffle both inputs go through RowToColumnarExec. */
