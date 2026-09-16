@@ -58,7 +58,11 @@ matching Spark's short-circuit behaviour.
 | `+` `-` `*` `/` on doubles | FLOAT64 | Bit-identical in ANSI and legacy mode; `/` by zero yields null (legacy) or raises `DIVIDE_BY_ZERO` (ANSI) with Spark's error context. Integer division falls back: `division not supported for <type>` |
 | `+` `-` `*` `/` on decimals | INT64 (decimal(<=18) operands **and** result) | Both operands decimal (`mixed decimal and non-decimal arithmetic` otherwise); Spark's result type must fit 18 digits: `decimal result <type> exceeds 18 digits` -- `decimal(15,2) * decimal(15,2)` is `decimal(31,4)` and falls back (#26). Only `/` can overflow and it checks; ANSI raises `NUMERIC_VALUE_OUT_OF_RANGE`, legacy yields null. Division is Spark-exact (round half up at the result scale). `unexpected decimal result scale` guards against an operand shape the kernel does not expect |
 | Unary minus | INT32, INT64, FLOAT64, decimal(<=18) | ANSI mode raises `ARITHMETIC_OVERFLOW` (`integer overflow` / `long overflow`, no hint) for an active `MIN_VALUE`; doubles and decimals never overflow here |
-| `Cast` | INT32 -> INT64, INT32 -> FLOAT64, INT64 -> FLOAT64; int/bigint/double -> decimal(<=18); decimal -> decimal / double / bigint / int; a cast to the operand's own type | Everything else: `unsupported cast <from> -> <to>` / `unsupported cast target <type>` (#43 -- narrowing, boolean, string <-> number, string <-> date/timestamp, date <-> timestamp). Decimal casts check the range; ANSI raises, legacy nulls. `try_cast not supported` (#47) |
+| `Cast` | INT32 -> INT64, INT32 -> FLOAT64, INT64 -> FLOAT64; int/bigint/double -> decimal(<=18); decimal -> decimal / double / bigint / int; timestamp -> date under a UTC or fixed-offset session zone (`TimestampToDateExpr`: `floorDiv(micros + offset, micros per day)`; Spark inserts this cast under `year(ts)` etc.); a cast to the operand's own type | Everything else: `unsupported cast <from> -> <to>` / `unsupported cast target <type>` (#43 -- narrowing, boolean, string <-> number, string <-> date/timestamp, date -> timestamp). timestamp -> date under a zone with rules: `cast timestamp -> date needs a fixed-offset session zone, not <zone>`. Decimal casts check the range; ANSI raises, legacy nulls. `try_cast not supported` (#47) |
+| `year`, `month`, `dayofmonth` / `day`, `dayofyear`, `quarter`, `dayofweek`, `weekday`, `extract(<field> FROM date)` | INT32 days -> INT32 | `DateFieldExpr` over `DateKernels.field`: branch-free civil-from-days per lane (no `LocalDate`), valid for negative days and every leap rule; Spark's numbering (`dayofweek` 1 = Sunday, `weekday` 0 = Monday). Over a timestamp Spark first casts to date (see Cast). `date function over <type>`, `date function on a literal` |
+| `trunc(date, unit)` | INT32 -> INT32 | Units `YEAR`/`YYYY`/`YY`, `QUARTER`, `MONTH`/`MON`/`MM`, `WEEK` (Monday), case-insensitive, as a string literal. `trunc unit '<u>' not supported`, `trunc unit is not a string literal` |
+| `date_add`, `date_sub`, `datediff` | INT32 lanes | `ArithExpr` add/subtract on days (Spark does not overflow-check these): `date +/- int` and `date - date`; either side may be a literal. `date arithmetic over <type>`, `date arithmetic with <type> days`, `arithmetic on two literals` |
+| `hour`, `minute`, `second` | INT64 micros -> INT32 | Under a UTC or fixed-offset session zone only (`TimeFieldExpr`: local micros = `micros + offset`); a zone with rules falls back: `time field needs a fixed-offset session zone, not <zone>`. `time field over <type>` |
 | `UnscaledValue`, `MakeDecimal` | INT64 (decimal(<=18)) | The optimizer's `DecimalAggregates` rewrite of `sum(decimal(p <= 8))` and `avg(decimal(p <= 11))`; `MakeDecimal` into more than 18 digits falls back (`make_decimal into <type> exceeds 18 digits`), overflow nulls or raises per `nullOnOverflow` (#49 covers `CheckOverflow` and the rest of that family) |
 | `KnownFloatingPointNormalized`, `NormalizeNaNAndZero` | FLOAT64 | Identities: the compare kernels already use the normalised ordering and double grouping keys are refused |
 | `CASE WHEN ... THEN ... [ELSE ...] END` | result of any lane; conditions BOOL | `CaseWhenExpr` over `SelectKernels`: each condition is evaluated only on the rows no earlier branch took, its winning rows are `condition is true` (a null condition counts as false), each branch value only on its winning rows; the result is null where the winner is null or no branch matched and there is no `ELSE`. Branches must share the result's Spark type (`branch type <t> differs from <t>`); `NULL` and literal branches -- string and boolean literals included -- are materialised as constant columns. `unsupported result type <type> for <sql>` for a wide decimal or nested result |
@@ -89,7 +93,6 @@ the remaining reasons on the aggregate's inputs.
 | Family | Issue |
 |---|---|
 | General `LIKE` (inner wildcards, `_`, `'a%b'`), `rlike` | #3 follow-up (the `LikeSimplification` shapes are Supported above) |
-| `year`, `month`, `extract`, date arithmetic | #5 |
 | `monotonically_increasing_id()` | #18 |
 | Decimal results wider than 18 digits on narrow operands (`decimal(15,2) * decimal(15,2)`) | #26 |
 | 128-bit `sum` / `avg` buffers for decimals beyond 8 / 11 digits | #27 |
@@ -105,8 +108,8 @@ the remaining reasons on the aggregate's inputs.
 | String search and replace (`instr`, `locate`, `replace`, `translate`, `split_part`) | #40 |
 | `concat`, `concat_ws`, `elt` | #41 |
 | Hash functions (`hash`, `xxhash64`, `md5`, `sha1`, `sha2`, `crc32`) | #42 |
-| The rest of the cast matrix (narrowing, boolean, string <-> number, string <-> date/timestamp, date <-> timestamp) | #43 |
-| The rest of the datetime family | #44 |
+| The rest of the cast matrix (narrowing, boolean, string <-> number, string <-> date/timestamp, date -> timestamp, timestamp -> date under zone rules) | #43 |
+| The rest of the datetime family (`date_trunc` on timestamps, ISO weeks, `add_months`, `last_day`, `unix_timestamp`, timestamp functions under zones with rules) | #44 |
 | Aggregate functions beyond `count`/`sum`/`min`/`max`/`avg`; `count(distinct)` | #45, #7 |
 | `stddev`, `variance`, `covar`, `corr` | #46 |
 | `try_add`, `try_divide`, `try_cast`, `try_sum`, `try_avg` | #47 |
