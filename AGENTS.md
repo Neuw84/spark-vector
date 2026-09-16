@@ -7,7 +7,7 @@ considered done. `README.md` is the user-facing description, `docs/results.md` t
 
 ## 1. What this project is
 
-A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (Partial and Final), `Sort` and
+A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (all four modes), `Sort` and
 the two hash joins over
 Arrow-layout columnar batches with the Java Vector API (`jdk.incubator.vector`), in the style of
 Apache DataFusion Comet but entirely on the JVM. It reads batches from Spark's vectorized Parquet
@@ -172,7 +172,7 @@ that pin it.
 
 ### 3.5 Aggregation
 
-- Partial and Final aggregates are both ours. Final consumes Spark's row shuffle through a
+- All four aggregate modes are ours: update vs merge is decided per aggregate expression (`Partial` / `Complete` read the input, `PartialMerge` / `Final` merge buffers), buffers vs results per operator (`VectorAggregatePlanner.emitsResults`; a mix is refused). The merge modes consume Spark's row shuffle through a
   `RowToColumnarExec` or, with Comet, Comet's columnar shuffle directly; merge functions
   (`CountMergeAgg`, `AverageMergeAgg`, sum/min/max over buffers) reuse the accumulators; result
   expressions are compiled with `evaluateExpression` substituted. `FILTER` clauses are not
@@ -434,7 +434,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 135 kernel tests, 154 Spark tests (127 without the Comet and Iceberg profiles;
+Current counts: 135 kernel tests, 157 Spark tests (130 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

@@ -13,7 +13,7 @@ import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarR
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
-import org.apache.spark.sql.catalyst.expressions.aggregate.Final
+import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.internal.SQLConf
 
@@ -163,9 +163,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           }
 
         case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
-          // A Final aggregate reads an exchange; Spark inserts RowToColumnarExec below us when the
+          // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
           // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
-          val isFinal = a.aggregateExpressions.nonEmpty && a.aggregateExpressions.forall(_.mode == Final)
+          val isFinal = VectorAggregatePlanner.mergesBuffers(a.aggregateExpressions.map(_.mode).distinct)
           val inputReason = if (isFinal) typeReason(a.child) else columnarInputReason(a.child)
           inputReason match {
             case Some(reason) => fallback(a, reason)

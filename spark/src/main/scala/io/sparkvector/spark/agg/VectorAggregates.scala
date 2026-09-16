@@ -237,20 +237,23 @@ object VectorAggregates {
   private val numeric: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64)
 
   /**
-   * Compiles an aggregate expression, or explains why it cannot be vectorized. Partial mode reads
-   * the function's input; Final mode merges the partial buffers (`inputAggBufferAttributes`) found
-   * in `input`.
+   * Compiles an aggregate expression, or explains why it cannot be vectorized. The update modes
+   * (`Partial`, `Complete`) read the function's input; the merge modes (`PartialMerge`, `Final`)
+   * merge the partial buffers (`inputAggBufferAttributes`) found in `input`. What the operator then
+   * emits -- buffers or results -- is the planner's decision, not the function's.
    */
   def compile(agg: AggregateExpression, input: Seq[Attribute]): Either[String, VectorAggFunction] = {
     if (agg.isDistinct) Left("distinct aggregates not supported")
     else agg.mode match {
-      case Partial if agg.filter.isDefined => Left("aggregates with FILTER not supported")
-      case Partial => compileFunction(agg.aggregateFunction, input)
-      // The FILTER clause is applied while updating (Partial); merging buffers does not see it.
-      case Final => compileMerge(agg.aggregateFunction, input)
-      case other => Left(s"aggregate mode $other not supported (Partial and Final only)")
+      case Partial | Complete if agg.filter.isDefined => Left("aggregates with FILTER not supported")
+      case Partial | Complete => compileFunction(agg.aggregateFunction, input)
+      // The FILTER clause is applied while updating; merging buffers does not see it (Spark drops it).
+      case PartialMerge | Final => compileMerge(agg.aggregateFunction, input)
     }
   }
+
+  /** Whether `mode` advances the state by merging buffers rather than by reading the function's input. */
+  def merges(mode: AggregateMode): Boolean = mode == PartialMerge || mode == Final
 
   private def compileMerge(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = {
     val buffers = f.inputAggBufferAttributes
