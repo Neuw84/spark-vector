@@ -170,6 +170,7 @@ object TpchRunner {
             writer.flush()
             println(s"[tpch] ${args.config} $q median=${result.medianMs}ms p90=${result.p90Ms}ms min=${result.minMs}ms rows=${result.rows} " +
               s"accelerated=${result.acceleratedOps}/${result.operatorCount} operators=${result.operators}")
+            result.fallbacks.foreach(f => println(s"[tpch]   fallback: $f"))
           }
         }
       } finally writer.close()
@@ -188,7 +189,9 @@ object TpchRunner {
    */
   final case class Measurement(
       query: String, timesMs: Seq[Double], rows: Int, checksum: String, operators: String, plan: String,
-      acceleratedOps: Int, operatorCount: Int) {
+      acceleratedOps: Int, operatorCount: Int,
+      /** `Operator: reason` for every operator the planner rule tried to convert and could not. */
+      fallbacks: Seq[String]) {
     private val sorted = timesMs.sorted
     def medianMs: Double = percentile(50)
     def p90Ms: Double = percentile(90)
@@ -202,7 +205,7 @@ object TpchRunner {
       s"""{"timestamp":"${Instant.now()}","config":"$config","query":"$query","data":"${esc(data)}","lineitemRows":$rowCount,""" +
         s""""medianMs":$medianMs,"p90Ms":$p90Ms,"minMs":$minMs,"timesMs":[${timesMs.map(t => math.round(t * 10) / 10.0).mkString(",")}],""" +
         s""""rows":$rows,"checksum":"$checksum","acceleratedOps":$acceleratedOps,"operatorCount":$operatorCount,""" +
-        s""""operators":"${esc(operators)}","plan":"${esc(plan)}"}"""
+        s""""fallbacks":"${esc(fallbacks.mkString("; "))}","operators":"${esc(operators)}","plan":"${esc(plan)}"}"""
     }
   }
 
@@ -235,8 +238,10 @@ object TpchRunner {
     }
     val accelerated = PlanAcceleration.fromPlan(plan)
     val acceleratedOps = accelerated.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated)
+    // One line per distinct (operator, reason): the same reason repeats across AQE stages.
+    val fallbacks = accelerated.fallbacks.map { case (node, reason) => s"$node: $reason" }.distinct
     Measurement(name, runs.map(_._1), rows.length, checksum, if (ops.isEmpty) "spark only" else ops, plan.treeString.take(4000),
-      acceleratedOps, accelerated.operatorCount)
+      acceleratedOps, accelerated.operatorCount, fallbacks)
   }
 
   private def allNodes(plan: SparkPlan): Seq[SparkPlan] = {
@@ -264,7 +269,9 @@ object TpchRunner {
       operators: String,
       lineitemRows: Long,
       /** Accelerated / counted operators; None for records written before the column existed. */
-      accelerated: Option[(Int, Int)]) {
+      accelerated: Option[(Int, Int)],
+      /** `Operator: reason` lines; empty for older records and for fully accelerated plans. */
+      fallbacks: Seq[String]) {
     /** Dataset label: the last path element (`sf1`, `sf10`). */
     def dataset: String = data.stripSuffix("/").split('/').last
     /** `5/7` -- operators executed by our kernels or Comet over operators that count. */
@@ -334,7 +341,10 @@ object TpchRunner {
       sb.append("\nOperators in the final plan:\n\n")
       d.queries.foreach { q =>
         d.configs.foreach { c =>
-          d.latest.get((c, q)).foreach(r => sb.append(s"- $q / $c: ${r.operators} (rows=${r.rows}, checksum=${r.checksum})\n"))
+          d.latest.get((c, q)).foreach { r =>
+            sb.append(s"- $q / $c: ${r.operators} (rows=${r.rows}, checksum=${r.checksum})\n")
+            r.fallbacks.foreach(f => sb.append(s"  - not accelerated: $f\n"))
+          }
         }
       }
       sb.append("\n")
@@ -455,7 +465,10 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
           sb.append(f"<tr><td>${esc(c)}</td><td>${r.minMs}%.1f</td><td>${r.medianMs}%.1f</td><td>${r.p90Ms}%.1f</td><td style=\"text-align:left\">${r.timesMs.map(t => f"$t%.0f").mkString(" ")}</td><td>${r.rows}</td><td>${r.checksum}</td></tr>\n")
         }
         sb.append("</tbody></table>\n")
-        entries.foreach { case (c, r) => sb.append(s"<p><b>${esc(c)}</b>: ${esc(r.operators)}</p>\n") }
+        entries.foreach { case (c, r) =>
+          sb.append(s"<p><b>${esc(c)}</b>: ${esc(r.operators)}</p>\n")
+          if (r.fallbacks.nonEmpty) sb.append("<ul>" + r.fallbacks.map(f => s"<li>not accelerated: ${esc(f)}</li>").mkString + "</ul>\n")
+        }
         sb.append("</details>\n")
       }
     }
@@ -474,8 +487,9 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
       .split(",").map(_.trim).filter(_.nonEmpty).map(_.toDouble).toSeq
     def optNum(k: String): Option[Int] = ("\"" + k + "\":([0-9]+)").r.findFirstMatchIn(line).map(_.group(1).toInt)
     val accelerated = for (a <- optNum("acceleratedOps"); t <- optNum("operatorCount")) yield (a, t)
+    val fallbacks = str("fallbacks").split("; ").map(_.trim).filter(_.nonEmpty).toSeq
     Row(str("timestamp"), str("config"), str("query"), str("data"), num("medianMs"), num("p90Ms"), num("minMs"), times,
-      num("rows").toInt, str("checksum"), str("operators"), num("lineitemRows").toLong, accelerated)
+      num("rows").toInt, str("checksum"), str("operators"), num("lineitemRows").toLong, accelerated, fallbacks)
   }
 }
 
