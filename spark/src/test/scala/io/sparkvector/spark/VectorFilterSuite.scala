@@ -102,10 +102,29 @@ class VectorFilterSuite extends VectorQuerySuite {
     assert(in.count() === 800) // 400 each for s1 and s17; id % 50 = 30 is one of the null rows, so s30 never occurs
   }
 
+  test("LIKE prefix, suffix and contains shapes, and the string match functions") {
+    // LikeSimplification rewrites these to StartsWith / EndsWith / Contains; s is 's0'..'s49'.
+    checkVectorized("SELECT i, s FROM t WHERE s LIKE 's1%'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s LIKE '%7'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s LIKE '%3%'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s NOT LIKE 's1%'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE startswith(s, 's4') AND i > 100", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE endswith(s, '') OR s IS NULL", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE contains(s, '2') AND NOT contains(s, '4')", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s LIKE 'nowhere%'", Seq(Filter))
+    val prefix = checkVectorized("SELECT i FROM t WHERE s LIKE 's1%'", Seq(Filter))
+    assert(prefix.count() === 4000) // s1 and s10..s19: 11 values, 400 rows each, minus the null value s10
+    val notLike = checkVectorized("SELECT i FROM t WHERE s NOT LIKE '%3%'", Seq(Filter))
+    assert(notLike.count() === 20000 - 2000 - 5200) // nulls drop; s3, s13, s23, s43 and s30..s39 minus the null s30 = 13 values
+  }
+
   test("unsupported expressions fall back with a reason") {
-    checkFallback("SELECT * FROM t WHERE s LIKE 's1%'", Seq(Filter), "unsupported expression")
+    // Inner wildcards are left as Like by the optimizer; 's%1' becomes Length(s) >= 2 AND ... which needs Length.
+    checkFallback("SELECT * FROM t WHERE s LIKE 's%1%2'", Seq(Filter), "unsupported expression")
+    checkFallback("SELECT * FROM t WHERE s LIKE 's_'", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE i % 2 = 0", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE s = concat(s, 'x')", Seq(Filter), "unsupported expression")
+    checkFallback("SELECT * FROM t WHERE startswith(s, s)", Seq(Filter), "string pattern is not a literal")
     // The optimizer turns a long IN list into InSet, which is #48.
     checkFallback("SELECT * FROM t WHERE s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12')", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE s IN ('s1', NULL)", Seq(Filter), "NULL in IN list")

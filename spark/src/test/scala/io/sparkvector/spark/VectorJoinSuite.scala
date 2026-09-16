@@ -97,7 +97,9 @@ class VectorJoinSuite extends VectorQuerySuite {
 
   test("unsupported joins fall back with a reason") {
     checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.d = dim.weight", Seq(BHJ), "join key type double")
-    checkFallback("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%'", Seq(BHJ), "unsupported expression")
+    checkFallback("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%y%z'", Seq(BHJ), "unsupported expression")
+    // A simplified LIKE (StartsWith) in the condition is compiled.
+    checkVectorized("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%'", Seq(BHJ))
   }
 
   test("shuffled hash join over Spark's row shuffle on both sides") {

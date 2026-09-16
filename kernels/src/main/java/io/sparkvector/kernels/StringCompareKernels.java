@@ -40,23 +40,7 @@ public final class StringCompareKernels {
         int end = doff.get(VectorBuffers.LE_INT, (long) (j + 1) << 2);
         verdict[j] = op.test(compareBytes(ddata, start, end, lit, 0, s.length));
       }
-      MemorySegment idx = a.data();
-      for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
-        if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
-          Bitmap.setWord(out, w, n, 0L);
-          continue;
-        }
-        int base = w << 6, limit = Math.min(64, n - base);
-        long word = 0L;
-        for (int k = 0; k < limit; k++) {
-          int j = idx.get(VectorBuffers.LE_INT, (long) (base + k) << 2);
-          // A null row may carry any index; keep the gather in range and let validity mask it.
-          if (j >= 0 && j < m && verdict[j]) {
-            word |= 1L << k;
-          }
-        }
-        Bitmap.setWord(out, w, n, word);
-      }
+      gather(a.data(), n, verdict, active, out);
       return;
     }
     MemorySegment off = a.offsets();
@@ -109,6 +93,30 @@ public final class StringCompareKernels {
           continue; // out-of-range dictionary index on a null row: validity masks it
         }
         if (op.test(compareBytes(sa.bytes, sa.start, sa.end, sb.bytes, sb.start, sb.end))) {
+          word |= 1L << k;
+        }
+      }
+      Bitmap.setWord(out, w, n, word);
+    }
+  }
+
+  /**
+   * Gathers one verdict per dictionary entry through a column of {@code n} indices into a result
+   * bitmap, skipping blocks with no active row. A null row may carry any index: out-of-range ones
+   * are left clear and validity masks them.
+   */
+  static void gather(MemorySegment idx, int n, boolean[] verdict, MemorySegment active, MemorySegment out) {
+    int m = verdict.length;
+    for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L);
+        continue;
+      }
+      int base = w << 6, limit = Math.min(64, n - base);
+      long word = 0L;
+      for (int k = 0; k < limit; k++) {
+        int j = idx.get(VectorBuffers.LE_INT, (long) (base + k) << 2);
+        if (j >= 0 && j < m && verdict[j]) {
           word |= 1L << k;
         }
       }

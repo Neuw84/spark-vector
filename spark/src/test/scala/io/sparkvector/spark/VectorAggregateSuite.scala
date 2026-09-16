@@ -174,5 +174,8 @@ class VectorAggregateSuite extends VectorQuerySuite {
       Seq(Filter, Agg))
     assert(q12.collect().map(_.getLong(1)).sum > 0)
     checkVectorized("SELECT count(*) FROM lineitem WHERE l_returnflag < l_linestatus", Seq(Filter, Agg))
+    // Q9 / Q14 / Q16 shapes: LIKE with a leading or trailing wildcard over dictionary pages.
+    checkVectorized("SELECT l_returnflag, count(*) FROM lineitem WHERE l_comment LIKE 'cmt1%' GROUP BY l_returnflag", Seq(Filter, Agg))
+    checkVectorized("SELECT count(*) FROM lineitem WHERE l_comment NOT LIKE '%9%' AND l_comment LIKE '%5'", Seq(Filter, Agg))
   }
 }

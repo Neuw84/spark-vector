@@ -1,8 +1,8 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, VecType}
+import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, Subtract, UnaryMinus, UnscaledValue}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, CaseWhen, Cast, Coalesce, Contains, Divide, EndsWith, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, If, In, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, StartsWith, Subtract, UnaryMinus, UnscaledValue}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
 
@@ -54,6 +54,10 @@ object ExpressionCompiler {
     case Not(EqualTo(l, r)) => comparison(CompareOp.NE, l, r, input)
 
     case In(value, list) => inList(value, list, input)
+
+    case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+    case EndsWith(l, r) => stringMatch(StringMatchKernels.Kind.SUFFIX, l, r, input)
+    case Contains(l, r) => stringMatch(StringMatchKernels.Kind.CONTAINS, l, r, input)
 
     case And(l, r) => binaryBoolean(l, r, input)(AndExpr.apply)
     case Or(l, r) => binaryBoolean(l, r, input)(OrExpr.apply)
@@ -274,6 +278,28 @@ object ExpressionCompiler {
         }
     }
   }
+
+  /**
+   * `startswith` / `endswith` / `contains` of a string column against a non-null string literal.
+   * A column pattern, a non-string operand or a `NULL` pattern falls back; `LIKE` with inner
+   * wildcards never reaches here (the optimizer leaves it as `Like`, #3 follow-up).
+   */
+  private def stringMatch(kind: StringMatchKernels.Kind, l: Expression, r: Expression, input: Seq[Attribute]): Result =
+    r match {
+      case Literal(null, _) => Left("null pattern")
+      case Literal(_, StringType) =>
+        for {
+          c <- compile(l, input)
+          _ <- c match {
+            case _: LiteralExpr => Left("string match on a literal")
+            case c if c.vecType != VecType.UTF8 => Left(s"string match not supported for ${l.dataType.simpleString}")
+            case _ => Right(())
+          }
+          p <- compile(r, input)
+        } yield StringMatchExpr(kind, c, p.asInstanceOf[LiteralExpr])
+      case _: Literal => Left(s"string pattern of type ${r.dataType.simpleString}")
+      case _ => Left("string pattern is not a literal")
+    }
 
   private def check(le: VectorExpr, re: VectorExpr, l: Expression, r: Expression): Either[String, Unit] = {
     if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("comparison of two literals")
