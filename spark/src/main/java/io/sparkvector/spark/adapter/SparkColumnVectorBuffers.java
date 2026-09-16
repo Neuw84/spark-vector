@@ -15,6 +15,8 @@ import org.apache.spark.sql.execution.vectorized.Dictionary;
 import org.apache.spark.sql.execution.vectorized.OffHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector;
+import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.unsafe.types.UTF8String;
 
@@ -53,6 +55,9 @@ public final class SparkColumnVectorBuffers {
       throw new UnsupportedOperationException("unsupported Spark type " + cv.dataType());
     }
     MemorySegment validity = copyValidity(cv, numRows, arena);
+    if (cv.dataType() instanceof DecimalType dec) {
+      return copyDecimal(cv, dec, numRows, arena, validity);
+    }
     if (type.isFixedWidth() && cv instanceof WritableColumnVector w) {
       Dictionary dict = w.hasDictionary() ? dictionaryOf(w) : null;
       MemorySegment source =
@@ -102,6 +107,34 @@ public final class SparkColumnVectorBuffers {
       }
       default -> throw new IllegalStateException(type.toString());
     }
+  }
+
+  /**
+   * Decimals of up to 18 digits: Spark's writable vectors keep them as ints (precision <= 9) or
+   * longs, the Parquet reader possibly dictionary encoded; both bulk getters decode the dictionary.
+   * Foreign vectors (Comet's 128-bit decimals, for instance) are read through {@code getDecimal}.
+   */
+  private static VectorBuffers copyDecimal(
+      ColumnVector cv, DecimalType dec, int numRows, Arena arena, MemorySegment validity) {
+    MemorySegment data = ArrowLayout.allocateData(arena, VecType.INT64, numRows);
+    if (cv instanceof WritableColumnVector) {
+      if (dec.precision() <= Decimal.MAX_INT_DIGITS()) {
+        int[] ints = cv.getInts(0, numRows);
+        for (int i = 0; i < numRows; i++) {
+          data.setAtIndex(VectorBuffers.LE_LONG, i, ints[i]);
+        }
+      } else {
+        MemorySegment.copy(cv.getLongs(0, numRows), 0, data, VectorBuffers.LE_LONG, 0, numRows);
+      }
+    } else {
+      for (int i = 0; i < numRows; i++) {
+        if (validity == null || Bitmap.isSet(validity, i)) {
+          Decimal d = cv.getDecimal(i, dec.precision(), dec.scale());
+          data.setAtIndex(VectorBuffers.LE_LONG, i, d == null ? 0L : d.toUnscaledLong());
+        }
+      }
+    }
+    return SegmentVectorBuffers.fixedWidth(VecType.INT64, numRows, validity, data);
   }
 
   private static MemorySegment copyValidity(ColumnVector cv, int numRows, Arena arena) {

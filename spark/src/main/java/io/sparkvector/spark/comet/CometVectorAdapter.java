@@ -115,6 +115,11 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
       }
       Object vector = getValueVector.invoke(cv);
       return wrap(vector, numRows, type);
+      if (cv.dataType() instanceof org.apache.spark.sql.types.DecimalType
+          && !vector.getClass().getName().endsWith(".BigIntVector")) {
+        // Comet's 128-bit decimals (and 32-bit ones): let the copy path read them via getDecimal.
+        return null;
+      }
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException("cannot read Comet vector", e);
     }

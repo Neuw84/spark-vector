@@ -186,12 +186,26 @@ public final class GroupedAccumulators {
     return out;
   }
 
-  /** SUM over ints or longs into long accumulators (wrapping like Spark's legacy mode). */
+  /**
+   * SUM over ints or longs into long accumulators. Wraps on overflow like Spark's legacy mode, or,
+   * when {@code checked}, detects it with {@code Math.addExact} (the scatter loops) and {@link
+   * AggKernels#sumLongExact} (the masked path) and throws {@link ArithmeticException}, which is
+   * what Spark's ANSI {@code sum(bigint)} needs.
+   */
   public static final class LongSum {
     private int capacity = 64;
     private long[] sum = new long[64 * INTERLEAVE];
     private long[] count = new long[64 * INTERLEAVE];
     private final Scratch scratch = new Scratch();
+    private final boolean checked;
+
+    public LongSum() {
+      this(false);
+    }
+
+    public LongSum(boolean checked) {
+      this.checked = checked;
+    }
 
     public void update(VectorBuffers v, GroupAssignment a) {
       ensure(a.numGroups());
@@ -204,7 +218,8 @@ public final class GroupedAccumulators {
           VectorBuffers sub = a.restrict(v, g);
           long c = AggKernels.countValid(sub);
           if (c > 0) {
-            sum[g] += ints ? AggKernels.sumInt(sub) : AggKernels.sumLong(sub);
+            long s = ints ? AggKernels.sumInt(sub) : (checked ? AggKernels.sumLongExact(sub) : AggKernels.sumLong(sub));
+            sum[g] = checked ? Math.addExact(sum[g], s) : sum[g] + s;
             count[g] += c;
           }
         }
@@ -213,12 +228,15 @@ public final class GroupedAccumulators {
       int[] ids = a.ids();
       int n = a.numRows();
       // Ints are widened into the long scratch so one loop serves both types.
-      // Ints are widened into the long scratch so one loop serves both types.
       long[] x = ints ? scratch.longsFromInts(v.data(), n) : scratch.longs(v.data(), n);
       MemorySegment validity = a.effectiveValidity(v);
       long[] sum = this.sum;
       long[] count = this.count;
       int cap = capacity;
+      if (checked) {
+        updateChecked(x, ids, n, validity, sum, count, cap);
+        return;
+      }
       if (validity == null) {
         int i = 0;
         if (INTERLEAVE == 4) {
@@ -277,10 +295,42 @@ public final class GroupedAccumulators {
       }
     }
 
+    /** Scatter with exact adds; the interleaving is kept so the sums are laid out identically. */
+    private void updateChecked(long[] x, int[] ids, int n, MemorySegment validity, long[] sum, long[] count, int cap) {
+      int slot = 0;
+      int total = cap * INTERLEAVE;
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
+          int g = ids[i] + slot;
+          sum[g] = Math.addExact(sum[g], x[i]);
+          count[g]++;
+          slot += cap;
+          if (slot == total) {
+            slot = 0;
+          }
+        }
+      } else {
+        for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+          long bits = Bitmap.wordAt(validity, w, n);
+          while (bits != 0L) {
+            int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+            bits &= bits - 1;
+            int g = ids[i] + slot;
+            sum[g] = Math.addExact(sum[g], x[i]);
+            count[g]++;
+            slot += cap;
+            if (slot == total) {
+              slot = 0;
+            }
+          }
+        }
+      }
+    }
+
     public long sum(int g) {
       long s = 0;
       for (int k = 0; k < INTERLEAVE; k++) {
-        s += sum[k * capacity + g];
+        s = checked ? Math.addExact(s, sum[k * capacity + g]) : s + sum[k * capacity + g];
       }
       return s;
     }

@@ -22,6 +22,7 @@ import org.apache.arrow.vector.FieldVector;
 import org.apache.spark.sql.types.BooleanType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DateType;
+import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.DoubleType;
 import org.apache.spark.sql.types.IntegerType;
 import org.apache.spark.sql.types.LongType;
@@ -113,7 +114,19 @@ public final class ArrowCData {
       MemorySegment validity = null;
       MemorySegment data;
       MemorySegment offsets = null;
-      if (in instanceof ArrowVectorBuffers a) {
+      if (dt instanceof DecimalType) {
+        // Our decimals are 64-bit lanes; the C Data format "d:p,s" is 128-bit two's complement,
+        // so widen into the export's arena (sign-extended high word).
+        data = arena.allocate(Math.max((long) n << 4, 16), 16);
+        for (int i = 0; i < n; i++) {
+          long v = in.getLong(i);
+          data.set(I64, (long) i << 4, v);
+          data.set(I64, ((long) i << 4) + 8, v >> 63);
+        }
+        if (nullCount > 0) {
+          validity = copyBitmap(arena, in.validity(), n);
+        }
+      } else if (in instanceof ArrowVectorBuffers a) {
         FieldVector v = (FieldVector) a.vector();
         for (ArrowBuf b : v.getBuffers(false)) {
           b.getReferenceManager().retain();
@@ -247,6 +260,9 @@ public final class ArrowCData {
     }
     if (dt instanceof StringType) {
       return "u";
+    }
+    if (dt instanceof DecimalType d) {
+      return "d:" + d.precision() + "," + d.scale();
     }
     throw new UnsupportedOperationException("no C Data format for " + dt);
   }

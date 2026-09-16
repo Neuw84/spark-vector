@@ -21,6 +21,8 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
         case DoubleType => cv.putDouble(i, i / 3.0)
         case BooleanType => cv.putBoolean(i, i % 2 == 0)
         case StringType => cv.putByteArray(i, s"s$i".getBytes("UTF-8"))
+        case d: DecimalType if d.precision <= 9 => cv.putInt(i, i * 7 - 300) // Spark keeps small decimals as ints
+        case _: DecimalType => cv.putLong(i, i.toLong * 98765432101L - 5)
         case other => fail(s"unexpected $other")
       }
     }
@@ -41,13 +43,14 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
           case DoubleType => assert(vb.getDouble(i) === cv.getDouble(i))
           case BooleanType => assert(vb.getBoolean(i) === cv.getBoolean(i))
           case StringType => assert(vb.getString(i) === cv.getUTF8String(i).toString)
+          case d: DecimalType => assert(vb.getLong(i) === cv.getDecimal(i, d.precision, d.scale).toUnscaledLong)
           case _ =>
         }
       }
     } finally arena.close()
   }
 
-  private val types = Seq(IntegerType, DateType, LongType, DoubleType, BooleanType, StringType)
+  private val types = Seq(IntegerType, DateType, LongType, DoubleType, BooleanType, StringType, DecimalType(7, 2), DecimalType(15, 3))
 
   test("OnHeapColumnVector copies into Arrow layout, with and without nulls") {
     for (dt <- types; withNulls <- Seq(true, false)) {

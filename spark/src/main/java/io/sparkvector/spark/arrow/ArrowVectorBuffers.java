@@ -30,6 +30,7 @@ public final class ArrowVectorBuffers implements VectorBuffers {
   private final MemorySegment validity;
   private final MemorySegment data;
   private final MemorySegment offsets;
+  private org.apache.spark.sql.types.DataType sparkType;
 
   private ArrowVectorBuffers(
       ValueVector vector,
@@ -89,6 +90,21 @@ public final class ArrowVectorBuffers implements VectorBuffers {
       throw new IllegalStateException("vector not allocated for " + length + " elements");
     }
     return wrap(v, type, length, ArrowSegments.of(v.getValidityBuffer()));
+  }
+
+  /**
+   * {@link #forWrite(ValueVector, int)} remembering the Spark type the vector stands for, which
+   * matters where the Arrow class alone is ambiguous (a decimal is a {@link BigIntVector}).
+   */
+  public static ArrowVectorBuffers forWrite(ValueVector v, int length, org.apache.spark.sql.types.DataType sparkType) {
+    ArrowVectorBuffers b = forWrite(v, length);
+    b.sparkType = sparkType;
+    return b;
+  }
+
+  /** The Spark type given at allocation, or {@code null}. */
+  public org.apache.spark.sql.types.DataType sparkType() {
+    return sparkType;
   }
 
   private static ArrowVectorBuffers wrap(

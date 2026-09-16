@@ -46,8 +46,8 @@ class VectorProjectSuite extends VectorQuerySuite {
   test("widening casts and implicit casts inserted by the analyzer") {
     checkVectorized("SELECT CAST(i AS BIGINT) AS a, CAST(i AS DOUBLE) AS b, CAST(l AS DOUBLE) AS c FROM t WHERE i > 5", Seq(Project))
     checkVectorized("SELECT i + 1.5D AS a, l * 0.5D AS b, i / 2 AS c FROM t WHERE i > 5", Seq(Project))
-    // Plain decimal literals make Spark cast to decimal, which is out of scope and must fall back cleanly.
-    checkFallback("SELECT i + 1.5 AS a FROM t WHERE i > 5", Seq(Project), "decimal")
+    // A plain decimal literal makes Spark cast the int to a decimal; both run on long lanes.
+    checkVectorized("SELECT i + 1.5 AS a FROM t WHERE i > 5", Seq(Project))
     checkFallback("SELECT CAST(d2 AS INT) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
   }
 

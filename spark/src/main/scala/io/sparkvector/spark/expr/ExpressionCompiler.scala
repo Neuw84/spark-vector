@@ -2,9 +2,9 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArithOp, CastKernels, CompareOp, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, Cast, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, Multiply, Not, Or, Subtract, UnaryMinus}
+import org.apache.spark.sql.catalyst.expressions.{Add, Alias, And, Attribute, AttributeReference, BoundReference, Cast, Divide, EqualTo, EvalMode, Expression, GreaterThan, GreaterThanOrEqual, IsNotNull, IsNull, KnownFloatingPointNormalized, LessThan, LessThanOrEqual, Literal, MakeDecimal, Multiply, Not, Or, Subtract, UnaryMinus, UnscaledValue}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
-import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, IntegerType, LongType, TimestampType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, TimestampType}
 
 /**
  * Translates Catalyst expressions into [[VectorExpr]] trees. Returns a human-readable reason on
@@ -19,6 +19,7 @@ object ExpressionCompiler {
   /** Types whose literals can be used as compare operands. */
   private def isLiteralType(dt: DataType): Boolean = dt match {
     case IntegerType | LongType | DoubleType | DateType | TimestampType => true
+    case d: DecimalType => TypeMapping.isSupported(d)
     case _ => false
   }
 
@@ -68,12 +69,32 @@ object ExpressionCompiler {
       compile(child, input).flatMap {
         case _: LiteralExpr => Left("negation of a literal")
         case c if !arithmeticTypes.contains(c.vecType) => Left(s"negation not supported for ${c.dataType.simpleString}")
-        case c if failOnError && c.vecType != VecType.FLOAT64 => Left("ANSI integer negation (overflow check) not supported")
+        // A decimal of at most 18 digits negated is still one: no overflow check needed.
+        case c if failOnError && c.vecType != VecType.FLOAT64 && !TypeMapping.isDecimal(c.dataType) =>
+          Left("ANSI integer negation (overflow check) not supported")
         case c => Right(NegateExpr(c))
+      }
+
+    // The optimizer's DecimalAggregates rewrite: sum(decimal) becomes MakeDecimal(sum(UnscaledValue(x))).
+    case UnscaledValue(child) =>
+      compile(child, input).flatMap {
+        case _: LiteralExpr => Left("unscaled value of a literal")
+        case c if !TypeMapping.isDecimal(c.dataType) => Left(s"unscaled value of ${c.dataType.simpleString}")
+        case c => Right(UnscaledValueExpr(c))
+      }
+    case m: MakeDecimal =>
+      compile(m.child, input).flatMap {
+        case _: LiteralExpr => Left("make_decimal of a literal")
+        case c if c.vecType != VecType.INT64 => Left(s"make_decimal of ${c.dataType.simpleString}")
+        case c if !TypeMapping.isSupported(m.dataType) => Left(s"make_decimal into ${m.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+        case c => Right(MakeDecimalExpr(c, m.dataType.asInstanceOf[DecimalType], m.nullOnOverflow))
       }
 
     // Casts to the operand's own type (Spark's Average emits `sum.cast(double)` on a double sum).
     case c: Cast if c.child.dataType == c.dataType => compile(c.child, input)
+
+    case c: Cast if TypeMapping.isDecimal(c.child.dataType) || TypeMapping.isDecimal(c.dataType) =>
+      decimalCast(c, input)
 
     case c: Cast =>
       val child = c.child
@@ -103,7 +124,8 @@ object ExpressionCompiler {
       mode: EvalMode.Value,
       e: Expression,
       input: Seq[Attribute]): Result =
-    for {
+    if (TypeMapping.isDecimal(l.dataType) || TypeMapping.isDecimal(r.dataType)) decimalArithmetic(op, l, r, mode, e, input)
+    else for {
       le <- compile(l, input)
       re <- compile(r, input)
       _ <- checkArithmetic(op, le, re, l, r, mode)
@@ -123,6 +145,57 @@ object ExpressionCompiler {
     else if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
     else if (mode == EvalMode.ANSI && le.vecType != VecType.FLOAT64) Left("ANSI integer arithmetic (overflow checks) not supported")
     else Right(())
+  }
+
+  /**
+   * Decimal arithmetic on unscaled long lanes. Spark computes the result type from the operand
+   * types (`max(p1-s1, p2-s2) + max(s1, s2) + 1` digits for `+`/`-`, `p1+p2+1` for `*`), which
+   * leaves room for every result: only division needs an overflow check. Results wider than 18
+   * digits have no lane representation and fall back.
+   */
+  private def decimalArithmetic(
+      op: ArithOp,
+      l: Expression,
+      r: Expression,
+      mode: EvalMode.Value,
+      e: Expression,
+      input: Seq[Attribute]): Result = (l.dataType, r.dataType, e.dataType) match {
+    case (lt: DecimalType, rt: DecimalType, dt: DecimalType) =>
+      if (!TypeMapping.isSupported(dt)) Left(s"decimal result ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+      else if (!TypeMapping.isSupported(lt) || !TypeMapping.isSupported(rt)) Left(s"decimal operand wider than ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+      else if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
+      else {
+        val shapeOk = op match {
+          case ArithOp.ADD | ArithOp.SUB => dt.scale == math.max(lt.scale, rt.scale)
+          case ArithOp.MUL => dt.scale == lt.scale + rt.scale
+          case ArithOp.DIV => rt.scale + dt.scale - lt.scale >= 0
+        }
+        if (!shapeOk) Left(s"unexpected decimal result scale for ${e.sql}")
+        else for {
+          le <- compile(l, input)
+          re <- compile(r, input)
+          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+        } yield DecimalArithExpr(op, le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context)
+      }
+    case _ => Left(s"mixed decimal and non-decimal arithmetic: ${e.sql}")
+  }
+
+  private def decimalCast(c: Cast, input: Seq[Attribute]): Result = {
+    val from = c.child.dataType
+    val to = c.dataType
+    val supportedPair = (from, to) match {
+      case (_: DecimalType, _: DecimalType) => true
+      case (IntegerType | LongType | DoubleType, _: DecimalType) => true
+      case (_: DecimalType, DoubleType | LongType | IntegerType) => true
+      case _ => false
+    }
+    if (!TypeMapping.isSupported(from) || !TypeMapping.isSupported(to)) Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
+    else if (!supportedPair) Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
+    else if (c.evalMode == EvalMode.TRY) Left("try_cast not supported")
+    else compile(c.child, input).flatMap {
+      case _: LiteralExpr => Left("cast of a literal")
+      case child => Right(DecimalCastExpr(child, from, to, c.evalMode == EvalMode.ANSI, c.origin.context))
+    }
   }
 
   /** A filter condition must produce a non-literal boolean column. */

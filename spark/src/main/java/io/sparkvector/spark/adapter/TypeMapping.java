@@ -4,6 +4,7 @@ import io.sparkvector.kernels.VecType;
 import org.apache.spark.sql.types.BooleanType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DateType;
+import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.DoubleType;
 import org.apache.spark.sql.types.IntegerType;
 import org.apache.spark.sql.types.LongType;
@@ -32,7 +33,18 @@ public final class TypeMapping {
     if (dt instanceof StringType) {
       return VecType.UTF8;
     }
+    if (dt instanceof DecimalType d && d.precision() <= MAX_DECIMAL_PRECISION) {
+      // Unscaled value in long lanes, like Spark's own WritableColumnVector for Decimal(p <= 18).
+      return VecType.INT64;
+    }
     return null;
+  }
+
+  /** Decimals wider than this have no 64-bit representation and fall back. */
+  public static final int MAX_DECIMAL_PRECISION = 18;
+
+  public static boolean isDecimal(DataType dt) {
+    return dt instanceof DecimalType;
   }
 
   public static boolean isSupported(DataType dt) {

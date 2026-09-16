@@ -66,7 +66,7 @@ final class EvalContext(
  * Compiled, serializable expression tree evaluated column-at-a-time with the kernels. Built by
  * [[ExpressionCompiler]] on the driver and shipped inside the physical operator.
  */
-sealed trait VectorExpr extends Serializable {
+trait VectorExpr extends Serializable {
   def dataType: DataType
   final def vecType: VecType = TypeMapping.vecTypeOf(dataType)
   def eval(ctx: EvalContext): VectorBuffers
@@ -85,7 +85,11 @@ final case class ColumnRef(ordinal: Int, dataType: DataType) extends VectorExpr 
  * materialised as a column on their own, which is why [[eval]] throws.
  */
 final case class LiteralExpr(value: Any, dataType: DataType) extends VectorExpr {
-  def number: Number = value.asInstanceOf[Number]
+  /** The literal as a lane value: decimals are their unscaled long. */
+  def number: Number = value match {
+    case d: org.apache.spark.sql.types.Decimal => java.lang.Long.valueOf(d.toUnscaledLong)
+    case n: Number => n
+  }
   override def eval(ctx: EvalContext): VectorBuffers =
     throw new UnsupportedOperationException("literal cannot be evaluated as a column")
   override def children: Seq[VectorExpr] = Nil

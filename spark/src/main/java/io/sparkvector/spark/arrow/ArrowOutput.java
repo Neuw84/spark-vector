@@ -6,6 +6,7 @@ import io.sparkvector.kernels.CompactKernels;
 import io.sparkvector.kernels.GatherKernels;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
+import io.sparkvector.spark.adapter.TypeMapping;
 import java.lang.foreign.MemorySegment;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BaseVariableWidthVector;
@@ -20,6 +21,7 @@ import org.apache.arrow.vector.VarCharVector;
 import org.apache.spark.sql.types.BooleanType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DateType;
+import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.DoubleType;
 import org.apache.spark.sql.types.IntegerType;
 import org.apache.spark.sql.types.LongType;
@@ -59,6 +61,9 @@ public final class ArrowOutput {
     if (dt instanceof StringType) {
       return new VarCharVector(name, allocator);
     }
+    if (dt instanceof DecimalType d && d.precision() <= TypeMapping.MAX_DECIMAL_PRECISION) {
+      return new BigIntVector(name, allocator); // unscaled values; see VectorDecimalColumnVector
+    }
     throw new UnsupportedOperationException("unsupported output type " + dt);
   }
 
@@ -71,7 +76,7 @@ public final class ArrowOutput {
     FieldVector v = newVector(name, dt, allocator);
     v.setInitialCapacity(length);
     v.allocateNew();
-    return ArrowVectorBuffers.forWrite(v, length);
+    return ArrowVectorBuffers.forWrite(v, length, dt);
   }
 
   /** Allocates a UTF8 vector with room for {@code length} elements and {@code bytes} of data. */
@@ -96,6 +101,14 @@ public final class ArrowOutput {
       vw.setLastSet(length - 1);
     }
     v.setValueCount(length);
+    return wrap(v, out.sparkType());
+  }
+
+  /** The Spark-facing column over a finished vector: decimals need their own wrapper. */
+  private static ColumnVector wrap(FieldVector v, DataType sparkType) {
+    if (sparkType instanceof DecimalType d) {
+      return new VectorDecimalColumnVector((BigIntVector) v, d);
+    }
     return new VectorArrowColumnVector(v);
   }
 
@@ -195,7 +208,7 @@ public final class ArrowOutput {
       throw new UnsupportedOperationException("scalar output not supported for " + dt);
     }
     v.setValueCount(1);
-    return new VectorArrowColumnVector(v);
+    return wrap(v, dt);
   }
 
   /**

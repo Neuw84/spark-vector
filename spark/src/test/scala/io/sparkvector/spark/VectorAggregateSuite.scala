@@ -71,10 +71,24 @@ class VectorAggregateSuite extends VectorQuerySuite {
     }
   }
 
-  test("sum of bigint falls back in ANSI mode and is vectorized in legacy mode") {
-    checkFallback("SELECT sum(l) FROM t", Seq(Agg), "ANSI sum of bigint")
+  test("sum of bigint is overflow-checked in ANSI mode and wraps in legacy mode") {
+    checkVectorized("SELECT sum(l), sum(i) FROM t", Seq(Agg))
+    checkVectorized("SELECT s, sum(l) FROM t GROUP BY s", Seq(Agg))
+    // Values whose sum leaves the long range, read from Parquet so the aggregate's input is columnar.
+    spark.range(0, 3000).selectExpr("6000000000000000000L + id AS v", "cast(id % 2 as boolean) AS g")
+      .write.mode("overwrite").parquet(newTempPath("agg/big"))
+    spark.read.parquet(newTempPath("agg/big")).createOrReplaceTempView("big")
     withConf("spark.sql.ansi.enabled" -> "false") {
-      checkVectorized("SELECT sum(l), sum(i) FROM t", Seq(Agg))
+      checkVectorized("SELECT sum(v) FROM big", Seq(Agg)) // wraps like Spark
+      checkVectorized("SELECT g, sum(v) FROM big GROUP BY g", Seq(Agg))
+    }
+    withPlugin(enabled = true) {
+      Seq("SELECT sum(v) FROM big", "SELECT g, sum(v) FROM big GROUP BY g").foreach { sql =>
+        val df = spark.sql(sql)
+        val e = intercept[Exception](df.collect())
+        assert(Iterator.iterate(e: Throwable)(_.getCause).takeWhile(_ != null).take(10).exists(_.getMessage.contains("ARITHMETIC_OVERFLOW")), s"expected ARITHMETIC_OVERFLOW for $sql, got $e")
+        assert(nodesOf[VectorHashAggregateExec](df).nonEmpty, s"the failing aggregate should be ours: ${finalPlan(df).treeString}")
+      }
     }
   }
 

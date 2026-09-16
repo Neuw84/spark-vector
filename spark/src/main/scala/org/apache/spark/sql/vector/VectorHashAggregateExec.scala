@@ -220,12 +220,13 @@ private[vector] class VectorGroupedAggregateIterator(
     val keys = new Array[VectorBuffers](keyExprs.length)
     while (input.hasNext) {
       val batch = input.next()
-      val n = batch.numRows()
-      if (n > 0) {
+      if (batch.numRows() > 0) {
         metrics.timed {
           metrics.numInputBatches += 1
-          if (idScratch.length < n) idScratch = new Array[Int](n)
           EvalContexts.withBatch(batch) { ctx =>
+            // Physical rows: a normalized foreign batch reports its live count as numRows.
+            val n = ctx.numRows
+            if (idScratch.length < n) idScratch = new Array[Int](n)
             var k = 0
             while (k < keys.length) { keys(k) = keyExprs(k).eval(ctx); k += 1 }
             val numGroups = table.assign(keys, n, idScratch, ctx.selection)
@@ -294,6 +295,8 @@ private[vector] class VectorGroupedAggregateIterator(
           io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
         case v: java.lang.Integer =>
           io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+        case v: java.lang.Boolean =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); io.sparkvector.kernels.Bitmap.setTo(data, o, v.booleanValue())
         case other => throw new IllegalStateException(s"unexpected buffer value $other")
       }
       o += 1

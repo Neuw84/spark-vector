@@ -4,7 +4,8 @@ import io.sparkvector.kernels.{AggKernels, CompareOp, GroupAssignment, GroupedAc
 import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
-import org.apache.spark.sql.types.{DataType, DoubleType, LongType}
+import io.sparkvector.spark.adapter.TypeMapping
+import org.apache.spark.sql.types.{DataType, DecimalType, DoubleType, LongType}
 
 /**
  * Running state of one aggregate function within one task. `bufferValues` yields the partial
@@ -50,9 +51,13 @@ final case class SumDoubleAgg(input: VectorExpr) extends VectorAggFunction {
   }
 }
 
-/** SUM over ints or longs into a long buffer (legacy wrap-around semantics for longs). */
-final case class SumLongAgg(input: VectorExpr) extends VectorAggFunction {
+/**
+ * SUM over ints or longs into a long buffer. `checked` is Spark's ANSI mode for a bigint sum: an
+ * overflow raises ARITHMETIC_OVERFLOW instead of wrapping.
+ */
+final case class SumLongAgg(input: VectorExpr, checked: Boolean, queryContext: org.apache.spark.QueryContext) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(LongType)
+  private def overflow(): Nothing = throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow("long overflow", "try_sum", queryContext)
   override def newState(): AggState = new AggState {
     private var sum = 0L
     private var count = 0L
@@ -60,16 +65,22 @@ final case class SumLongAgg(input: VectorExpr) extends VectorAggFunction {
       val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
       if (c > 0) {
-        sum += (if (v.`type`() == VecType.INT32) AggKernels.sumInt(v) else AggKernels.sumLong(v))
+        try {
+          val s = if (v.`type`() == VecType.INT32) AggKernels.sumInt(v) else if (checked) AggKernels.sumLongExact(v) else AggKernels.sumLong(v)
+          sum = if (checked) Math.addExact(sum, s) else sum + s
+        } catch { case _: ArithmeticException => overflow() }
         count += c
       }
     }
     override def bufferValues: Array[Any] = Array(if (count == 0) null else java.lang.Long.valueOf(sum))
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
-    private val acc = new GroupedAccumulators.LongSum
-    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-    override def bufferValue(g: Int, slot: Int): Any = if (acc.count(g) == 0) null else java.lang.Long.valueOf(acc.sum(g))
+    private val acc = new GroupedAccumulators.LongSum(checked)
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit =
+      try acc.update(input.eval(ctx), groups) catch { case _: ArithmeticException => overflow() }
+    override def bufferValue(g: Int, slot: Int): Any =
+      if (acc.count(g) == 0) null
+      else try java.lang.Long.valueOf(acc.sum(g)) catch { case _: ArithmeticException => overflow() }
   }
 }
 
@@ -250,9 +261,7 @@ object VectorAggregates {
         ref(0).flatMap { b =>
           (s.dataType, b.vecType) match {
             case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(b))
-            case (LongType, VecType.INT64) if s.evalContext.evalMode == EvalMode.ANSI =>
-              Left("ANSI sum of bigint (overflow check) not supported")
-            case (LongType, VecType.INT64) => Right(SumLongAgg(b))
+            case (LongType, VecType.INT64) => Right(SumLongAgg(b, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
             case (dt, _) => Left(s"merging sum buffers of ${dt.simpleString} not supported")
           }
         }
@@ -270,14 +279,16 @@ object VectorAggregates {
     if (numeric.contains(b.vecType)) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
 
   private def compileFunction(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = f match {
+    case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
+      // Only reached for decimals of more than 8 digits (the optimizer rewrites smaller ones to a
+      // long sum): the (sum, isEmpty) buffer would need more than 18 digits.
+      Left(s"sum buffer ${s.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
     case s: Sum =>
       numericChild(s.child, input).flatMap { child =>
         (s.dataType, child.vecType) match {
           case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(child))
-          case (LongType, VecType.INT32) => Right(SumLongAgg(child))
-          case (LongType, VecType.INT64) if s.evalContext.evalMode == EvalMode.ANSI =>
-            Left("ANSI sum of bigint (overflow check) not supported")
-          case (LongType, VecType.INT64) => Right(SumLongAgg(child))
+          case (LongType, VecType.INT32) => Right(SumLongAgg(child, checked = false, s.origin.context))
+          case (LongType, VecType.INT64) => Right(SumLongAgg(child, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
           case (dt, _) => Left(s"sum over ${s.child.dataType.simpleString} producing ${dt.simpleString} not supported")
         }
       }
@@ -296,6 +307,8 @@ object VectorAggregates {
     case m: Min => numericChild(m.child, input).map(child => MinMaxAgg(child, isMin = true, m.dataType))
     case m: Max => numericChild(m.child, input).map(child => MinMaxAgg(child, isMin = false, m.dataType))
 
+    case a: Average if a.child.dataType.isInstanceOf[DecimalType] =>
+      Left(s"avg buffer ${a.aggBufferAttributes.head.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
     case a: Average =>
       if (a.dataType != DoubleType) Left(s"avg producing ${a.dataType.simpleString} not supported")
       else numericChild(a.child, input).map { child =>

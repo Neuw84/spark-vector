@@ -29,6 +29,9 @@ public final class BorrowedColumnVector extends ColumnVector {
     if (cv instanceof VectorDictionaryColumnVector d) {
       return d.borrow();
     }
+    if (cv instanceof VectorDecimalColumnVector d) {
+      return d.borrow();
+    }
     if (cv instanceof BorrowedColumnVector b) {
       return b;
     }

@@ -4,6 +4,7 @@ import io.sparkvector.kernels.VectorBuffers;
 import io.sparkvector.spark.arrow.ArrowVectorBuffers;
 import io.sparkvector.spark.arrow.BorrowedColumnVector;
 import io.sparkvector.spark.arrow.VectorArrowColumnVector;
+import io.sparkvector.spark.arrow.VectorDecimalColumnVector;
 import io.sparkvector.spark.arrow.VectorDictionaryColumnVector;
 import java.lang.foreign.Arena;
 import java.util.List;
@@ -55,6 +56,9 @@ public final class ColumnVectorAdapters {
       }
     }
     return SparkColumnVectorBuffers.copy(cv, numRows, scratch);
+    if (cv instanceof VectorDecimalColumnVector d) {
+      return ArrowVectorBuffers.forRead(d.vector());
+    }
   }
 
   /** True if {@link #adapt} would not need to copy. */
@@ -62,7 +66,8 @@ public final class ColumnVectorAdapters {
     if (cv instanceof BorrowedColumnVector b) {
       return isZeroCopy(b.inner(), numRows);
     }
-    if (cv instanceof VectorArrowColumnVector || cv instanceof VectorDictionaryColumnVector) {
+    if (cv instanceof VectorArrowColumnVector || cv instanceof VectorDictionaryColumnVector
+        || cv instanceof VectorDecimalColumnVector) {
       return true;
     }
     for (Adapter adapter : ADAPTERS) {

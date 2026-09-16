@@ -156,6 +156,63 @@ public final class AggKernels {
     return acc.reduceLanes(VectorOperators.ADD);
   }
 
+  /**
+   * {@link #sumLong} with overflow detection, for Spark's ANSI mode: throws {@link
+   * ArithmeticException} if the sum leaves the long range at any point. Overflow of a lane-wise
+   * add is recorded with the sign trick {@code (a ^ r) & (b ^ r) < 0} (four cheap lane operations,
+   * no reduction per step); the final horizontal sum uses {@code Math.addExact}.
+   */
+  public static long sumLongExact(VectorBuffers a) {
+    MemorySegment d = a.data();
+    MemorySegment validity = a.validity();
+    int n = a.length();
+    int lanes = L.length();
+    long laneMask = fullWord(lanes);
+    LongVector acc = LongVector.zero(L);
+    LongVector overflow = LongVector.zero(L);
+    for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      long word = wordOf(validity, w, n);
+      if (word == 0L) {
+        continue;
+      }
+      int base = w << 6;
+      int limit = Math.min(64, n - base);
+      if (word == fullWord(limit)) {
+        int k = 0;
+        for (; k + lanes <= limit; k += lanes) {
+          LongVector v = LongVector.fromMemorySegment(L, d, (long) (base + k) << 3, LE);
+          LongVector r = acc.add(v);
+          overflow = overflow.or(acc.lanewise(VectorOperators.XOR, r).and(v.lanewise(VectorOperators.XOR, r)));
+          acc = r;
+        }
+        if (k < limit) {
+          LongVector v = LongVector.fromMemorySegment(L, d, (long) (base + k) << 3, LE, L.indexInRange(k, limit));
+          LongVector r = acc.add(v);
+          overflow = overflow.or(acc.lanewise(VectorOperators.XOR, r).and(v.lanewise(VectorOperators.XOR, r)));
+          acc = r;
+        }
+      } else {
+        for (int k = 0; k < limit; k += lanes) {
+          long bits = (word >>> k) & laneMask;
+          if (bits != 0L) {
+            LongVector v = LongVector.fromMemorySegment(L, d, (long) (base + k) << 3, LE, maskL(bits));
+            LongVector r = acc.add(v);
+            overflow = overflow.or(acc.lanewise(VectorOperators.XOR, r).and(v.lanewise(VectorOperators.XOR, r)));
+            acc = r;
+          }
+        }
+      }
+    }
+    if (overflow.compare(VectorOperators.LT, 0L).anyTrue()) {
+      throw new ArithmeticException("long overflow");
+    }
+    long total = 0L;
+    for (int l = 0; l < lanes; l++) {
+      total = Math.addExact(total, acc.lane(l));
+    }
+    return total;
+  }
+
   /** Sum of the valid ints, accumulated in 64-bit lanes (cannot overflow for realistic sizes). */
   public static long sumInt(VectorBuffers a) {
     MemorySegment d = a.data();
