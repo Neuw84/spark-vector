@@ -419,8 +419,9 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 - Keep the running doc set in sync: `README.md` (usage, keys, lessons), `docs/results.md`
   (numbers and what they mean), `docs/comet.md` (integration and limitations),
   `docs/operators.md` (the per-operator support matrix: requirements, config keys, fallback
-  strings -- every operator change updates its row in the same commit), this file (design and
-  validation).
+  strings -- every operator change updates its row in the same commit), `docs/expressions.md` (the
+  per-expression matrix: lane types and fallback reasons -- every expression change updates its
+  row in the same commit), this file (design and validation).
 
 ## 7. Known gaps
 
