@@ -1,7 +1,7 @@
 package org.apache.spark.sql.vector
 
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{RDD, SQLPartitioningAwareUnionRDD}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, SinglePartition, UnknownPartitioning}
 import org.apache.spark.sql.execution.{CoalesceExec, SparkPlan, UnionExec}
@@ -15,6 +15,14 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * through `RowToColumnarExec`, where Spark's union would have dropped every child to rows. The rule
  * asks for at least one columnar child, otherwise there is nothing to keep. Output nullability is
  * merged across children exactly as Spark's operator does.
+ *
+ * Partitioning is Spark's contract too, and it is not optional: when every child is hash-partitioned
+ * the same way (`spark.sql.unionOutputPartitioning`, on by default), Spark's `UnionExec` reports that
+ * partitioning and `EnsureRequirements` -- which runs before this operator replaces it -- omits the
+ * shuffle an aggregate or join above the union would otherwise need. The union must then keep the
+ * i-th partitions of its children together (`SQLPartitioningAwareUnionRDD`), as Spark's does; a plain
+ * concatenation would put one key in as many partitions as there are children, and a Final aggregate
+ * above it would emit that key once per child (TPC-DS q33, q56, q60 -- #128).
  */
 case class VectorUnionExec(children: Seq[SparkPlan]) extends VectorPassThrough {
 
@@ -24,11 +32,18 @@ case class VectorUnionExec(children: Seq[SparkPlan]) extends VectorPassThrough {
       first.withNullability(attrs.exists(_.nullable))
     }
 
-  override def outputPartitioning: Partitioning =
-    UnknownPartitioning(children.map(_.outputPartitioning.numPartitions).sum)
+  /** Exactly what Spark's operator would report for these children. */
+  override def outputPartitioning: Partitioning = UnionExec(children).outputPartitioning
 
-  override protected def doExecuteColumnar(): RDD[ColumnarBatch] =
-    sparkContext.union(children.map(_.executeColumnar()))
+  override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
+    // Read once, before the children execute, so the partitioning reported and the one built agree.
+    val partitioning = outputPartitioning
+    val rdds = children.map(_.executeColumnar())
+    partitioning match {
+      case _: UnknownPartitioning => sparkContext.union(rdds)
+      case known => new SQLPartitioningAwareUnionRDD(sparkContext, rdds.filter(_.partitions.nonEmpty), known.numPartitions)
+    }
+  }
 
   override protected def withNewChildrenInternal(newChildren: IndexedSeq[SparkPlan]): SparkPlan = copy(children = newChildren)
 

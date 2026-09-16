@@ -223,8 +223,14 @@ that pin it.
   take reuses `VectorRowStages` (UnsafeRow copies -> single-partition shuffle -> one on-heap batch),
   the same tail as the top-N operator. `spark.vector.exec.limit.enabled`; `OFFSET` falls back.
 - `VectorUnionExec` / `VectorCoalesceExec` are `VectorPassThrough` operators: they forward children's
-  batches unchanged (`sparkContext.union` / `coalesce(n, shuffle = false)`), so the rule does not mark a
-  filter below them as a selection producer (a forwarded selection would reach whatever sits above).
+  batches unchanged, so the rule does not mark a filter below them as a selection producer (a forwarded
+  selection would reach whatever sits above). The union keeps Spark's partitioning contract:
+  `outputPartitioning` is what `UnionExec` would report for the same children, and when that is a known
+  partitioning the children's i-th partitions are read together (`SQLPartitioningAwareUnionRDD`) --
+  `EnsureRequirements` ran before the replacement and planned no shuffle above the union on the strength
+  of that claim (TPC-DS q33/q56/q60 returned one row per channel for a key before this, #128). Spark
+  4.1.3's own `UnionExec` has the concatenating columnar path, so ours must not be disabled over
+  co-partitioned columnar children.
   The union is columnar whatever its children are, provided one is: Spark's transitions insert
   `RowToColumnarExec` under the row children. Spark's own `UnionExec` is columnar only when every
   child is, and the UI classifies it as a Spark operator either way.
@@ -447,7 +453,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 135 kernel tests, 163 Spark tests (136 without the Comet and Iceberg profiles;
+Current counts: 135 kernel tests, 164 Spark tests (137 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

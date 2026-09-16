@@ -50,6 +50,30 @@ class VectorUnionSuite extends VectorQuerySuite {
     assert(reasons.exists(_.contains("no columnar child")), reasons.mkString("; "))
   }
 
+  test("union of equally partitioned children keeps Spark's partitioning contract (TPC-DS q33 shape)") {
+    import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioningLike, UnknownPartitioning}
+    import org.apache.spark.sql.execution.exchange.ShuffleExchangeLike
+    // Every child is a Final aggregate hash-partitioned by s, so Spark's union reports that
+    // partitioning and EnsureRequirements plans no shuffle above it: the outer aggregate runs
+    // directly over the union, which must keep each key in one partition. With a plain
+    // concatenation every key came out once per child (#128: q33, q56, q60).
+    val channel = (k: Int) => s"SELECT s, sum(l) AS total FROM t WHERE i % 3 = $k GROUP BY s"
+    val sql = s"SELECT s, sum(total) AS total, count(*) AS parts FROM (${channel(0)} UNION ALL ${channel(1)} UNION ALL ${channel(2)}) u GROUP BY s"
+    val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
+    val df = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); d }
+    assertRowsEqual(expected, df.collect(), 1e-9, sql)
+    val union = nodesOf[VectorUnionExec](df).head
+    assert(union.outputPartitioning.isInstanceOf[HashPartitioningLike], union.outputPartitioning.toString)
+    // The three inner shuffles are the only exchanges: none was planned above the union.
+    assert(nodesOf[ShuffleExchangeLike](df).size === 3, finalPlan(df).treeString)
+    assert(df.collect().forall(_.getLong(2) <= 3) && df.collect().map(_.getString(0)).distinct.length === df.count())
+    // Children partitioned on different keys: Spark's union reports nothing, and a shuffle is planned.
+    val mixed = "SELECT k, sum(total) FROM (SELECT s AS k, sum(l) AS total FROM t GROUP BY s UNION ALL SELECT CAST(i % 7 AS STRING) AS k, sum(l) FROM t GROUP BY i % 7) u GROUP BY k"
+    val m = checkVectorized(mixed, Seq(Union, Agg))
+    assert(nodesOf[VectorUnionExec](m).head.outputPartitioning.isInstanceOf[UnknownPartitioning])
+    assert(nodesOf[ShuffleExchangeLike](m).size === 3, finalPlan(m).treeString)
+  }
+
   test("UNION (distinct) is a keys-only aggregate over our union") {
     // The aggregate has no functions: a keys-only aggregate, ours in both stages, over our union.
     val df = checkVectorized("SELECT s FROM (SELECT s FROM t UNION SELECT s FROM t WHERE i < 100)", Seq(Union))
