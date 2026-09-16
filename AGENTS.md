@@ -268,7 +268,9 @@ that pin it.
   condition is compiled against `left ++ right`, not the operator's output), evaluate the condition
   over the pairs and decide per row afterwards -- kept/dropped, or its passing pairs / one `-1`
   padded row -- so a row whose candidates all fail is padded exactly like one with no candidate.
-  Full outer keeps a per-build-row matched flag and emits the unmatched build rows, streamed side
+  Full outer (shuffled hash join only -- Spark never broadcasts one and our per-task trailing pass
+  would duplicate the unmatched build rows; the broadcast planner refuses it with a reason) keeps a
+  per-build-row matched flag and emits the unmatched build rows, streamed side
   null (`ArrowOutput.nulls`), after the input is exhausted; build rows with a null key are never in
   the table and so always come out there. Refused with a reason: existence, null-aware anti, skew
   joins, double keys (Spark normalises NaN/-0.0 before comparing, the key table compares bits).
@@ -438,7 +440,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 135 kernel tests, 161 Spark tests (134 without the Comet and Iceberg profiles;
+Current counts: 135 kernel tests, 162 Spark tests (135 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

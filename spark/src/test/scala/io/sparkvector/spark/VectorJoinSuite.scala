@@ -92,7 +92,33 @@ class VectorJoinSuite extends VectorQuerySuite {
       // Build side on the left.
       checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ dim.name, tk.i FROM dim FULL OUTER JOIN tk ON tk.l = dim.dl AND dim.weight > 10.0", Seq(SHJ))
       checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ count(*), count(tk.i), count(dim.name) FROM tk FULL OUTER JOIN dim ON tk.i50 = dim.di AND tk.d > dim.weight", Seq(SHJ, classOf[VectorHashAggregateExec]))
+      // An empty side: AQE eliminates a join whose side is empty outright (it never reaches any
+      // operator), so the shape that does reach us is a side reduced to one key -- every shuffle
+      // partition but one then has an empty build or probe side and must still emit the other side.
+      val emptyBuild = checkVectorized("SELECT /*+ SHUFFLE_HASH(d) */ tk.i, d.name FROM tk FULL OUTER JOIN (SELECT * FROM dim WHERE di = 7) d ON tk.i50 = d.di", Seq(SHJ))
+      assert(emptyBuild.filter("name IS NULL").count() === 20000 - 400, "every probe row outside key 7 is unmatched")
+      val emptyProbe = checkVectorized("SELECT /*+ SHUFFLE_HASH(d) */ tk.i, d.name FROM (SELECT * FROM tk WHERE i50 = 7 AND i < 1000) tk FULL OUTER JOIN dim d ON tk.i50 = d.di", Seq(SHJ))
+      assert(emptyProbe.filter("i IS NULL").count() === 58, "58 dimension rows have no probe row")
+      // Shuffle partitions that receive build rows but no probe rows at all still emit their build rows.
+      val sparse = checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name, dim.di FROM (SELECT * FROM tk WHERE i50 = 3) tk FULL OUTER JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
+      assert(sparse.filter("i IS NULL").count() === 58, "58 of the 60 dimension rows have no probe row")
+      // Null keys never match: the null-keyed rows of both sides appear once each, unpaired.
+      val nulls = checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.l, dim.dl FROM tk FULL OUTER JOIN dim ON tk.l = dim.dl", Seq(SHJ))
+      val nullKeyed = spark.table("tk").filter("l IS NULL").count() + spark.table("dim").filter("dl IS NULL").count()
+      assert(nulls.filter("l IS NULL AND dl IS NULL").count() === nullKeyed, "each null-keyed row of either side comes out once, unpaired, with the other side null")
     }
+  }
+
+  test("a full outer join over a broadcast is refused, as Spark never plans one") {
+    import org.apache.spark.sql.catalyst.plans.FullOuter
+    import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
+    import org.apache.spark.sql.vector.VectorJoinPlanner
+    // Spark's JoinSelection excludes FullOuter from broadcasting, so build the operator by hand from a
+    // real broadcast join and change only the join type.
+    val plan = withPlugin(enabled = false)(spark.sql("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di").queryExecution.executedPlan)
+    val bhj = org.apache.spark.sql.vector.PlanUtils.allNodes(plan).collect { case b: BroadcastHashJoinExec => b }.head
+    val planned = VectorJoinPlanner.plan(bhj.copy(joinType = FullOuter))
+    assert(planned.isLeft && planned.left.toOption.get.contains("full outer join over a broadcast"), planned.toString)
   }
 
   test("unsupported joins fall back with a reason") {
