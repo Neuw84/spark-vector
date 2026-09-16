@@ -276,6 +276,22 @@ public final class ArrowOutput {
     return finish(out, length, true);
   }
 
+  /**
+   * A column of {@code length} nulls. Used for the streamed side of the build rows a full outer
+   * join emits after the last streamed batch, where there is no input column to gather from.
+   */
+  public static ColumnVector nulls(String name, DataType dt, int length, BufferAllocator allocator) {
+    ArrowVectorBuffers out =
+        TypeMapping.vecTypeOf(dt) == VecType.UTF8
+            ? allocateUtf8(name, length, 0, allocator)
+            : allocateFixed(name, dt, length, allocator);
+    Bitmap.fill(out.validity(), length, false);
+    if (out.type() == VecType.UTF8) {
+      out.offsets().asSlice(0, ((long) length + 1) << 2).fill((byte) 0);
+    }
+    return finish(out, length, false);
+  }
+
   /** Copies a whole column (no selection) into a new Arrow vector. */
   public static ColumnVector copy(String name, DataType dt, VectorBuffers in, BufferAllocator allocator) {
     int n = in.length();
