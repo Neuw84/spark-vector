@@ -35,6 +35,8 @@ public final class CometBatchBridge {
   private final Method wrapSchema;
   private final Method importVector;
   private final Method getVector; // CometVector.getVector(ValueVector, DictionaryProvider)
+  /** Exports handed to Comet by this bridge, for {@link #releaseOutstanding}. */
+  private final java.util.List<Long> exported = new java.util.ArrayList<>();
 
   private CometBatchBridge(ClassLoader loader) throws ReflectiveOperationException {
     Class<?> pkg = Class.forName("org.apache.comet.package$", true, loader);
@@ -111,19 +113,38 @@ public final class CometBatchBridge {
   }
 
   private ColumnVector toComet(VectorBuffers in, String name, DataType dt) {
-    ArrowCData.Exported exported = ArrowCData.export(in, name, dt);
+    ArrowCData.Exported export = ArrowCData.export(in, name, dt);
     try {
-      Object array = wrapArray.invoke(null, exported.array());
-      Object schema = wrapSchema.invoke(null, exported.schema());
+      Object array = wrapArray.invoke(null, export.array());
+      Object schema = wrapSchema.invoke(null, export.schema());
       Object fieldVector = importVector.invoke(importer, array, schema, dictionaryProvider);
-      return (ColumnVector) getVector.invoke(null, fieldVector, dictionaryProvider);
+      ColumnVector v = (ColumnVector) getVector.invoke(null, fieldVector, dictionaryProvider);
+      exported.add(export.id());
+      return v;
     } catch (InvocationTargetException e) {
-      ArrowCData.abandon(exported.id());
+      ArrowCData.abandon(export.id());
       throw new IllegalStateException("Comet import failed for column " + name, e.getCause());
     } catch (IllegalAccessException e) {
-      ArrowCData.abandon(exported.id());
+      ArrowCData.abandon(export.id());
       throw new IllegalStateException("Comet import failed for column " + name, e);
     }
+  }
+
+  /**
+   * Releases the exports of this bridge that Comet has not released itself. Called when the task
+   * completes, i.e. after every consumer in it is done: Comet's range-partitioning sampler reads
+   * our batches through {@code rowIterator()} and never closes the imported vectors, which would
+   * otherwise pin the last batch of every task. Returns the number of exports released.
+   */
+  public int releaseOutstanding() {
+    int released = 0;
+    for (long id : exported) {
+      if (ArrowCData.abandon(id)) {
+        released++;
+      }
+    }
+    exported.clear();
+    return released;
   }
 
   /** Applies a selection into scratch memory; the export then copies from there. */

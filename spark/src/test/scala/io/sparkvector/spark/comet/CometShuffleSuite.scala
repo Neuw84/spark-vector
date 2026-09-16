@@ -91,6 +91,28 @@ class CometShuffleSuite extends VectorQuerySuite {
     assertNoLeak()
   }
 
+  test("range-partitioned exchange above our operators takes the native shuffle; sort above it is ours", CometTest) {
+    val sql = "SELECT s, count(*) AS c, sum(d2) AS total FROM t GROUP BY s ORDER BY s, c DESC"
+    val df = checkVectorized(sql, Seq(Agg, classOf[org.apache.spark.sql.vector.VectorSortExec]))
+    val plan = finalPlan(df)
+    val exchanges = cometExchanges(plan)
+    val range = exchanges.filter(_.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning])
+    assert(range.nonEmpty, s"expected a Comet range exchange:\n${plan.treeString}")
+    range.foreach { e =>
+      assert(e.children.head.isInstanceOf[VectorToCometExec], s"range exchange should sit on the bridge:\n${plan.treeString}")
+      assert(CometShuffle.isNative(e), s"range exchange should be native:\n${plan.treeString}")
+    }
+    // The rows come back in order: the sort ran over Comet's columnar shuffle output.
+    val keys = df.collect().map(r => (Option(r.getString(0)), -r.getLong(1)))
+    assert(keys.toSeq === keys.sortBy(k => (k._1.isDefined, k._1.getOrElse(""), k._2)).toSeq) // ASC NULLS FIRST
+    assertNoLeak()
+    withConf(io.sparkvector.spark.VectorConf.CometRangeShuffleEnabled -> "false") {
+      val plain = checkVectorized(sql, Seq(Agg))
+      val ranges = cometExchanges(finalPlan(plain)).filter(_.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning])
+      assert(ranges.forall(e => !e.children.head.isInstanceOf[VectorToCometExec]), finalPlan(plain).treeString)
+    }
+  }
+
   test("bridge can be disabled, leaving Comet's row-based columnar shuffle", CometTest) {
     withConf(io.sparkvector.spark.VectorConf.CometShuffleEnabled -> "false") {
       val df = checkVectorized("SELECT s, count(*) FROM t GROUP BY s", Seq(Agg))

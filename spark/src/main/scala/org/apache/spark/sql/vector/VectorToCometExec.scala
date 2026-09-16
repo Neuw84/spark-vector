@@ -1,6 +1,7 @@
 package org.apache.spark.sql.vector
 
 import io.sparkvector.spark.comet.CometBatchBridge
+import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
@@ -37,6 +38,9 @@ case class VectorToCometExec(child: SparkPlan) extends UnaryExecNode {
     child.executeColumnar().mapPartitionsInternal { iter =>
       val bridge = CometBatchBridge.tryCreate()
       if (bridge == null) throw new IllegalStateException("Comet classes are not on the executor classpath")
+      // Listeners run in reverse registration order, so this frees whatever Comet left unreleased
+      // before the child iterators (registered earlier) close their allocators.
+      Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => bridge.releaseOutstanding()))
       iter.filter(_.numRows() > 0).map { batch =>
         val converted = bridge.convert(batch, names, types)
         batches += 1

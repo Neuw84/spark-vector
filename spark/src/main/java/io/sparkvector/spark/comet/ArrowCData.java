@@ -225,12 +225,17 @@ public final class ArrowCData {
     }
   }
 
-  /** Frees an export whose structs were never handed to a consumer (import failed). */
-  public static void abandon(long id) {
+  /**
+   * Frees an export the consumer will not release (an import failed, or the consumer never closes
+   * what it imported). Returns whether the export was still live.
+   */
+  public static boolean abandon(long id) {
     Export e = LIVE.remove(id);
     if (e != null) {
       e.close();
+      return true;
     }
+    return false;
   }
 
   /** Exports still owned by consumers; for tests and leak checks. */
