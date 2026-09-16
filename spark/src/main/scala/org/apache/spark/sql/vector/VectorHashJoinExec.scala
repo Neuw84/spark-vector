@@ -26,10 +26,14 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * [[GroupKeyTable]] keyed on the build keys, probed batch by batch with the streamed keys, the
  * matches gathered into output batches by [[GatherKernels]].
  *
- * Inner, left outer, right outer (build side left), left semi and left anti joins are supported;
- * a non-equi `condition` only for inner joins, where it is evaluated on the joined batch and the
- * rows failing it compacted away. Null keys never match, as in Spark. Double keys are refused:
- * Spark compares them after NaN/zero normalisation, the key table by bits.
+ * Inner, left outer, right outer (build side left), full outer, left semi and left anti joins are
+ * supported, each with an optional non-equi `condition`. Inner joins evaluate it on the joined
+ * batch and compact the rows failing it away. Semi, anti and outer joins evaluate it on the
+ * candidate pairs of every streamed row first and only then decide what that row becomes: kept or
+ * dropped (semi/anti), its passing pairs or one null-padded row (outer). A full outer join also
+ * remembers which build rows were ever paired and emits the rest, null-padded, after the last
+ * streamed batch. Null keys never match, as in Spark. Double keys are refused: Spark compares them
+ * after NaN/zero normalisation, the key table by bits.
  */
 trait VectorHashJoinLike extends VectorBinaryExec {
   def leftKeys: Seq[Expression]
@@ -47,14 +51,18 @@ trait VectorHashJoinLike extends VectorBinaryExec {
     case _: InnerLike => left.output ++ right.output
     case LeftOuter => left.output ++ right.output.map(_.withNullability(true))
     case RightOuter => left.output.map(_.withNullability(true)) ++ right.output
+    case FullOuter => left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
     case LeftSemi | LeftAnti => left.output
     case _ => left.output ++ right.output // never planned; see VectorJoinPlanner.supportedType
   }
 
+  /** The joined row a condition sees: both sides, whatever the join type outputs. */
+  private def joinedOutput: Seq[Attribute] = left.output ++ right.output
+
   @transient protected lazy val compiledBuildKeys: Array[VectorExpr] = VectorJoinPlanner.compileKeys(buildKeys, buildPlan.output)
   @transient protected lazy val compiledStreamedKeys: Array[VectorExpr] = VectorJoinPlanner.compileKeys(streamedKeys, streamedPlan.output)
   @transient protected lazy val compiledCondition: Option[VectorExpr] =
-    condition.map(c => VectorJoinPlanner.compileCondition(c, output).fold(r => throw new IllegalStateException(s"cannot vectorize join condition: $r"), identity))
+    condition.map(c => VectorJoinPlanner.compileCondition(c, joinedOutput).fold(r => throw new IllegalStateException(s"cannot vectorize join condition: $r"), identity))
 
   protected def joinSpec: JoinSpec = JoinSpec(
     joinType,
@@ -63,6 +71,7 @@ trait VectorHashJoinLike extends VectorBinaryExec {
     compiledStreamedKeys,
     compiledCondition,
     output.map(a => (a.name, a.dataType)).toArray,
+    joinedOutput.map(a => (a.name, a.dataType)).toArray,
     buildPlan.output.map(_.dataType).toArray,
     streamedPlan.output.length)
 
@@ -84,7 +93,10 @@ final case class JoinSpec(
     buildKeys: Array[VectorExpr],
     streamedKeys: Array[VectorExpr],
     condition: Option[VectorExpr],
+    /** The operator's output: left ++ right, or the left side alone for semi/anti joins. */
     outputAttrs: Array[(String, DataType)],
+    /** Always left ++ right: the row the condition is evaluated on. */
+    joinedAttrs: Array[(String, DataType)],
     buildTypes: Array[DataType],
     streamedWidth: Int)
 
@@ -303,7 +315,17 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
   }
 }
 
-/** Probes the build table with every streamed batch and gathers the matches. */
+/**
+ * Probes the build table with every streamed batch and gathers the matches.
+ *
+ * Without a condition, or for an inner join, the matches of a batch are gathered straight into
+ * output batches (an inner condition is applied to the gathered batch and the failing rows
+ * compacted away). Semi, anti and outer joins with a condition go through [[emitConditional]]:
+ * the candidate pairs are gathered as the joined row and the condition evaluated over them, and
+ * only then does each streamed row become kept/dropped (semi/anti) or its passing pairs / one
+ * null-padded row (outer). A full outer join records which build rows were ever paired and emits
+ * the others, null-padded on the streamed side, once the input is exhausted.
+ */
 private[vector] class VectorHashJoinIterator(
     input: Iterator[ColumnarBatch],
     build: BuildTable,
@@ -318,14 +340,26 @@ private[vector] class VectorHashJoinIterator(
   private val pending = new ArrayDeque[ColumnarBatch]()
   private var emitted: ColumnarBatch = _
   private var closed = false
+  /** The candidate pairs of the current batch: streamed row and build row (-1 pads an outer join). */
   private var probeIdx = new Array[Int](OutputBatchSize)
   private var buildIdx = new Array[Int](OutputBatchSize)
+  /** The pairs an outer join with a condition emits, rewritten from the candidates. */
+  private var outProbeIdx = new Array[Int](0)
+  private var outBuildIdx = new Array[Int](0)
+  /** Per candidate pair, whether the condition held. */
+  private var passed = new Array[Boolean](0)
+  /** Per streamed row, whether any of its candidates passed the condition. */
+  private var rowMatched = new Array[Boolean](0)
   private var idScratch = new Array[Int](0)
 
   private val numBuildCols = spec.buildTypes.length
   private val streamedWidth = spec.streamedWidth
   private val isSemiOrAnti = spec.joinType == LeftSemi || spec.joinType == LeftAnti
-  private val keepUnmatched = spec.joinType == LeftOuter || spec.joinType == RightOuter
+  private val isFullOuter = spec.joinType == FullOuter
+  private val keepUnmatched = spec.joinType == LeftOuter || spec.joinType == RightOuter || isFullOuter
+  /** Build rows paired with a streamed row so far; only a full outer join needs to know. */
+  private val buildMatched: Array[Boolean] = if (isFullOuter) new Array[Boolean](build.numRows) else null
+  private var buildDrained = !isFullOuter
 
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
@@ -333,6 +367,10 @@ private[vector] class VectorHashJoinIterator(
     while (pending.isEmpty && input.hasNext) {
       val batch = input.next()
       if (batch.numRows() > 0) metrics.timed { probe(batch) }
+    }
+    if (pending.isEmpty && !buildDrained) {
+      buildDrained = true
+      metrics.timed { emitUnmatchedBuild() }
     }
     !pending.isEmpty
   }
@@ -355,26 +393,32 @@ private[vector] class VectorHashJoinIterator(
       if (idScratch.length < n) idScratch = new Array[Int](n)
       if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates)
       else java.util.Arrays.fill(idScratch, 0, n, -1)
-      if (isSemiOrAnti) emitSemiAnti(ctx, batch, candidates)
-      else emitMatches(ctx, candidates)
+      spec.condition match {
+        case Some(cond) if isSemiOrAnti || keepUnmatched => emitConditional(ctx, cond)
+        case _ if isSemiOrAnti => emitSemiAnti(ctx)
+        case _ => emitMatches(ctx)
+      }
     }
   }
 
-  /** Semi/anti joins keep or drop streamed rows: a selection over the batch, compacted once. */
-  private def emitSemiAnti(ctx: EvalContext, batch: ColumnarBatch, candidates: MemorySegment): Unit = {
+  private def selected(ctx: EvalContext, i: Int): Boolean = ctx.selection == null || Bitmap.isSet(ctx.selection, i)
+
+  /** Semi/anti joins without a condition keep or drop streamed rows on the key lookup alone. */
+  private def emitSemiAnti(ctx: EvalContext): Unit = {
     val n = ctx.numRows
     val sel = ctx.bitmap()
     val wantMatch = spec.joinType == LeftSemi
     var i = 0
     while (i < n) {
-      val selected = ctx.selection == null || Bitmap.isSet(ctx.selection, i)
-      if (selected) {
-        val matched = idScratch(i) >= 0
-        if (matched == wantMatch) Bitmap.set(sel, i)
-      }
+      if (selected(ctx, i) && (idScratch(i) >= 0) == wantMatch) Bitmap.set(sel, i)
       i += 1
     }
-    val count = Bitmap.popcount(sel, n)
+    compactStreamed(ctx, sel)
+  }
+
+  /** Emits the streamed rows selected by `sel` as one batch of the operator's output. */
+  private def compactStreamed(ctx: EvalContext, sel: MemorySegment): Unit = {
+    val count = Bitmap.popcount(sel, ctx.numRows)
     if (count > 0) {
       val columns = new Array[ColumnVector](spec.outputAttrs.length)
       var c = 0
@@ -387,23 +431,140 @@ private[vector] class VectorHashJoinIterator(
     }
   }
 
-  private def emitMatches(ctx: EvalContext, candidates: MemorySegment): Unit = {
+  /** Inner and outer joins whose condition, if any, an inner join applies to the gathered batch. */
+  private def emitMatches(ctx: EvalContext): Unit = {
     val n = ctx.numRows
     var count = 0
     var i = 0
     while (i < n) {
-      val selected = ctx.selection == null || Bitmap.isSet(ctx.selection, i)
-      if (selected) {
+      if (selected(ctx, i)) {
         var r = if (idScratch(i) >= 0) build.head(idScratch(i)) else -1
         if (r < 0) {
           if (keepUnmatched) { count = append(count, i, -1); }
         } else {
-          while (r >= 0) { count = append(count, i, r); r = build.next(r) }
+          while (r >= 0) {
+            count = append(count, i, r)
+            if (buildMatched != null) buildMatched(r) = true
+            r = build.next(r)
+          }
         }
       }
       i += 1
     }
-    if (count > 0) flush(ctx, count)
+    if (count > 0) flush(ctx, probeIdx, buildIdx, count, filter = spec.condition.isDefined)
+  }
+
+  /**
+   * Semi, anti and outer joins with a condition. Every candidate pair of the batch is gathered as
+   * the joined row and the condition evaluated over those; a streamed row then counts as matched
+   * when at least one of its pairs passed, exactly as if the condition had been checked per
+   * candidate. Rows with no candidate at all have no pair here and stay unmatched.
+   */
+  private def emitConditional(ctx: EvalContext, cond: VectorExpr): Unit = {
+    val n = ctx.numRows
+    var count = 0
+    var i = 0
+    while (i < n) {
+      if (selected(ctx, i)) {
+        var r = if (idScratch(i) >= 0) build.head(idScratch(i)) else -1
+        while (r >= 0) { count = append(count, i, r); r = build.next(r) }
+      }
+      i += 1
+    }
+    if (passed.length < count) passed = new Array[Boolean](probeIdx.length)
+    if (rowMatched.length < n) rowMatched = new Array[Boolean](n) else java.util.Arrays.fill(rowMatched, 0, n, false)
+    evaluateCondition(ctx, cond, count)
+    var p = 0
+    while (p < count) { if (passed(p)) rowMatched(probeIdx(p)) = true; p += 1 }
+    if (isSemiOrAnti) {
+      val sel = ctx.bitmap()
+      val wantMatch = spec.joinType == LeftSemi
+      i = 0
+      while (i < n) {
+        if (selected(ctx, i) && rowMatched(i) == wantMatch) Bitmap.set(sel, i)
+        i += 1
+      }
+      compactStreamed(ctx, sel)
+    } else emitOuterConditional(ctx, count)
+  }
+
+  /** Fills `passed(0 until count)`: the condition over the gathered candidate pairs, chunk by chunk. */
+  private def evaluateCondition(ctx: EvalContext, cond: VectorExpr, count: Int): Unit = {
+    var from = 0
+    while (from < count) {
+      val to = math.min(count, from + OutputBatchSize)
+      val joined = gather(ctx, spec.joinedAttrs, probeIdx, buildIdx, from, to)
+      try {
+        EvalContexts.withBatch(joined) { jctx =>
+          val (sel, _) = VectorExpr.selection(cond.eval(jctx), jctx)
+          var j = 0
+          while (j < to - from) { passed(from + j) = Bitmap.isSet(sel, j); j += 1 }
+        }
+      } finally joined.close()
+      from = to
+    }
+  }
+
+  /**
+   * Outer joins with a condition: per streamed row, its passing pairs, or one null-padded pair
+   * when it matched no candidate (whether it had none or they all failed the condition).
+   */
+  private def emitOuterConditional(ctx: EvalContext, count: Int): Unit = {
+    val n = ctx.numRows
+    if (outProbeIdx.length < count + n) {
+      outProbeIdx = new Array[Int](count + n)
+      outBuildIdx = new Array[Int](count + n)
+    }
+    var w = 0
+    var p = 0
+    var i = 0
+    while (i < n) {
+      if (selected(ctx, i)) {
+        if (rowMatched(i)) {
+          while (p < count && probeIdx(p) == i) {
+            if (passed(p)) {
+              outProbeIdx(w) = i
+              outBuildIdx(w) = buildIdx(p)
+              if (buildMatched != null) buildMatched(buildIdx(p)) = true
+              w += 1
+            }
+            p += 1
+          }
+        } else {
+          while (p < count && probeIdx(p) == i) p += 1
+          outProbeIdx(w) = i
+          outBuildIdx(w) = -1
+          w += 1
+        }
+      }
+      i += 1
+    }
+    if (w > 0) flush(ctx, outProbeIdx, outBuildIdx, w, filter = false)
+  }
+
+  /** Full outer join: the build rows no streamed row was ever paired with, streamed side null. */
+  private def emitUnmatchedBuild(): Unit = {
+    var count = 0
+    var r = 0
+    while (r < build.numRows) {
+      if (!buildMatched(r)) count = append(count, -1, r)
+      r += 1
+    }
+    var from = 0
+    while (from < count) {
+      val to = math.min(count, from + OutputBatchSize)
+      val columns = new Array[ColumnVector](spec.outputAttrs.length)
+      var c = 0
+      while (c < columns.length) {
+        val (name, dt) = spec.outputAttrs(c)
+        columns(c) =
+          if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), buildIdx, from, to, allocator)
+          else ArrowOutput.nulls(name, dt, to - from, allocator)
+        c += 1
+      }
+      pending.add(new ColumnarBatch(columns, to - from))
+      from = to
+    }
   }
 
   private def append(count: Int, probe: Int, buildRow: Int): Int = {
@@ -416,32 +577,33 @@ private[vector] class VectorHashJoinIterator(
     count + 1
   }
 
-  /** Gathers the matches into output batches of at most [[OutputBatchSize]] rows. */
-  private def flush(ctx: EvalContext, count: Int): Unit = {
+  // Joined rows are left ++ right; which of the two is the build side depends on buildSide.
+  private def isBuildColumn(c: Int): Boolean = if (spec.buildIsLeft) c < numBuildCols else c >= streamedWidth
+  private def buildOrdinal(c: Int): Int = if (spec.buildIsLeft) c else c - streamedWidth
+  private def streamedOrdinal(c: Int): Int = if (spec.buildIsLeft) c - numBuildCols else c
+
+  /** Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). */
+  private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int): ColumnarBatch = {
+    val columns = new Array[ColumnVector](attrs.length)
+    var c = 0
+    while (c < columns.length) {
+      val (name, dt) = attrs(c)
+      columns(c) =
+        if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
+        else ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
+      c += 1
+    }
+    new ColumnarBatch(columns, to - from)
+  }
+
+  /** Gathers `count` pairs into output batches of at most [[OutputBatchSize]] rows. */
+  private def flush(ctx: EvalContext, probe: Array[Int], bld: Array[Int], count: Int, filter: Boolean): Unit = {
     var from = 0
     while (from < count) {
       val to = math.min(count, from + OutputBatchSize)
-      val columns = new Array[ColumnVector](spec.outputAttrs.length)
-      var c = 0
-      while (c < columns.length) {
-        val (name, dt) = spec.outputAttrs(c)
-        // Output order is left ++ right; which of the two is the build side depends on buildSide.
-        val fromBuild = if (spec.buildIsLeft) c < numBuildCols else c >= streamedWidth
-        columns(c) =
-          if (fromBuild) {
-            val bc = if (spec.buildIsLeft) c else c - streamedWidth
-            ArrowOutput.gather(name, dt, build.columns(bc), buildIdx, from, to, allocator)
-          } else {
-            val sc = if (spec.buildIsLeft) c - numBuildCols else c
-            ArrowOutput.gather(name, dt, ctx.input(sc), probeIdx, from, to, allocator)
-          }
-        c += 1
-      }
-      val joined = new ColumnarBatch(columns, to - from)
-      spec.condition match {
-        case Some(cond) => filtered(joined, cond).foreach(pending.add)
-        case None => pending.add(joined)
-      }
+      val joined = gather(ctx, spec.outputAttrs, probe, bld, from, to)
+      if (filter) filtered(joined, spec.condition.get).foreach(pending.add)
+      else pending.add(joined)
       from = to
     }
   }
@@ -499,23 +661,22 @@ object VectorJoinPlanner {
   def compileCondition(cond: Expression, output: Seq[Attribute]): Either[String, VectorExpr] =
     ExpressionCompiler.compilePredicate(cond, output)
 
-  private def supportedType(joinType: JoinType, condition: Option[Expression], buildSide: BuildSide): Either[String, Unit] = joinType match {
-    case _: InnerLike => Right(())
-    case LeftOuter | LeftSemi | LeftAnti if buildSide == BuildRight =>
-      if (condition.isDefined) Left(s"$joinType with a non-equi condition not supported") else Right(())
-    case RightOuter if buildSide == BuildLeft =>
-      if (condition.isDefined) Left("right outer join with a non-equi condition not supported") else Right(())
+  private def supportedType(joinType: JoinType, buildSide: BuildSide): Either[String, Unit] = joinType match {
+    case _: InnerLike | FullOuter => Right(())
+    case LeftOuter | LeftSemi | LeftAnti if buildSide == BuildRight => Right(())
+    case RightOuter if buildSide == BuildLeft => Right(())
     case other => Left(s"join type $other with build side $buildSide not supported")
   }
 
   private def check(
       leftKeys: Seq[Expression], rightKeys: Seq[Expression], joinType: JoinType, buildSide: BuildSide,
-      condition: Option[Expression], left: SparkPlan, right: SparkPlan, output: Seq[Attribute]): Either[String, Unit] = {
+      condition: Option[Expression], left: SparkPlan, right: SparkPlan): Either[String, Unit] = {
     if (leftKeys.isEmpty) Left("join without equi-join keys")
-    else supportedType(joinType, condition, buildSide).flatMap { _ =>
+    else supportedType(joinType, buildSide).flatMap { _ =>
       val keyFailures = leftKeys.flatMap(k => compileKey(k, left.output).left.toOption) ++ rightKeys.flatMap(k => compileKey(k, right.output).left.toOption)
       if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))
-      else condition.map(c => compileCondition(c, output).map(_ => ())).getOrElse(Right(()))
+      // The condition sees both sides, whatever the join type outputs.
+      else condition.map(c => compileCondition(c, left.output ++ right.output).map(_ => ())).getOrElse(Right(()))
     }
   }
 
@@ -523,7 +684,7 @@ object VectorJoinPlanner {
     if (j.isNullAwareAntiJoin) Left("null-aware anti join not supported")
     else {
       val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
-      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, v.output).map(_ => v)
+      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
     }
   }
 
@@ -531,7 +692,7 @@ object VectorJoinPlanner {
     if (j.isSkewJoin) Left("skew join not supported")
     else {
       val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
-      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, v.output).map(_ => v)
+      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
     }
   }
 }

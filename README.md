@@ -216,7 +216,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Arithmetic | `+ - *` on Int/Long/Double/Decimal, `/` on Double and Decimal (Spark's half-up rounding; null or ANSI error past the precision), unary minus, widening casts, casts between decimals, integers and doubles, literal columns | ANSI integer arithmetic, `%`, decimal results above 18 digits, other casts |
 | Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `min`, `max`, `avg` in Partial and Final mode; `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal | `DISTINCT`, `FILTER` (Partial), double keys, PartialMerge/Complete modes, wider decimal sums, other functions |
 | Sort | `SORT BY`/`ORDER BY` over a columnar child, every supported type as key, in memory | sorts over Spark's row shuffle (kept by Spark), spilling |
-| Joins | broadcast and shuffled hash joins: inner, left/right outer, left semi, left anti; keys of Int/Long/Boolean/String/Date/Decimal; a non-equi condition on inner joins | sort-merge joins, full outer, existence and null-aware anti joins, double keys, outer joins with a non-equi condition |
+| Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti, each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
 
 ## Benchmarks
 
@@ -356,7 +356,11 @@ Final aggregate it accepts exchanges as inputs, so it runs over Spark's row shuf
 the kernels, looks every row up in one pass, expands the match chains into two index arrays and
 gathers the output with `GatherKernels` (`-1` pads the unmatched rows of outer joins); semi and anti
 joins are a selection over the streamed batch, compacted once; an inner join's non-equi condition is
-evaluated on the joined batch and the failing rows compacted away. Null keys never match. Double
+evaluated on the joined batch and the failing rows compacted away. Semi, anti and outer joins with a
+condition gather the candidate pairs of each streamed row first, evaluate the condition over them
+and only then decide what the row becomes (kept or dropped, its passing pairs or one padded row);
+a full outer join remembers which build rows were paired and emits the rest after the last
+streamed batch. Null keys never match. Double
 keys are refused because Spark compares them after NaN/zero normalisation and the key table by bits.
 Sort-merge joins are not converted; with `spark.sql.join.preferSortMergeJoin=false` or a
 `SHUFFLE_HASH` hint Spark plans the hash join instead.

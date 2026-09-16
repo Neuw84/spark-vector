@@ -204,10 +204,17 @@ that pin it.
 - `VectorShuffledHashJoinExec` replaces `ShuffledHashJoinExec` and, like the Final aggregate, accepts
   exchanges (or their AQE stages) as inputs on types alone: Spark inserts `RowToColumnarExec` under
   us for its row shuffle. `ClusteredDistribution` on both sides, `PartitioningCollection` out.
-- Supported: inner, left/right outer, left semi, left anti; a non-equi condition on inner joins only
-  (evaluated on the joined batch, failing rows compacted). Refused with a reason: full outer,
-  existence, null-aware anti, skew joins, double keys (Spark normalises NaN/-0.0 before comparing,
-  the key table compares bits), outer joins with a condition. Sort-merge joins are not converted.
+- Supported: inner, left/right/full outer, left semi, left anti, each with an optional non-equi
+  condition. An inner join evaluates it on the joined batch and compacts the failing rows; semi,
+  anti and outer joins gather every candidate pair of a streamed row as the joined row (the
+  condition is compiled against `left ++ right`, not the operator's output), evaluate the condition
+  over the pairs and decide per row afterwards -- kept/dropped, or its passing pairs / one `-1`
+  padded row -- so a row whose candidates all fail is padded exactly like one with no candidate.
+  Full outer keeps a per-build-row matched flag and emits the unmatched build rows, streamed side
+  null (`ArrowOutput.nulls`), after the input is exhausted; build rows with a null key are never in
+  the table and so always come out there. Refused with a reason: existence, null-aware anti, skew
+  joins, double keys (Spark normalises NaN/-0.0 before comparing, the key table compares bits).
+  Sort-merge joins are not converted.
 - Both joins are `VectorBinaryExec`; `VectorPlan` is the base the rule, selection marking, Comet
   bridging and the UI classify on.
 
@@ -373,7 +380,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 104 kernel tests, 117 Spark tests (90 without the Comet and Iceberg profiles;
+Current counts: 104 kernel tests, 120 Spark tests (93 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
