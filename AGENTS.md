@@ -143,7 +143,11 @@ that pin it.
   zero-copy with `MemorySegment.ofAddress(...).reinterpret(size)`, and so are the fixed-width
   columns of Spark's own `OffHeapColumnVector` (`spark.sql.columnVector.offheap.enabled=true`,
   no dictionary) -- `SparkColumnVectorBuffers.wrappedOffHeapColumns()` counts them; strings and
-  dictionaries still take the copy. `docs/operators.md` "Scan compatibility" is the matrix.
+  dictionaries still take the copy. `docs/operators.md` "Scan compatibility" is the matrix. A cached
+  table is a columnar input only when Spark's `DefaultCachedBatchSerializer` says so, and it decides on
+  the cached relation's *whole* schema: boolean/byte/short/int/long/float/double only, so a string or
+  date column anywhere in the cache makes `InMemoryTableScanExec` a row scan whatever is projected
+  (#55 level 2, an Arrow `CachedBatchSerializer`, would lift that).
 - Dictionary-encoded strings stay dictionary encoded end to end: the Spark adapter forwards
   Parquet dictionary indices, the filter compacts int32 indices and copies the small dictionary,
   `VectorDictionaryColumnVector` lets Spark's row conversion read them, and the aggregate hashes
@@ -496,7 +500,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 201 Spark tests (174 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 204 Spark tests (177 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

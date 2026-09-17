@@ -72,6 +72,8 @@ accepts a scan when `supportsColumnar` holds and every output column has a lane 
 | Parquet with a nested column (struct, array, map) in the scan output | Spark 4's nested vectorized reader keeps the scan columnar, but the column has no lane, so the operator above falls back; prune the nested column and the rest converts (#19 will carry such columns through) | `unsupported column type <type> for <name>` |
 | Wide decimals (precision > 18) in the scan output | Columnar in Spark, refused here (#28) | `unsupported column type decimal(p,s) for <name>` |
 | ORC, vectorized reader (the default) | Columnar input through the adapter seam's generic copy (`OrcColumnVector` is read through the `ColumnVector` getters) | -- |
+| Cached table (`CACHE TABLE`, `df.cache()`) whose **whole cached relation** is boolean/byte/short/int/long/float/double | Columnar input (#55, level 1): `InMemoryTableScanExec` decompresses Spark's `CachedBatch`es into on-heap batches, copied once per batch like a Parquet scan; our operators sit directly on the scan. Pinned by `VectorCacheSuite` | -- |
+| Cached table with a string, date, timestamp, decimal or nested column **anywhere in the cached relation** (or `spark.sql.inMemoryColumnarStorage.enableVectorizedReader=false`) | A row scan: Spark's `DefaultCachedBatchSerializer.supportsColumnarOutput` is decided on the relation's full schema, not the projected columns, and only admits the primitive types above. Nothing above it converts until a shuffle. Caching in a format of our own (an Arrow `CachedBatchSerializer`, level 2 of #55) is the way to lift this | `child Scan In-memory table <name> is not columnar` / `child InMemoryTableScan is not columnar` |
 | CSV, JSON, text, Avro, JDBC | Row-based readers; out of scope | `child <op> is not columnar` |
 | Comet's native scan, Iceberg's `BatchScanExec` | Columnar input, zero-copy through the registered adapters (see docs/comet.md, docs/iceberg.md) | -- |
 | Any other DSv2 columnar source | Columnar input, copied once per batch (#88) | -- |
@@ -83,7 +85,7 @@ Tracked issues, in the order they unblock TPC-H:
 | Spark operator | Issue | What is missing |
 |---|---|---|
 | `SortMergeJoinExec` | #10 | Not converted; Spark's default for large equi-joins |
-| `InMemoryTableScanExec` (cached tables) | #55 | Not accepted as a columnar input |
+| `InMemoryTableScanExec` -- cache in our own format | #55 (level 2) | An Arrow `CachedBatchSerializer` (`spark.sql.cache.serializer`) so cached strings, dates, timestamps and decimals come out columnar with no decompression; level 1 (consuming Spark's columnar cache output) is done, see "Scan compatibility". Measure Spark's compression trade-off before deciding |
 | `SortAggregateExec` | `VectorHashAggregateExec` (+ `VectorSortExec`) | Spark plans a sort-based aggregate when a buffer holds a string (`min`/`max`/`first`/`last`/`max_by` over strings), which an `UnsafeRow` cannot mutate; our group table has no such limit, so the same hash operator is built from the identical fields. Two contracts kept: the sort Spark placed below is dropped when it is exactly the required one, and a result-emitting stage keeps Spark's output ordering (the grouping keys ascending) through a `VectorSortExec` above, since parents were planned on it. | `spark.vector.exec.aggregate.enabled` | As `HashAggregateExec` |
 | `ObjectHashAggregateExec` | #57 | Not converted (`collect_list`, `percentile_approx` and the other `TypedImperativeAggregate`s) |
 | `WindowExec`, `WindowGroupLimitExec` | #58 | Not converted |
