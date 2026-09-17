@@ -62,13 +62,13 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       }
       val converted = plan.transformUp {
         case f @ FilterExec(condition, child) if VectorConf.filterEnabled(conf) =>
-          columnarInputReason(child).orElse(filterReason(f)) match {
+          forwardingInputReason(child).orElse(filterReason(f)) match {
             case Some(reason) => fallback(f, reason)
             case None => VectorFilterExec(condition, child)
           }
 
         case p @ ProjectExec(projectList, child) if VectorConf.projectEnabled(conf) =>
-          columnarInputReason(child).orElse(projectReason(p)) match {
+          forwardingInputReason(child).orElse(projectReason(p)) match {
             case Some(reason) => fallback(p, reason)
             case None => VectorProjectExec(projectList, child)
           }
@@ -326,6 +326,15 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   }
 
   /**
+   * The input of an operator that forwards its child's columns without reading them all (filter,
+   * project): a column of a type the kernels have no lane for is passed through as Spark's own vector
+   * (see [[VectorProjectExec]]), so only the columnar contract is required here; an expression that
+   * reads such a column is refused by the compiler with the type named.
+   */
+  private def forwardingInputReason(plan: SparkPlan): Option[String] =
+    if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar") else None
+
+  /**
    * A join input that is an exchange (or its adaptive stage) is accepted on types alone, like the
    * Final aggregate's input: Spark inserts RowToColumnarExec below us when the shuffle is row based.
    */
@@ -370,7 +379,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
   /** Why a projection would not compile over its child's output (an expression, an output type), input aside. */
   private def projectReason(p: ProjectExec): Option[String] = {
-    val failures = p.projectList.flatMap { e =>
+    val failures = p.projectList.filterNot(VectorProjectExec.isPassThrough).flatMap { e =>
       val compiled = ExpressionCompiler.compile(e, p.child.output)
       val typeCheck =
         if (TypeMapping.isSupported(e.dataType)) Right(())

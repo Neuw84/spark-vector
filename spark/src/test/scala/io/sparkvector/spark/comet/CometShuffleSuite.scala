@@ -49,6 +49,9 @@ class CometShuffleSuite extends VectorQuerySuite {
     super.beforeAll()
     TestTables.createMixed(spark, newTempPath("comet-shuffle/t"))
     TestTables.createLineitem(spark, newTempPath("comet-shuffle/lineitem"))
+    TestTables.mixedDataFrame(spark).selectExpr("i", "s", "named_struct('a', i, 'b', s) AS st")
+      .repartition(2).write.mode("overwrite").parquet(newTempPath("comet-shuffle/t_struct"))
+    spark.read.parquet(newTempPath("comet-shuffle/t_struct")).createOrReplaceTempView("t_struct")
   }
 
   private def cometExchanges(plan: SparkPlan): Seq[SparkPlan] = PlanUtils.allNodes(plan).filter(CometShuffle.isCometExchange)
@@ -111,6 +114,13 @@ class CometShuffleSuite extends VectorQuerySuite {
       val ranges = cometExchanges(finalPlan(plain)).filter(_.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning])
       assert(ranges.forall(e => !e.children.head.isInstanceOf[VectorToCometExec]), finalPlan(plain).treeString)
     }
+  }
+
+  test("a passed-through nested column keeps the exchange off the bridge", CometTest) {
+    // A struct has no lane and cannot cross the C Data interface: the project is ours, the shuffle above it is not bridged.
+    val df = checkVectorized("SELECT st, i + 1 AS n FROM t_struct WHERE i % 3 = 0 DISTRIBUTE BY i", Seq.empty)
+    assert(nodesOf[VectorToCometExec](df).isEmpty, finalPlan(df).treeString)
+    assertNoLeak()
   }
 
   test("bridge can be disabled, leaving Comet's row-based columnar shuffle", CometTest) {

@@ -24,7 +24,7 @@ charvarchar.sql	143	5	6
 charvarchar.sql_analyzer_test	55	0	0
 collations-aliases.sql	51	0	0
 collations-aliases.sql_analyzer_test	19	0	0
-collations-basic.sql	173	3	4
+collations-basic.sql	173	5	6
 collations-basic.sql_analyzer_test	47	0	0
 collations-padding-trim.sql	72	2	2
 collations-padding-trim.sql_analyzer_test	17	0	0
@@ -258,15 +258,15 @@ postgreSQL/create_view.sql	363	2	2
 postgreSQL/create_view.sql_analyzer_test	186	0	0
 postgreSQL/date.sql	62	3	5
 postgreSQL/date.sql_analyzer_test	17	0	0
-postgreSQL/float4.sql	43	0	0
+postgreSQL/float4.sql	43	2	2
 postgreSQL/float4.sql_analyzer_test	7	0	0
 postgreSQL/float8.sql	104	21	32
 postgreSQL/float8.sql_analyzer_test	14	0	0
-postgreSQL/groupingsets.sql	70	18	64
+postgreSQL/groupingsets.sql	70	19	65
 postgreSQL/groupingsets.sql_analyzer_test	15	0	0
 postgreSQL/insert.sql	16	1	1
 postgreSQL/insert.sql_analyzer_test	7	0	0
-postgreSQL/int2.sql	42	0	0
+postgreSQL/int2.sql	42	1	1
 postgreSQL/int2.sql_analyzer_test	7	0	0
 postgreSQL/int4.sql	60	29	49
 postgreSQL/int4.sql_analyzer_test	7	0	0
@@ -277,7 +277,7 @@ postgreSQL/join.sql	2424	385	1068
 postgreSQL/join.sql_analyzer_test	723	0	0
 postgreSQL/limit.sql	13	9	18
 postgreSQL/limit.sql_analyzer_test	2	0	0
-postgreSQL/numeric.sql	1119	2	2
+postgreSQL/numeric.sql	1119	6	6
 postgreSQL/numeric.sql_analyzer_test	519	0	0
 postgreSQL/select.sql	43	20	27
 postgreSQL/select.sql_analyzer_test	6	1	1

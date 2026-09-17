@@ -603,7 +603,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 218 Spark tests (191 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 220 Spark tests (192 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -642,10 +642,19 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
 
 ## 7. Known gaps
 
-- Iceberg `MERGE INTO` itself is not accelerated: the rewritten plan projects
-  `monotonically_increasing_id()` (compiled, `MonotonicIdExpr`) and the struct `_partition` metadata
-  column above the target scan; the struct column (#19) is what makes that project fall back. Reads
-  over the merged table are.
+- Iceberg `MERGE INTO` itself is not accelerated: `MergeRows` and the write are Spark's (#21). The
+  project above the target scan (`monotonically_increasing_id()` as `MonotonicIdExpr`, plus the struct
+  `_partition` metadata column) is no longer refused for the struct since #19. Reads over the merged
+  table are.
+- Pass-through of columns without a lane (#19): `VectorColumnarRule.forwardingInputReason` (filter,
+  project) requires only a columnar child; `VectorProjectExec.isPassThrough` (a bare
+  `AttributeReference` or an `Alias` of one) is never compiled and becomes a `ColumnRef` of the
+  column's own type. Dense batches borrow Spark's vector (`BorrowedColumnVector` delegates every getter,
+  `getStruct` reads through `getChild`); a selection is applied to such a column with
+  `RemappedColumnVector` (row ids of the selection, shared by all foreign columns of the batch, children
+  remapped too) instead of `ArrowOutput.compact`, in both iterators; the lanes stay lazy, so a foreign
+  column never reaches `ColumnVectorAdapters`. Everything above still judges by `typeReason`, and the
+  Comet bridge's `bridgeable` already refuses a child output the C Data interface cannot carry.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

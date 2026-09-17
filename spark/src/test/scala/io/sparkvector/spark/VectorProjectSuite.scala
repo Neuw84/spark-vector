@@ -2,6 +2,7 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 
+import org.apache.spark.sql.execution.{ColumnarToRowExec, RowToColumnarExec}
 import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 class VectorProjectSuite extends VectorQuerySuite {
@@ -25,6 +26,52 @@ class VectorProjectSuite extends VectorQuerySuite {
       .mode("overwrite")
       .parquet(tsPath)
     spark.read.parquet(tsPath).createOrReplaceTempView("ts")
+    // Columns with no lane -- a struct, an array, a map, a wide decimal -- beside ordinary ones.
+    val nestedPath = newTempPath("project/nested")
+    TestTables
+      .mixedDataFrame(spark, 6000)
+      .selectExpr(
+        "i", "l", "s",
+        "if(i % 11 = 4, null, named_struct('a', i, 'b', s, 'c', named_struct('d', l))) AS st",
+        "if(i % 13 = 6, null, array(i, i + 1, l)) AS arr",
+        "if(i % 17 = 2, null, map(coalesce(s, 'none'), l, 'k', cast(i AS bigint))) AS mp",
+        "if(i % 19 = 7, null, cast(l AS decimal(30, 4)) * 1000000000000) AS wide")
+      .repartition(2)
+      .write
+      .mode("overwrite")
+      .parquet(nestedPath)
+    spark.read.parquet(nestedPath).createOrReplaceTempView("nested")
+  }
+
+  test("columns with no lane pass through the project and filter as Spark's vectors, dense or under a selection") {
+    def noRowConversion(df: org.apache.spark.sql.DataFrame): Unit = {
+      assert(nodesOf[RowToColumnarExec](df).isEmpty, finalPlan(df).treeString)
+      assert(nodesOf[ColumnarToRowExec](df).size == 1, finalPlan(df).treeString)
+    }
+    // Dense: the struct, array, map and wide decimal ride beside a computed column; renamed too.
+    noRowConversion(checkVectorized("SELECT i, i + 1 AS j, st, arr, mp, wide, st AS again FROM nested", Seq(Project)))
+    // A selection the project applies (the filter below keeps it: enough rows survive), and one the filter
+    // compacts itself (sparse): the foreign columns are remapped, their nested fields included.
+    noRowConversion(checkVectorized("SELECT i, upper(s) AS us, st, arr, mp, wide FROM nested WHERE i % 3 = 0", Seq(Filter, Project)))
+    noRowConversion(checkVectorized("SELECT i, st, mp FROM nested WHERE i % 97 = 5 OR l IS NULL", Seq(Filter, Project)))
+    noRowConversion(checkVectorized("SELECT st, arr, wide FROM nested WHERE i > 5990", Seq(Filter)))
+    // A filter alone forwards them; every row surviving passes the batch through.
+    noRowConversion(checkVectorized("SELECT i, st, arr, mp, wide FROM nested WHERE i >= 0", Seq(Filter)))
+    // The rows read back through the foreign vectors are Spark's, field by field.
+    val fields = withPlugin(enabled = true) {
+      spark.sql("SELECT i, st, arr, mp, wide FROM nested WHERE i % 5 = 1 AND i < 400").collect()
+        .map(r => (r.getInt(0), String.valueOf(r.get(1)), String.valueOf(r.get(2)), String.valueOf(r.get(3)), String.valueOf(r.get(4)))).toSeq
+    }
+    val expected = withPlugin(enabled = false) {
+      spark.sql("SELECT i, st, arr, mp, wide FROM nested WHERE i % 5 = 1 AND i < 400").collect()
+        .map(r => (r.getInt(0), String.valueOf(r.get(1)), String.valueOf(r.get(2)), String.valueOf(r.get(3)), String.valueOf(r.get(4)))).toSeq
+    }
+    assert(fields.sortBy(_._1) == expected.sortBy(_._1))
+    // Reading into such a column is still refused, with the type or expression named; so is grouping by it.
+    checkFallback("SELECT i, st.a AS a FROM nested", Seq(Project), "st")
+    checkFallback("SELECT i FROM nested WHERE st.a > 5", Seq(Filter), "st")
+    checkFallback("SELECT st, count(*) AS n FROM nested GROUP BY st", Seq(classOf[VectorHashAggregateExec]), "unsupported column type struct")
+    checkFallback("SELECT wide + 1 AS w FROM nested", Seq(Project), "18 digits")
   }
 
   test("date fields, truncation and arithmetic over date columns") {

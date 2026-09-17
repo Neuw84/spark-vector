@@ -53,7 +53,9 @@ class VectorUnknownSourceSuite extends VectorQuerySuite {
     checkVectorized("SELECT year(dt) AS y, hour(ts) AS h, dec + 1 AS d1, length(s) AS ls FROM u WHERE i < 100", Seq(Filter, Project))
   }
 
-  test("a struct column makes the operator fall back with the type reason, until #19") {
-    checkFallback("SELECT i, st.a AS a FROM u_struct WHERE i > 10", Seq(Filter), "unsupported column type struct<a:int> for st")
+  test("a struct column from a foreign source passes through the filter as the source's vector; reading into it falls back") {
+    val df = checkFallback("SELECT i, st.a AS a FROM u_struct WHERE i > 10", Seq(classOf[org.apache.spark.sql.vector.VectorProjectExec]), "st")
+    assert(nodesOf[VectorFilterExec](df).nonEmpty, finalPlan(df).treeString)
+    checkVectorized("SELECT i, st FROM u_struct WHERE i > 10", Seq(Filter))
   }
 }
