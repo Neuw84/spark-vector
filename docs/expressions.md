@@ -29,9 +29,13 @@ result of such a type `unsupported output type <type> for <name>`, whatever the 
 decimals are the usual reason in practice (see the TPC-H decimal measurement in
 [docs/results.md](results.md) and #26 / #27 / #28).
 
-**Literals** are compiled only as operands of a supported type: `int`, `bigint`, `double`, `date`,
-`timestamp`, `decimal(p <= 18)`, `string`. A `boolean` literal records `unsupported literal type
-boolean`; a `NULL` literal `null literal`. An expression made only of literals is
+**Literals** are compiled as operands of a supported type: `int`, `bigint`, `double`, `date`,
+`timestamp`, `decimal(p <= 18)`, `string`. A typed `NULL` literal (`CAST(NULL AS INT)`, the `NULL AS col`
+a union coerces) of any lane type is an all-invalid column (`NullLiteralExpr`); the operators that need a
+*value* literal -- comparison operands, `IN` lists, string arguments -- refuse a null there with their own
+reason. A `boolean` literal records `unsupported literal type boolean` by design: booleans are bitmaps,
+and every predicate over a boolean literal (`b = true`, `<=>`) takes a dedicated path before compiling
+it. An expression made only of literals is
 refused where it would be pointless as a kernel (`comparison of two literals`, `arithmetic on two
 literals`, `cast of a literal`, `literal predicate`, ...) -- Spark's optimizer normally folds those away
 before we see them; a bare literal projection (`SELECT 1 FROM t`) is supported and materialised as a
@@ -48,7 +52,7 @@ matching Spark's short-circuit behaviour.
 |---|---|---|
 | Column reference (`AttributeReference`, `BoundReference`) | all lanes | `unbound attribute <name>` if the attribute is not in the operator's input; `unsupported type <type> for <name>` otherwise |
 | `Alias` | any | Transparent |
-| Literal | INT32, INT64, FLOAT64, date, timestamp, decimal(<=18), string | Operand only, or a whole projected column (a string literal becomes a constant UTF8 column). `unsupported literal type <type>`, `null literal` |
+| Literal | INT32, INT64, FLOAT64, date, timestamp, decimal(<=18), string; a typed `NULL` of any lane type | Operand, a whole projected column (a string literal becomes a constant UTF8 column; a typed null an all-invalid one), or a result column beside aggregates (`'store' AS channel, sum(...)`). `unsupported literal type <type>` (boolean, binary, ...), `null literal of <type>` for a type without a lane |
 | `=` `<` `<=` `>` `>=` and `!=` / `<>` (`Not(EqualTo)`) | INT32, INT64, FLOAT64 (incl. date, timestamp, decimal(<=18) as their lane), UTF8 | Operands must have the **same** Spark type -- Spark's coercion inserts casts, which then have to compile (see Cast): `comparison operands differ: <t1> vs <t2>`. Strings compare in Spark's default `UTF8_BINARY` order (unsigned byte-wise, a prefix first) against a literal or another string column; a dictionary-encoded column is compared once per dictionary entry. Booleans: `comparison not supported for boolean` (#32). Doubles compare with Spark's ordering (NaN equal to NaN and greatest, `-0.0 == 0.0`); `KnownFloatingPointNormalized` / `NormalizeNaNAndZero` wrappers are identities. |
 | `IN (v1, ..., vN)` | any comparable lane incl. UTF8 | Every element must be a non-null literal of the value's type (`InExpr`: the value is evaluated once, one equality pass per literal, through the dictionary for dictionary-encoded strings). `NULL in IN list`, `IN list is not all literals`, `IN operands differ: ...`, `IN over a literal`, `empty IN list`; above `spark.sql.optimizer.inSetConversionThreshold` literals Spark rewrites to `InSet` -- see its row |
 | `InSet` (an `IN` list above `spark.sql.optimizer.inSetConversionThreshold`, 10 by default) | INT32, INT64, FLOAT64 (incl. date, decimal(<=18) as their lane), UTF8 | `InSetExpr` over `PredicateKernels.inSet`: the set's values sorted once at compile time, one binary search per row; doubles are matched on their bit images, which is Spark's boxed-set semantics (NaN matches NaN, `-0.0` does not match `0.0`). Strings take the `IN` path above (one equality pass per element, through the dictionary). `NULL in IN set` (Spark's result is then null for non-members), `IN not supported for <type>` |
@@ -162,7 +166,6 @@ the remaining reasons on the aggregate's inputs.
 | `CheckOverflow` and the internal decimal family | #49 |
 | Nested-type accessors (struct field, array element, map value) | #50 |
 | A row-based escape hatch for expressions with no kernel, including Scala UDFs | #51 |
-| Structural audit: literals, aliases, sort orders, `CASE WHEN` shapes | #52 |
 
 ## Not planned
 

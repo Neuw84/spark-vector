@@ -386,6 +386,28 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT try_sum(CAST(l AS DECIMAL(12, 2))) AS a FROM t", Seq(classOf[VectorHashAggregateExec]), "try_sum over a decimal")
   }
 
+  test("structural: literals of every type, typed nulls, aliases and reason texts") {
+    // Every literal type as a projected column, next to real columns and alone; typed nulls are all-invalid columns.
+    checkVectorized("SELECT 1 AS a, 12345678901L AS b, 1.5D AS c, DATE '2020-02-29' AS d1, TIMESTAMP '2020-02-29 12:34:56.789' AS e0, 'lit' AS f, CAST(2.50 AS DECIMAL(10, 2)) AS g, -7 AS h, i FROM t", Seq(Project))
+    checkVectorized("SELECT CAST(NULL AS INT) AS a, CAST(NULL AS BIGINT) AS b, CAST(NULL AS DOUBLE) AS c, CAST(NULL AS STRING) AS d1, CAST(NULL AS DATE) AS e0, CAST(NULL AS TIMESTAMP) AS f, CAST(NULL AS DECIMAL(10, 2)) AS g, i FROM t", Seq(Project))
+    checkVectorized("SELECT 1 AS a, 'x' AS b, CAST(NULL AS INT) AS c FROM t WHERE i > 5", Seq(Project, Filter))
+    // The nulls ordinary SQL leaves in expressions: nullif, a CASE branch, coalesce, if.
+    checkVectorized("SELECT nullif(i, 3) AS a, CASE WHEN i % 2 = 0 THEN NULL ELSE i END AS b, coalesce(CAST(NULL AS INT), i) AS c, if(b, NULL, s) AS d1, nullif(s, 's3') AS e0 FROM t", Seq(Project))
+    // Aliases: nested and over a subquery are transparent; an alias over an unsupported child reports the child's reason.
+    checkVectorized("SELECT x AS y, (y2 + 1) AS z FROM (SELECT i AS x, l AS y2 FROM t) sub", Seq(Project))
+    checkFallback("SELECT soundex(s) AS renamed FROM t", Seq(Project), "soundex")
+    // Boolean literals are deliberately not constant columns (predicates over them take other paths).
+    checkFallback("SELECT true AS b2 FROM t", Seq(Project), "unsupported literal type boolean")
+    // Fallback reasons name what they refused -- the strings the suites, the UI and docs/expressions.md quote.
+    val reasons = Seq(
+      "SELECT soundex(s) AS a FROM t" -> "soundex",
+      "SELECT cast(s AS BINARY) AS a FROM t" -> "binary",
+      "SELECT date_format(dt, CASE WHEN i % 2 = 0 THEN 'yyyy' ELSE 'MM' END) AS a FROM t" -> "date_format",
+      "SELECT try_cast(d AS DECIMAL(10, 2)) AS a FROM t" -> "try_cast",
+      "SELECT collate(s, 'UNICODE_CI') AS a FROM t" -> "ollat")
+    for ((sql, needle) <- reasons) checkFallback(sql, Seq(Project), needle)
+  }
+
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {
     // hash must be Spark's exact Murmur3 -- every supported type incl. nulls, NaN, -0.0, dates, timestamps, short decimals, several columns, a seed.
     checkVectorized("SELECT hash(i) AS a, hash(l) AS b, hash(d) AS c, hash(d2) AS d0, hash(b) AS e0, hash(s) AS f, hash(dt) AS g, hash(CAST(d2 AS DECIMAL(10, 2))) AS h, hash(i, l, s, b, d) AS j, hash(-0.0d * i) AS k FROM t", Seq(Project))

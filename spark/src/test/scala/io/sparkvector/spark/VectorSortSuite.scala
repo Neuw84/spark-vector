@@ -72,6 +72,9 @@ class VectorSortSuite extends VectorQuerySuite {
     checkVectorized("SELECT i, d FROM t SORT BY d * 2.0 + 1 DESC", Seq(Sort))
     checkVectorized("SELECT i, l FROM t SORT BY CAST(l AS DOUBLE) / 3", Seq(Sort))
     checkVectorized("SELECT i, l FROM t SORT BY i * 2 + 1", Seq(Sort))
+    // Expression keys of other families: a string built per row, a CASE, a cast, several at once.
+    checkVectorized("SELECT i, s FROM t SORT BY concat(s, '-', CAST(i % 7 AS STRING)) DESC, i", Seq(Sort))
+    checkVectorized("SELECT i, d2 FROM t SORT BY CASE WHEN d2 > 1 THEN -d2 ELSE d2 END, CAST(i AS BIGINT) * 3 DESC", Seq(Sort))
   }
 
   test("global sort over a Spark row shuffle stays with Spark") {
