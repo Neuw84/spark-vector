@@ -234,6 +234,22 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("length, octet_length, bit_length, ascii and chr") {
+    val m = "CASE WHEN i % 4 = 0 THEN 'héllo wörld' WHEN i % 4 = 1 THEN '日本語テキスト' WHEN i % 4 = 2 THEN '😀x😀y' ELSE s END"
+    // Every alias, over ASCII with nulls and over multi-byte text: code points vs bytes vs bits.
+    checkVectorized(s"SELECT length(s) AS a, len(s) AS b, char_length(s) AS c, character_length(s) AS d0, octet_length(s) AS e0, bit_length(s) AS f, length($m) AS g, octet_length($m) AS h, bit_length($m) AS j FROM t", Seq(Project))
+    // ascii: the first code point, 0 on the empty string, multi-byte first characters, nulls.
+    checkVectorized(s"SELECT ascii(s) AS a, ascii($m) AS b, ascii(CASE WHEN i % 5 = 0 THEN '' ELSE s END) AS c FROM t", Seq(Project))
+    // chr over ints and longs: negatives, 0, 128..255 as two-byte characters, n % 256 wrap; char alias.
+    checkVectorized("SELECT chr(i % 300) AS a, chr(i - 10) AS b, char(l % 512) AS c, chr(65 + i % 26) AS d0, chr(CAST(i AS BIGINT) * 100000) AS e0 FROM t", Seq(Project))
+    // In a filter, as a grouping key, nested in arithmetic and in the slicing functions.
+    checkVectorized("SELECT i FROM t WHERE length(s) = 3 AND ascii(s) = 115", Seq(Filter))
+    checkVectorized(s"SELECT length(s) AS k, count(*) AS n, sum(octet_length($m)) AS b FROM t GROUP BY length(s)", Seq(Project, classOf[VectorHashAggregateExec]))
+    checkVectorized(s"SELECT length($m) * 2 + bit_length(s) AS a, substring($m, length($m) - 1) AS b, lpad(s, length(s) + 2, chr(42)) AS c FROM t", Seq(Project))
+    // Declined: a binary subject (its length is bytes, not a lane), chr of a double.
+    checkFallback("SELECT length(CAST(s AS BINARY)) AS a FROM t", Seq(Project), "unsupported")
+  }
+
   test("substring, left/right, lpad/rpad, repeat, space, overlay write new strings") {
     // s is 's0'..'s49' with nulls; m mixes multi-byte text in (2- and 3-byte code points and a 4-byte emoji).
     val m = "CASE WHEN i % 4 = 0 THEN 'héllo wörld' WHEN i % 4 = 1 THEN '日本語テキスト' WHEN i % 4 = 2 THEN '😀x😀y' ELSE s END"
