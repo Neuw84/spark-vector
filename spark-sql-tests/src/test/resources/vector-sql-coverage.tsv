@@ -57,7 +57,7 @@ cte-legacy.sql_analyzer_test	1	0	0
 cte-nested.sql	21	4	8
 cte-nonlegacy.sql	14	4	8
 cte-nonlegacy.sql_analyzer_test	1	0	0
-cte-recursion.sql	1095	0	0
+cte-recursion.sql	1095	2	2
 cte-recursion.sql_analyzer_test	53	0	0
 cte.sql	130	2	2
 cte.sql_analyzer_test	8	0	0
@@ -115,7 +115,7 @@ group-by-filter.sql	397	335	715
 group-by-filter.sql_analyzer_test	27	0	0
 group-by-ordinal.sql	27	20	20
 group-by-ordinal.sql_analyzer_test	2	0	0
-group-by.sql	287	81	141
+group-by.sql	287	96	156
 group-by.sql_analyzer_test	29	0	0
 grouping_set.sql	20	13	13
 grouping_set.sql_analyzer_test	1	0	0
@@ -124,9 +124,9 @@ having.sql	50	31	77
 having.sql_analyzer_test	1	0	0
 higher-order-functions.sql	182	0	0
 higher-order-functions.sql_analyzer_test	11	0	0
-identifier-clause-legacy.sql	277	8	10
+identifier-clause-legacy.sql	277	9	11
 identifier-clause-legacy.sql_analyzer_test	129	4	6
-identifier-clause.sql	332	8	10
+identifier-clause.sql	332	11	15
 identifier-clause.sql_analyzer_test	143	4	6
 ilike-all.sql	14	0	0
 ilike-all.sql_analyzer_test	1	0	0
@@ -142,7 +142,7 @@ interval.sql	172	0	0
 interval.sql_analyzer_test	1	0	0
 join-empty-relation.sql	27	0	0
 join-empty-relation.sql_analyzer_test	3	0	0
-join-lateral.sql	152	30	81
+join-lateral.sql	152	33	113
 join-lateral.sql_analyzer_test	12	0	0
 join-resolution-edge-cases.sql	16	0	0
 join-resolution-edge-cases.sql_analyzer_test	4	0	0
@@ -237,7 +237,7 @@ parse-query-correctness.sql_analyzer_test	31	1	2
 parse-schema-string.sql	4	0	0
 percentiles.sql	33	0	0
 percentiles.sql_analyzer_test	5	0	0
-pipe-operators.sql	312	32	39
+pipe-operators.sql	312	43	59
 pipe-operators.sql_analyzer_test	28	0	0
 pivot.sql	26	12	12
 pivot.sql_analyzer_test	3	0	0
@@ -262,7 +262,7 @@ postgreSQL/float4.sql	43	0	0
 postgreSQL/float4.sql_analyzer_test	7	0	0
 postgreSQL/float8.sql	104	21	32
 postgreSQL/float8.sql_analyzer_test	14	0	0
-postgreSQL/groupingsets.sql	70	18	58
+postgreSQL/groupingsets.sql	70	18	64
 postgreSQL/groupingsets.sql_analyzer_test	15	0	0
 postgreSQL/insert.sql	16	1	1
 postgreSQL/insert.sql_analyzer_test	7	0	0
@@ -273,7 +273,7 @@ postgreSQL/int4.sql_analyzer_test	7	0	0
 postgreSQL/int8.sql	89	54	59
 postgreSQL/int8.sql_analyzer_test	7	0	0
 postgreSQL/interval.sql	14	0	0
-postgreSQL/join.sql	2424	383	1053
+postgreSQL/join.sql	2424	385	1068
 postgreSQL/join.sql_analyzer_test	723	0	0
 postgreSQL/limit.sql	13	9	18
 postgreSQL/limit.sql_analyzer_test	2	0	0
@@ -295,11 +295,11 @@ postgreSQL/timestamp.sql	45	13	28
 postgreSQL/timestamp.sql_analyzer_test	15	0	0
 postgreSQL/union.sql	73	45	82
 postgreSQL/union.sql_analyzer_test	3	0	0
-postgreSQL/window_part1.sql	152	49	73
+postgreSQL/window_part1.sql	152	70	172
 postgreSQL/window_part1.sql_analyzer_test	23	0	0
 postgreSQL/window_part2.sql	113	3	3
 postgreSQL/window_part2.sql_analyzer_test	23	0	0
-postgreSQL/window_part3.sql	86	3	3
+postgreSQL/window_part3.sql	86	6	6
 postgreSQL/window_part3.sql_analyzer_test	32	0	0
 postgreSQL/window_part4.sql	119	0	0
 postgreSQL/window_part4.sql_analyzer_test	5	0	0
@@ -336,7 +336,7 @@ sql-on-files.sql	30	0	0
 sql-on-files.sql_analyzer_test	16	0	0
 sql-session-variables.sql	381	4	6
 sql-session-variables.sql_analyzer_test	168	0	0
-sql-udf.sql	815	39	52
+sql-udf.sql	815	40	54
 sql-udf.sql_analyzer_test	342	0	0
 st-functions.sql	40	22	22
 st-functions.sql_analyzer_test	4	0	0
@@ -358,11 +358,11 @@ subquery/exists-subquery/exists-having.sql	11	3	9
 subquery/exists-subquery/exists-having.sql_analyzer_test	3	0	0
 subquery/exists-subquery/exists-in-join-condition.sql	50	0	0
 subquery/exists-subquery/exists-in-join-condition.sql_analyzer_test	3	0	0
-subquery/exists-subquery/exists-joins-and-set-ops.sql	282	84	240
+subquery/exists-subquery/exists-joins-and-set-ops.sql	282	84	252
 subquery/exists-subquery/exists-joins-and-set-ops.sql_analyzer_test	57	0	0
 subquery/exists-subquery/exists-orderby-limit.sql	104	9	12
 subquery/exists-subquery/exists-orderby-limit.sql_analyzer_test	14	0	0
-subquery/exists-subquery/exists-outside-filter.sql	18	8	8
+subquery/exists-subquery/exists-outside-filter.sql	18	10	12
 subquery/exists-subquery/exists-outside-filter.sql_analyzer_test	3	0	0
 subquery/exists-subquery/exists-within-and-or.sql	11	0	0
 subquery/exists-subquery/exists-within-and-or.sql_analyzer_test	3	0	0
@@ -376,7 +376,7 @@ subquery/in-subquery/in-having.sql	32	6	10
 subquery/in-subquery/in-having.sql_analyzer_test	8	0	0
 subquery/in-subquery/in-joins.sql	852	138	444
 subquery/in-subquery/in-joins.sql_analyzer_test	240	0	0
-subquery/in-subquery/in-limit.sql	88	8	24
+subquery/in-subquery/in-limit.sql	88	12	40
 subquery/in-subquery/in-limit.sql_analyzer_test	12	0	0
 subquery/in-subquery/in-multiple-columns.sql	24	2	2
 subquery/in-subquery/in-multiple-columns.sql_analyzer_test	8	0	0
@@ -420,9 +420,9 @@ subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	10
 subquery/scalar-subquery/scalar-subquery-count-bug.sql_analyzer_test	12	0	0
 subquery/scalar-subquery/scalar-subquery-group-by.sql	26	6	12
 subquery/scalar-subquery/scalar-subquery-group-by.sql_analyzer_test	8	0	0
-subquery/scalar-subquery/scalar-subquery-predicate.sql	67	31	138
+subquery/scalar-subquery/scalar-subquery-predicate.sql	67	34	155
 subquery/scalar-subquery/scalar-subquery-predicate.sql_analyzer_test	8	0	0
-subquery/scalar-subquery/scalar-subquery-select.sql	55	14	22
+subquery/scalar-subquery/scalar-subquery-select.sql	55	14	20
 subquery/scalar-subquery/scalar-subquery-select.sql_analyzer_test	11	0	0
 subquery/scalar-subquery/scalar-subquery-set-op.sql	56	32	91
 subquery/scalar-subquery/scalar-subquery-set-op.sql_analyzer_test	3	0	0
@@ -456,7 +456,7 @@ timezone.sql	16	1	1
 timezone.sql_analyzer_test	8	0	0
 to_from_avro.sql	11	0	0
 to_from_avro.sql_analyzer_test	6	0	0
-transform.sql	51	7	10
+transform.sql	51	8	12
 transform.sql_analyzer_test	5	0	0
 try-string-functions.sql	35	0	0
 try_aggregates.sql	32	10	10
@@ -500,7 +500,7 @@ typeCoercion/native/stringCastAndExpressions.sql	8	0	0
 typeCoercion/native/stringCastAndExpressions.sql_analyzer_test	1	0	0
 typeCoercion/native/widenSetOperationTypes.sql	75	34	34
 typeCoercion/native/widenSetOperationTypes.sql_analyzer_test	1	0	0
-typeCoercion/native/windowFrameCoercion.sql	22	0	0
+typeCoercion/native/windowFrameCoercion.sql	22	6	6
 typeCoercion/native/windowFrameCoercion.sql_analyzer_test	1	0	0
 udf/postgreSQL/udf-aggregates_part1.sql - Scala UDF	56	40	46
 udf/postgreSQL/udf-aggregates_part1.sql - Scala UDF_analyzer_test	2	0	0
@@ -526,7 +526,7 @@ udf/udf-except.sql - Scala UDF	11	7	11
 udf/udf-except.sql - Scala UDF_analyzer_test	2	0	0
 udf/udf-group-analytics.sql - Scala UDF	25	7	7
 udf/udf-group-analytics.sql - Scala UDF_analyzer_test	2	0	0
-udf/udf-group-by.sql - Scala UDF	43	5	6
+udf/udf-group-by.sql - Scala UDF	43	8	11
 udf/udf-group-by.sql - Scala UDF_analyzer_test	4	0	0
 udf/udf-having.sql - Scala UDF	6	0	0
 udf/udf-having.sql - Scala UDF_analyzer_test	1	0	0
@@ -548,7 +548,7 @@ udf/udf-udaf.sql - Scala UDF	11	0	0
 udf/udf-udaf.sql - Scala UDF_analyzer_test	5	0	0
 udf/udf-union.sql - Scala UDF	26	0	0
 udf/udf-union.sql - Scala UDF_analyzer_test	10	0	0
-udf/udf-window.sql - Scala UDF	16	0	0
+udf/udf-window.sql - Scala UDF	16	3	8
 udf/udf-window.sql - Scala UDF_analyzer_test	1	0	0
 union-per-child-output-deduplication.sql	20	0	0
 union-per-child-output-deduplication.sql_analyzer_test	6	0	0
@@ -578,8 +578,8 @@ view-schema-type-evolution.sql	104	3	3
 view-schema-type-evolution.sql_analyzer_test	48	0	0
 view-with-default-collation.sql	192	22	32
 view-with-default-collation.sql_analyzer_test	72	0	0
-window-with-aggregates.sql	9	7	8
-window.sql	346	0	0
+window-with-aggregates.sql	9	8	26
+window.sql	346	60	156
 window.sql_analyzer_test	40	0	0
 xml-functions.sql	22	0	0
 xml-functions.sql_analyzer_test	3	0	0

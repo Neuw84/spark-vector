@@ -293,7 +293,14 @@ that pin it.
   (`ArrowOutput.copy` / `compact`) until their last row's partition has ended. Decimal aggregates are
   refused: the Complete-mode decimal sum buffer is wide and `compileFinalResults`'s wide-sum shortcut
   assumes a merge emitted the result -- gate on #28. The two modes never mix in one operator (a ranking
-  function needs `ORDER BY`, whose default frame is `RANGE ... CURRENT ROW`).
+  function needs `ORDER BY`, whose default frame is `RANGE ... CURRENT ROW`). Layer 2b, running frames:
+  `VectorWindowPlanner.frameKind` (WholePartition / RunningRows / RunningRange); the iterator opens a group per
+  row or per peer group (`KeyTracker(orderKeys)`) and marks partition starts in a `BitSet`; `prefixOf(from, to)`
+  computes each group's running buffers from the previous group's (`lastPrefix`, `prefixDone`; a group
+  straddling two held batches is the one earlier group a later batch re-reads) with `prefixCombiners` --
+  `addLong` (ANSI `Math.addExact` -> `VectorErrors.arithmeticOverflow`), `addDouble`, `extreme` via
+  `Comparable` -- and `AggBufferColumns.values` lays them out for `compileFinalResults`. Functions without a
+  slot-wise prefix (first/last, stats, bit_*) are refused; an operator mixing two frame kinds is refused.
 - `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
   way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
   per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
@@ -569,7 +576,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 214 Spark tests (187 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 215 Spark tests (188 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
