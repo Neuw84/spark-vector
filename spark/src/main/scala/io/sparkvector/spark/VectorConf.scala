@@ -18,6 +18,8 @@ object VectorConf {
   val UnionEnabled = "spark.vector.exec.union.enabled"
   val CoalesceEnabled = "spark.vector.exec.coalesce.enabled"
   val ExpandEnabled = "spark.vector.exec.expand.enabled"
+  val SampleEnabled = "spark.vector.exec.sample.enabled"
+  val LocalTableScanEnabled = "spark.vector.exec.localTableScan.enabled"
   val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
   val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
@@ -47,6 +49,10 @@ object VectorConf {
   def coalesceEnabled(conf: SQLConf): Boolean = bool(conf, CoalesceEnabled, default = true)
   /** Convert ExpandExec (grouping sets, the distinct rewrite) over a columnar child. */
   def expandEnabled(conf: SQLConf): Boolean = bool(conf, ExpandEnabled, default = true)
+  /** Convert SampleExec without replacement over a columnar child (Spark's own Bernoulli sequence per partition). */
+  def sampleEnabled(conf: SQLConf): Boolean = bool(conf, SampleEnabled, default = true)
+  /** Convert LocalTableScanExec (`VALUES`, small local relations) into one batch per partition; off by default. */
+  def localTableScanEnabled(conf: SQLConf): Boolean = bool(conf, LocalTableScanEnabled, default = false)
   /** Convert BroadcastHashJoinExec over a columnar streamed side (the build side stays Spark's broadcast). */
   def broadcastHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, BroadcastHashJoinEnabled, default = true)
   /** Convert ShuffledHashJoinExec; over Spark's row shuffle both inputs go through RowToColumnarExec. */
