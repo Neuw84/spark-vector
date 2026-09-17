@@ -406,7 +406,7 @@ public final class CompactKernels {
         if (validity == null || Bitmap.isSet(validity, i)) {
           int start = off.get(VectorBuffers.LE_INT, (long) i << 2);
           int len = off.get(VectorBuffers.LE_INT, (long) (i + 1) << 2) - start;
-          MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, outData, ValueLayout.JAVA_BYTE, pos, len);
+          ByteCopy.copy(data, start, outData, pos, len);
           pos += len;
         }
         o++;
