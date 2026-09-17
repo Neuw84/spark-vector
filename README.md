@@ -287,6 +287,15 @@ benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1 spark,vector --queries
 benchmarks/scripts/run-tpcds.sh --report
 ```
 
+On a cluster the same runners take the session `spark-submit` built (`--cluster`), the tables from
+a base URI or a catalog (`--tables s3a://bucket/tpcds/sf1000/parquet`, `--tables catalog:db`), and
+write one `.jsonl` per run to any Hadoop file system (`--out s3a://...`), each row carrying Spark's
+stage metrics for the query (executor time, GC, shuffle bytes, spill, peak memory) beside the plan
+and the operator counts; `benchmarks/scripts/submit-cluster.sh <config> <tables> <dataset> <out>`
+turns a configuration into the `spark-submit` line, and `run-tpcds.sh --cluster-report <out>` writes
+the report in the layout of the data-on-EKS Comet benchmark (summary, speedup distribution,
+regressions with their stage evidence, per-query table, environment) -- see `benchmarks/k8s/README.md`.
+
 Each configuration runs in its own JVM and appends its measurements to
 `benchmarks/results/<config>.jsonl` (`benchmarks/results/tpcds/<config>.jsonl` for TPC-DS). The runner then rewrites two reports from every `.jsonl` file,
 one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` and a self-contained

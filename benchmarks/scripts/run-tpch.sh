@@ -4,6 +4,8 @@
 #
 #   benchmarks/scripts/run-tpch.sh <data-dir> [configs] [extra TpchRunner args...]
 #   benchmarks/scripts/run-tpch.sh --report          # only rewrite the reports
+#   benchmarks/scripts/run-tpch.sh --cluster-report <dir>   # the data-on-EKS-style report over a cluster run's rows
+#                                                           # (<dir> local or s3://..., see submit-cluster.sh)
 #
 #   data-dir  directory containing the table directories (see gen-tpch.sh); its basename (sf1, sf10) names
 #             the dataset section in the reports
@@ -22,11 +24,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DATA="${1:?usage: run-tpch.sh <data-dir> [configs] [extra args] | run-tpch.sh --report}"
+DATA="${1:?usage: run-tpch.sh <data-dir> [configs] [extra args] | run-tpch.sh --report | run-tpch.sh --cluster-report <dir>}"
 shift
+CLUSTER_REPORT=""
+if [ "$DATA" = "--cluster-report" ]; then
+  CLUSTER_REPORT="${1:?usage: run-tpch.sh --cluster-report <dir>}"
+  shift
+fi
 CONFIGS="${1:-}"
 if [ -n "${CONFIGS}" ]; then shift; fi
-if [ "$DATA" = "--report" ]; then
+if [ "$DATA" = "--report" ] || [ -n "$CLUSTER_REPORT" ]; then
   CONFIGS=""
 elif [ -z "$CONFIGS" ]; then
   CONFIGS="spark,vector"
@@ -79,4 +86,8 @@ for cfg in ${LIST[@]+"${LIST[@]}"}; do
     --config "$cfg" --data "$DATA" --threads "$THREADS" --out "$OUT" "$@"
 done
 
-"$JAVA" "${JVM_OPTS[@]}" -cp "$CP" "$RUNNER" --report "$OUT"
+if [ -n "$CLUSTER_REPORT" ]; then
+  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" "$RUNNER" --cluster-report "$CLUSTER_REPORT"
+else
+  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" "$RUNNER" --report "$OUT"
+fi

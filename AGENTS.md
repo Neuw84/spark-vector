@@ -47,6 +47,8 @@ benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.
 benchmarks/scripts/gen-tpcds.sh 1          # DuckDB dsdgen, 24 tables with real DECIMAL(7,2)/DATE columns, into benchmarks/data/tpcds-sf1
 benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1 spark,vector --queries q10,q35,q45   # results under benchmarks/results/tpcds
 benchmarks/scripts/profile-query.sh benchmarks/data/sf10 vector q6   # one query under a JFR recording + jfr-summary.sh (section 4.7)
+benchmarks/scripts/submit-cluster.sh vector s3a://bucket/tpcds/sf1000/parquet sf1000-parquet s3a://bucket/results/sf1000-parquet   # cluster run (#246; DRY_RUN=1 prints the spark-submit line)
+benchmarks/scripts/run-tpcds.sh --cluster-report s3a://bucket/results/sf1000-parquet   # data-on-EKS-style report over a cluster run's rows
 benchmarks/scripts/run-tpcds.sh --report   # rewrite benchmarks/results/tpcds/results.{md,html}
 ```
 
