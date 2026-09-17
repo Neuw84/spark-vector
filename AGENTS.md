@@ -614,7 +614,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 161 kernel tests, 237 Spark tests (210 without the Comet and Iceberg profiles;
+Current counts: 161 kernel tests, 238 Spark tests (211 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -719,8 +719,16 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   `DecimalAddNoOverflowCheck` keeps it null), but an UNGROUPED `Final` divides the exact total -- Spark's
   generated ungrouped Final keeps the sum in a local nothing re-checks -- so `avg(big * big)` over the test
   table is a value ungrouped and null grouped, in both engines. `Complete` mode (streaming planners only)
-  puts the result in the sum slot for both the wide sum and avg. Not yet: `+`/`-` (a rescale can overflow
-  too), wide products as values (needs a 128-bit output column on escalated batches).
+  puts the result in the sum slot for both the wide sum and avg. Slice 4: `SpeculativeDecimalAddExpr`
+  (`+`/`-` whose declared scale is `max(s1, s2)`; both operands rescaled in the lane with a `multiplyHigh`
+  check, added with the sign trick, escalated exactly otherwise); the multiply and add share
+  `SpeculativeOperand` and `Escalations`, both implement `SpeculativeDecimalExpr`, and the compiler entry is
+  `speculativeDecimalArithmetic` (any nesting of `* + -` over lanes, literals and speculative children). An
+  uncapped `+`/`-` can never exceed its declared precision; Spark's cap lowers the scale (and rounds) only
+  past 32 integer digits, and that shape is refused. Test-fixture arithmetic to remember: `big` is ~9e14 so
+  `big * big` is 8.1e29 -- a `sum` over ~12 such rows already overflows a `decimal(38,6)` buffer, so a
+  fallback probe on that shape must bound its rows. Not yet: wide products or sums as values (needs a
+  128-bit output column on escalated batches) -- that is #28's lane.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Size, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BinaryArithmetic, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Size, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
@@ -767,31 +767,45 @@ object ExpressionCompiler {
   }
 
   /**
-   * The speculative narrow form of a decimal multiply whose declared result is wider than 18 digits
-   * (#26): both operands at most 18 digits, the declared scale exactly `s1 + s2` (so the declared
-   * precision is at most 38 and Spark never rounds the product), not `try_*`. `None` when the
-   * expression is not that shape; only the wide decimal sum asks, because only it can take the
-   * escalated rows exactly.
+   * The speculative narrow form of decimal arithmetic whose declared result is wider than 18 digits
+   * (#26): a `Multiply` with both operands at most 18 digits (or speculative themselves) and the
+   * declared scale exactly `s1 + s2` (so the declared precision is at most 38 and Spark never rounds
+   * the product), or an `Add` / `Subtract` whose declared scale is the common scale `max(s1, s2)` (so
+   * Spark only range-checks the exact sum); not `try_*`. `None` when the expression is not that
+   * shape; only the wide decimal sum and average ask, because only they can take the escalated rows
+   * exactly.
    */
-  def speculativeDecimalMultiply(e: Expression, input: Seq[Attribute]): Option[Result] = e match {
-    case m @ Multiply(l, r, _) =>
-      // Spark 4.1's Multiply carries a NumericEvalContext; the mode lives inside it.
-      val mode = m.evalContext.evalMode
-      (l.dataType, r.dataType, e.dataType) match {
-      case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
-          if !TypeMapping.isSupported(dt) && dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
-        // An operand is a lane (at most 18 digits) or, recursively, such a product itself.
-        def operand(o: Expression): Result =
-          if (TypeMapping.isSupported(o.dataType)) compile(o, input)
-          else speculativeDecimalMultiply(o, input).getOrElse(Left(s"decimal operand ${o.dataType.simpleString} of ${o.sql} is neither a lane nor a speculative product"))
-        Some(for {
-          le <- operand(l)
-          re <- operand(r)
-          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
-        } yield SpeculativeDecimalMulExpr(le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context))
+  def speculativeDecimalArithmetic(e: Expression, input: Seq[Attribute]): Option[Result] = {
+    // An operand is a lane (at most 18 digits) or, recursively, a speculative expression itself.
+    def operand(o: Expression): Result =
+      if (TypeMapping.isSupported(o.dataType)) compile(o, input)
+      else speculativeDecimalArithmetic(o, input).getOrElse(Left(s"decimal operand ${o.dataType.simpleString} of ${o.sql} is neither a lane nor a speculative product or sum"))
+    def operands(l: Expression, r: Expression): Either[String, (VectorExpr, VectorExpr)] =
+      for {
+        le <- operand(l)
+        re <- operand(r)
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+      } yield (le, re)
+    e match {
+      case m @ Multiply(l, r, _) =>
+        // Spark 4.1's Multiply carries a NumericEvalContext; the mode lives inside it.
+        val mode = m.evalContext.evalMode
+        (l.dataType, r.dataType, e.dataType) match {
+          case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
+              if !TypeMapping.isSupported(dt) && dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
+            Some(operands(l, r).map { case (le, re) => SpeculativeDecimalMulExpr(le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context) })
+          case _ => None
+        }
+      case a: BinaryArithmetic if a.isInstanceOf[Add] || a.isInstanceOf[Subtract] =>
+        val mode = a.evalContext.evalMode
+        (a.left.dataType, a.right.dataType, e.dataType) match {
+          case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
+              if !TypeMapping.isSupported(dt) && dt.scale == math.max(lt.scale, rt.scale) && mode != EvalMode.TRY =>
+            Some(operands(a.left, a.right).map { case (le, re) => SpeculativeDecimalAddExpr(le, re, a.isInstanceOf[Subtract], lt, rt, dt, mode == EvalMode.ANSI, e.origin.context) })
+          case _ => None
+        }
       case _ => None
     }
-    case _ => None
   }
 
   /**
