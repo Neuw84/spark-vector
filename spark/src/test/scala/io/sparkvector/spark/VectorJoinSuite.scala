@@ -2,7 +2,7 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
-import org.apache.spark.sql.vector.{VectorBroadcastHashJoinExec, VectorBroadcastNestedLoopJoinExec, VectorFilterExec, VectorHashAggregateExec, VectorShuffledHashJoinExec}
+import org.apache.spark.sql.vector.{VectorBroadcastHashJoinExec, VectorBroadcastNestedLoopJoinExec, VectorFilterExec, VectorHashAggregateExec, VectorJoinPlanner, VectorShuffledHashJoinExec}
 
 /**
  * Hash joins against Spark's. `t` (20k rows) is the streamed side, `dim` a small dimension table
@@ -216,5 +216,25 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkFallback("SELECT /*+ BROADCAST(tk) */ tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 < dim.di WHERE tk.i < 100", Seq(BNLJ), "preserved side broadcast")
     // A WHERE on one side would turn the full join into a left join; filter beneath it instead.
     checkFallback("SELECT t2.i, dim.name FROM (SELECT * FROM tk WHERE i < 100) t2 FULL JOIN dim ON t2.i50 < dim.di", Seq(BNLJ), "full outer nested loop join")
+  }
+
+  test("a build side estimated above spark.vector.join.maxBuildSize stays with Spark; unknown sizes convert") {
+    withConf(VectorConf.JoinMaxBuildSize -> "1") {
+      checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(BHJ), "exceeds spark.vector.join.maxBuildSize=1")
+      checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 < dim.di WHERE tk.i < 500", Seq(BNLJ), "exceeds spark.vector.join.maxBuildSize=1")
+      checkFallback("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "exceeds spark.vector.join.maxBuildSize=1")
+    }
+    // Size strings are accepted, and a generous threshold converts as before.
+    withConf(VectorConf.JoinMaxBuildSize -> "512m") {
+      checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di WHERE tk.i < 300", Seq(BHJ))
+    }
+    // The default is a per-core share of the off-heap budget, or 1 GiB without one.
+    assert(VectorConf.joinMaxBuildSize(spark.sessionState.conf, new org.apache.spark.SparkConf(false)) === (1L << 30))
+    val offHeap = new org.apache.spark.SparkConf(false).set("spark.memory.offHeap.enabled", "true").set("spark.memory.offHeap.size", "4g").set("spark.executor.cores", "4")
+    assert(VectorConf.joinMaxBuildSize(spark.sessionState.conf, offHeap) === (1L << 30))
+    // No logical link, no statistics: unknown, which converts rather than refuses.
+    val orphan = org.apache.spark.sql.execution.LocalTableScanExec(Nil, Nil, None)
+    assert(VectorJoinPlanner.estimatedBuildSize(orphan).isEmpty)
+    assert(VectorJoinPlanner.buildSizeReason(orphan, 1L).isEmpty)
   }
 }

@@ -43,6 +43,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
   override def apply(plan: SparkPlan): SparkPlan = {
     val conf = session.sessionState.conf
+    lazy val maxBuildSize = VectorConf.joinMaxBuildSize(conf, session.sparkContext.getConf)
     if (!VectorConf.isEnabled(conf)) {
       plan
     } else {
@@ -150,7 +151,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)) match {
+          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -164,7 +165,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)) match {
+          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -176,7 +177,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         case j: ShuffledHashJoinExec if VectorConf.shuffledHashJoinEnabled(conf) =>
           // Both inputs are exchanges: Spark's row shuffle is converted below us by
           // RowToColumnarExec, Comet's columnar one is read directly.
-          exchangeInputReason(j.left).orElse(exchangeInputReason(j.right)) match {
+          val shjBuild = j.buildSide match {
+            case org.apache.spark.sql.catalyst.optimizer.BuildLeft => j.left
+            case org.apache.spark.sql.catalyst.optimizer.BuildRight => j.right
+          }
+          exchangeInputReason(j.left).orElse(exchangeInputReason(j.right)).orElse(VectorJoinPlanner.buildSizeReason(shjBuild, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {

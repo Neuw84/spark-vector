@@ -319,6 +319,11 @@ that pin it.
   decide from `rowMatched` after all chunks, outer joins emit per chunk. The build side is Spark's
   `IdentityBroadcastMode` array of rows. Full outer and outer-with-the-broadcast-side-preserved are
   refused (a matched bitmap over a broadcast shared by every task).
+- All three hash-style joins refuse a build side whose estimate exceeds `spark.vector.join.maxBuildSize`
+  (`VectorJoinPlanner.buildSizeReason`; the estimate is the AQE stage's `computeStats` for a
+  materialised stage, else the logical link's `stats.sizeInBytes`; `Long.MaxValue` or no link =
+  unknown = convert). The runtime half of #86 (fail with a message when the build actually exceeds
+  the budget) needs #12's memory accounting.
 - `VectorShuffledHashJoinExec` replaces `ShuffledHashJoinExec` and, like the Final aggregate, accepts
   exchanges (or their AQE stages) as inputs on types alone: Spark inserts `RowToColumnarExec` under
   us for its row shuffle. `ClusteredDistribution` on both sides, `PartitioningCollection` out.
@@ -507,7 +512,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 207 Spark tests (180 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 208 Spark tests (181 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

@@ -73,6 +73,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.expand.enabled` | convert `ExpandExec` (`ROLLUP` / `CUBE` / `GROUPING SETS`, the `count(distinct)` rewrite) over a columnar child: one borrowed-column batch per grouping set, no data copy |
 | `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
 | `spark.vector.exec.broadcastNestedLoopJoin.enabled` | convert `BroadcastNestedLoopJoinExec` (non-equi joins) when the streamed side is columnar; inner/cross, semi/anti/existence and outer joins with the streamed side preserved |
+| `spark.vector.join.maxBuildSize` | largest build side (bytes or a size string) the hash-style joins convert for -- they hold it in memory per task; default 1 GiB, or `spark.memory.offHeap.size / spark.executor.cores` when off-heap is configured; larger estimates stay with Spark, unknown estimates convert |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
