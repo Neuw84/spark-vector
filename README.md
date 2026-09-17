@@ -68,6 +68,8 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.limit.enabled` | convert `LocalLimitExec` / `GlobalLimitExec` / `CollectLimitExec` over a columnar child (no offset); batches pass through until the boundary, the collect limit's final take goes through Spark's single-partition shuffle |
 | `spark.vector.exec.union.enabled` | convert `UnionExec` when at least one child is columnar (row children go through Spark's `RowToColumnarExec`); keep it on with Spark 4.1.3, whose own columnar union concatenates co-partitioned children it reports as partition-aligned |
 | `spark.vector.exec.coalesce.enabled` | convert `CoalesceExec` over a columnar child (no shuffle, batches forwarded) |
+| `spark.vector.exec.sample.enabled` | convert `SampleExec` without replacement over a columnar child: Spark's own Bernoulli sequence per partition as a selection bitmap, so a seed returns Spark's rows |
+| `spark.vector.exec.localTableScan.enabled` | convert `LocalTableScanExec` (`VALUES`, local relations) into one batch per partition; **off by default** -- nothing to accelerate, it only lets small-table tests run our operators |
 | `spark.vector.exec.expand.enabled` | convert `ExpandExec` (`ROLLUP` / `CUBE` / `GROUPING SETS`, the `count(distinct)` rewrite) over a columnar child: one borrowed-column batch per grouping set, no data copy |
 | `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
@@ -374,7 +376,11 @@ concatenates its children's batches and is columnar as soon as one child is -- S
 when every child is, so a `VALUES` side or a row shuffle used to drop the whole union to rows; Spark's
 transitions convert such a child through `RowToColumnarExec` below us. `VectorCoalesceExec` forwards the
 child's batches through a shuffle-free `coalesce(n)`. `spark.vector.exec.union.enabled` and
-`spark.vector.exec.coalesce.enabled` turn them off.
+`spark.vector.exec.coalesce.enabled` turn them off. `VectorSampleExec` (`TABLESAMPLE`, `df.sample` without
+replacement) is a selection producer like the filter: it runs Spark's own Bernoulli sampler per partition
+over the live rows, so the same seed returns exactly Spark's rows, and forwards the bitmap. `VectorLocalTableScanExec`
+turns a `VALUES` relation into batches; it is off by default (`spark.vector.exec.localTableScan.enabled`)
+because there is nothing to accelerate -- it only removes the row-to-columnar transition for small-table tests.
 
 `ROLLUP`, `CUBE` and `GROUPING SETS` (and the rewrite Spark applies to `count(distinct)`) go through
 `ExpandExec`, which duplicates every row once per grouping set with the unused keys nulled and a

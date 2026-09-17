@@ -264,6 +264,13 @@ that pin it.
   The union is columnar whatever its children are, provided one is: Spark's transitions insert
   `RowToColumnarExec` under the row children. Spark's own `UnionExec` is columnar only when every
   child is, and the UI classifies it as a Spark operator either way.
+- `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
+  way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
+  per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
+  Spark's for a seed; a forwarded input selection means rows the filter dropped draw nothing, as in Spark.
+  `VectorLocalTableScanExec` (off by default, `spark.vector.exec.localTableScan.enabled`) is a leaf that
+  writes each partition of a local relation into one on-heap batch through `VectorRowStages.toBatch`; tests
+  over `VALUES` must exclude the optimizer's `ConvertToLocalRelation` or no operator survives above it.
 - `VectorExpandExec` (also `VectorPassThrough`) emits one output batch per projection per input batch:
   `ColumnRef` slots are `BorrowedColumnVector`s of the input, `NULL` literals `ArrowOutput.nulls`, other
   literals `ArrowOutput.constant`; the planner refuses any other slot shape. Literal slots bypass the
@@ -483,7 +490,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 190 Spark tests (163 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 194 Spark tests (167 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

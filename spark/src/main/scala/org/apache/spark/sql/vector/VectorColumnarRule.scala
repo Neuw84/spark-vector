@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GlobalLimitExec, LocalLimitExec, ProjectExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
+import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
@@ -88,6 +88,15 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case Some(reason) => fallback(c, reason)
             case None => VectorStructuralPlanner.planCoalesce(c).fold(reason => fallback(c, reason), v => v)
           }
+
+        case s: SampleExec if VectorConf.sampleEnabled(conf) =>
+          columnarInputReason(s.child) match {
+            case Some(reason) => fallback(s, reason)
+            case None => VectorSamplePlanner.plan(s).fold(reason => fallback(s, reason), v => v)
+          }
+
+        case l: LocalTableScanExec if VectorConf.localTableScanEnabled(conf) =>
+          VectorSamplePlanner.planLocalTableScan(l).fold(reason => fallback(l, reason), v => v)
 
         case l: LocalLimitExec if VectorConf.limitEnabled(conf) =>
           columnarInputReason(l.child) match {
@@ -239,6 +248,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       parent.withNewChildren(parent.children.map {
         case f: VectorFilterExec if !f.emitSelection => f.copy(emitSelection = true)
         case p: VectorProjectExec if !p.emitSelection => p.copy(emitSelection = true)
+        case s: VectorSampleExec if !s.emitSelection => s.copy(emitSelection = true)
         case other => other
       })
   }
