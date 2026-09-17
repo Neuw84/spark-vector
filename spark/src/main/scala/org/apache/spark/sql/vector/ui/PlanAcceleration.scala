@@ -280,7 +280,8 @@ object PlanAcceleration {
       else if (isCometName(name)) Engine.Comet
       else if (isTransition(name)) Engine.Transition
       else if (isShuffleRead(name)) Engine.ShuffleRead
-      else if (i.children.isEmpty && name.startsWith("Scan")) Engine.ColumnarSource
+      // "Scan parquet", "Scan In-memory table <name>", or an unnamed cache's "InMemoryTableScan".
+      else if (i.children.isEmpty && (name.startsWith("Scan") || name.startsWith("InMemoryTableScan"))) Engine.ColumnarSource
       else Engine.Spark
     }
 
