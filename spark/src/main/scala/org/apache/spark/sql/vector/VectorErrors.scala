@@ -21,6 +21,10 @@ object VectorErrors {
   def invalidIndexOfZero(context: QueryContext): RuntimeException =
     QueryExecutionErrors.invalidIndexOfZeroError(context)
 
+  /** `make_date` with an invalid civil date in ANSI mode: Spark's DATETIME_FIELD_OUT_OF_BOUNDS family. */
+  def dateTimeArgumentOutOfRange(cause: Exception): RuntimeException =
+    QueryExecutionErrors.ansiDateTimeArgumentOutOfRange(cause)
+
   /** A decimal result that does not fit the target precision (ANSI arithmetic and casts). */
   def decimalPrecisionOverflow(value: Decimal, precision: Int, scale: Int, context: QueryContext): ArithmeticException =
     QueryExecutionErrors.cannotChangeDecimalPrecisionError(value, precision, scale, context)
