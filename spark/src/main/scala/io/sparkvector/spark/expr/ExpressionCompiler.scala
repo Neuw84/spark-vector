@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, StringTrim, StringTrimLeft, StringTrimRight, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, Upper, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, Upper, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
@@ -70,6 +70,26 @@ object ExpressionCompiler {
       else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+
+    // The search family: one byte-search primitive under every function; string children only.
+    case StringInstr(str, sub) if str.dataType == StringType =>
+      for (h <- stringArg(str, input, "instr"); nd <- stringArg(sub, input, "instr")) yield LocateExpr(nd, h, LiteralExpr(1, IntegerType))
+    case StringLocate(sub, str, start) if str.dataType == StringType =>
+      for (nd <- stringArg(sub, input, "locate"); h <- stringArg(str, input, "locate"); st <- intArg(start, input, "locate")) yield LocateExpr(nd, h, st)
+    case StringReplace(str, search, replacement) if str.dataType == StringType =>
+      for (h <- stringSubject(str, input, "replace"); se <- stringArg(search, input, "replace"); r <- stringArg(replacement, input, "replace")) yield ReplaceExpr(h, se, r)
+    case StringTranslate(str, Literal(m: UTF8String, StringType), Literal(r: UTF8String, StringType)) if str.dataType == StringType =>
+      stringSubject(str, input, "translate").map { h =>
+        val (from, to) = TranslateExpr.dictionary(m.toString, r.toString)
+        TranslateExpr(h, from, to)
+      }
+    case StringTranslate(_, _, _) => Left("translate with a non-literal from/to string not supported")
+    case SubstringIndex(str, delim, count) if str.dataType == StringType =>
+      for (h <- stringSubject(str, input, "substring_index"); d <- stringArg(delim, input, "substring_index"); c <- intArg(count, input, "substring_index")) yield SubstringIndexExpr(h, d, c)
+    case e @ ElementAt(StringSplitSQL(str, delim), part, Some(Literal(dflt: UTF8String, StringType)), _) if str.dataType == StringType && dflt.numBytes == 0 =>
+      for (h <- stringSubject(str, input, "split_part"); d <- stringArg(delim, input, "split_part"); k <- intArg(part, input, "split_part")) yield SplitPartExpr(h, d, k, e.origin.context)
+    case FindInSet(word, set) if set.dataType == StringType =>
+      for (w <- stringArg(word, input, "find_in_set"); st <- stringArg(set, input, "find_in_set")) yield FindInSetExpr(w, st)
 
     // Case mapping: the ASCII rows in the kernel, the rest through Spark's own CollationSupport.
     // A collated column follows ICU rules and is not byte-mapped -- the line Comet draws too.

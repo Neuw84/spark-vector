@@ -234,6 +234,32 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("instr, locate, replace, translate, substring_index, split_part and find_in_set") {
+    // Haystacks with repeats, multi-byte text, commas and dots; needles as literals and lanes.
+    val h = "CASE WHEN i % 6 = 0 THEN 'www.apache.org' WHEN i % 6 = 1 THEN '日本語テキスト日本' WHEN i % 6 = 2 THEN 'a,b,,c' WHEN i % 6 = 3 THEN '😀x😀y😀' WHEN i % 6 = 4 THEN '' ELSE concat(s, s) END"
+    val nd = "CASE WHEN i % 5 = 0 THEN '.' WHEN i % 5 = 1 THEN '日本' WHEN i % 5 = 2 THEN '' WHEN i % 5 = 3 THEN 's' ELSE NULL END"
+    // instr / locate / position: code-point positions, the empty needle, a start beyond the end, non-positive and null starts.
+    checkVectorized(s"SELECT instr($h, 'a') AS a, instr($h, $nd) AS b, locate('s', $h) AS c, locate($nd, $h, 3) AS d0, position('本' IN $h) AS e0, locate('x', $h, i % 4 - 1) AS f, locate('a', $h, CASE WHEN i % 3 = 0 THEN NULL ELSE 1 END) AS g, instr(s, '1') AS h0 FROM t", Seq(Project))
+    // replace: literal and lane search/replacement, an empty search, deletion, multi-byte.
+    checkVectorized(s"SELECT replace($h, 'a', '<>') AS a, replace($h, $nd, '-') AS b, replace($h, 'x') AS c, replace(s, s, 'same') AS d0, replace($h, '日本', '🙂') AS e0 FROM t", Seq(Project))
+    // translate: deletion, a repeated matching character (first mapping wins), multi-byte from/to.
+    checkVectorized(s"SELECT translate($h, 'a.,', '1;') AS a, translate($h, 'aa日😀', '12本!') AS b, translate(s, 's0123456789', 'S') AS c FROM t", Seq(Project))
+    // substring_index: positive and negative counts, count 0, empty delimiter, missing delimiter, lane counts.
+    checkVectorized(s"SELECT substring_index($h, '.', 1) AS a, substring_index($h, '.', -1) AS b, substring_index($h, ',', 2) AS c, substring_index($h, '本', -2) AS d0, substring_index($h, '.', 0) AS e0, substring_index($h, '', 1) AS f, substring_index($h, 'zz', 1) AS g, substring_index($h, $nd, i % 5 - 2) AS h0 FROM t", Seq(Project))
+    // split_part: from either end, past the ends, an empty delimiter, a lane part; find_in_set incl. a comma in the word.
+    checkVectorized(s"SELECT split_part($h, '.', 2) AS a, split_part($h, ',', -1) AS b, split_part($h, ',', 9) AS c, split_part($h, '', 1) AS d0, split_part($h, '.', i % 3 + 1) AS e0, split_part($h, '本', -2) AS f FROM t", Seq(Project))
+    checkVectorized(s"SELECT find_in_set('b', $h) AS a, find_in_set(s, concat('x,', s, ',y')) AS b, find_in_set('a,b', $h) AS c, find_in_set('', $h) AS d0, find_in_set($nd, 'www.apache.org,日本,,s') AS e0 FROM t", Seq(Project))
+    // A zero part raises Spark's INVALID_INDEX_OF_ZERO in both engines; a filtered row never raises.
+    checkVectorized("SELECT split_part(s, '1', i % 2 + 1) AS a FROM t WHERE i % 2 = 0", Seq(Project, Filter))
+    val e = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT split_part(s, '1', i % 2) AS a FROM t").collect()))
+    assert(causes(e).exists(_.getMessage.contains("INVALID_INDEX_OF_ZERO")), s"expected INVALID_INDEX_OF_ZERO, got $e")
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT i FROM t WHERE instr(s, '1') = 2 OR substring_index(s, '2', 1) = 's'", Seq(Filter))
+    checkVectorized("SELECT split_part(concat(s, '-', s), '-', 2) AS k, count(*) AS n, max(locate('s', s)) AS m FROM t GROUP BY split_part(concat(s, '-', s), '-', 2)", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: translate with a column from/to string.
+    checkFallback("SELECT translate(s, s, 'x') AS a FROM t", Seq(Project), "non-literal from/to")
+  }
+
   test("upper, lower, initcap and the trims") {
     // Rows the ASCII path decides, and rows it hands to Spark's own implementation: multi-byte letters,
     // the German sharp s, a Turkish dotted capital I, digits and punctuation at word starts.
