@@ -455,6 +455,13 @@ A change is not done until all of the following that apply have run green, local
    Spark's own SQL golden-file suite runs the same idea at scale, on demand only:
    `benchmarks/scripts/run-spark-sql-tests.sh [regex]` (profile `spark-sql-tests`, about 15
    minutes for everything; 642 cases pass, 111 Python UDF variants are ignored without pyspark).
+   It prints a per-case coverage table and, on a full run, fails when a case runs fewer of our
+   operators than `spark-sql-tests/src/test/resources/vector-sql-coverage.tsv` records
+   (`SQL_TESTS_UPDATE_BASELINE=true` rewrites the floor; #17). Its JVM sets
+   `sparkvector.agg.interleave=1` so double sums add in Spark's order and match the golden digits.
+   Run it after any planner or expression change: after a day of merges it found four bugs the
+   hand-written suites had not (lazy `nanvl`, `count` over literal arguments, collated strings as
+   lanes, a build side pruned to zero columns).
    `VectorSQLQueryTestSuite.defaultExclude` skips `explain*.sql` (golden plans are Spark's), the
    DataSketches files (their memory library rejects JDK > 21) and `udtf/udtf.sql` (needs pyspark);
    `SQL_TESTS_EXCLUDE='^$'` runs them anyway. The test JVM needs `-Dspark.testing=true` (Spark's

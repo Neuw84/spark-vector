@@ -399,4 +399,14 @@ class VectorAggregateSuite extends VectorQuerySuite {
     // In a comparison the normalisation wrapper does not appear; the compare kernels already treat NaN = NaN and -0.0 = 0.0.
     checkVectorized("SELECT count(*) FROM t WHERE (CASE WHEN i % 2 = 0 THEN -0.0 ELSE d2 END) = 0.0", Seq(Agg))
   }
+
+  test("count over literal arguments after the distinct rewrite; a collated grouping key falls back") {
+    // count(DISTINCT 3, 2) becomes count(3, 2) over the Expand: literal arguments never decide anything.
+    checkVectorized("SELECT count(DISTINCT 2) AS a, count(DISTINCT 3, 2) AS b, count(DISTINCT i, 5) AS c FROM t", Seq(Agg))
+    checkVectorized("SELECT s, count(DISTINCT 2) AS a, count(DISTINCT 3, 2) FILTER (WHERE i > 100) AS b FROM t GROUP BY s", Seq(Agg))
+    checkVectorized("SELECT count(i, 7, l) AS a, count(1, 2) AS b FROM t", Seq(Agg))
+    // Kernels compare bytes: a collated string has no lane, and Spark's RowToColumnarExec cannot convert one either.
+    checkFallback("SELECT count(*) AS n FROM t GROUP BY s COLLATE UTF8_LCASE", Seq(Agg), "unsupported column type string collate")
+    checkFallback("SELECT s COLLATE UTF8_LCASE AS c, i FROM t WHERE i < 10", Seq(classOf[org.apache.spark.sql.vector.VectorProjectExec]), "collate")
+  }
 }

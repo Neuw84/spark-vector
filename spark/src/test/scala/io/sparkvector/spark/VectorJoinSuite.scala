@@ -237,4 +237,10 @@ class VectorJoinSuite extends VectorQuerySuite {
     assert(VectorJoinPlanner.estimatedBuildSize(orphan).isEmpty)
     assert(VectorJoinPlanner.buildSizeReason(orphan, 1L).isEmpty)
   }
+
+  test("a cross join whose build side is pruned to no columns still pairs every row") {
+    checkNested("SELECT tk.i, tk.s FROM tk CROSS JOIN dim WHERE tk.i < 100")
+    checkNested("SELECT count(*) AS n FROM tk CROSS JOIN dim WHERE tk.i < 500", Seq(classOf[VectorHashAggregateExec]))
+    checkNested("SELECT dim.name FROM tk JOIN dim ON tk.i < 5")
+  }
 }
