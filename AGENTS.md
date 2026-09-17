@@ -603,7 +603,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 225 Spark tests (197 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 226 Spark tests (198 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -679,6 +679,17 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   `st.inner` as `_extract_inner` -- both compile now, so the whole chain stays columnar. A
   `VectorPlan` parent turns the filter below into a selection producer, so the iterator honours
   `ctx.selection`.
+- Speculative narrow decimals (#26, slice 1): `ExpressionCompiler.speculativeDecimalMultiply` recognises
+  a `Multiply` of two decimal(<=18) operands whose declared result is wider than 18 digits (scale exactly
+  `s1 + s2`, precision <= 38, not TRY) and builds `SpeculativeDecimalMulExpr` (DecimalExprs.scala); only
+  `VectorAggregates`' Sum-over-decimal case asks for it. `evalChecked` computes the INT64 products with a
+  `Math.multiplyHigh` check per row, clears the lane's validity for overflowing rows and returns their
+  exact `BigInteger` products; `WideDecimalSumAgg.Escalation` adds those per group beside the
+  `WideLongSum` accumulator (ungrouped: only selected rows; grouped: `GroupAssignment.ids` >= 0), and
+  `bufferValue` sums both parts. `eval` on the speculative expression throws -- it must never be a lane
+  for another consumer. `SpeculativeDecimals.escalatedRows()` is the (global) escalation counter the
+  tests read. Not yet: `+`/`-` (a rescale can overflow too), wide products as values (needs a 128-bit
+  output column on escalated batches), nested products.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

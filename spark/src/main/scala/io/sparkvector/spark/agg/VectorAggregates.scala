@@ -1,7 +1,7 @@
 package io.sparkvector.spark.agg
 
 import io.sparkvector.kernels.{AggKernels, Bitmap, CompareOp, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
-import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, SpeculativeDecimalMulExpr, SpeculativeDecimals, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import io.sparkvector.spark.adapter.TypeMapping
@@ -105,16 +105,68 @@ final case class WideDecimalSumAgg(input: VectorExpr, bufferType: DecimalType) e
       if (t.abs.compareTo(limit) >= 0) null else new java.math.BigDecimal(t, bufferType.scale)
     }
 
+  /**
+   * The exact side of a speculative narrow input (#26): the rows whose product left 64 bits are added
+   * here as exact integers, per group, beside the 128-bit lane accumulator. Nothing to do for an
+   * ordinary lane input.
+   */
+  private final class Escalation {
+    private var totals = new Array[java.math.BigInteger](0)
+    private var counts = new Array[Long](0)
+    private def ensure(g: Int): Unit = if (g >= totals.length) {
+      val n = math.max(g + 1, totals.length * 2)
+      totals = java.util.Arrays.copyOf(totals, n); counts = java.util.Arrays.copyOf(counts, n)
+    }
+    def add(g: Int, v: java.math.BigInteger): Unit = {
+      ensure(g)
+      totals(g) = if (totals(g) == null) v else totals(g).add(v)
+      counts(g) += 1
+    }
+    def count(g: Int): Long = if (g < counts.length) counts(g) else 0L
+    def total(g: Int, base: java.math.BigInteger): java.math.BigInteger = if (g < totals.length && totals(g) != null) base.add(totals(g)) else base
+  }
+
+  /** Evaluates the input for one batch: the lane to accumulate, and the escalated rows folded into `extra`. */
+  private def evalInput(ctx: EvalContext, extra: Escalation, groupOf: Int => Int): VectorBuffers = input match {
+    case s: SpeculativeDecimalMulExpr =>
+      val checked = s.evalChecked(ctx)
+      var k = 0
+      var added = 0
+      while (k < checked.rows.length) {
+        val g = groupOf(checked.rows(k))
+        if (g >= 0) { extra.add(g, checked.exact(k)); added += 1 }
+        k += 1
+      }
+      if (added > 0) SpeculativeDecimals.addEscalated(added)
+      checked.lane
+    case other => other.eval(ctx)
+  }
+
   override def newState(): AggState = new AggState {
     private val acc = new GroupedAccumulators.WideLongSum
-    override def update(ctx: EvalContext): Unit = acc.updateAll(ctx.masked(input.eval(ctx)))
-    override def bufferValues: Array[Any] = Array(sumValue(acc.count(0), acc.sum(0)), java.lang.Boolean.valueOf(acc.count(0) == 0))
+    private val extra = new Escalation
+    override def update(ctx: EvalContext): Unit = {
+      val sel = ctx.selection
+      val lane = evalInput(ctx, extra, r => if (sel == null || Bitmap.isSet(sel, r)) 0 else -1)
+      acc.updateAll(ctx.masked(lane))
+    }
+    override def bufferValues: Array[Any] = {
+      val count = acc.count(0) + extra.count(0)
+      Array(sumValue(count, extra.total(0, acc.sum(0))), java.lang.Boolean.valueOf(count == 0))
+    }
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
     private val acc = new GroupedAccumulators.WideLongSum
-    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-    override def bufferValue(g: Int, slot: Int): Any =
-      if (slot == 0) sumValue(acc.count(g), acc.sum(g)) else java.lang.Boolean.valueOf(acc.count(g) == 0)
+    private val extra = new Escalation
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
+      val ids = groups.ids()
+      val lane = evalInput(ctx, extra, r => ids(r))
+      acc.update(lane, groups)
+    }
+    override def bufferValue(g: Int, slot: Int): Any = {
+      val count = acc.count(g) + extra.count(g)
+      if (slot == 0) sumValue(count, extra.total(g, acc.sum(g))) else java.lang.Boolean.valueOf(count == 0)
+    }
   }
 }
 
@@ -613,10 +665,16 @@ object VectorAggregates {
     case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
       // Only reached for decimals of more than 8 digits (the optimizer rewrites smaller ones to a
       // long sum): the buffer is Spark's (sum: Decimal(p + 10, s), isEmpty) pair, the sum wider than
-      // 18 digits, accumulated in 128 bits from the unscaled lane values.
-      numericChild(s.child, input).flatMap { child =>
-        if (child.vecType == VecType.FLOAT64) Left(s"sum over ${s.child.dataType.simpleString} producing ${s.dataType.simpleString} not supported")
-        else Right(WideDecimalSumAgg(child, s.dataType.asInstanceOf[DecimalType]))
+      // 18 digits, accumulated in 128 bits from the unscaled lane values. A declared-wide product of
+      // narrow operands under the sum (TPC-H's `sum(l_extendedprice * (1 - l_discount))`) is computed
+      // speculatively in 64 bits, its overflowing rows added exactly (#26).
+      ExpressionCompiler.speculativeDecimalMultiply(s.child, input) match {
+        case Some(speculative) => speculative.map(child => WideDecimalSumAgg(child, s.dataType.asInstanceOf[DecimalType]))
+        case None =>
+          numericChild(s.child, input).flatMap { child =>
+            if (child.vecType == VecType.FLOAT64) Left(s"sum over ${s.child.dataType.simpleString} producing ${s.dataType.simpleString} not supported")
+            else Right(WideDecimalSumAgg(child, s.dataType.asInstanceOf[DecimalType]))
+          }
       }
     case s: Sum =>
       numericChild(s.child, input).flatMap { child =>

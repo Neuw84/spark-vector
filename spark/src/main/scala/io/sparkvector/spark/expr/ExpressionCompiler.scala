@@ -766,6 +766,28 @@ object ExpressionCompiler {
   }
 
   /**
+   * The speculative narrow form of a decimal multiply whose declared result is wider than 18 digits
+   * (#26): both operands at most 18 digits, the declared scale exactly `s1 + s2` (so the declared
+   * precision is at most 38 and Spark never rounds the product), not `try_*`. `None` when the
+   * expression is not that shape; only the wide decimal sum asks, because only it can take the
+   * escalated rows exactly.
+   */
+  def speculativeDecimalMultiply(e: Expression, input: Seq[Attribute]): Option[Result] = e match {
+    case Multiply(l, r, mode) => (l.dataType, r.dataType, e.dataType) match {
+      case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
+          if !TypeMapping.isSupported(dt) && TypeMapping.isSupported(lt) && TypeMapping.isSupported(rt) &&
+            dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
+        Some(for {
+          le <- compile(l, input)
+          re <- compile(r, input)
+          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+        } yield SpeculativeDecimalMulExpr(le, re, lt, rt, dt))
+      case _ => None
+    }
+    case _ => None
+  }
+
+  /**
    * Decimal arithmetic on unscaled long lanes. Spark computes the result type from the operand
    * types (`max(p1-s1, p2-s2) + max(s1, s2) + 1` digits for `+`/`-`, `p1+p2+1` for `*`), which
    * leaves room for every result: only division needs an overflow check. Results wider than 18

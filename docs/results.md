@@ -437,6 +437,19 @@ Every decimal-only fallback is on the aggregate, and it comes in two shapes:
 - **Nothing in TPC-H needs a genuinely wide declared input (#28):** every base column is `(15,2)`.
   The division in Q1's `avg` does not appear either -- `avg` fails earlier, on its buffer.
 
+**Update (#26, slice 1).** With the product under a decimal `sum` computed speculatively in 64 bits
+and its overflowing rows added exactly to the 128-bit sum, the `unsupported column type decimal(38,4)
+for sum` reason is gone from all ten queries. On the same SF1 decimal schema (`local[8]`, one iteration,
+no warm-up, the shared x86 host, so timings are indicative only) the accelerated-operator counts read
+q3 11/16, q5 11/31, q6 4/5, q7 9/29, q8 14/39, q9 12/30, q10 9/22, q11 10/16, q12 7/13, q15 5/11,
+q19 7/9, q20 17/32 -- against 5, 8, 2, 6, 10, 9, 6, 6, 2, 3, 0 and 6 in the table above (part of the
+rise is the operators landed since that run: windows, nested columns, the broadcast join over an
+exchange). 22 of 22 checksums identical. What still holds decimals back: Q1's nested product
+`sum((l_extendedprice * (1 - l_discount)) * (1 + l_tax))` (`decimal(38,6)`, a wide *operand* -- the next
+slice), the `avg` buffers (`decimal(25,2)`, the wide `avg` buffer), and the operators *above* a wide
+sum (`TakeOrderedAndProject` / `Filter` over `revenue`, `sum(l_quantity)`: a wide result column as an
+input, #28).
+
 The rest of the decimal-only list is the cascade: `Filter: child HashAggregate is not columnar`,
 `BroadcastHashJoin: child Filter is not columnar`, `Project`/`Sort: child ... is not columnar` --
 operators that would have been ours had the aggregate below them stayed columnar (Q11, Q15, Q17,
