@@ -24,7 +24,7 @@ charvarchar.sql	143	5	6
 charvarchar.sql_analyzer_test	55	0	0
 collations-aliases.sql	51	0	0
 collations-aliases.sql_analyzer_test	19	0	0
-collations-basic.sql	173	5	8
+collations-basic.sql	173	6	9
 collations-basic.sql_analyzer_test	47	0	0
 collations-padding-trim.sql	72	2	2
 collations-padding-trim.sql_analyzer_test	17	0	0
@@ -126,7 +126,7 @@ higher-order-functions.sql	182	0	0
 higher-order-functions.sql_analyzer_test	11	0	0
 identifier-clause-legacy.sql	277	9	11
 identifier-clause-legacy.sql_analyzer_test	129	4	6
-identifier-clause.sql	332	11	15
+identifier-clause.sql	332	13	18
 identifier-clause.sql_analyzer_test	143	4	6
 ilike-all.sql	14	0	0
 ilike-all.sql_analyzer_test	1	0	0
@@ -258,7 +258,7 @@ postgreSQL/create_view.sql	363	2	2
 postgreSQL/create_view.sql_analyzer_test	186	0	0
 postgreSQL/date.sql	62	3	5
 postgreSQL/date.sql_analyzer_test	17	0	0
-postgreSQL/float4.sql	43	2	2
+postgreSQL/float4.sql	43	3	4
 postgreSQL/float4.sql_analyzer_test	7	0	0
 postgreSQL/float8.sql	104	21	32
 postgreSQL/float8.sql_analyzer_test	14	0	0
@@ -277,7 +277,7 @@ postgreSQL/join.sql	2424	385	1068
 postgreSQL/join.sql_analyzer_test	723	0	0
 postgreSQL/limit.sql	13	9	18
 postgreSQL/limit.sql_analyzer_test	2	0	0
-postgreSQL/numeric.sql	1119	6	6
+postgreSQL/numeric.sql	1119	13	24
 postgreSQL/numeric.sql_analyzer_test	519	0	0
 postgreSQL/select.sql	43	20	27
 postgreSQL/select.sql_analyzer_test	6	1	1
@@ -416,7 +416,7 @@ subquery/resolution-edge-cases.sql	17	0	0
 subquery/resolution-edge-cases.sql_analyzer_test	6	0	0
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql	24	3	3
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql_analyzer_test	10	0	0
-subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	8
+subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	10
 subquery/scalar-subquery/scalar-subquery-count-bug.sql_analyzer_test	12	0	0
 subquery/scalar-subquery/scalar-subquery-group-by.sql	26	6	12
 subquery/scalar-subquery/scalar-subquery-group-by.sql_analyzer_test	8	0	0
@@ -427,7 +427,7 @@ subquery/scalar-subquery/scalar-subquery-select.sql_analyzer_test	11	0	0
 subquery/scalar-subquery/scalar-subquery-set-op.sql	56	32	91
 subquery/scalar-subquery/scalar-subquery-set-op.sql_analyzer_test	3	0	0
 subquery/subquery-in-from.sql	6	6	6
-subquery/subquery-nested-data.sql	37	5	11
+subquery/subquery-nested-data.sql	37	9	21
 subquery/subquery-nested-data.sql_analyzer_test	10	0	0
 subquery/subquery-offset.sql	32	2	2
 subquery/subquery-offset.sql_analyzer_test	10	0	0

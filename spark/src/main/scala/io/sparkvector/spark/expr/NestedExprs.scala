@@ -46,6 +46,77 @@ final case class StructFieldExpr(inputOrdinal: Int, path: Seq[Int], dataType: Da
   override def children: Seq[VectorExpr] = Nil
 }
 
+/**
+ * `size(arr)` / `size(map)` / `cardinality` over a column (or a struct field of one) that has no lane:
+ * the element count per row read from Spark's vector; a null array is null (or -1 under
+ * `spark.sql.legacy.sizeOfNull`, as Spark's `Size` yields).
+ */
+final case class SizeExpr(inputOrdinal: Int, path: Seq[Int], isMap: Boolean, legacySizeOfNull: Boolean) extends VectorExpr {
+  private val steps = path.toArray
+  override def dataType: DataType = org.apache.spark.sql.types.IntegerType
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    var cv: ColumnVector = ctx.column(inputOrdinal)
+    val ancestors = new scala.collection.mutable.ArrayBuffer[ColumnVector]
+    var s = 0
+    while (s < steps.length) { if (cv.hasNull) ancestors += cv; cv = cv.getChild(steps(s)); s += 1 }
+    val parents = ancestors.toArray
+    val data = io.sparkvector.kernels.ArrowLayout.allocateData(ctx.arena, VecType.INT32, n)
+    val validity = if (legacySizeOfNull) null else ctx.bitmap()
+    var r = 0
+    while (r < n) {
+      val isNull = cv.isNullAt(r) || parents.exists(_.isNullAt(r))
+      if (isNull) { if (legacySizeOfNull) data.set(VectorBuffers.LE_INT, r.toLong << 2, -1) }
+      else {
+        val len = if (isMap) cv.getMap(r).numElements() else cv.getArray(r).numElements()
+        data.set(VectorBuffers.LE_INT, r.toLong << 2, len)
+        if (validity != null) Bitmap.set(validity, r)
+      }
+      r += 1
+    }
+    SegmentVectorBuffers.fixedWidth(VecType.INT32, n, validity, data)
+  }
+
+  override def children: Seq[VectorExpr] = Nil
+}
+
+/**
+ * A struct field of a type without a lane (struct, array, map, wide decimal) projected as a value: never
+ * evaluated as a lane -- [[org.apache.spark.sql.vector.VectorProjectExec]] turns it into a
+ * `NestedFieldColumnVector` view of Spark's child vector, exactly as it passes a whole such column through.
+ */
+final case class NestedColumnRef(inputOrdinal: Int, path: Seq[Int], dataType: DataType) extends VectorExpr {
+  override def eval(ctx: EvalContext): VectorBuffers =
+    throw new IllegalStateException(s"a nested column of type ${dataType.simpleString} has no lane; it is passed through, not evaluated")
+  override def children: Seq[VectorExpr] = Nil
+}
+
+/**
+ * The nulls of a column without a lane (or a struct field of one), for `IS NULL` / `IS NOT NULL` over it
+ * (Spark adds `isnotnull(arr)` below a non-outer explode): a BOOL lane whose validity is the non-null
+ * rows, ancestors' nulls included; the null tests read only the validity.
+ */
+final case class NestedValidityExpr(inputOrdinal: Int, path: Seq[Int]) extends VectorExpr {
+  private val steps = path.toArray
+  override def dataType: DataType = org.apache.spark.sql.types.BooleanType
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    var cv: ColumnVector = ctx.column(inputOrdinal)
+    val ancestors = new scala.collection.mutable.ArrayBuffer[ColumnVector]
+    var s = 0
+    while (s < steps.length) { if (cv.hasNull) ancestors += cv; cv = cv.getChild(steps(s)); s += 1 }
+    val parents = ancestors.toArray
+    val validity = ctx.bitmap()
+    var r = 0
+    while (r < n) { if (!(cv.isNullAt(r) || parents.exists(_.isNullAt(r)))) Bitmap.set(validity, r); r += 1 }
+    SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, validity, validity)
+  }
+
+  override def children: Seq[VectorExpr] = Nil
+}
+
 object StructFieldExpr {
   /** The same buffers under a narrower validity bitmap, whatever the lane's shape. */
   def withValidity(v: VectorBuffers, validity: java.lang.foreign.MemorySegment): VectorBuffers = v match {

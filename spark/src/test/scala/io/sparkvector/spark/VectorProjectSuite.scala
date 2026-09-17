@@ -85,8 +85,10 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT st.b AS b, count(*) AS n, sum(st.a) AS sa, avg(st.c.d) AS ad FROM nested GROUP BY st.b", Seq(Project, classOf[VectorHashAggregateExec]))
     // A field beside the whole struct passed through, under a selection the project applies.
     checkVectorized("SELECT st, st.a AS a, st.c.d AS d FROM nested WHERE i % 4 = 1", Seq(Filter, Project))
-    // A struct-typed field as a value would be a nested result: refused with the reason (the whole column passes through instead).
-    checkFallback("SELECT i, st.c AS c FROM nested", Seq(Project), "not supported as a value")
+    // A struct-typed field as a value passes through as a view of the child vector, the struct's nulls folded in -- dense and compacted.
+    checkVectorized("SELECT i, st.c AS c, st.c.d AS d FROM nested", Seq(Project))
+    checkVectorized("SELECT i, st.c AS c FROM nested WHERE i % 7 = 2", Seq(Filter, Project))
+    checkVectorized("SELECT i, st.c IS NULL AS nc, size(arr) AS n, arr IS NOT NULL AS na FROM nested", Seq(Project))
     // Under a sparse selection the filter compacts; the project then reads the remapped struct's children.
     checkVectorized("SELECT st.a AS a, st.c.d AS d FROM nested WHERE i % 250 = 3", Seq(Filter, Project))
     // A struct-typed field as a value is a struct result: refused with the reason; a field of a non-struct is an analysis error in Spark itself.
