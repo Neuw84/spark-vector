@@ -85,11 +85,17 @@ object VectorStructuralPlanner {
    * supported lanes (a row child is converted by Spark's `RowToColumnarExec`, whose batches must
    * be adaptable).
    */
+  /**
+   * The union forwards its children's batches untouched, so it is planned whatever their column types:
+   * a type it does not know is a type it never reads. Refusing on types was worse than useless -- a
+   * union left to Spark over columnar children runs Spark 4.1.3's columnar `UnionExec`, which
+   * concatenates co-partitioned children (the #128 bug upstream), and TPC-DS q66 returned every row
+   * twice once the wide decimal sum (#87) made the channel aggregates columnar with a `decimal(28,2)`
+   * result the union refused.
+   */
   def planUnion(u: UnionExec): Either[String, VectorUnionExec] = {
-    val typeFailures = u.children.flatMap(c => c.output.find(a => !TypeMapping.isSupported(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}"))
     if (u.children.size < 2) Left("union with fewer than two children")
     else if (!u.children.exists(_.supportsColumnar)) Left("no columnar child")
-    else if (typeFailures.nonEmpty) Left(typeFailures.distinct.mkString("; "))
     else Right(VectorUnionExec(u.children))
   }
 

@@ -319,6 +319,15 @@ that pin it.
   decide from `rowMatched` after all chunks, outer joins emit per chunk. The build side is Spark's
   `IdentityBroadcastMode` array of rows. Full outer and outer-with-the-broadcast-side-preserved are
   refused (a matched bitmap over a broadcast shared by every task).
+- Every replacement operator must report `outputPartitioning` exactly as the Spark operator it replaces
+  -- *through its output aliases*. `VectorHashAggregateExec` and `VectorProjectExec` mix in Spark's
+  `PartitioningPreservingUnaryExecNode` (`outputExpressions` = result / project list) so `GROUP BY
+  d_year` output as `year` is partitioned by `year`; a partitioning naming an attribute the operator does
+  not output is one a union above cannot match, and both unions (ours and Spark's) then concatenate at
+  execution -- TPC-DS q66 returned every row twice (#162). `VectorUnionExec` is planned whatever the
+  column types for the same reason: left to Spark over columnar children it runs the concatenating
+  columnar `UnionExec`. Run the TPC-DS harness (`run-tpcds.sh`, SF1 in scratch, ~5 minutes) after any
+  change to an operator's output contract.
 - `SortMergeJoinExec` is re-expressed as `VectorShuffledHashJoinExec` under the opt-in
   `spark.vector.exec.sortMergeJoin.enabled` (#10): `VectorJoinPlanner.planSortMerge` picks the smaller
   side by `estimatedBuildSize` (both sides must have statistics -- without AQE they do not -- and the
@@ -528,7 +537,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 206 Spark tests (179 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 207 Spark tests (180 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

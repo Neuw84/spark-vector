@@ -248,4 +248,34 @@ class VectorDecimalSuite extends VectorQuerySuite {
 
   private def causes(t: Throwable): Seq[Throwable] =
     Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).toSeq
+
+  test("a union of aliased-key channel aggregates keeps the partitioning contract whatever the column type (TPC-DS q66)") {
+    import org.apache.spark.sql.execution.exchange.ShuffleExchangeLike
+    // Each channel is a Final aggregate hash-partitioned by k whose sum(big) result is decimal(28,2): a
+    // type our operators do not read, but the union only forwards batches. Left to Spark, the union
+    // ran Spark 4.1.3's columnar UnionExec, which concatenates the co-partitioned children, and the
+    // aggregate above (planned without a shuffle on the union's partitioning) emitted every key once per
+    // channel -- q66 returned 10 rows for Spark's 5.
+    val channel = (c: Int) => s"SELECT k, sum(big) AS total FROM t WHERE i % 3 = $c GROUP BY k"
+    val sql = s"SELECT k, sum(total) AS total, count(*) AS parts FROM (${channel(0)} UNION ALL ${channel(1)}) u GROUP BY k"
+    val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
+    val df = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); d }
+    assertRowsEqual(expected, df.collect(), 1e-9, sql)
+    assert(nodesOf[org.apache.spark.sql.vector.VectorUnionExec](df).nonEmpty, finalPlan(df).treeString)
+    assert(nodesOf[org.apache.spark.sql.execution.UnionExec](df).isEmpty, finalPlan(df).treeString)
+    assert(nodesOf[ShuffleExchangeLike](df).size === 2, finalPlan(df).treeString)
+    val rows = df.collect()
+    assert(rows.length === 4 && rows.forall(_.getLong(2) === 2), rows.mkString("\n"))
+    // q66 itself aliases the key (`d_year AS year`): the channel aggregate must report its partitioning
+    // over the alias, as Spark's does, or the union cannot recognise the children as co-partitioned.
+    val aliased = (c: Int) => s"SELECT k AS kk, sum(big) AS total FROM t WHERE i % 3 = $c GROUP BY k"
+    val sql2 = s"SELECT kk, sum(total) AS total, count(*) AS parts FROM (${aliased(0)} UNION ALL ${aliased(1)}) u GROUP BY kk"
+    val expected2 = withPlugin(enabled = false)(spark.sql(sql2).collect())
+    val df2 = withPlugin(enabled = true) { val d = spark.sql(sql2); d.collect(); d }
+    assertRowsEqual(expected2, df2.collect(), 1e-9, sql2)
+    val union = nodesOf[org.apache.spark.sql.vector.VectorUnionExec](df2).head
+    assert(union.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.HashPartitioningLike], union.outputPartitioning.toString)
+    assert(nodesOf[ShuffleExchangeLike](df2).size === 2, finalPlan(df2).treeString)
+    assert(df2.collect().forall(_.getLong(2) === 2), df2.collect().mkString("\n"))
+  }
 }
