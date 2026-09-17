@@ -234,6 +234,20 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {
+    // hash must be Spark's exact Murmur3 -- every supported type incl. nulls, NaN, -0.0, dates, timestamps, short decimals, several columns, a seed.
+    checkVectorized("SELECT hash(i) AS a, hash(l) AS b, hash(d) AS c, hash(d2) AS d0, hash(b) AS e0, hash(s) AS f, hash(dt) AS g, hash(CAST(d2 AS DECIMAL(10, 2))) AS h, hash(i, l, s, b, d) AS j, hash(-0.0d * i) AS k FROM t", Seq(Project))
+    checkVectorized("SELECT hash(ts) AS a, hash(ts, i) AS b FROM ts", Seq(Project))
+    checkVectorized("SELECT hash(i, s) AS a, xxhash64(i, s) AS b FROM t", Seq(Project))
+    // Digests over the string's bytes (Spark's string -> binary cast), hex out; sha2's bit lengths incl. 0 and an unknown one.
+    checkVectorized("SELECT md5(s) AS a, sha1(s) AS b, sha(s) AS c, sha2(s, 256) AS d0, sha2(s, 0) AS e0, sha2(s, 224) AS f, sha2(s, 384) AS g, sha2(s, 512) AS h, sha2(s, 100) AS j, crc32(s) AS k, md5(concat(s, '日本')) AS m FROM t", Seq(Project))
+    // In a filter and as a grouping key; hash of a literal folds in Spark.
+    checkVectorized("SELECT i FROM t WHERE pmod(hash(s), 7) = 3 AND crc32(s) > 1000000", Seq(Filter))
+    checkVectorized("SELECT pmod(hash(s, i % 3), 5) AS k, count(*) AS n, min(md5(s)) AS m FROM t GROUP BY pmod(hash(s, i % 3), 5)", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: a non-literal sha2 bit length.
+    checkFallback("SELECT sha2(s, i) AS a FROM t", Seq(Project), "non-literal bit length")
+  }
+
   test("instr, locate, replace, translate, substring_index, split_part and find_in_set") {
     // Haystacks with repeats, multi-byte text, commas and dots; needles as literals and lanes.
     val h = "CASE WHEN i % 6 = 0 THEN 'www.apache.org' WHEN i % 6 = 1 THEN '日本語テキスト日本' WHEN i % 6 = 2 THEN 'a,b,,c' WHEN i % 6 = 3 THEN '😀x😀y😀' WHEN i % 6 = 4 THEN '' ELSE concat(s, s) END"
@@ -433,7 +447,7 @@ class VectorProjectSuite extends VectorQuerySuite {
 
   test("unsupported expressions in a projection fall back") {
     checkFallback("SELECT reverse(s) AS c FROM t WHERE i > 5", Seq(Project), "unsupported expression")
-    checkFallback("SELECT hash(i) AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
+    checkFallback("SELECT soundex(s) AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
   }
 
   test("project conversion can be disabled by configuration") {

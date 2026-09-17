@@ -3,11 +3,11 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, Upper, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, Upper, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
-import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
+import org.apache.spark.sql.types.{BinaryType, BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
 
 /**
  * Translates Catalyst expressions into [[VectorExpr]] trees. Returns a human-readable reason on
@@ -70,6 +70,17 @@ object ExpressionCompiler {
       else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+
+    // Hashes: Spark's own Murmur3 steps per child (the xxhash64 chain's per-type rules); digests per row.
+    case Murmur3Hash(children, seed) if children.nonEmpty && children.forall(c => XxHash64Expr.supports(c.dataType)) =>
+      children.foldLeft[Either[String, Vector[VectorExpr]]](Right(Vector.empty)) { (acc, c) =>
+        for (done <- acc; v <- compile(c, input)) yield done :+ v
+      }.map(vs => Murmur3HashExpr(vs, children.map(_.dataType), seed))
+    case Md5(BinaryFromString(str)) => stringSubject(str, input, "md5").map(DigestExpr(DigestExpr.Md5, _))
+    case Sha1(BinaryFromString(str)) => stringSubject(str, input, "sha1").map(DigestExpr(DigestExpr.Sha1, _))
+    case Sha2(BinaryFromString(str), Literal(bits: Int, IntegerType)) => stringSubject(str, input, "sha2").map(DigestExpr(DigestExpr.Sha2(bits), _))
+    case Sha2(_, _) => Left("sha2 with a non-literal bit length not supported")
+    case Crc32(BinaryFromString(str)) => stringSubject(str, input, "crc32").map(DigestExpr(DigestExpr.Crc32, _))
 
     // The search family: one byte-search primitive under every function; string children only.
     case StringInstr(str, sub) if str.dataType == StringType =>
@@ -762,6 +773,14 @@ object ExpressionCompiler {
       case Some(Literal(null, _)) => Left(s"$what with a null trim string")
       case Some(_) => Left(s"$what with a non-literal trim string not supported")
     }
+
+  /** Spark's `string -> binary` cast, a reinterpretation of the bytes: the UTF8 lane underneath serves as the binary. */
+  private object BinaryFromString {
+    def unapply(e: Expression): Option[Expression] = e match {
+      case Cast(child, BinaryType, _, _) if child.dataType == StringType => Some(child)
+      case _ => None
+    }
+  }
 
   /** Several string arguments, each a UTF8 lane or a non-null literal; at least one must be a lane. */
   private def stringArgs(es: Seq[Expression], input: Seq[Attribute], what: String): Either[String, Seq[VectorExpr]] = {

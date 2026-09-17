@@ -98,6 +98,21 @@ class StringConcatKernelsTest {
   }
 
   @Test
+  void fromRowsBuildsALaneWithNullsFromEitherSide() {
+    try (Arena arena = Arena.ofConfined()) {
+      byte[][] rows = {"ab".getBytes(StandardCharsets.UTF_8), null, "".getBytes(StandardCharsets.UTF_8), "日本".getBytes(StandardCharsets.UTF_8), "x".getBytes(StandardCharsets.UTF_8)};
+      MemorySegment validity = ArrowLayout.allocateBitmap(arena, 5);
+      for (int i : new int[] {0, 1, 2, 3}) Bitmap.set(validity, i); // row 4 null from the caller's validity
+      VectorBuffers out = StringConcatKernels.fromRows(rows, validity, arena);
+      String[] expected = {"ab", null, "", "日本", null};
+      for (int i = 0; i < 5; i++) assertEquals(expected[i], read(out, i), "row " + i);
+      VectorBuffers all = StringConcatKernels.fromRows(rows, null, arena);
+      assertEquals("x", read(all, 4));
+      assertEquals(null, read(all, 1));
+    }
+  }
+
+  @Test
   void eltPicksByIndex() {
     int n = A.length;
     try (Arena arena = Arena.ofConfined()) {
