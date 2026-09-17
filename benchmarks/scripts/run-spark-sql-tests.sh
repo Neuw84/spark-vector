@@ -8,6 +8,7 @@
 #   benchmarks/scripts/run-spark-sql-tests.sh '^(join|decimal)'
 #   SQL_TESTS_EXCLUDE='^$' benchmarks/scripts/run-spark-sql-tests.sh   # also the excluded files
 #   SQL_TESTS_UPDATE_BASELINE=true benchmarks/scripts/run-spark-sql-tests.sh   # full run; rewrite the coverage floor
+#   SQL_TESTS_JVM_ARGS='-Dspark.vector.exec.sortMergeJoin.enabled=true' benchmarks/scripts/run-spark-sql-tests.sh 'join'   # a non-default configuration
 #
 # Excluded by default (VectorSQLQueryTestSuite.defaultExclude): explain*.sql, whose golden output
 # is Spark's own physical plan, and the DataSketches files (hll, kllquantiles, thetasketch), whose
@@ -26,4 +27,4 @@ unset JAVA_TOOL_OPTIONS
 cd "$ROOT"
 # -Piceberg: the spark module's test sources include the Iceberg suites, which only compile with that profile.
 mvn -B -Pspark-sql-tests -Piceberg -pl spark-sql-tests -am -DskipTests install -q
-mvn -B -Pspark-sql-tests -pl spark-sql-tests -Dsuites=io.sparkvector.spark.sqltests.VectorSQLQueryTestSuite "-DsqlTests.filter=$FILTER" "-DsqlTests.exclude=$EXCLUDE" "-DsqlTests.updateBaseline=${SQL_TESTS_UPDATE_BASELINE:-false}" test
+mvn -B -Pspark-sql-tests -pl spark-sql-tests -Dsuites=io.sparkvector.spark.sqltests.VectorSQLQueryTestSuite "-DsqlTests.filter=$FILTER" "-DsqlTests.exclude=$EXCLUDE" "-DsqlTests.jvmArgs=${SQL_TESTS_JVM_ARGS:-}" "-DsqlTests.updateBaseline=${SQL_TESTS_UPDATE_BASELINE:-false}" test

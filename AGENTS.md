@@ -319,6 +319,15 @@ that pin it.
   decide from `rowMatched` after all chunks, outer joins emit per chunk. The build side is Spark's
   `IdentityBroadcastMode` array of rows. Full outer and outer-with-the-broadcast-side-preserved are
   refused (a matched bitmap over a broadcast shared by every task).
+- `SortMergeJoinExec` is re-expressed as `VectorShuffledHashJoinExec` under the opt-in
+  `spark.vector.exec.sortMergeJoin.enabled` (#10): `VectorJoinPlanner.planSortMerge` picks the smaller
+  side by `estimatedBuildSize` (both sides must have statistics -- without AQE they do not -- and the
+  smaller must fit the budget), the rule strips the two required sorts (`sortMergeInputs`), and a
+  top-down pre-pass (`markSortMergeJoins`, tag `VectorExecRule.OrderingNeeded`) keeps a merge join whose
+  ordering an ancestor relies on; the pre-pass and the transform share one verdict (`sortMergeConversion`)
+  so a join deemed to convert never leaves a Spark merge join above it reading unsorted input. Tie order
+  under `ORDER BY` and unordered `LIMIT` picks differ from Spark's order-preserving merge (three
+  `subquery/in-subquery` golden files); `SQL_TESTS_JVM_ARGS` runs the golden suite under the flag.
 - All three hash-style joins refuse a build side whose estimate exceeds `spark.vector.join.maxBuildSize`
   (`VectorJoinPlanner.buildSizeReason`; the estimate is the AQE stage's `computeStats` for a
   materialised stage, else the logical link's `stats.sizeInBytes`; `Long.MaxValue` or no link =
@@ -519,7 +528,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 208 Spark tests (181 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 206 Spark tests (179 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
