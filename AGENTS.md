@@ -603,7 +603,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 220 Spark tests (192 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 221 Spark tests (193 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -655,6 +655,14 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   remapped too) instead of `ArrowOutput.compact`, in both iterators; the lanes stay lazy, so a foreign
   column never reaches `ColumnVectorAdapters`. Everything above still judges by `typeReason`, and the
   Comet bridge's `bridgeable` already refuses a child output the C Data interface cannot carry.
+- Struct field access (#50): `ExpressionCompiler.structPath` resolves `GetStructField` chains down to
+  the input ordinal and the field ordinals; `StructFieldExpr` (spark/expr/NestedExprs.scala) walks
+  `ctx.column(ordinal).getChild(...)` to the leaf and adapts it with `ColumnVectorAdapters.adapt` (the
+  leaf is a Spark vector -- on-heap copy, off-heap view, foreign generic copy; a `RemappedColumnVector`
+  child is remapped too), then ANDs each ancestor's non-null bitmap into the validity
+  (`StructFieldExpr.withValidity` rebuilds a `SegmentVectorBuffers` of the lane's shape). A struct-typed
+  field as a value, `arr[i]`, `map[key]` and `arr.field` are refused with reasons naming #50; nested
+  results and the array/map/lambda families are recorded as not planned in `docs/expressions.md`.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

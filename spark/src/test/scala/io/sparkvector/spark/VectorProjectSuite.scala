@@ -32,7 +32,7 @@ class VectorProjectSuite extends VectorQuerySuite {
       .mixedDataFrame(spark, 6000)
       .selectExpr(
         "i", "l", "s",
-        "if(i % 11 = 4, null, named_struct('a', i, 'b', s, 'c', named_struct('d', l))) AS st",
+        "if(i % 11 = 4, null, named_struct('a', i, 'b', s, 'c', if(i % 5 = 0, null, named_struct('d', l, 'e', d)))) AS st",
         "if(i % 13 = 6, null, array(i, i + 1, l)) AS arr",
         "if(i % 17 = 2, null, map(coalesce(s, 'none'), l, 'k', cast(i AS bigint))) AS mp",
         "if(i % 19 = 7, null, cast(l AS decimal(30, 4)) * 1000000000000) AS wide")
@@ -67,11 +67,30 @@ class VectorProjectSuite extends VectorQuerySuite {
         .map(r => (r.getInt(0), String.valueOf(r.get(1)), String.valueOf(r.get(2)), String.valueOf(r.get(3)), String.valueOf(r.get(4)))).toSeq
     }
     assert(fields.sortBy(_._1) == expected.sortBy(_._1))
-    // Reading into such a column is still refused, with the type or expression named; so is grouping by it.
-    checkFallback("SELECT i, st.a AS a FROM nested", Seq(Project), "st")
-    checkFallback("SELECT i FROM nested WHERE st.a > 5", Seq(Filter), "st")
+    // Reading into an array, a map or a wide decimal is still refused, with the expression named; so is grouping by the struct.
+    checkFallback("SELECT i, arr[0] AS a0 FROM nested", Seq(Project), "array element access")
+    checkFallback("SELECT i, mp['k'] AS k FROM nested", Seq(Project), "map value access")
     checkFallback("SELECT st, count(*) AS n FROM nested GROUP BY st", Seq(classOf[VectorHashAggregateExec]), "unsupported column type struct")
     checkFallback("SELECT wide + 1 AS w FROM nested", Seq(Project), "18 digits")
+  }
+
+  test("struct fields are read from the struct vector's children, through chains, with the struct's nulls") {
+    // Every field type of the fixture: int, string, and through a nullable inner struct a long and a double.
+    checkVectorized("SELECT i, st.a AS a, st.b AS b, st.c.d AS d, st.c.e AS e FROM nested", Seq(Project))
+    // Computed over fields, filtered on a field (the filter and the project both read the child vectors).
+    checkVectorized("SELECT i, st.a + 1 AS a1, upper(st.b) AS ub, st.c.d * 2 AS d2 FROM nested WHERE st.a % 3 = 0 AND st.c.d IS NOT NULL", Seq(Filter, Project))
+    // A null struct or a null inner struct yields a null field, exactly where Spark does.
+    checkVectorized("SELECT i, st.a IS NULL AS na, st.c.d IS NULL AS nd, coalesce(st.c.d, -1L) AS d FROM nested", Seq(Project))
+    // Fields as grouping keys and aggregate inputs (Spark projects them below the aggregate).
+    checkVectorized("SELECT st.b AS b, count(*) AS n, sum(st.a) AS sa, avg(st.c.d) AS ad FROM nested GROUP BY st.b", Seq(Project, classOf[VectorHashAggregateExec]))
+    // A field beside the whole struct passed through, under a selection the project applies.
+    checkVectorized("SELECT st, st.a AS a, st.c.d AS d FROM nested WHERE i % 4 = 1", Seq(Filter, Project))
+    // A struct-typed field as a value would be a nested result: refused with the reason (the whole column passes through instead).
+    checkFallback("SELECT i, st.c AS c FROM nested", Seq(Project), "not supported as a value")
+    // Under a sparse selection the filter compacts; the project then reads the remapped struct's children.
+    checkVectorized("SELECT st.a AS a, st.c.d AS d FROM nested WHERE i % 250 = 3", Seq(Filter, Project))
+    // A struct-typed field as a value is a struct result: refused with the reason; a field of a non-struct is an analysis error in Spark itself.
+    checkFallback("SELECT i, st.c.d + 1 AS d1, named_struct('x', st.a) AS sx FROM nested", Seq(Project), "unsupported expression CreateNamedStruct")
   }
 
   test("date fields, truncation and arithmetic over date columns") {
