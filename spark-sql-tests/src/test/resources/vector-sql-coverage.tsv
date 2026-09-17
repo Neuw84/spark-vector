@@ -222,7 +222,7 @@ order-by-all.sql	18	1	1
 order-by-all.sql_analyzer_test	1	0	0
 order-by-and-having-on-top-of-aggregate-with-join.sql	80	72	180
 order-by-and-having-on-top-of-aggregate-with-join.sql_analyzer_test	4	0	0
-order-by-nulls-ordering.sql	74	4	4
+order-by-nulls-ordering.sql	74	12	16
 order-by-nulls-ordering.sql_analyzer_test	23	0	0
 order-by-ordinal.sql	19	0	0
 order-by-ordinal.sql_analyzer_test	4	0	0
@@ -295,13 +295,13 @@ postgreSQL/timestamp.sql	45	13	28
 postgreSQL/timestamp.sql_analyzer_test	15	0	0
 postgreSQL/union.sql	73	45	82
 postgreSQL/union.sql_analyzer_test	3	0	0
-postgreSQL/window_part1.sql	152	88	223
+postgreSQL/window_part1.sql	152	101	265
 postgreSQL/window_part1.sql_analyzer_test	23	0	0
 postgreSQL/window_part2.sql	113	3	3
 postgreSQL/window_part2.sql_analyzer_test	23	0	0
-postgreSQL/window_part3.sql	86	6	6
+postgreSQL/window_part3.sql	86	12	12
 postgreSQL/window_part3.sql_analyzer_test	32	0	0
-postgreSQL/window_part4.sql	119	0	0
+postgreSQL/window_part4.sql	119	33	63
 postgreSQL/window_part4.sql_analyzer_test	5	0	0
 postgreSQL/with.sql	1030	67	107
 postgreSQL/with.sql_analyzer_test	44	0	0
@@ -416,13 +416,13 @@ subquery/resolution-edge-cases.sql	17	0	0
 subquery/resolution-edge-cases.sql_analyzer_test	6	0	0
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql	24	3	3
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql_analyzer_test	10	0	0
-subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	8
+subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	10
 subquery/scalar-subquery/scalar-subquery-count-bug.sql_analyzer_test	12	0	0
 subquery/scalar-subquery/scalar-subquery-group-by.sql	26	6	12
 subquery/scalar-subquery/scalar-subquery-group-by.sql_analyzer_test	8	0	0
 subquery/scalar-subquery/scalar-subquery-predicate.sql	67	34	155
 subquery/scalar-subquery/scalar-subquery-predicate.sql_analyzer_test	8	0	0
-subquery/scalar-subquery/scalar-subquery-select.sql	55	14	22
+subquery/scalar-subquery/scalar-subquery-select.sql	55	14	20
 subquery/scalar-subquery/scalar-subquery-select.sql_analyzer_test	11	0	0
 subquery/scalar-subquery/scalar-subquery-set-op.sql	56	32	91
 subquery/scalar-subquery/scalar-subquery-set-op.sql_analyzer_test	3	0	0
@@ -548,7 +548,7 @@ udf/udf-udaf.sql - Scala UDF	11	0	0
 udf/udf-udaf.sql - Scala UDF_analyzer_test	5	0	0
 udf/udf-union.sql - Scala UDF	26	0	0
 udf/udf-union.sql - Scala UDF_analyzer_test	10	0	0
-udf/udf-window.sql - Scala UDF	16	3	8
+udf/udf-window.sql - Scala UDF	16	5	12
 udf/udf-window.sql - Scala UDF_analyzer_test	1	0	0
 union-per-child-output-deduplication.sql	20	0	0
 union-per-child-output-deduplication.sql_analyzer_test	6	0	0
@@ -579,7 +579,7 @@ view-schema-type-evolution.sql_analyzer_test	48	0	0
 view-with-default-collation.sql	192	22	32
 view-with-default-collation.sql_analyzer_test	72	0	0
 window-with-aggregates.sql	9	8	26
-window.sql	346	96	192
+window.sql	346	108	204
 window.sql_analyzer_test	40	0	0
 xml-functions.sql	22	0	0
 xml-functions.sql_analyzer_test	3	0	0

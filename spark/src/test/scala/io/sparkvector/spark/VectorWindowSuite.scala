@@ -155,21 +155,44 @@ class VectorWindowSuite extends VectorQuerySuite {
     checkWindow("SELECT i, dense_rank() OVER (PARTITION BY i % 7 ORDER BY l % 3) AS dr, rank() OVER (PARTITION BY i % 7 ORDER BY l % 3) AS rk, first_value(l) OVER (PARTITION BY i % 7 ORDER BY l % 3) AS f FROM t")
   }
 
+  test("sliding frames equal Spark: sum, count, avg, min, max over ROWS BETWEEN with every bound shape") {
+    // Bounded both sides, preceding-only, following-only (empty frames near the partition end), and the suffix.
+    checkWindow("SELECT i, l, sum(l) OVER (PARTITION BY s ORDER BY l % 5, i ROWS BETWEEN 2 PRECEDING AND 1 FOLLOWING) AS moving, count(*) OVER (PARTITION BY s ORDER BY l % 5, i ROWS BETWEEN 2 PRECEDING AND 1 FOLLOWING) AS n FROM t")
+    checkWindow("SELECT i, sum(i) OVER (PARTITION BY i % 7 ORDER BY l, i ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING) AS before, avg(d) OVER (PARTITION BY i % 7 ORDER BY l, i ROWS BETWEEN 1 FOLLOWING AND 3 FOLLOWING) AS after FROM t WHERE d = d AND abs(d) < 1e300")
+    checkWindow("SELECT i, min(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS suffix_min, max(s) OVER (PARTITION BY i % 7 ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS around, count(nullif(l % 3, 0)) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS nn FROM t")
+    // UNBOUNDED PRECEDING with a following bound: advanced in order like Spark; doubles bit-identical; the whole-partition ROWS form.
+    checkWindow("SELECT i, sum(d) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING) AS ahead, avg(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS mean, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t WHERE d = d AND abs(d) < 1e300")
+    // A 20000-row partition with bounded frames across batch boundaries, and ties (ROWS frames ignore peers).
+    checkWindow("SELECT i, sum(l) OVER (ORDER BY i ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING) AS window7, max(i) OVER (ORDER BY l % 5, i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS m FROM t")
+    // Sliding aggregates beside a running one and an offset in one operator (all take the held-partition path).
+    checkWindow("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, lag(l) OVER (PARTITION BY s ORDER BY i) AS prev, count(*) OVER (PARTITION BY s) AS n FROM t")
+    // ANSI: a sliding bigint sum that overflows raises like Spark; non-ANSI wraps.
+    val overflowing = "SELECT i, sum(CASE WHEN i = 1 THEN 9223372036854775807L ELSE l END) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS moving FROM t WHERE i < 10"
+    withConf("spark.sql.ansi.enabled" -> "true") {
+      val e = intercept[Exception] { withPlugin(enabled = true) { spark.sql(overflowing).collect() } }
+      assert(e.getMessage.contains("ARITHMETIC_OVERFLOW") || e.getMessage.contains("overflow"), e.getMessage)
+    }
+    withConf("spark.sql.ansi.enabled" -> "false") { checkWindow(overflowing) }
+  }
+
   test("other window functions and frames fall back with a reason; the operator can be disabled") {
-    // Sliding frames, a running frame of a function without a prefix form, and two frame kinds in one operator.
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS moving FROM t", Seq(Window), "window aggregate sum over frame")
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS suffix FROM t", Seq(Window), "window aggregate sum over frame")
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, first(l) OVER (PARTITION BY s ORDER BY i) AS f FROM t", Seq(Window), "offset functions beside other window functions")
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS byrows FROM t", Seq(Window), "different frames in one operator")
+    // RANGE frames with value offsets, sliding frames of functions without a form here, and two frame kinds in one operator.
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) AS moving FROM t", Seq(Window), "RANGE frames with value offsets")
+    checkFallback("SELECT i, stddev(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS sd FROM t", Seq(Window), "over a sliding frame not supported")
+    checkWindow("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, first(l) OVER (PARTITION BY s ORDER BY i) AS f FROM t")
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS dec FROM t", Seq(Window), "over decimals not supported")
     checkFallback("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over decimals not supported")
     checkFallback("SELECT i, approx_count_distinct(l) OVER (PARTITION BY s) AS n FROM t", Seq(Window), "window aggregate approx_count_distinct:")
-    checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "offset functions beside other window functions")
+    checkWindow("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t")
+    checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, stddev(l) OVER (PARTITION BY s ORDER BY i) AS sd FROM t", Seq(Window), "running frame for stddev not supported")
     checkFallback("SELECT i, lag(l, 1) IGNORE NULLS OVER (PARTITION BY s ORDER BY i) AS previous FROM t", Seq(Window), "IGNORE NULLS not supported")
     checkFallback("SELECT i, first_value(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS f FROM t", Seq(Window), "first_value over frame")
     checkFallback("SELECT i, rank() OVER (PARTITION BY d ORDER BY i) AS rk FROM t", Seq(Window), "double keys not supported")
-    // A ranking function beside an aggregate in the same spec keeps the whole operator Spark's.
-    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "beside a ranking function in one operator")
-    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t", Seq(Window), "beside a ranking function in one operator")
+    // A ranking function beside an aggregate in the same spec: one operator of ours (the held-partition path computes both);
+    // beside an aggregate it cannot compute, the whole operator stays Spark's with that reason.
+    checkWindow("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t")
+    checkWindow("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t")
+    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, stddev(l) OVER (PARTITION BY s ORDER BY i) AS sd FROM t", Seq(Window), "running frame for stddev not supported")
     withConf("spark.vector.exec.window.enabled" -> "false") {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk FROM t"); d.collect(); d }
       assert(nodesOf[WindowExec](df).nonEmpty && nodesOf[VectorWindowExec](df).isEmpty, finalPlan(df).treeString)
