@@ -847,9 +847,9 @@ object VectorJoinPlanner {
    * the build side fits". `left` / `right` are the join's inputs with the sorts Spark placed for the
    * merge already removed (the caller strips them: a hash join does not need them).
    */
-  def planSortMerge(
+  def sortMergeBuildSide(
       leftKeys: Seq[Expression], rightKeys: Seq[Expression], joinType: JoinType, condition: Option[Expression],
-      isSkewJoin: Boolean, left: SparkPlan, right: SparkPlan, maxBuildSize: Long): Either[String, VectorShuffledHashJoinExec] = {
+      isSkewJoin: Boolean, left: SparkPlan, right: SparkPlan, maxBuildSize: Long): Either[String, BuildSide] = {
     if (isSkewJoin) Left("skew join not supported")
     else {
       val sides: Seq[BuildSide] = joinType match {
@@ -867,8 +867,7 @@ object VectorJoinPlanner {
         else {
           val (buildSide, size) = sized.minBy(_._2)
           if (size > maxBuildSize) Left(s"smallest side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize")
-          else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right)
-            .map(_ => VectorShuffledHashJoinExec(leftKeys, rightKeys, joinType, buildSide, condition, left, right))
+          else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right).map(_ => buildSide)
         }
       }
     }

@@ -18,8 +18,12 @@ import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregat
 import org.apache.spark.sql.internal.SQLConf
 
 object VectorExecRule {
-  /** Set on every SortMergeJoinExec by the pre-pass: does an ancestor rely on the join's output ordering? */
-  val OrderingNeeded: TreeNodeTag[Boolean] = TreeNodeTag[Boolean]("io.sparkvector.sortMergeJoin.orderingNeeded")
+  /**
+   * Set on every SortMergeJoinExec by the pre-pass: the build side of the shuffled hash join it becomes,
+   * or the reason it stays Spark's. The transform builds from this decision and never re-derives it.
+   */
+  val SortMergeDecision: TreeNodeTag[Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]] =
+    TreeNodeTag("io.sparkvector.sortMergeJoin.decision")
 }
 
 /** Tags and helpers for explaining why an operator was left to Spark. */
@@ -52,31 +56,20 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     if (!VectorConf.isEnabled(conf)) {
       plan
     } else {
-      if (VectorConf.sortMergeJoinEnabled(conf)) markSortMergeJoins(plan, orderingNeeded = false, maxBuildSize)
+      if (VectorConf.sortMergeJoinEnabled(conf)) {
+        markSortMergeJoins(plan, orderingNeeded = false, maxBuildSize, new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]])
+      }
       val converted = plan.transformUp {
         case f @ FilterExec(condition, child) if VectorConf.filterEnabled(conf) =>
-          columnarInputReason(child) match {
+          columnarInputReason(child).orElse(filterReason(f)) match {
             case Some(reason) => fallback(f, reason)
-            case None =>
-              ExpressionCompiler.compilePredicate(condition, child.output) match {
-                case Right(_) => VectorFilterExec(condition, child)
-                case Left(reason) => fallback(f, reason)
-              }
+            case None => VectorFilterExec(condition, child)
           }
 
         case p @ ProjectExec(projectList, child) if VectorConf.projectEnabled(conf) =>
-          columnarInputReason(child) match {
+          columnarInputReason(child).orElse(projectReason(p)) match {
             case Some(reason) => fallback(p, reason)
-            case None =>
-              val failures = projectList.flatMap { e =>
-                val compiled = ExpressionCompiler.compile(e, child.output)
-                val typeCheck =
-                  if (TypeMapping.isSupported(e.dataType)) Right(())
-                  else Left(s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
-                compiled.flatMap(_ => typeCheck).left.toOption.map(r => s"${e.sql}: $r")
-              }
-              if (failures.isEmpty) VectorProjectExec(projectList, child)
-              else fallback(p, failures.mkString("; "))
+            case None => VectorProjectExec(projectList, child)
           }
 
         case e: ExpandExec if VectorConf.expandEnabled(conf) =>
@@ -207,13 +200,19 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           // the same keys with no shuffle in between): such a join stays Spark's, decided by the
           // pre-pass over the whole plan (markSortMergeJoins), since a hash join has no ordering to
           // offer. And the build side must fit the budget by statistics, not by assumption.
-          if (j.getTagValue(VectorExecRule.OrderingNeeded).contains(true)) fallback(j, "output ordering required by the parent operator")
-          else {
-            val (left, right) = sortMergeInputs(j)
-            sortMergeConversion(j, left, right, maxBuildSize) match {
-              case Right(v) => v
-              case Left(reason) => fallback(j, reason)
-            }
+          // The decision is the pre-pass's, taken over the original plan: by now the children are the
+          // transformed ones (a merge join below that converted is our hash join, columnar; a required
+          // sort is stripped), and re-deriving anything here -- a size estimate, say, which our operators
+          // do not carry -- could contradict the pass and leave a Spark merge join reading unsorted input.
+          j.getTagValue(VectorExecRule.SortMergeDecision) match {
+            case Some(Right(buildSide)) =>
+              val (left, right) = sortMergeInputs(j)
+              exchangeInputReason(left).orElse(exchangeInputReason(right)) match {
+                case None => VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
+                case Some(reason) => fallback(resorted(j), reason)
+              }
+            case Some(Left(reason)) => fallback(resorted(j), reason)
+            case None => fallback(resorted(j), "sort-merge join not examined by the pre-pass")
           }
 
         case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) => planAggregate(a, a, conf)
@@ -347,37 +346,101 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     (strip(j.left, j.requiredChildOrdering.head), strip(j.right, j.requiredChildOrdering(1)))
   }
 
-  /** The one verdict both passes use, so the pre-pass never marks a child free of a join that then stays Spark's. */
-  private def sortMergeConversion(j: SortMergeJoinExec, left: SparkPlan, right: SparkPlan, maxBuildSize: Long): Either[String, SparkPlan] =
-    exchangeInputReason(left).orElse(exchangeInputReason(right)) match {
-      case Some(reason) => Left(reason)
-      case None => VectorJoinPlanner.planSortMerge(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.isSkewJoin, left, right, maxBuildSize)
+  /** Why a filter's predicate would not compile over its child's output, input aside. */
+  private def filterReason(f: FilterExec): Option[String] =
+    ExpressionCompiler.compilePredicate(f.condition, f.child.output).left.toOption
+
+  /** Why a projection would not compile over its child's output (an expression, an output type), input aside. */
+  private def projectReason(p: ProjectExec): Option[String] = {
+    val failures = p.projectList.flatMap { e =>
+      val compiled = ExpressionCompiler.compile(e, p.child.output)
+      val typeCheck =
+        if (TypeMapping.isSupported(e.dataType)) Right(())
+        else Left(s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
+      compiled.flatMap(_ => typeCheck).left.toOption.map(r => s"${e.sql}: $r")
     }
+    if (failures.isEmpty) None else Some(failures.mkString("; "))
+  }
 
   /**
-   * Top-down pre-pass tagging every sort-merge join with whether some ancestor relies on its output
-   * ordering: a parent that requires an ordering of it (Spark placed no sort in between only because
-   * the join's ordering satisfied it), or an ordered ancestor whose own ordering is relied on and
-   * derives from it. A join that converts requires nothing of its children; one that stays Spark's --
-   * because it is needed ordered, or fails the conversion checks -- requires its children sorted, and
-   * a merge join among them then stays too. The tags ride along the copies transformUp makes.
+   * A merge join that stays Spark's must read sorted inputs: a merge join below it that converted (the
+   * pre-pass expected this one to convert too) no longer offers its ordering, so the sort comes back over
+   * that columnar child. A child that still satisfies the requirement -- Spark's own, or a sort left in
+   * place -- is untouched.
    */
-  private def markSortMergeJoins(plan: SparkPlan, orderingNeeded: Boolean, maxBuildSize: Long): Unit = {
+  private def resorted(j: SortMergeJoinExec): SortMergeJoinExec = {
+    def fix(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan =
+      if (org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, required) || !child.supportsColumnar) child
+      else VectorSortExec(required, global = false, child)
+    val left = fix(j.left, j.requiredChildOrdering.head)
+    val right = fix(j.right, j.requiredChildOrdering(1))
+    if ((left eq j.left) && (right eq j.right)) j else j.copy(left = left, right = right)
+  }
+
+  private type SortMergeMemo = java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]]
+
+  /**
+   * Whether a sort-merge join could become our hash join, ordering aside: its inputs (sorts stripped)
+   * are exchanges, or merge joins that could themselves convert -- a chain of merge joins on the same
+   * key has no shuffle between its links, and the upper link reads the lower one's output, which is
+   * columnar once the lower converts (TPC-DS q10, q35, q69, q95 chain semi and existence joins on the
+   * customer key). Bottom-up, memoised over the original nodes; the ordering question is the pre-pass's.
+   */
+  private def sortMergeEligibility(j: SortMergeJoinExec, maxBuildSize: Long, memo: SortMergeMemo): Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide] = {
+    val known = memo.get(j)
+    if (known != null) known
+    else {
+      val conf = session.sessionState.conf
+      val (left, right) = sortMergeInputs(j)
+      // The pass runs over Spark's plan, before anything is converted, so an input is judged by what it
+      // will be: an exchange is read through RowToColumnarExec; a merge join is columnar if it converts
+      // (recursively -- Spark prunes and filters between the links of a chain, so projects and filters are
+      // seen through with the rule's own checks); any other operator the rule replaces is assumed to
+      // convert when its output types are lanes. That assumption is optimistic on purpose: the transform
+      // verifies the real children and, when a join has to stay after all, restores the ordering a
+      // converted child below it no longer offers (`resorted`), so a wrong guess costs a sort, never a row.
+      def inputReason(p: SparkPlan): Option[String] = p match {
+        case inner: SortMergeJoinExec =>
+          sortMergeEligibility(inner, maxBuildSize, memo).left.toOption.map(r => s"child SortMergeJoin stays with Spark: $r").orElse(typeReason(inner))
+        case proj: ProjectExec if VectorConf.projectEnabled(conf) => projectReason(proj).orElse(inputReason(proj.child))
+        case filt: FilterExec if VectorConf.filterEnabled(conf) => filterReason(filt).orElse(inputReason(filt.child))
+        case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => typeReason(p)
+        case _: UnionExec | _: ExpandExec | _: CoalesceExec | _: SampleExec | _: SortExec | _: LocalLimitExec | _: GlobalLimitExec |
+             _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec | _: ShuffledHashJoinExec | _: HashAggregateExec | _: SortAggregateExec =>
+          typeReason(p)
+        case other => columnarInputReason(other)
+      }
+      val decision = inputReason(left).orElse(inputReason(right)) match {
+        case Some(reason) => Left(reason)
+        case None => VectorJoinPlanner.sortMergeBuildSide(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.isSkewJoin, left, right, maxBuildSize)
+      }
+      memo.put(j, decision)
+      decision
+    }
+  }
+
+  /**
+   * Top-down pre-pass deciding every sort-merge join: it stays Spark's when some ancestor relies on its
+   * output ordering -- a parent that requires an ordering of it (Spark placed no sort in between only
+   * because the join's ordering satisfied it), or an ordered ancestor whose own ordering is relied on
+   * and derives from it -- or when it is not eligible; otherwise it converts with the build side the
+   * eligibility chose. A join that converts requires nothing of its children, so a merge join below it
+   * on the same key is free to convert too; one that stays requires its children sorted, and a merge
+   * join among them then stays as well. The decisions ride along the copies transformUp makes.
+   */
+  private def markSortMergeJoins(plan: SparkPlan, orderingNeeded: Boolean, maxBuildSize: Long, memo: SortMergeMemo): Unit = {
     val converts = plan match {
       case j: SortMergeJoinExec =>
-        j.setTagValue(VectorExecRule.OrderingNeeded, orderingNeeded)
-        if (orderingNeeded) false
-        else {
-          val (left, right) = sortMergeInputs(j)
-          sortMergeConversion(j, left, right, maxBuildSize).isRight
-        }
+        val decision = if (orderingNeeded) Left("output ordering required by the parent operator") else sortMergeEligibility(j, maxBuildSize, memo)
+        j.setTagValue(VectorExecRule.SortMergeDecision, decision)
+        decision.isRight
       case _ => false
     }
     plan.children.zipWithIndex.foreach { case (child, i) =>
       val required = !converts && plan.requiredChildOrdering(i).nonEmpty
       val passes = orderingNeeded && plan.outputOrdering.nonEmpty &&
         org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, plan.outputOrdering)
-      markSortMergeJoins(child, required || passes, maxBuildSize)
+      markSortMergeJoins(child, required || passes, maxBuildSize, memo)
     }
   }
 

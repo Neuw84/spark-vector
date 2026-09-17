@@ -496,13 +496,15 @@ sort-merge joins into the shuffled hash join (#10, `spark.vector.exec.sortMergeJ
 (q8, q11, q14a, q14b, q25, q29, q31, q54, q72 and q78, q72 from 16/51 to 37/49, q25 and q29 from 14/38
 to 27/36) and two lose a few (q38, q92: adaptive execution re-plans a join as a broadcast join whose
 streamed side is then the bare row shuffle read, which our broadcast join refuses -- accepting an
-exchange as the streamed input, as the shuffled join does, would recover them). Eleven queries still
-carry a sort-merge join: four chains of merge joins on the same key with no shuffle in between (q10,
-q35, q69, q95 -- the lower join's ordering is what the upper one reads, so both stay; a chain-aware
-verdict is the next step), five whose other input is a row operator left to Spark for a wide decimal
-(q1, q30, q81, q44, q64, q97), and q51 with a `decimal(27,2)` join column. The per-query TPC-DS issues
-name the sort-merge join as their blocker some sixty times; the flag is how to see which of those it
-lifts.
+exchange as the streamed input, as the shuffled join does, would recover them -- done since, #98).
+Eleven queries still carried a sort-merge join then; with chains of merge joins on the same key
+converting whole (#102: q10 21/45 to 31/41, q35 20/44 to 30/40, q69 21/44 to 30/40, q95 21/43 to
+30/40) and the broadcast join streaming from a shuffle read, the flag gives **3179 of 4668 operators
+ours (68%)**, 50 queries at 75% or more, all 103 checksums equal. Seven queries still carry a merge
+join, each for a reason outside the join itself: a `decimal(24,7)` or `decimal(19,2)` input the kernels
+have no lane for (q1, q30, q81, q64), a `decimal(27,2)` join column (q51), a `Window` input (q44), an
+aggregate that does not convert (q97). The per-query TPC-DS issues name the sort-merge join as their
+blocker some sixty times; the flag is how to see which of those it lifts.
 
 Refreshed after the broadcast join learned to stream from a bare shuffle read (#98; the shape adaptive
 execution leaves when it re-plans a shuffled join as a broadcast join at runtime): **3042 of 4736

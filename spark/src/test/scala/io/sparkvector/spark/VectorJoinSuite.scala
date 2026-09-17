@@ -280,6 +280,13 @@ class VectorJoinSuite extends VectorQuerySuite {
       assert(nulls.filter("l IS NULL").count() > 0 && nulls.filter("dl IS NULL").count() > 0 && nulls.filter("l = dl").count() > 0)
       // Two joins on different keys: a shuffle sits between them, so each converts on its own.
       checkSortMerge("SELECT tk.i, a.name, b.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.l = b.dl WHERE tk.i < 4000")
+      // A chain on the same key with no shuffle between the joins: the upper join reads the lower one's
+      // output directly, columnar once the lower converts, so the whole chain converts (TPC-DS q10, q35,
+      // q69, q95 chain semi and existence joins on the customer key).
+      checkSortMerge("SELECT tk.i, a.name, b.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.i50 = b.di WHERE tk.i < 2000")
+      checkSortMerge("SELECT tk.i FROM tk WHERE tk.i50 IN (SELECT di FROM dim WHERE weight > 10) AND EXISTS (SELECT 1 FROM dim WHERE dim.di = tk.i50 AND dim.name > 'n') AND tk.i < 3000")
+      val three = checkSortMerge("SELECT tk.i, a.name, b.name, c.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.i50 = b.di JOIN dim c ON tk.i50 = c.di WHERE tk.i < 1000")
+      assert(nodesOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec](three).length === 3, finalPlan(three).treeString)
     }
   }
 
@@ -294,11 +301,26 @@ class VectorJoinSuite extends VectorQuerySuite {
       checkFallback(
         "SELECT tk.i, count(*) OVER (PARTITION BY tk.i50) AS c FROM tk JOIN dim ON tk.i50 = dim.di WHERE tk.i < 2000",
         Seq(SHJ), "output ordering required by the parent operator")
-      // Two merge joins on the same key with no shuffle between them: the upper reads the lower's ordering.
+      // A chain of merge joins on the same key with no shuffle between them, under a window on that key:
+      // the window relies on the top join's ordering, so it stays, and the join below it -- whose
+      // ordering the top one reads -- stays with it.
       val chained = checkFallback(
-        "SELECT tk.i, a.name, b.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.i50 = b.di WHERE tk.i < 2000",
+        "SELECT tk.i, a.name, b.name, count(*) OVER (PARTITION BY tk.i50) AS c FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.i50 = b.di WHERE tk.i < 2000",
         Seq(SHJ), "output ordering required by the parent operator")
       assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](chained).length === 2, finalPlan(chained).treeString)
+    }
+    withConf(SortMerge: _*) {
+      // The pre-pass judges inputs optimistically over Spark's plan; here the upper join's right input is an
+      // aggregate that will not convert (approx_count_distinct), so the upper join stays after all while the
+      // lower one, freed by the pre-pass, converted: the ordering the lower one no longer offers is restored
+      // by a sort over our hash join, and Spark's merge join reads sorted input.
+      val healed = checkVectorized(
+        "SELECT tk.i, a.name, x.c FROM tk JOIN dim a ON tk.i50 = a.di JOIN (SELECT di, approx_count_distinct(name) AS c FROM dim GROUP BY di) x ON tk.i50 = x.di WHERE tk.i < 2000",
+        Seq(SHJ))
+      val smj = nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](healed)
+      assert(smj.length === 1, finalPlan(healed).treeString)
+      val resort = nodesOf[org.apache.spark.sql.vector.VectorSortExec](healed).filter(sort => !sort.global && sort.child.collectFirst { case j: org.apache.spark.sql.vector.VectorShuffledHashJoinExec => j }.isDefined)
+      assert(resort.nonEmpty, finalPlan(healed).treeString)
     }
     withConf((SortMerge :+ ("spark.vector.join.maxBuildSize" -> "1")): _*) {
       checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "exceeds spark.vector.join.maxBuildSize=1")
