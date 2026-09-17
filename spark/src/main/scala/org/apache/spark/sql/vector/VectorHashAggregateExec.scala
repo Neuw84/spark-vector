@@ -12,7 +12,7 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeRef
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateMode, Complete, DeclarativeAggregate, Final, Partial, PartialMerge, Sum}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, HashAggregateExec}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{DataType, DecimalType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -298,6 +298,16 @@ private[vector] class VectorGroupedAggregateIterator(
         var o = 0
         while (o < count) { values(o) = state.bufferValue(from + o, slot).asInstanceOf[java.math.BigDecimal]; o += 1 }
         return ArrowOutput.decimalColumn(name, d, values, allocator)
+      case org.apache.spark.sql.types.StringType =>
+        // min/max, first/last, min_by/max_by over strings: boxed UTF8Strings into a varchar vector.
+        val values = new Array[Array[Byte]](count)
+        var o = 0
+        while (o < count) {
+          val v = state.bufferValue(from + o, slot)
+          values(o) = if (v == null) null else v.asInstanceOf[org.apache.spark.unsafe.types.UTF8String].getBytes
+          o += 1
+        }
+        return ArrowOutput.utf8Column(name, values, allocator)
       case _ =>
     }
     val out: ArrowVectorBuffers = ArrowOutput.allocateFixed(name, dt, count, allocator)
@@ -417,7 +427,7 @@ object VectorAggregatePlanner {
   }
 
   /** Wide decimal sum buffers a merging aggregate reads: the one wide input the operator accepts. */
-  def wideSumBuffers(a: HashAggregateExec): Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
+  def wideSumBuffers(a: BaseAggregateExec): Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
     a.aggregateExpressions.collect {
       case agg if VectorAggregates.merges(agg.mode) && agg.aggregateFunction.isInstanceOf[Sum] && agg.aggregateFunction.dataType.isInstanceOf[DecimalType] =>
         agg.aggregateFunction.inputAggBufferAttributes.head.exprId
@@ -460,7 +470,7 @@ object VectorAggregatePlanner {
    * required child distribution is set -- Spark plans those as a Partial with no distribution and a
    * Final over the exchange with the keys as distribution, and both merely emit the keys.
    */
-  def readsExchange(a: HashAggregateExec): Boolean =
+  def readsExchange(a: BaseAggregateExec): Boolean =
     if (a.aggregateExpressions.isEmpty) a.requiredChildDistributionExpressions.isDefined
     else mergesBuffers(a.aggregateExpressions.map(_.mode).distinct)
 
@@ -471,7 +481,7 @@ object VectorAggregatePlanner {
    * says whether it emits buffers (`Partial` / `PartialMerge`, as Spark's distinct rewrite mixes
    * them) or results (`Final` / `Complete`). `finalEnabled` gates the modes that read an exchange.
    */
-  def plan(a: HashAggregateExec, finalEnabled: Boolean): Either[String, VectorHashAggregateExec] = {
+  def plan(a: BaseAggregateExec, finalEnabled: Boolean): Either[String, VectorHashAggregateExec] = {
     val modes = a.aggregateExpressions.map(_.mode).distinct
     val keysOnly = a.aggregateExpressions.isEmpty
     // A keys-only aggregate emits its keys in both of Spark's stages: the buffer layout fits both.

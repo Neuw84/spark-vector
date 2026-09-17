@@ -64,7 +64,8 @@ Tracked issues, in the order they unblock TPC-H:
 |---|---|---|
 | `SortMergeJoinExec` | #10 | Not converted; Spark's default for large equi-joins |
 | `InMemoryTableScanExec` (cached tables) | #55 | Not accepted as a columnar input |
-| `ObjectHashAggregateExec`, `SortAggregateExec` | #57 | Not converted |
+| `SortAggregateExec` | `VectorHashAggregateExec` (+ `VectorSortExec`) | Spark plans a sort-based aggregate when a buffer holds a string (`min`/`max`/`first`/`last`/`max_by` over strings), which an `UnsafeRow` cannot mutate; our group table has no such limit, so the same hash operator is built from the identical fields. Two contracts kept: the sort Spark placed below is dropped when it is exactly the required one, and a result-emitting stage keeps Spark's output ordering (the grouping keys ascending) through a `VectorSortExec` above, since parents were planned on it. | `spark.vector.exec.aggregate.enabled` | As `HashAggregateExec` |
+| `ObjectHashAggregateExec` | #57 | Not converted (`collect_list`, `percentile_approx` and the other `TypedImperativeAggregate`s) |
 | `WindowExec`, `WindowGroupLimitExec` | #58 | Not converted |
 | `GenerateExec` (`explode`, `posexplode`) | #59 | Not converted |
 | `BroadcastNestedLoopJoinExec` | #60 | Not converted |

@@ -118,6 +118,31 @@ public final class ArrowOutput {
     return new VectorArrowColumnVector(v);
   }
 
+  /** A string column from boxed values ({@code null} entries are nulls): an aggregate buffer over strings. */
+  public static ColumnVector utf8Column(String name, byte[][] values, BufferAllocator allocator) {
+    long bytes = 0;
+    for (byte[] b : values) {
+      bytes += b == null ? 0 : b.length;
+    }
+    ArrowVectorBuffers out = allocateUtf8(name, values.length, bytes, allocator);
+    MemorySegment offsets = out.offsets();
+    MemorySegment data = out.data();
+    MemorySegment validity = out.validity();
+    long pos = 0;
+    for (int i = 0; i < values.length; i++) {
+      offsets.setAtIndex(VectorBuffers.LE_INT, i, (int) pos);
+      if (values[i] == null) {
+        Bitmap.clear(validity, i);
+      } else {
+        Bitmap.set(validity, i);
+        MemorySegment.copy(MemorySegment.ofArray(values[i]), 0, data, pos, values[i].length);
+        pos += values[i].length;
+      }
+    }
+    offsets.setAtIndex(VectorBuffers.LE_INT, values.length, (int) pos);
+    return finish(out, values.length, false);
+  }
+
   /**
    * A wide decimal column ({@code p > 18}) from boxed values: {@code null} entries are nulls. Used
    * for the {@code sum} buffer of a decimal aggregate; the values are the exact 128-bit totals.
@@ -216,7 +241,11 @@ public final class ArrowOutput {
     v.setInitialCapacity(1);
     v.allocateNew();
     if (value == null) {
-      ((org.apache.arrow.vector.BaseFixedWidthVector) v).setNull(0);
+      if (v instanceof BaseVariableWidthVector vv) {
+        vv.setNull(0);
+      } else {
+        ((org.apache.arrow.vector.BaseFixedWidthVector) v).setNull(0);
+      }
     } else if (v instanceof IntVector iv) {
       iv.setSafe(0, ((Number) value).intValue());
     } else if (v instanceof DateDayVector dv) {
@@ -231,6 +260,8 @@ public final class ArrowOutput {
       bv.setSafe(0, ((Boolean) value) ? 1 : 0);
     } else if (v instanceof DecimalVector dv) {
       dv.setSafe(0, (java.math.BigDecimal) value);
+    } else if (v instanceof VarCharVector sv) {
+      sv.setSafe(0, ((org.apache.spark.unsafe.types.UTF8String) value).getBytes());
     } else {
       v.close();
       throw new UnsupportedOperationException("scalar output not supported for " + dt);

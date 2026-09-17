@@ -67,16 +67,19 @@ object FilteredAgg {
  * with Spark's `(first, valueSet)` buffer. Ints, longs, doubles, dates and booleans; the buffer is
  * boxed per group as the output path expects.
  */
-final case class FirstAgg(input: VectorExpr, dataType: DataType) extends VectorAggFunction {
+final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boolean = true) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(dataType, BooleanType)
 
   override def newState(): AggState = new AggState {
     private var value: Any = null
     private var set = false
     override def update(ctx: EvalContext): Unit = if (!set) {
-      val v = ctx.masked(input.eval(ctx))
-      val i = FirstAgg.firstValid(v, ctx.numRows, 0)
-      if (i >= 0) { value = FirstAgg.box(v, i); set = true }
+      val v = input.eval(ctx)
+      // With ignoreNulls the first selected non-null row; without, the first selected row, null or not.
+      val i = if (ignoreNulls) FirstAgg.firstValid(ctx.masked(v), ctx.numRows, 0)
+        else if (ctx.selection == null) (if (ctx.numRows > 0) 0 else -1)
+        else FirstAgg.firstValid(new io.sparkvector.kernels.SegmentVectorBuffers(v.`type`(), ctx.numRows, ctx.selection, v.data(), v.offsets(), v.dictionary()), ctx.numRows, 0)
+      if (i >= 0) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i) else null; set = true }
     }
     override def bufferValues: Array[Any] = Array(value, java.lang.Boolean.valueOf(set))
   }
@@ -87,7 +90,6 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType) extends VectorA
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
       val n = ctx.numRows
       val v = input.eval(ctx)
-      val validity = groups.effectiveValidity(v)
       val ids = groups.ids()
       if (groups.numGroups() > values.length) {
         val cap = math.max(groups.numGroups(), values.length * 2)
@@ -97,7 +99,7 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType) extends VectorA
       var i = 0
       while (i < n) {
         val g = ids(i)
-        if (g >= 0 && !set(g) && (validity == null || Bitmap.isSet(validity, i))) { values(g) = FirstAgg.box(v, i); set(g) = true }
+        if (g >= 0 && !set(g) && (!ignoreNulls || Rows.valid(v, i))) { values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i) else null; set(g) = true }
         i += 1
       }
     }
@@ -108,7 +110,8 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType) extends VectorA
 
 object FirstAgg {
   def supports(dt: DataType): Boolean = dt match {
-    case IntegerType | LongType | DoubleType | DateType | BooleanType => true
+    case IntegerType | LongType | DoubleType | DateType | BooleanType | org.apache.spark.sql.types.StringType => true
+    case _: org.apache.spark.sql.types.DecimalType => io.sparkvector.spark.adapter.TypeMapping.isSupported(dt)
     case _ => false
   }
 
@@ -127,6 +130,7 @@ object FirstAgg {
     case VecType.INT64 => java.lang.Long.valueOf(v.data().getAtIndex(VectorBuffers.LE_LONG, i))
     case VecType.FLOAT64 => java.lang.Double.valueOf(v.data().getAtIndex(VectorBuffers.LE_DOUBLE, i))
     case VecType.BOOL => java.lang.Boolean.valueOf(Bitmap.isSet(v.data(), i))
+    case VecType.UTF8 => org.apache.spark.unsafe.types.UTF8String.fromBytes(v.getUtf8Bytes(i))
     case t => throw new IllegalStateException(s"first over $t")
   }
 }

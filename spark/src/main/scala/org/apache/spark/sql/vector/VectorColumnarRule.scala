@@ -14,7 +14,7 @@ import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExch
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
-import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
 
 /** Tags and helpers for explaining why an operator was left to Spark. */
@@ -162,19 +162,25 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
           }
 
-        case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) =>
-          // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
-          // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
-          val isFinal = VectorAggregatePlanner.readsExchange(a)
-          // The wide decimal sum buffer (Decimal(p > 18)) is the one wide column a merging aggregate reads.
-          val inputReason = if (isFinal) typeReason(a.child, VectorAggregatePlanner.wideSumBuffers(a)) else columnarInputReason(a.child)
-          inputReason match {
-            case Some(reason) => fallback(a, reason)
-            case None =>
-              VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf)) match {
-                case Right(v) => v
-                case Left(reason) => fallback(a, reason)
-              }
+        case a: HashAggregateExec if VectorConf.aggregateEnabled(conf) => planAggregate(a, a, conf)
+
+        case s: SortAggregateExec if VectorConf.aggregateEnabled(conf) =>
+          // Spark plans a SortAggregate when an aggregation buffer holds a string (min/max/first/last
+          // over strings): not mutable in an UnsafeRow, so no hash aggregate for Spark. Our group table
+          // has no such limit, so the same hash operator serves, built from the identical fields. Two
+          // contracts to keep: the sort Spark placed below is not needed by a hash aggregate and is
+          // dropped when it is exactly the required one, and a result-emitting stage keeps Spark's
+          // output ordering (the keys ascending) through our sort, since parents were planned on it.
+          val child = s.child match {
+            case VectorSortExec(order, false, c) if sameOrder(order, s.requiredChildOrdering.head) => c
+            case org.apache.spark.sql.execution.SortExec(order, false, c, _) if sameOrder(order, s.requiredChildOrdering.head) => c
+            case c => c
+          }
+          planAggregate(s, s, conf) match {
+            case v: VectorHashAggregateExec =>
+              val unsorted = if (child eq s.child) v else v.copy(child = child)
+              if (v.emitsResults && s.outputOrdering.nonEmpty) VectorSortExec(s.outputOrdering, global = false, unsorted) else unsorted
+            case other => other
           }
       }
       val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
@@ -255,6 +261,26 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => typeReason(plan)
     case other => columnarInputReason(other)
   }
+
+  /** Converts an aggregate (`a`, possibly a SortAggregate re-expressed as a hash one); `original` takes the fallback. */
+  private def planAggregate(a: org.apache.spark.sql.execution.aggregate.BaseAggregateExec, original: SparkPlan, conf: SQLConf): SparkPlan = {
+    // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
+    // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
+    val isFinal = VectorAggregatePlanner.readsExchange(a)
+    // The wide decimal sum buffer (Decimal(p > 18)) is the one wide column a merging aggregate reads.
+    val inputReason = if (isFinal) typeReason(a.child, VectorAggregatePlanner.wideSumBuffers(a)) else columnarInputReason(a.child)
+    inputReason match {
+      case Some(reason) => fallback(original, reason)
+      case None =>
+        VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf)) match {
+          case Right(v) => v
+          case Left(reason) => fallback(original, reason)
+        }
+    }
+  }
+
+  private def sameOrder(a: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder], b: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): Boolean =
+    a.length == b.length && a.zip(b).forall { case (x, y) => x.child.semanticEquals(y.child) && x.direction == y.direction && x.nullOrdering == y.nullOrdering }
 
   private def typeReason(plan: SparkPlan, allowed: Set[org.apache.spark.sql.catalyst.expressions.ExprId] = Set.empty): Option[String] =
     plan.output.find(a => !TypeMapping.isSupported(a.dataType) && !allowed.contains(a.exprId)).map { a =>

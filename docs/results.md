@@ -481,6 +481,12 @@ and `upper` (2). The best plans are the star-join aggregates: q22 and q96 at 15/
 at 19/24, q3/q42/q43/q52/q55 at 12/15, where the remaining Spark operators are the final sort and the
 `TakeOrderedAndProject` above it.
 
+Refreshed after the wide decimal sum landed in both stages (#27, #87): 2844 of 4735 operators ours
+(60%), 27 queries at 75% or more, still none fully accelerated; the decimal `sum`/`avg` refusals fell
+from 27 queries to 9 -- those sum a *wide input* (`decimal(27,2)` totals of a `UNION ALL` of channel
+sums) or average a decimal, which need a wide lane rather than a wide accumulator (#28). All 103
+queries agree with Spark to 10 significant digits.
+
 **Correctness: three checksums differed, now fixed (#128).** q33, q56 and q60 -- the same template,
 three sales channels aggregated per item and combined with `UNION ALL` -- returned 100 rows under both
 configurations but with different sums (for q33, `i_manufact_id` 1000 totalled 8756.30 under Spark
