@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
@@ -249,6 +249,28 @@ object ExpressionCompiler {
     case e @ DateSub(start, days) => dateArith(ArithOp.SUB, start, days, e.dataType, input)
     case e @ DateDiff(end, start) if end.dataType == DateType && start.dataType == DateType =>
       dateArith(ArithOp.SUB, end, start, e.dataType, input)
+
+    // Pattern functions: Spark's own formatter per row (a literal pattern), and date_trunc on timestamps.
+    case DateFormatClass(ts, Literal(fmt: UTF8String, StringType), tz) => formatInstant(ts, fmt.toString, tz, input, "date_format")
+    case DateFormatClass(_, _, _) => Left("date_format with a non-literal pattern not supported")
+    case FromUnixTime(sec, Literal(fmt: UTF8String, StringType), Some(zone)) if sec.dataType == LongType =>
+      compile(sec, input).flatMap {
+        case _: LiteralExpr => Left("from_unixtime of a literal")
+        case c => Right(FormatInstantExpr(c, childIsDate = false, secondsIn = true, fmt.toString, zone, 0L))
+      }
+    case FromUnixTime(_, _, _) => Left("from_unixtime with a non-literal pattern not supported")
+    case UnixTimestamp(t, _, tz, _) => unixTimestamp(t, tz, input, "unix_timestamp")
+    case ToUnixTimestamp(t, _, tz, _) => unixTimestamp(t, tz, input, "to_unix_timestamp")
+    case TruncTimestamp(Literal(fmt: UTF8String, StringType), ts, tz) =>
+      TruncTimestampExpr.of(fmt.toString) match {
+        case None => Left(s"date_trunc unit '$fmt' not supported")
+        case Some(unit) =>
+          DateExprs.fixedOffsetMicros(tz) match {
+            case None => Left(s"date_trunc needs a fixed-offset session zone, not ${tz.getOrElse("none")}")
+            case Some(offset) => instantLane(ts, input, "date_trunc").map { case (c, isDate) => TruncTimestampExpr(unit, c, isDate, offset) }
+          }
+      }
+    case TruncTimestamp(_, _, _) => Left("date_trunc with a non-literal unit not supported")
 
     // Day-number relabels and epoch scaling: the lane is the same, only Spark's type changes.
     case UnixDate(child) => dateChild(child, input).map(RelabelExpr(_, IntegerType))
@@ -543,6 +565,35 @@ object ExpressionCompiler {
   private def timestampLane(e: Expression, input: Seq[Attribute], what: String): Result =
     if (e.dataType != TimestampType) Left(s"$what over ${e.dataType.simpleString} not supported")
     else compile(e, input).flatMap { case _: LiteralExpr => Left(s"$what of a literal"); case c => Right(c) }
+
+  /** `date_format` over a timestamp lane (any zone -- Spark's formatter does the work) or a date lane (fixed offset). */
+  private def formatInstant(e: Expression, pattern: String, tz: Option[String], input: Seq[Attribute], what: String): Result = tz match {
+    case None => Left(s"$what without a session zone")
+    case Some(zone) =>
+      instantLane(e, input, what).flatMap {
+        case (_: LiteralExpr, _) => Left(s"$what of a literal")
+        case (c, false) => Right(FormatInstantExpr(c, childIsDate = false, secondsIn = false, pattern, zone, 0L))
+        case (c, true) =>
+          DateExprs.fixedOffsetMicros(tz) match {
+            case None => Left(s"$what over a date needs a fixed-offset session zone, not $zone")
+            case Some(offset) => Right(FormatInstantExpr(c, childIsDate = true, secondsIn = false, pattern, zone, offset))
+          }
+      }
+  }
+
+  /** `unix_timestamp` / `to_unix_timestamp` over a timestamp or date lane; parsing a string is not ours. */
+  private def unixTimestamp(e: Expression, tz: Option[String], input: Seq[Attribute], what: String): Result =
+    if (e.dataType.isInstanceOf[StringType]) Left(s"$what parsing a string not supported")
+    else
+      instantLane(e, input, what).flatMap {
+        case (_: LiteralExpr, _) => Left(s"$what of a literal")
+        case (c, false) => Right(UnixTimestampExpr(c, childIsDate = false, 0L))
+        case (c, true) =>
+          DateExprs.fixedOffsetMicros(tz) match {
+            case None => Left(s"$what over a date needs a fixed-offset session zone, not ${tz.getOrElse("none")}")
+            case Some(offset) => Right(UnixTimestampExpr(c, childIsDate = true, offset))
+          }
+      }
 
   /** A timestamp lane, or a date lane behind Spark's date -> timestamp cast (the flag says which). */
   private def instantLane(e: Expression, input: Seq[Attribute], what: String): Either[String, (VectorExpr, Boolean)] = e match {
