@@ -278,8 +278,12 @@ that pin it.
   distribution and ordering (`requiredChildDistribution` / `requiredChildOrdering`), and the rule accepts
   ANY child on types (`typeReason`) because the sort below is Spark's without a columnar shuffle -- Spark
   inserts `RowToColumnarExec`. `VectorWindowPlanner.rankKind` refuses everything else with a reason naming
-  the function; double keys are refused like join keys. `WindowGroupLimitExec` (Spark's top-K below the
-  window, inserted for `rank <= k` filters) is not converted yet and sits as a row operator below us.
+  the function; double keys are refused like join keys. `VectorWindowGroupLimitExec` (layer 4) replaces
+  `WindowGroupLimitExec` (Spark's top-k below the window, inserted for `rank <= k` filters with k up to
+  `spark.sql.optimizer.windowGroupLimitThreshold`, Partial below the exchange and Final above the sort) with the
+  same walk in `VectorWindowGroupLimitIterator`, keeping a row while its ranking value is at most k -- tighter
+  than Spark's, which also passes the first row of the next peer group; both are pre-filters, the window above
+  computes the real ranks. Partial sits over our operators, so the chain stays columnar up to the shuffle.
   Layer 2, `VectorWindowAggregateIterator`: whole-partition frames (`SpecifiedWindowFrame(_, UnboundedPreceding,
   UnboundedFollowing)`, Complete mode, no FILTER) reuse `VectorAggregates.compile` + `GroupedAggState` with
   the partition ordinal as the group id (`GroupAssignment.of(ids, n, numGroups, arena, selection)`, ids
@@ -565,7 +569,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 213 Spark tests (186 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 214 Spark tests (187 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

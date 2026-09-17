@@ -3,7 +3,7 @@ package org.apache.spark.sql.vector
 import io.sparkvector.kernels.{Bitmap, GroupAssignment, VectorBuffers}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.agg.{GroupedAggState, Rows, VectorAggFunction, VectorAggregates}
-import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, VectorAllocators}
+import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch, VectorAllocators}
 import io.sparkvector.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
@@ -12,7 +12,7 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, D
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Complete}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.window.WindowExec
+import org.apache.spark.sql.execution.window.{Final, Partial, WindowExec, WindowGroupLimitExec, WindowGroupLimitMode}
 import org.apache.spark.sql.types.{DataType, DecimalType, DoubleType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -145,6 +145,14 @@ object VectorWindowPlanner {
       case other => Left(s"window function ${other.prettyName} not supported (row_number, rank and dense_rank are)")
     }
     case other => Left(s"window expression ${other.sql} not supported")
+  }
+
+  /** The ranking kind of a bare ranking function (WindowGroupLimitExec's `rankLikeFunction`). */
+  def rankLikeKind(f: Expression): Either[String, Int] = f match {
+    case _: RowNumber => Right(RowNumberKind)
+    case _: Rank => Right(RankKind)
+    case _: DenseRank => Right(DenseRankKind)
+    case other => Left(s"window group limit function ${other.prettyName} not supported")
   }
 
   /** The aggregate of a whole-partition frame (`UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`), if that is what `e` is. */
@@ -456,6 +464,162 @@ private[vector] class VectorWindowAggregateIterator(
       held.foreach(_.columns.foreach(_.close()))
       held.clear()
       allocator.close()
+    }
+  }
+}
+
+/**
+ * Columnar replacement for WindowGroupLimitExec (#58, layer 4): Spark's per-partition top-k below a
+ * ranking window, inserted for a filter `rank <= k` (k up to `spark.sql.optimizer.windowGroupLimitThreshold`)
+ * -- in Partial mode below the exchange, over whatever produced the rows, and in Final mode above the
+ * sort. Both modes require the same ordering as the window (partition keys, then order keys) and the
+ * Final mode the window's distribution, so the walk is the ranking walk of [[VectorWindowIterator]]
+ * with a filter: a row is kept while the ranking function's value at that row is at most `limit`.
+ * Spark's own operator also lets the first row of the peer group past the limit through (it checks the
+ * previous row's rank); both are pre-filters under the window that computes the real ranks, so the
+ * tighter set is exact for the query and smaller for the shuffle.
+ *
+ * Output rows are compacted (a top-k keeps a few rows per partition); a batch with every row kept is
+ * forwarded, one with none is dropped.
+ */
+case class VectorWindowGroupLimitExec(
+    partitionSpec: Seq[Expression],
+    orderSpec: Seq[SortOrder],
+    rankLikeFunction: Expression,
+    limit: Int,
+    mode: WindowGroupLimitMode,
+    child: SparkPlan)
+    extends VectorExec {
+
+  override def output: Seq[Attribute] = child.output
+
+  override def requiredChildDistribution: Seq[Distribution] = mode match {
+    case Partial => super.requiredChildDistribution
+    case Final => if (partitionSpec.isEmpty) AllTuples :: Nil else ClusteredDistribution(partitionSpec) :: Nil
+  }
+  override def requiredChildOrdering: Seq[Seq[SortOrder]] = Seq(partitionSpec.map(SortOrder(_, Ascending)) ++ orderSpec)
+  override def outputOrdering: Seq[SortOrder] = child.outputOrdering
+  override def outputPartitioning: Partitioning = child.outputPartitioning
+
+  private def compileKey(e: Expression): VectorExpr = ExpressionCompiler.compile(e, child.output) match {
+    case Right(v) => v
+    case Left(reason) => throw new IllegalStateException(s"cannot vectorize window group limit key ${e.sql}: $reason")
+  }
+  @transient private lazy val partitionKeys: Array[VectorExpr] = partitionSpec.map(compileKey).filterNot(_.isInstanceOf[LiteralExpr]).toArray
+  @transient private lazy val orderKeys: Array[VectorExpr] = orderSpec.map(o => compileKey(o.child)).filterNot(_.isInstanceOf[LiteralExpr]).toArray
+  @transient private lazy val kind: Int = VectorWindowPlanner.rankLikeKind(rankLikeFunction).getOrElse(
+    throw new IllegalStateException(s"cannot vectorize window group limit function ${rankLikeFunction.sql}"))
+
+  override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
+    val pk = partitionKeys
+    val ok = orderKeys
+    val k = kind
+    val lim = limit
+    val childAttrs = child.output.map(a => (a.name, a.dataType)).toArray
+    val m = vectorMetrics
+    child.executeColumnar().mapPartitionsInternal { iter =>
+      new VectorWindowGroupLimitIterator(iter, pk, ok, k, lim, childAttrs, m)
+    }
+  }
+
+  override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
+
+  override def verboseStringWithOperatorId(): String = {
+    s"""$formattedNodeName
+       |Function: ${rankLikeFunction.sql} <= $limit ($mode)
+       |Partition: ${partitionSpec.map(_.sql).mkString(", ")}
+       |Order: ${orderSpec.map(_.sql).mkString(", ")}
+       |Output: ${output.map(_.name).mkString(", ")}
+       |""".stripMargin
+  }
+}
+
+object VectorWindowGroupLimitPlanner {
+  def plan(g: WindowGroupLimitExec): Either[String, VectorWindowGroupLimitExec] = {
+    VectorWindowPlanner.rankLikeKind(g.rankLikeFunction) match {
+      case Left(reason) => Left(reason)
+      case Right(_) =>
+        val keys = g.partitionSpec ++ g.orderSpec.map(_.child)
+        val keyFailures = keys.flatMap { k =>
+          if (k.dataType == DoubleType) Some(s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)")
+          else if (!TypeMapping.isSupported(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
+          else ExpressionCompiler.compile(k, g.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
+        }
+        keyFailures.headOption.toLeft(VectorWindowGroupLimitExec(g.partitionSpec, g.orderSpec, g.rankLikeFunction, g.limit, g.mode, g.child))
+    }
+  }
+}
+
+/** The ranking walk with a filter: rows whose ranking value is at most `limit` survive. */
+private[vector] class VectorWindowGroupLimitIterator(
+    input: Iterator[ColumnarBatch],
+    partitionKeys: Array[VectorExpr],
+    orderKeys: Array[VectorExpr],
+    kind: Int,
+    limit: Int,
+    childAttrs: Array[(String, DataType)],
+    metrics: VectorMetrics)
+    extends VectorBatchIterator(input, "VectorWindowGroupLimitExec") {
+
+  private val partition = new KeyTracker(partitionKeys)
+  private val order = new KeyTracker(orderKeys)
+  private var rowNumber = 0L
+  private var rank = 0L
+  private var denseRank = 0L
+
+  override protected def process(batch: ColumnarBatch): ColumnarBatch = metrics.timed {
+    metrics.numInputBatches += 1
+    withEvalContext(batch) { ctx =>
+      val n = ctx.numRows
+      val live = ctx.selection
+      partition.startBatch(ctx)
+      order.startBatch(ctx)
+      val kept = Bitmap.allocate(ctx.arena, n)
+      var keptCount = 0
+      var i = 0
+      while (i < n) {
+        if (live == null || Bitmap.isSet(live, i)) {
+          val newPartition = partition.changed(i)
+          if (newPartition) {
+            rowNumber = 0L
+            rank = 0L
+            denseRank = 0L
+          }
+          rowNumber += 1
+          val peer = !newPartition && !order.changed(i)
+          if (!peer) {
+            rank = rowNumber
+            denseRank += 1
+          }
+          partition.remember(i)
+          order.remember(i)
+          val value = kind match {
+            case VectorWindowPlanner.RowNumberKind => rowNumber
+            case VectorWindowPlanner.RankKind => rank
+            case _ => denseRank
+          }
+          if (value <= limit) { Bitmap.set(kept, i); keptCount += 1 }
+        }
+        i += 1
+      }
+      if (keptCount == 0) {
+        null
+      } else if (live == null && keptCount == n) {
+        metrics.numOutputBatches += 1
+        metrics.numOutputRows += n
+        batch
+      } else {
+        val columns = new Array[ColumnVector](childAttrs.length)
+        var c = 0
+        while (c < childAttrs.length) {
+          val (name, dt) = childAttrs(c)
+          columns(c) = ArrowOutput.compact(name, dt, ctx.input(c), kept, keptCount, allocator)
+          c += 1
+        }
+        metrics.numOutputBatches += 1
+        metrics.numOutputRows += keptCount
+        new ColumnarBatch(columns, keptCount)
+      }
     }
   }
 }

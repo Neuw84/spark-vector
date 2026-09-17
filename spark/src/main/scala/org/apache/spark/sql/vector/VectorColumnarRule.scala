@@ -13,7 +13,7 @@ import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarR
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
-import org.apache.spark.sql.execution.window.WindowExec
+import org.apache.spark.sql.execution.window.{WindowExec, WindowGroupLimitExec}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
@@ -139,6 +139,14 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           typeReason(w.child) match {
             case Some(reason) => fallback(w, reason)
             case None => VectorWindowPlanner.plan(w).fold(reason => fallback(w, reason), v => v)
+          }
+
+        case g: WindowGroupLimitExec if VectorConf.windowEnabled(conf) =>
+          // Spark's per-partition top-k under a ranking window: Partial sits over whatever produced the rows
+          // (often ours), Final over Spark's sort -- either way the child is accepted on types alone.
+          typeReason(g.child) match {
+            case Some(reason) => fallback(g, reason)
+            case None => VectorWindowGroupLimitPlanner.plan(g).fold(reason => fallback(g, reason), v => v)
           }
 
         case s: SortExec if VectorConf.sortEnabled(conf) =>

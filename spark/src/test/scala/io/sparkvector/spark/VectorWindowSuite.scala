@@ -1,8 +1,8 @@
 package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
-import org.apache.spark.sql.execution.window.WindowExec
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorProjectExec, VectorWindowExec}
+import org.apache.spark.sql.execution.window.{WindowExec, WindowGroupLimitExec}
+import org.apache.spark.sql.vector.{VectorFilterExec, VectorProjectExec, VectorWindowExec, VectorWindowGroupLimitExec}
 
 /** Window functions (#58), first layer: row_number, rank, dense_rank over sorted input. */
 class VectorWindowSuite extends VectorQuerySuite {
@@ -51,6 +51,33 @@ class VectorWindowSuite extends VectorQuerySuite {
     checkWindow(
       "SELECT s, count(*) AS n FROM (SELECT s, row_number() OVER (PARTITION BY s ORDER BY i) AS rn FROM t) w WHERE rn <= 10 GROUP BY s",
       Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
+  }
+
+  test("the per-partition top-k Spark inserts under a ranking window is ours in both modes") {
+    def checkTopK(sql: String, modes: Int): Unit = {
+      val df = checkVectorized(sql, Seq(Window, classOf[VectorWindowGroupLimitExec]))
+      assert(nodesOf[WindowGroupLimitExec](df).isEmpty && nodesOf[VectorWindowGroupLimitExec](df).length === modes, finalPlan(df).treeString)
+    }
+    // Partial below the exchange over our scan-side operators, Final above Spark's sort: two operators.
+    checkTopK("SELECT s, i, rk FROM (SELECT s, i, rank() OVER (PARTITION BY s ORDER BY l DESC) AS rk FROM t) w WHERE rk <= 3", 2)
+    checkTopK("SELECT s, i FROM (SELECT s, i, row_number() OVER (PARTITION BY i % 7 ORDER BY l, i) AS rn FROM t) w WHERE rn < 5", 2)
+    // Ties at the boundary: rank keeps every tied row at k, dense_rank keeps whole peer groups.
+    checkTopK("SELECT i, l, rk FROM (SELECT i, l, rank() OVER (PARTITION BY s ORDER BY l % 5) AS rk FROM t) w WHERE rk <= 2", 2)
+    checkTopK("SELECT i, l, dr FROM (SELECT i, l, dense_rank() OVER (PARTITION BY s ORDER BY l % 5 DESC) AS dr FROM t) w WHERE dr <= 2", 2)
+    // k at Spark's threshold (past it Spark plans no group limit); a null partition key and a null order key.
+    checkTopK("SELECT i, rk FROM (SELECT i, rank() OVER (PARTITION BY s ORDER BY nullif(l % 3, 0)) AS rk FROM t) w WHERE rk <= 1000", 2)
+    // No PARTITION BY: one group; the limit reached mid-batch drops the rest of every batch (row_number
+    // without a partition becomes Spark's top-N instead, so rank is the shape that keeps the group limit).
+    checkTopK("SELECT i, rk FROM (SELECT i, rank() OVER (ORDER BY l DESC) AS rk FROM t) w WHERE rk <= 7", 2)
+    // Under the threshold Spark plans no group limit at all: the window alone.
+    withConf("spark.sql.optimizer.windowGroupLimitThreshold" -> "0") {
+      val df = checkVectorized("SELECT s, i, rk FROM (SELECT s, i, rank() OVER (PARTITION BY s ORDER BY l DESC) AS rk FROM t) w WHERE rk <= 3", Seq(Window))
+      assert(nodesOf[VectorWindowGroupLimitExec](df).isEmpty, finalPlan(df).treeString)
+    }
+    withConf("spark.vector.exec.window.enabled" -> "false") {
+      val df = withPlugin(enabled = true) { val d = spark.sql("SELECT s, i, rk FROM (SELECT s, i, rank() OVER (PARTITION BY s ORDER BY l DESC) AS rk FROM t) w WHERE rk <= 3"); d.collect(); d }
+      assert(nodesOf[WindowGroupLimitExec](df).nonEmpty && nodesOf[VectorWindowGroupLimitExec](df).isEmpty, finalPlan(df).treeString)
+    }
   }
 
   test("whole-partition aggregates equal Spark: sum, avg, count, min, max over every partition shape") {
