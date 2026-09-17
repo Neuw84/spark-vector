@@ -24,7 +24,7 @@ charvarchar.sql	143	5	6
 charvarchar.sql_analyzer_test	55	0	0
 collations-aliases.sql	51	0	0
 collations-aliases.sql_analyzer_test	19	0	0
-collations-basic.sql	173	5	6
+collations-basic.sql	173	5	8
 collations-basic.sql_analyzer_test	47	0	0
 collations-padding-trim.sql	72	2	2
 collations-padding-trim.sql_analyzer_test	17	0	0
@@ -38,7 +38,7 @@ columnresolution-negative.sql	48	0	0
 columnresolution-negative.sql_analyzer_test	26	0	0
 columnresolution-views.sql	21	0	0
 columnresolution-views.sql_analyzer_test	4	0	0
-columnresolution.sql	81	5	5
+columnresolution.sql	81	10	10
 columnresolution.sql_analyzer_test	26	0	0
 comments.sql	10	0	0
 comparator.sql	10	0	0
@@ -237,7 +237,7 @@ parse-query-correctness.sql_analyzer_test	31	1	2
 parse-schema-string.sql	4	0	0
 percentiles.sql	33	0	0
 percentiles.sql_analyzer_test	5	0	0
-pipe-operators.sql	312	43	63
+pipe-operators.sql	312	51	74
 pipe-operators.sql_analyzer_test	28	0	0
 pivot.sql	26	12	12
 pivot.sql_analyzer_test	3	0	0
@@ -416,13 +416,13 @@ subquery/resolution-edge-cases.sql	17	0	0
 subquery/resolution-edge-cases.sql_analyzer_test	6	0	0
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql	24	3	3
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql_analyzer_test	10	0	0
-subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	10
+subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	8
 subquery/scalar-subquery/scalar-subquery-count-bug.sql_analyzer_test	12	0	0
 subquery/scalar-subquery/scalar-subquery-group-by.sql	26	6	12
 subquery/scalar-subquery/scalar-subquery-group-by.sql_analyzer_test	8	0	0
 subquery/scalar-subquery/scalar-subquery-predicate.sql	67	34	155
 subquery/scalar-subquery/scalar-subquery-predicate.sql_analyzer_test	8	0	0
-subquery/scalar-subquery/scalar-subquery-select.sql	55	14	20
+subquery/scalar-subquery/scalar-subquery-select.sql	55	14	22
 subquery/scalar-subquery/scalar-subquery-select.sql_analyzer_test	11	0	0
 subquery/scalar-subquery/scalar-subquery-set-op.sql	56	32	91
 subquery/scalar-subquery/scalar-subquery-set-op.sql_analyzer_test	3	0	0
