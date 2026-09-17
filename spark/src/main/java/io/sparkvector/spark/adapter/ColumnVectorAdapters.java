@@ -33,6 +33,18 @@ public final class ColumnVectorAdapters {
 
   private static final List<Adapter> ADAPTERS = new CopyOnWriteArrayList<>();
 
+  /** Test-visible counters (executor side; local mode in the suites): columns a registered adapter took zero-copy, and columns that fell through to the copy. */
+  private static final java.util.concurrent.atomic.LongAdder ADAPTED_COLUMNS = new java.util.concurrent.atomic.LongAdder();
+  private static final java.util.concurrent.atomic.LongAdder COPIED_COLUMNS = new java.util.concurrent.atomic.LongAdder();
+
+  public static long adaptedColumns() {
+    return ADAPTED_COLUMNS.sum();
+  }
+
+  public static long copiedColumns() {
+    return COPIED_COLUMNS.sum();
+  }
+
   static {
     // Comet's and Iceberg's scan vectors are read zero-copy when their jars are on the classpath
     // (executor side); registration is a no-op otherwise.
@@ -62,9 +74,11 @@ public final class ColumnVectorAdapters {
     for (Adapter adapter : ADAPTERS) {
       VectorBuffers vb = adapter.adapt(cv, numRows, scratch);
       if (vb != null) {
+        ADAPTED_COLUMNS.increment();
         return vb;
       }
     }
+    COPIED_COLUMNS.increment();
     return SparkColumnVectorBuffers.copy(cv, numRows, scratch);
   }
 
