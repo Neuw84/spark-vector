@@ -46,6 +46,7 @@ benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,come
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
 benchmarks/scripts/gen-tpcds.sh 1          # DuckDB dsdgen, 24 tables with real DECIMAL(7,2)/DATE columns, into benchmarks/data/tpcds-sf1
 benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1 spark,vector --queries q10,q35,q45   # results under benchmarks/results/tpcds
+benchmarks/scripts/profile-query.sh benchmarks/data/sf10 vector q6   # one query under a JFR recording + jfr-summary.sh (section 4.7)
 benchmarks/scripts/run-tpcds.sh --report   # rewrite benchmarks/results/tpcds/results.{md,html}
 ```
 
@@ -613,6 +614,28 @@ A change is not done until all of the following that apply have run green, local
    regression (3.5) is the worked example: the first written explanation (thread competition,
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
+
+   Two scripts make that procedure one command each (#251):
+
+   ```bash
+   benchmarks/scripts/profile-query.sh benchmarks/data/sf10 vector q6 --iterations 3 --warmup 2   # run + record + summarise
+   benchmarks/scripts/profile-query.sh benchmarks/data/tpcds-sf1 vector q72 --tpcds --conf spark.vector.exec.sortMergeJoin.enabled=true
+   benchmarks/scripts/jfr-summary.sh /tmp/profiling/sf10/q6-vector.jfr --top 20                     # any recording, as text for an issue
+   benchmarks/scripts/profile-query.sh - vector q6 --flags-only   # the recording flags for a cluster run's executor/driver options
+   ```
+
+   `profile-query.sh` runs one query in one configuration under a `settings=profile` recording
+   (rows into a scratch `RESULTS_DIR`, never the report), prints the `[tpch]`/`[tpcds]` kernel times,
+   and writes `<query>-<config>.jfr` plus `.summary.txt` next to it. `jfr-summary.sh` prints, in the
+   reading order above: `jfr view hot-methods`; the callers of the JDK-internal `MemorySegment` and
+   `Buffer.checkIndex` frames (a stack walk over `jdk.ExecutionSample`, so the hot JDK frame is
+   attributed to the kernel or reader that called it); the plugin's own frames by self time (the
+   first `io.sparkvector` frame of each stack -- which kernel or expression owns the samples, and how
+   much of the JVM's time is not ours at all); then allocation sites, GC pauses, latencies by type
+   and native methods (Comet's JVM side). The cluster half of the regression protocol -- submitting
+   the single-query application with `--flags-only`'s options and pulling the recordings back --
+   attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
+   unchanged.
 
 Current counts: 161 kernel tests, 238 Spark tests (211 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
