@@ -327,7 +327,8 @@ final case class ArithExpr(
     right: VectorExpr,
     dataType: DataType,
     ansiDivideByZero: Boolean,
-    queryContext: org.apache.spark.QueryContext)
+    queryContext: org.apache.spark.QueryContext,
+    nullOnOverflow: Boolean = false)
     extends VectorExpr {
 
   override def children: Seq[VectorExpr] = Seq(left, right)
@@ -337,8 +338,9 @@ final case class ArithExpr(
     val data = ArrowLayout.allocateData(ctx.arena, vecType, n)
     var validity: java.lang.foreign.MemorySegment = null
     var divisorZero: java.lang.foreign.MemorySegment = null
-    // ANSI mode: integer results that did not fit their lane raise for active rows (below).
-    val checkOverflow = ansiDivideByZero && (vecType == VecType.INT32 || vecType == VecType.INT64)
+    // ANSI mode: integer results that did not fit their lane raise for active rows (below); the
+    // try_* forms (nullOnOverflow) null those rows instead.
+    val checkOverflow = (ansiDivideByZero || nullOnOverflow) && (vecType == VecType.INT32 || vecType == VecType.INT64)
     var overflow: java.lang.foreign.MemorySegment = null
     (left, right) match {
       case (l, lit: LiteralExpr) =>
@@ -367,7 +369,12 @@ final case class ArithExpr(
         if (op == ArithOp.DIV) divisorZero = zeroMask(b, ctx)
         if (checkOverflow) { overflow = ctx.bitmap(); OverflowKernels.overflow(op, a, b, data, overflow) }
     }
-    if (overflow != null && ArithExpr.anyActive(overflow, validity, ctx)) {
+    if (overflow != null && nullOnOverflow) {
+      val newValidity = ctx.bitmap()
+      if (validity == null) BitmapKernels.not(overflow, newValidity, n)
+      else BitmapKernels.andNot(validity, overflow, newValidity, n)
+      validity = newValidity
+    } else if (overflow != null && ArithExpr.anyActive(overflow, validity, ctx)) {
       throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(vecType), ArithExpr.hint(op), queryContext)
     }
     if (divisorZero != null) {

@@ -326,8 +326,8 @@ class VectorProjectSuite extends VectorQuerySuite {
     // In a filter and as a grouping key.
     checkVectorized("SELECT count(*) AS n FROM t WHERE cast(d2 AS INT) = 1 AND cast(i AS BOOLEAN)", Seq(Filter, classOf[VectorHashAggregateExec]))
     checkVectorized("SELECT cast(d2 AS INT) AS k, cast(b AS STRING) AS s2, count(*) AS n FROM t GROUP BY cast(d2 AS INT), cast(b AS STRING)", Seq(Project, classOf[VectorHashAggregateExec]))
-    // Declined: try_cast, and the casts still on the list (string -> number, date -> string).
-    checkFallback("SELECT try_cast(d AS INT) AS a FROM t", Seq(Project), "try_cast")
+    // Declined: try_cast into a decimal (the decimal path), and a cast outside the lane types.
+    checkFallback("SELECT try_cast(d AS DECIMAL(10, 2)) AS a FROM t", Seq(Project), "try_cast")
     checkFallback("SELECT cast(s AS BINARY) AS a FROM t", Seq(Project), "unsupported cast")
   }
 
@@ -363,6 +363,27 @@ class VectorProjectSuite extends VectorQuerySuite {
     // In a filter and as a grouping key.
     checkVectorized("SELECT count(*) AS n FROM t WHERE cast(cast(i AS STRING) AS INT) % 2 = 0 AND cast(dt AS STRING) < '2021'", Seq(Filter, classOf[VectorHashAggregateExec]))
     checkVectorized("SELECT cast(dt AS STRING) AS k, count(*) AS n FROM t GROUP BY cast(dt AS STRING)", Seq(Project, classOf[VectorHashAggregateExec]))
+  }
+
+  test("try_add, try_subtract, try_multiply, try_divide, try_mod and try_cast") {
+    for (ansi <- Seq("true", "false")) {
+      withConf("spark.sql.ansi.enabled" -> ansi) {
+        // Some rows overflow, others do not: those rows are null, the rest are the exact result; the input's nulls stay null.
+        checkVectorized("SELECT try_add(i, 2147483000) AS a, try_add(2147483000, i) AS b, try_subtract(-2147483000, i) AS c, try_multiply(i, 2147483) AS d1, try_multiply(l, l * l * l) AS e0, try_add(l, l) AS f, try_subtract(i, i) AS g, try_multiply(d, 1e300) AS h FROM t", Seq(Project))
+        // try_divide is floating point and null on a zero divisor; try_mod nulls a zero divisor too.
+        checkVectorized("SELECT try_divide(i, i % 5) AS a, try_divide(d, d2) AS b, try_divide(l, 0) AS c, try_divide(1, d2 - 1.5) AS d1, try_mod(i, i % 7) AS e0, try_mod(l, 4) AS f, try_mod(d, d2) AS g, try_mod(i, 0) AS h FROM t", Seq(Project))
+        // try_cast: the #43 cast nodes with null instead of raise -- narrowing, strings, dates, booleans.
+        checkVectorized("SELECT try_cast(d AS INT) AS a, try_cast(d AS BIGINT) AS b, try_cast(l * 1000000000 AS INT) AS c, try_cast(s AS INT) AS d1, try_cast(s AS DOUBLE) AS e0, try_cast(s AS BOOLEAN) AS f, try_cast(s AS DATE) AS g, try_cast(s AS TIMESTAMP) AS h, try_cast(cast(i AS STRING) AS INT) AS j, try_cast(d2 * 3 AS INT) AS k FROM t", Seq(Project))
+      }
+    }
+    // Mixed with checked arithmetic on the same batch: the try_* result is null where the checked form would raise, nothing else changes.
+    checkVectorized("SELECT try_multiply(i, 2147483) AS a, i * 2 AS b FROM t WHERE i < 100000", Seq(Project, Filter))
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT count(*) AS n, count(try_add(i, 2147483000)) AS m FROM t WHERE try_divide(i, i % 3) IS NULL", Seq(Filter, classOf[VectorHashAggregateExec]))
+    checkVectorized("SELECT try_cast(d AS INT) AS k, count(*) AS n FROM t GROUP BY try_cast(d AS INT)", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: decimals keep their own path, and the aggregate forms are the next slice.
+    checkFallback("SELECT try_add(CAST(i AS DECIMAL(10, 2)), CAST(l AS DECIMAL(12, 2))) AS a FROM t", Seq(Project), "try_*")
+    checkFallback("SELECT try_sum(l) AS a, try_avg(i) AS b FROM t", Seq(classOf[VectorHashAggregateExec]), "try_sum")
   }
 
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {

@@ -215,16 +215,17 @@ object ExpressionCompiler {
           }
       }
 
-    case c: Cast if c.evalMode == EvalMode.TRY && sliceOneCast(c) => Left("try_cast not supported")
+    // try_cast: the same nodes with null instead of raise -- the non-numeric nodes already null in legacy mode.
     case c: Cast if sliceOneCast(c) =>
       val from = c.child.dataType
       val to = c.dataType
       val ansi = c.evalMode == EvalMode.ANSI
+      val tryMode = c.evalMode == EvalMode.TRY
       compile(c.child, input).flatMap {
         case _: LiteralExpr => Left("cast of a literal")
         case ce =>
           (from, to) match {
-            case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => Right(NarrowCastExpr(ce, to, ansi, c.origin.context))
+            case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => Right(NarrowCastExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
             case (IntegerType | LongType | DoubleType, BooleanType) => Right(ToBooleanExpr(ce))
             case (BooleanType, IntegerType | LongType | DoubleType) => Right(FromBooleanExpr(ce, to))
             case (StringType, BooleanType) => Right(StringToBooleanExpr(ce, ansi, c.origin.context))
@@ -479,7 +480,8 @@ object ExpressionCompiler {
       e: Expression,
       input: Seq[Attribute]): Result = {
     val what = kind match { case DivideLikeExpr.Rem => "%"; case DivideLikeExpr.Pmod => "pmod"; case DivideLikeExpr.Div => "div" }
-    if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
+    // try_mod is Remainder in TRY mode: a zero divisor is null, exactly the legacy path.
+    if (mode == EvalMode.TRY && kind != DivideLikeExpr.Rem) Left(s"try_* $what not supported")
     else if (l.dataType != r.dataType) Left(s"$what operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
     else if (TypeMapping.isDecimal(l.dataType)) Left(s"$what over ${l.dataType.simpleString} not supported")
     else if (kind == DivideLikeExpr.Div && TypeMapping.vecTypeOf(l.dataType) == VecType.FLOAT64) Left("div over double not supported")
@@ -696,7 +698,7 @@ object ExpressionCompiler {
       le <- compile(l, input)
       re <- compile(r, input)
       _ <- checkArithmetic(op, le, re, l, r, mode)
-    } yield ArithExpr(op, le, re, e.dataType, mode == EvalMode.ANSI, e.origin.context)
+    } yield ArithExpr(op, le, re, e.dataType, mode == EvalMode.ANSI, e.origin.context, nullOnOverflow = mode == EvalMode.TRY)
 
   private def checkArithmetic(
       op: ArithOp,
@@ -709,7 +711,6 @@ object ExpressionCompiler {
     else if (l.dataType != r.dataType) Left(s"arithmetic operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
     else if (!arithmeticTypes.contains(le.vecType)) Left(s"arithmetic not supported for ${l.dataType.simpleString}")
     else if (op == ArithOp.DIV && le.vecType != VecType.FLOAT64) Left(s"division not supported for ${l.dataType.simpleString}")
-    else if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
     else Right(())
   }
 

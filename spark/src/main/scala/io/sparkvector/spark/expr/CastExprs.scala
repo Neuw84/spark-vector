@@ -1,6 +1,6 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, CastKernels, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
+import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, CastKernels, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{BooleanType, DataType, DoubleType, IntegerType, LongType, StringType, TimestampType}
 import org.apache.spark.sql.vector.{SparkCasts, SparkFormatters, VectorErrors}
@@ -11,14 +11,21 @@ import org.apache.spark.unsafe.types.UTF8String
  * zero, saturates, NaN is 0), and under ANSI Spark's `CAST_OVERFLOW` for the first out-of-range value
  * among the batch's active rows -- a filtered row never raises.
  */
-final case class NarrowCastExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext) extends VectorExpr {
+final case class NarrowCastExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext, nullOnOverflow: Boolean = false) extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val a = child.eval(ctx)
     val n = ctx.numRows
     val out = ArrowLayout.allocateData(ctx.arena, vecType, n)
-    val overflow = if (ansi) ctx.bitmap() else null
+    val overflow = if (ansi || nullOnOverflow) ctx.bitmap() else null
     CastKernels.narrow(a, vecType, out, overflow)
+    if (nullOnOverflow) {
+      // try_cast: the flagged rows become null, combined with the input's validity.
+      val validity = ArrowLayout.allocateBitmap(ctx.arena, n)
+      if (a.validity() == null) BitmapKernels.not(overflow, validity, n)
+      else BitmapKernels.andNot(a.validity(), overflow, validity, n)
+      return SegmentVectorBuffers.fixedWidth(vecType, n, validity, out)
+    }
     if (ansi && ArithExpr.anyActive(overflow, a.validity(), ctx)) {
       var i = 0
       while (i < n) {
