@@ -117,7 +117,7 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i + 1.5D AS a, l * 0.5D AS b, i / 2 AS c FROM t WHERE i > 5", Seq(Project))
     // A plain decimal literal makes Spark cast the int to a decimal; both run on long lanes.
     checkVectorized("SELECT i + 1.5 AS a FROM t WHERE i > 5", Seq(Project))
-    checkFallback("SELECT CAST(dt AS STRING) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
+    checkFallback("SELECT CAST(s AS BINARY) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
   }
 
   // `l` is null on every seventh row (so `l > 3000` is a null condition there), `d` is null on
@@ -328,10 +328,41 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT cast(d2 AS INT) AS k, cast(b AS STRING) AS s2, count(*) AS n FROM t GROUP BY cast(d2 AS INT), cast(b AS STRING)", Seq(Project, classOf[VectorHashAggregateExec]))
     // Declined: try_cast, and the casts still on the list (string -> number, date -> string).
     checkFallback("SELECT try_cast(d AS INT) AS a FROM t", Seq(Project), "try_cast")
+    checkFallback("SELECT cast(s AS BINARY) AS a FROM t", Seq(Project), "unsupported cast")
+  }
+
+  test("casts: string -> number, date/timestamp <-> string") {
+    val numbers = "CASE i % 16 WHEN 0 THEN ' 42 ' WHEN 1 THEN '-7' WHEN 2 THEN '12.9' WHEN 3 THEN '3e2' WHEN 4 THEN '2147483648' WHEN 5 THEN NULL WHEN 6 THEN 'abc' WHEN 7 THEN '' WHEN 8 THEN '+5' WHEN 9 THEN '1.5e300' WHEN 10 THEN 'NaN' WHEN 11 THEN ' -Infinity ' WHEN 12 THEN 'inf' WHEN 13 THEN '0x1p3' WHEN 14 THEN '1d' ELSE '9223372036854775807' END"
+    // Legacy: Spark's own parsers per row -- trimmed, signed, fraction dropped for integers, null for the rest; specials for doubles.
     withConf("spark.sql.ansi.enabled" -> "false") {
-      checkFallback("SELECT cast(s AS INT) AS a FROM t", Seq(Project), "unsupported cast")
+      checkVectorized(s"SELECT cast($numbers AS INT) AS a, cast($numbers AS BIGINT) AS b, cast($numbers AS DOUBLE) AS c, cast(s AS INT) AS d1, cast(s AS DOUBLE) AS e0 FROM t", Seq(Project))
     }
-    checkFallback("SELECT cast(dt AS STRING) AS a FROM t", Seq(Project), "unsupported cast")
+    // Round trips agree under ANSI (every value parses); a bad spelling raises Spark's CAST_INVALID_INPUT unless filtered away.
+    checkVectorized("SELECT cast(cast(i AS STRING) AS INT) AS a, cast(cast(l AS STRING) AS BIGINT) AS b, cast(cast(d AS STRING) AS DOUBLE) AS c, cast(cast(-d2 AS STRING) AS DOUBLE) AS d1, cast(cast(i AS STRING) AS BIGINT) AS e0, cast(cast(l AS STRING) AS DOUBLE) AS f FROM t", Seq(Project))
+    for (target <- Seq("INT", "BIGINT", "DOUBLE")) {
+      val e = intercept[Exception](withPlugin(enabled = true)(spark.sql(s"SELECT cast(s AS $target) AS a FROM t").collect()))
+      assert(causes(e).exists(_.getMessage.contains("CAST_INVALID_INPUT")), s"expected CAST_INVALID_INPUT for $target, got $e")
+      checkVectorized(s"SELECT cast(s AS $target) AS a FROM t WHERE s IS NULL", Seq(Project, Filter))
+    }
+    // Dates and timestamps to strings with Spark's own formatters, under any zone; and back with Spark's own parser.
+    val forms = "CASE i % 9 WHEN 0 THEN '2020-01-05' WHEN 1 THEN '2020-1-5' WHEN 2 THEN ' 2020-01-05T10:20:30 ' WHEN 3 THEN '2020-01-05 10:20:30.123456Z' WHEN 4 THEN '2020-01-05T10:20:30+05:30' WHEN 5 THEN '2020' WHEN 6 THEN NULL WHEN 7 THEN '1969-12-31 23:59:59.999' ELSE 'not a date' END"
+    for (zone <- Seq("UTC", "+05:30", "America/New_York")) {
+      withConf("spark.sql.session.timeZone" -> zone) {
+        checkVectorized("SELECT cast(dt AS STRING) AS a, cast(ts AS STRING) AS b, cast(d0 AS STRING) AS c FROM t JOIN ts ON t.i = ts.i", Seq(Project))
+        checkVectorized("SELECT cast(cast(dt AS STRING) AS DATE) AS a, cast(cast(ts AS STRING) AS TIMESTAMP) AS b, cast(cast(d0 AS STRING) AS TIMESTAMP) AS c, cast(cast(ts AS STRING) AS DATE) AS d1 FROM t JOIN ts ON t.i = ts.i", Seq(Project))
+        withConf("spark.sql.ansi.enabled" -> "false") {
+          checkVectorized(s"SELECT cast($forms AS DATE) AS a, cast($forms AS TIMESTAMP) AS b FROM t", Seq(Project))
+        }
+      }
+    }
+    val badDate = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT cast(s AS DATE) AS a FROM t").collect()))
+    assert(causes(badDate).exists(_.getMessage.contains("CAST_INVALID_INPUT")), s"expected CAST_INVALID_INPUT, got $badDate")
+    val badTs = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT cast(s AS TIMESTAMP) AS a FROM t").collect()))
+    assert(causes(badTs).exists(_.getMessage.contains("CAST_INVALID_INPUT")), s"expected CAST_INVALID_INPUT, got $badTs")
+    checkVectorized("SELECT cast(s AS DATE) AS a, cast(s AS TIMESTAMP) AS b FROM t WHERE s IS NULL", Seq(Project, Filter))
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT count(*) AS n FROM t WHERE cast(cast(i AS STRING) AS INT) % 2 = 0 AND cast(dt AS STRING) < '2021'", Seq(Filter, classOf[VectorHashAggregateExec]))
+    checkVectorized("SELECT cast(dt AS STRING) AS k, count(*) AS n FROM t GROUP BY cast(dt AS STRING)", Seq(Project, classOf[VectorHashAggregateExec]))
   }
 
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {
