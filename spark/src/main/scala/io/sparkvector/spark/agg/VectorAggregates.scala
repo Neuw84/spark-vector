@@ -1,7 +1,7 @@
 package io.sparkvector.spark.agg
 
 import io.sparkvector.kernels.{AggKernels, Bitmap, CompareOp, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
-import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, SpeculativeDecimalMulExpr, SpeculativeDecimals, VectorExpr}
+import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, SpeculativeDecimalExpr, SpeculativeDecimals, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import io.sparkvector.spark.adapter.TypeMapping
@@ -127,7 +127,7 @@ private[agg] final class Escalation {
 private[agg] object Escalation {
   /** Evaluates `input` for one batch: the lane to accumulate, and the escalated rows folded into `extra`. */
   def evalInput(input: VectorExpr, ctx: EvalContext, extra: Escalation, groupOf: Int => Int): VectorBuffers = input match {
-    case s: SpeculativeDecimalMulExpr =>
+    case s: SpeculativeDecimalExpr =>
       val checked = s.evalChecked(ctx)
       var k = 0
       var added = 0
@@ -889,7 +889,7 @@ object VectorAggregates {
       // speculatively in 64 bits, its overflowing rows added exactly (#26).
       val bufferType = s.dataType.asInstanceOf[DecimalType]
       def agg(child: VectorExpr) = WideDecimalSumAgg(child, bufferType, complete, nullOnOverflow = s.evalContext.evalMode != EvalMode.ANSI, s.origin.context)
-      ExpressionCompiler.speculativeDecimalMultiply(s.child, input) match {
+      ExpressionCompiler.speculativeDecimalArithmetic(s.child, input) match {
         case Some(speculative) => speculative.map(agg)
         case None =>
           numericChild(s.child, input).flatMap { child =>
@@ -960,7 +960,7 @@ object VectorAggregates {
       if (bufferType.precision <= TypeMapping.MAX_DECIMAL_PRECISION) Left(s"avg buffer ${bufferType.simpleString} within 18 digits not supported")
       else {
         def agg(child: VectorExpr) = WideDecimalAvgAgg(child, bufferType, DecimalAvgResult(a), complete)
-        ExpressionCompiler.speculativeDecimalMultiply(a.child, input) match {
+        ExpressionCompiler.speculativeDecimalArithmetic(a.child, input) match {
           case Some(speculative) => speculative.map(agg)
           case None =>
             numericChild(a.child, input).flatMap { child =>

@@ -170,7 +170,9 @@ class VectorDecimalSuite extends VectorQuerySuite {
     // Still refused: a wide product anywhere but under a sum, and a product whose operand is neither a lane nor a product.
     checkFallback("SELECT dec12 * dec12 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
     // (the Final stage may still be ours: it merges the buffer Spark's Partial produced)
-    assert(nodesOf[HashAggregateExec](checkFallback("SELECT sum((dec12 * dec12 + 1) * dec7) AS s FROM t", Seq.empty, "neither a lane nor a speculative product")).nonEmpty)
+    // (a wide sum as an operand became speculative in slice 4; a wide operand that is neither is still refused)
+    bothOurs("SELECT sum((dec12 * dec12 + 1) * dec7) AS s FROM t")
+    assert(nodesOf[HashAggregateExec](checkFallback("SELECT sum(cast(dec12 * dec12 AS decimal(30,4)) * dec7) AS s FROM t", Seq.empty, "neither a lane nor a speculative product or sum")).nonEmpty)
     assert(nodesOf[HashAggregateExec](checkFallback("SELECT max(dec12 * dec12) AS m FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
   }
 
@@ -301,6 +303,38 @@ class VectorDecimalSuite extends VectorQuerySuite {
     checkExact("SELECT a FROM (SELECT k, avg(dec18) AS a FROM t GROUP BY k) WHERE a IS NOT NULL", Seq(Agg, Filter))
     // A wide result inside another expression is refused (the projection would have to divide wide decimals).
     assert(nodesOf[HashAggregateExec](checkFallback("SELECT avg(dec18) * 2 AS x FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
+  }
+
+  test("a declared-wide sum or difference under a decimal sum or avg: rescaled and added in 64 bits, overflowing rows exact (#26)") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    def bothOurs(sql: String): Unit = {
+      checkExact(sql, Seq(Agg))
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "both stages should be ours\n" + finalPlan(df).treeString)
+    }
+    val before = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+    // Sums that fit 64 bits: a lane plus a literal (decimal(19,4)), lanes of different scales, a product plus a lane, differences.
+    bothOurs("SELECT sum(dec18 + 1) AS s FROM t")                                   // decimal(19,4)
+    bothOurs("SELECT k, sum(dec18 - 1) AS s, avg(dec18 + 1) AS a FROM t GROUP BY k")
+    bothOurs("SELECT sum(dec12 + dec18) AS s FROM t")                               // decimal(21,4): dec12 rescaled to 4
+    bothOurs("SELECT k, sum(dec12 * dec7 + dec12) AS s FROM t GROUP BY k")         // decimal(21,4): a speculative product plus a lane
+    bothOurs("SELECT sum(dec12 * dec7 - dec18) AS s FROM t")                        // decimal(21,4)
+    bothOurs("SELECT sum(dec12 * (1 - dec7) + dec12 * dec7) AS s FROM t")           // two speculative products
+    bothOurs("SELECT sum(big + big) AS s, sum(big - big) AS d FROM t")              // decimal(19,2): 17-digit values, fits
+    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
+    // Escalation at the rescale: big * 100 is a 19-digit unscaled value that leaves 64 bits when shifted to scale 4.
+    bothOurs("SELECT sum(big * 100 + dec18) AS s FROM t")                           // decimal(25,4)
+    val nonNull = spark.sql("SELECT count(big) FROM t WHERE dec18 IS NOT NULL").collect().head.getLong(0)
+    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before + 2 * nonNull, "every row with both operands escalates (bothOurs runs the query twice)")
+    // Escalation from an operand: every product of big * big is exact, the add combines exactly.
+    bothOurs("SELECT k, sum(big * big + dec12) AS s FROM t GROUP BY k")             // decimal(38,4)
+    bothOurs("SELECT k, avg(big * big - dec12 * dec7) AS a FROM t WHERE i < 3000 GROUP BY k")
+    // Escalation at the add itself: two rescaled 18-digit values whose sum leaves 64 bits.
+    bothOurs("SELECT sum(cast(if(i % 3 = 0, 900000000000000000, i) AS decimal(18,0)) + cast(if(i % 3 = 0, 90000000000000000.0, i) AS decimal(18,1))) AS s FROM t WHERE i < 100") // decimal(20,1): 9.9e18 unscaled
+    // Still refused: a wide sum as a projected value, and the shape where Spark's precision cap lowers the scale (it rounds there).
+    checkFallback("SELECT dec18 + 1 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
+    bothOurs("SELECT sum(dec18 * dec18 + dec18 * dec18) AS s FROM t")               // decimal(38,8): exactly at the cap, scale kept
+    assert(nodesOf[HashAggregateExec](checkFallback("SELECT sum(big * big * 10 + dec18 * dec18) AS s FROM t WHERE i < 8", Seq.empty, "18 digits")).nonEmpty) // (38,4) + (37,8): the cap lowers the scale to 6
   }
 
   test("sum(DISTINCT) and avg(DISTINCT) over wide decimals: every stage of the distinct rewrite ours") {
