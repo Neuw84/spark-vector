@@ -17,6 +17,10 @@ object VectorErrors {
   def invalidArrayIndex(index: Int, count: Int, context: QueryContext): ArrayIndexOutOfBoundsException =
     QueryExecutionErrors.invalidArrayIndexError(index, count, context)
 
+  /** `split_part` with part 0: Spark's INVALID_INDEX_OF_ZERO, raised regardless of ANSI mode. */
+  def invalidIndexOfZero(context: QueryContext): RuntimeException =
+    QueryExecutionErrors.invalidIndexOfZeroError(context)
+
   /** A decimal result that does not fit the target precision (ANSI arithmetic and casts). */
   def decimalPrecisionOverflow(value: Decimal, precision: Int, scale: Int, context: QueryContext): ArithmeticException =
     QueryExecutionErrors.cannotChangeDecimalPrecisionError(value, precision, scale, context)

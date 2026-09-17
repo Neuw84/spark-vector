@@ -46,6 +46,16 @@ public final class StringConcatKernels {
       return StringSliceKernels.lengthOf(store, StringSliceKernels.index(lane, i));
     }
 
+    /** The segment holding row {@code i}'s bytes. */
+    MemorySegment seg(int i) {
+      return lane == null ? literal : store.data();
+    }
+
+    /** The offset of row {@code i}'s first byte within {@link #seg}. */
+    long at(int i) {
+      return lane == null ? 0L : StringSliceKernels.startOf(store, StringSliceKernels.index(lane, i));
+    }
+
     /** Copies row {@code i}'s bytes to {@code out} at {@code at}; returns the bytes copied. */
     int copy(int i, MemorySegment out, long at) {
       if (lane == null) {
