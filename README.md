@@ -314,6 +314,11 @@ $JAVA_HOME/bin/jfr view hot-methods /tmp/q1.jfr
 $JAVA_HOME/bin/jfr print --events jdk.ExecutionSample --stack-depth 12 /tmp/q1.jfr   # callers of a hot frame
 ```
 
+Or as one command: `benchmarks/scripts/profile-query.sh benchmarks/data/sf10 comet-scan-vector q1`
+runs, records and summarises (`benchmarks/scripts/jfr-summary.sh <file.jfr>` summarises any
+recording: hot methods, the callers of the JDK-internal `MemorySegment` frames, the plugin's own
+frames by self time, allocation, GC, waits and native methods -- text you can paste into an issue).
+
 Every performance finding in this project came out of such a recording rather than out of the
 median alone: the masked-reduction aggregate, triple string decoding, the two-lane shuffle table,
 and most recently a zero-copy configuration that was slower than a copying one because Comet's scan
