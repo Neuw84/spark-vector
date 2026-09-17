@@ -448,7 +448,9 @@ exchange). 22 of 22 checksums identical. What still holds decimals back: Q1's ne
 `sum((l_extendedprice * (1 - l_discount)) * (1 + l_tax))` (`decimal(38,6)`, a wide *operand* -- the next
 slice), the `avg` buffers (`decimal(25,2)`, the wide `avg` buffer), and the operators *above* a wide
 sum (`TakeOrderedAndProject` / `Filter` over `revenue`, `sum(l_quantity)`: a wide result column as an
-input, #28).
+input, #28). Slice 2 of #26 (nested products) then removed Q1's `decimal(38,6)` reason as well: its
+aggregate now waits only on the `avg` buffers (`avg buffer decimal(25,2) exceeds 18 digits`), the
+wide `avg` being the next decimal step.
 
 The rest of the decimal-only list is the cascade: `Filter: child HashAggregate is not columnar`,
 `BroadcastHashJoin: child Filter is not columnar`, `Project`/`Sort: child ... is not columnar` --

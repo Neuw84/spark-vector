@@ -314,16 +314,21 @@ object SpeculativeDecimals {
 }
 
 /**
- * `a * b` over two decimals of at most 18 digits whose *declared* result is wider than 18 digits
- * (`decimal(12,2) * decimal(14,2)` is `decimal(27,4)`): Spark's result type is a static rule, not a
- * statement about the data, so the product is computed speculatively in the INT64 unscaled lane and
- * checked per row with `Math.multiplyHigh` -- the high word of the 128-bit product must be the sign
- * extension of the low word. Rows whose product does not fit are *escalated*: their exact product is
- * returned beside the lane (as `BigInteger`, at the declared scale `s1 + s2`, which Spark never
- * rounds when the declared precision is at most 38) and the lane's validity is cleared for them, so a
- * consumer that can take exact values row by row -- the 128-bit decimal sum -- adds them exactly, and
- * no wrong value ever leaves. No overflow of Spark's own can occur here: the declared precision holds
- * every product of the operands' widths.
+ * `a * b` over decimals whose *declared* result is wider than 18 digits (`decimal(12,2) * decimal(14,2)`
+ * is `decimal(27,4)`): Spark's result type is a static rule, not a statement about the data, so the
+ * product is computed speculatively in the INT64 unscaled lane and checked per row with
+ * `Math.multiplyHigh` -- the high word of the 128-bit product must be the sign extension of the low
+ * word. Rows whose product does not fit are *escalated*: their exact product is returned beside the
+ * lane (as `BigInteger`, at the declared scale `s1 + s2`, which Spark keeps whenever the declared
+ * precision is at most 38) and the lane's validity is cleared for them, so a consumer that can take
+ * exact values row by row -- the 128-bit decimal sum -- adds them exactly, and no wrong value ever
+ * leaves.
+ *
+ * An operand may itself be such a product (`(price * (1 - disc)) * (1 + tax)`, declared
+ * `decimal(38,6)`): its escalated rows are multiplied exactly, so the whole tree escalates as one.
+ * Where Spark capped the declared precision at 38 the product may not fit it: like Spark's
+ * `Multiply`, such a row is null in legacy mode and `NUMERIC_VALUE_OUT_OF_RANGE` in ANSI mode --
+ * only an escalated (exact) value can be that large.
  *
  * This is deliberately not a general lane: only [[io.sparkvector.spark.agg]]'s wide decimal sum
  * consumes it (through [[evalChecked]]); [[eval]] is never called.
@@ -333,7 +338,9 @@ final case class SpeculativeDecimalMulExpr(
     right: VectorExpr,
     leftType: DecimalType,
     rightType: DecimalType,
-    dataType: DecimalType)
+    dataType: DecimalType,
+    ansi: Boolean,
+    queryContext: QueryContext)
     extends VectorExpr {
 
   override def children: Seq[VectorExpr] = Seq(left, right)
@@ -341,43 +348,66 @@ final case class SpeculativeDecimalMulExpr(
   override def eval(ctx: EvalContext): VectorBuffers =
     throw new IllegalStateException(s"speculative narrow decimal ${dataType.simpleString} is consumed only by the wide decimal sum")
 
-  /** The narrow products as an INT64 lane (overflowing rows invalid) plus the escalated rows and their exact products. */
-  final class Checked(val lane: VectorBuffers, val rows: Array[Int], val exact: Array[java.math.BigInteger])
+  /** One operand as the loop reads it: a literal, a lane, or a speculative child with its escalated rows. */
+  private final class Operand(e: VectorExpr, ctx: EvalContext) {
+    val literal: Boolean = e.isInstanceOf[LiteralExpr]
+    val lit: Long = if (literal) e.asInstanceOf[LiteralExpr].value.asInstanceOf[Decimal].toUnscaledLong else 0L
+    private val checked: SpeculativeChecked = e match { case s: SpeculativeDecimalMulExpr => s.evalChecked(ctx); case _ => null }
+    private val lane: VectorBuffers = if (literal) null else if (checked != null) checked.lane else e.eval(ctx)
+    private val validity = if (lane == null) null else lane.validity()
+    private var k = 0 // cursor into the child's escalated rows (rows ascend with i)
+    /** Row `i` is null (a real null, not an escalation). */
+    def isNull(i: Int): Boolean = !literal && validity != null && !Bitmap.isSet(validity, i) && !escalated(i)
+    /** Row `i` was escalated by the child: its exact value is `exactAt`. */
+    def escalated(i: Int): Boolean = {
+      if (checked == null) return false
+      while (k < checked.rows.length && checked.rows(k) < i) k += 1
+      k < checked.rows.length && checked.rows(k) == i
+    }
+    def exactAt(i: Int): java.math.BigInteger = checked.exact(k)
+    def narrow(i: Int): Long = if (literal) lit else lane.data().get(VectorBuffers.LE_LONG, i.toLong << 3)
+    def wide(i: Int): java.math.BigInteger = if (escalated(i)) exactAt(i) else java.math.BigInteger.valueOf(narrow(i))
+  }
 
-  def evalChecked(ctx: EvalContext): Checked = {
+  private val limit = java.math.BigInteger.TEN.pow(dataType.precision)
+
+  def evalChecked(ctx: EvalContext): SpeculativeChecked = {
     val n = ctx.numRows
     val data = ArrowLayout.allocateData(ctx.arena, VecType.INT64, n)
     val validity = ctx.bitmap()
-    // Operands: a lane each, or one literal (both literals never compile).
-    val (aLane, aLit) = left match { case lit: LiteralExpr => (null, lit.value.asInstanceOf[Decimal].toUnscaledLong); case e => (e.eval(ctx), 0L) }
-    val (bLane, bLit) = right match { case lit: LiteralExpr => (null, lit.value.asInstanceOf[Decimal].toUnscaledLong); case e => (e.eval(ctx), 0L) }
-    val aValid = if (aLane == null) null else aLane.validity()
-    val bValid = if (bLane == null) null else bLane.validity()
+    val a = new Operand(left, ctx)
+    val b = new Operand(right, ctx)
     var rows: Array[Int] = null
     var exact: Array[java.math.BigInteger] = null
     var escalated = 0
+    def escalate(i: Int, v: java.math.BigInteger): Unit = {
+      if (v.abs.compareTo(limit) >= 0) {
+        // Past the declared precision: Spark's Multiply yields null (legacy) or raises (ANSI) for this row.
+        if (ansi) throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(Decimal(new java.math.BigDecimal(v, dataType.scale)), dataType.precision, dataType.scale, queryContext)
+      } else {
+        if (rows == null) { rows = new Array[Int](8); exact = new Array[java.math.BigInteger](8) }
+        if (escalated == rows.length) { rows = java.util.Arrays.copyOf(rows, escalated * 2); exact = java.util.Arrays.copyOf(exact, escalated * 2) }
+        rows(escalated) = i; exact(escalated) = v; escalated += 1
+      }
+    }
     var i = 0
     while (i < n) {
-      val valid = (aValid == null || Bitmap.isSet(aValid, i)) && (bValid == null || Bitmap.isSet(bValid, i))
-      if (valid) {
-        val x = if (aLane == null) aLit else aLane.data().get(VectorBuffers.LE_LONG, i.toLong << 3)
-        val y = if (bLane == null) bLit else bLane.data().get(VectorBuffers.LE_LONG, i.toLong << 3)
-        val lo = x * y
-        if (Math.multiplyHigh(x, y) == (lo >> 63)) {
-          data.set(VectorBuffers.LE_LONG, i.toLong << 3, lo)
-          Bitmap.set(validity, i)
-        } else {
-          if (rows == null) { rows = new Array[Int](8); exact = new Array[java.math.BigInteger](8) }
-          if (escalated == rows.length) { rows = java.util.Arrays.copyOf(rows, escalated * 2); exact = java.util.Arrays.copyOf(exact, escalated * 2) }
-          rows(escalated) = i
-          exact(escalated) = java.math.BigInteger.valueOf(x).multiply(java.math.BigInteger.valueOf(y))
-          escalated += 1
+      if (!a.isNull(i) && !b.isNull(i)) {
+        if (a.escalated(i) || b.escalated(i)) escalate(i, a.wide(i).multiply(b.wide(i)))
+        else {
+          val x = a.narrow(i); val y = b.narrow(i)
+          val lo = x * y
+          if (Math.multiplyHigh(x, y) == (lo >> 63)) { data.set(VectorBuffers.LE_LONG, i.toLong << 3, lo); Bitmap.set(validity, i) }
+          else escalate(i, java.math.BigInteger.valueOf(x).multiply(java.math.BigInteger.valueOf(y)))
         }
       }
       i += 1
     }
     val lane = SegmentVectorBuffers.fixedWidth(VecType.INT64, n, validity, data)
-    if (escalated == 0) new Checked(lane, Array.emptyIntArray, Array.empty)
-    else new Checked(lane, java.util.Arrays.copyOf(rows, escalated), java.util.Arrays.copyOf(exact, escalated))
+    if (escalated == 0) new SpeculativeChecked(lane, Array.emptyIntArray, Array.empty)
+    else new SpeculativeChecked(lane, java.util.Arrays.copyOf(rows, escalated), java.util.Arrays.copyOf(exact, escalated))
   }
 }
+
+/** The narrow products as an INT64 lane (overflowing rows invalid) plus the escalated rows (ascending) and their exact products. */
+final class SpeculativeChecked(val lane: VectorBuffers, val rows: Array[Int], val exact: Array[java.math.BigInteger])
