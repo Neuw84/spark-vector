@@ -234,6 +234,29 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("substring, left/right, lpad/rpad, repeat, space, overlay write new strings") {
+    // s is 's0'..'s49' with nulls; m mixes multi-byte text in (2- and 3-byte code points and a 4-byte emoji).
+    val m = "CASE WHEN i % 4 = 0 THEN 'héllo wörld' WHEN i % 4 = 1 THEN '日本語テキスト' WHEN i % 4 = 2 THEN '😀x😀y' ELSE s END"
+    // substring: the TPC-H Q22 prefix, the tail, position 0, negative and out-of-range positions, zero and negative lengths, lanes as arguments.
+    checkVectorized("SELECT substring(s, 1, 2) AS a, substr(s, 2) AS b, substring(s, -1) AS c, substring(s, 0, 1) AS d0, substring(s, 5, 10) AS e0, substring(s, 2, 0) AS f, substring(s, -50, 3) AS g, substring(s, 2, -1) AS h FROM t", Seq(Project))
+    checkVectorized("SELECT substring(s, i % 4, i % 3) AS a, substring(s, i % 5 - 2) AS b, substring(s FROM 2 FOR 1) AS c FROM t", Seq(Project))
+    checkVectorized(s"SELECT substring($m, 2, 3) AS a, substring($m, -3) AS b, substring($m, 1, 1) AS c, substring($m, 4, 100) AS d0, substring($m, -100, 5) AS e0 FROM t", Seq(Project))
+    // left / right are Spark's rewrites onto substring (right through an If over the length).
+    checkVectorized(s"SELECT left(s, 1) AS a, right(s, 2) AS b, left(s, i % 3) AS c, right(s, -1) AS d0, left($m, 4) AS e0, right($m, 2) AS f, right(s, i % 4) AS g FROM t", Seq(Project))
+    // lpad / rpad: literal and lane lengths, a multi-byte pad, a lane pad, an empty pad, truncation, a zero length.
+    checkVectorized(s"SELECT lpad(s, 6, '*') AS a, rpad(s, 6) AS b, lpad(s, 1, 'xy') AS c, rpad($m, 9, 'ñ') AS d0, lpad(s, i % 8, '-') AS e0, rpad(s, 5, s) AS f, lpad(s, 4, '') AS g, lpad($m, 0, 'x') AS h, rpad(s, 7, '日本') AS j FROM t", Seq(Project))
+    // repeat and space, incl. non-positive counts and a lane count.
+    checkVectorized(s"SELECT repeat(s, 2) AS a, repeat(s, i % 3) AS b, repeat(s, -1) AS c, repeat($m, 2) AS d0, space(i % 5) AS e0, space(i % 3 - 1) AS f FROM t", Seq(Project))
+    // overlay: the PLACING form, a zero length, the default length, a lane position, a lane replacement, out-of-range positions.
+    checkVectorized(s"SELECT overlay(s PLACING '_' FROM 2) AS a, overlay(s, 'XY', 1, 3) AS b, overlay($m, 'ab', 3, 0) AS c, overlay(s, 'q', i % 3 + 1, 1) AS d0, overlay(s, s, 2, -1) AS e0, overlay(s, 'z', 100, 1) AS f, overlay($m, 'Ü', -2, 2) AS g FROM t", Seq(Project))
+    // In a filter, as a grouping key and inside a comparison.
+    checkVectorized("SELECT i FROM t WHERE substring(s, 2, 1) = '1' AND left(s, 1) = 's'", Seq(Filter))
+    checkVectorized("SELECT substring(s, 1, 2) AS k, count(*) AS n, min(rpad(s, 4, '.')) AS r FROM t GROUP BY substring(s, 1, 2)", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: a binary subject, and a literal count past the batch output cap (Spark would try to allocate it).
+    checkFallback("SELECT substring(CAST(s AS BINARY), 1, 2) AS a FROM t", Seq(Project), "unsupported")
+    checkFallback("SELECT repeat(s, 2000000) AS a FROM t WHERE i < 2", Seq(Project), "exceeds the batch output cap")
+  }
+
   test("rounding: ceil, floor, rint, round, bround over doubles and integers") {
     // d2 = (id % 13) / 4 holds exact quarters and halves; d has NaN, infinities and nulls.
     checkVectorized("SELECT ceil(d) AS c, floor(d) AS f, rint(d) AS r, ceil(d2) AS c2, floor(d2) AS f2, rint(d2) AS r2, ceil(l) AS cl, floor(i) AS fi FROM t", Seq(Project))

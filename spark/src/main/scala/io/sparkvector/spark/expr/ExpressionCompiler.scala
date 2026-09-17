@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -69,6 +69,27 @@ object ExpressionCompiler {
       else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+
+    // The slicing family writes new UTF8 data: Spark's UTF8String semantics per lane (left/right are
+    // Spark's own rewrites onto substring; binary inputs are not lanes and fall back).
+    case Substring(str, pos, len) if str.dataType == StringType =>
+      for (s <- stringSubject(str, input, "substring"); p <- intArg(pos, input, "substring"); l <- intArg(len, input, "substring")) yield SubstringExpr(s, p, l)
+    case StringLPad(str, len, pad) =>
+      for (s <- stringSubject(str, input, "lpad"); l <- intArg(len, input, "lpad", StringSlices.MaxLiteralCount); pd <- stringArg(pad, input, "lpad")) yield PadExpr(s, l, pd, left = true)
+    case StringRPad(str, len, pad) =>
+      for (s <- stringSubject(str, input, "rpad"); l <- intArg(len, input, "rpad", StringSlices.MaxLiteralCount); pd <- stringArg(pad, input, "rpad")) yield PadExpr(s, l, pd, left = false)
+    case StringRepeat(str, times) =>
+      for (s <- stringSubject(str, input, "repeat"); t <- intArg(times, input, "repeat", StringSlices.MaxLiteralCount)) yield RepeatExpr(s, t)
+    case StringSpace(n) =>
+      intArg(n, input, "space", StringSlices.MaxLiteralCount).flatMap {
+        case _: LiteralExpr => Left("space of a literal") // folds in Spark; a constant column has no producer here
+        case c => Right(SpaceExpr(c))
+      }
+    case Overlay(in, replace, pos, len) if in.dataType == StringType =>
+      for {
+        s <- stringSubject(in, input, "overlay"); r <- stringArg(replace, input, "overlay")
+        p <- intArg(pos, input, "overlay"); l <- intArg(len, input, "overlay")
+      } yield OverlayExpr(s, r, p, l)
     case EndsWith(l, r) => stringMatch(StringMatchKernels.Kind.SUFFIX, l, r, input)
     case Contains(l, r) => stringMatch(StringMatchKernels.Kind.CONTAINS, l, r, input)
 
@@ -658,6 +679,33 @@ object ExpressionCompiler {
    * A column pattern, a non-string operand or a `NULL` pattern falls back; `LIKE` with inner
    * wildcards never reaches here (the optimizer leaves it as `Like`, #3 follow-up).
    */
+  /** The string a slicing function works on: a UTF8 lane (a literal subject folds in Spark). */
+  private def stringSubject(e: Expression, input: Seq[Attribute], what: String): Result =
+    compile(e, input).flatMap {
+      case _: LiteralExpr => Left(s"$what of a literal")
+      case c if c.vecType != VecType.UTF8 => Left(s"$what over ${e.dataType.simpleString} not supported")
+      case c => Right(c)
+    }
+
+  /** A string argument: a UTF8 lane or a non-null string literal. */
+  private def stringArg(e: Expression, input: Seq[Attribute], what: String): Result = e match {
+    case Literal(null, _) => Left(s"$what with a null argument")
+    case _ =>
+      compile(e, input).flatMap {
+        case lit: LiteralExpr => Right(lit)
+        case c if c.vecType != VecType.UTF8 => Left(s"$what argument ${e.dataType.simpleString} not supported")
+        case c => Right(c)
+      }
+  }
+
+  /** An int argument: an INT32 lane or an int literal, the literal bounded when it sizes the output. */
+  private def intArg(e: Expression, input: Seq[Attribute], what: String, maxLiteral: Int = Int.MaxValue): Result = e match {
+    case Literal(null, _) => Left(s"$what with a null argument")
+    case Literal(v: Int, IntegerType) if v > maxLiteral => Left(s"$what count $v exceeds the batch output cap")
+    case _ if e.dataType != IntegerType => Left(s"$what argument ${e.dataType.simpleString} is not an int")
+    case _ => compile(e, input)
+  }
+
   private def stringMatch(kind: StringMatchKernels.Kind, l: Expression, r: Expression, input: Seq[Attribute]): Result =
     r match {
       case Literal(null, _) => Left("null pattern")
