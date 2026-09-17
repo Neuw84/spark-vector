@@ -90,19 +90,19 @@ public final class StringSliceKernels {
 
   // ---------------------------------------------------------------- input access
 
-  private static VectorBuffers store(VectorBuffers v) {
+  static VectorBuffers store(VectorBuffers v) {
     return v.dictionary() != null ? v.dictionary() : v;
   }
 
-  private static int index(VectorBuffers v, int i) {
+  static int index(VectorBuffers v, int i) {
     return v.dictionary() != null ? v.getInt(i) : i;
   }
 
-  private static int startOf(VectorBuffers store, int idx) {
+  static int startOf(VectorBuffers store, int idx) {
     return store.offsets().getAtIndex(VectorBuffers.LE_INT, idx);
   }
 
-  private static int lengthOf(VectorBuffers store, int idx) {
+  static int lengthOf(VectorBuffers store, int idx) {
     return store.offsets().getAtIndex(VectorBuffers.LE_INT, idx + 1) - startOf(store, idx);
   }
 
