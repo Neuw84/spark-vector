@@ -92,7 +92,13 @@ that pin it.
 - Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`
   (numbers via `CompareKernels`, strings via `StringCompareKernels` in UTF8_BINARY order), `InExpr`
   (one equality pass per literal), `StringMatchExpr` (`startswith`/`endswith`/`contains`, i.e. the
-  `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), the date nodes in `DateExprs.scala`
+  `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), the string writers in
+  `StringSliceExprs.scala` (`SubstringExpr`, `PadExpr`, `RepeatExpr`, `SpaceExpr`, `OverlayExpr` over
+  `StringSliceKernels` -- the first kernel that produces new UTF8 data: two passes, per-row lengths and
+  source ranges then one data buffer sized from their prefix sum; Spark's `UTF8String` code-point rules
+  and first-byte width table; dictionary input read through the dictionary, plain output; a 1 GiB
+  per-batch cap and a 2^20 literal bound decline runaway counts; reuse `substringRange`/`numChars`/
+  `byteOffsetOfChar` for the remaining string issues), the date nodes in `DateExprs.scala`
   (`DateFieldExpr`/`DateTruncExpr` over `DateKernels`' civil-from-days arithmetic, `TimestampToDateExpr`/`TimeFieldExpr`
   under a fixed-offset session zone only -- zones with rules fall back), `MonotonicIdExpr`
   (`monotonically_increasing_id()`: partition prefix from the task context plus a per-task counter
@@ -477,7 +483,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 138 kernel tests, 174 Spark tests (147 without the Comet and Iceberg profiles;
+Current counts: 140 kernel tests, 175 Spark tests (148 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
