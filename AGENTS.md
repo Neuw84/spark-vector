@@ -688,8 +688,15 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   `WideLongSum` accumulator (ungrouped: only selected rows; grouped: `GroupAssignment.ids` >= 0), and
   `bufferValue` sums both parts. `eval` on the speculative expression throws -- it must never be a lane
   for another consumer. `SpeculativeDecimals.escalatedRows()` is the (global) escalation counter the
-  tests read. Not yet: `+`/`-` (a rescale can overflow too), wide products as values (needs a 128-bit
-  output column on escalated batches), nested products.
+  tests read. Slice 2: an operand may be a `SpeculativeDecimalMulExpr` itself (`operand()` in the
+  compiler recurses into a wide `Multiply`); `evalChecked` reads each operand through an `Operand`
+  (literal / lane / speculative child with a cursor over its ascending escalated rows), multiplies
+  exactly where a child escalated, and applies Spark's range check for a capped declared precision
+  (`|v| >= 10^p` -> null in legacy, `VectorErrors.decimalPrecisionOverflow` in ANSI). Spark 4.1's
+  `Multiply` carries a `NumericEvalContext`, not an `EvalMode` -- read `m.evalContext.evalMode`, a
+  pattern-bound third field compares unequal to every `EvalMode` value. Not yet: `+`/`-` (a rescale
+  can overflow too), wide products as values (needs a 128-bit output column on escalated batches),
+  `avg` over such products.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

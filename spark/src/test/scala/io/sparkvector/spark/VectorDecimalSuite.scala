@@ -158,10 +158,19 @@ class VectorDecimalSuite extends VectorQuerySuite {
     // A total past the sum's decimal(38,4) raises in ANSI mode for both engines, with the same error class.
     val ours = intercept[Exception] { withPlugin(enabled = true) { spark.sql("SELECT sum(big * big) AS s FROM t").collect() } }
     assert(ours.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE"), ours.getMessage)
-    // Still refused: a wide product anywhere but under a sum, and a product with a wide operand.
+    // Nested products (slice 2): a wide product as an operand of another, escalating as one tree; Q1's shape.
+    bothOurs("SELECT sum(dec12 * dec7 * dec12) AS s FROM t")                                     // decimal(33,6), fits
+    bothOurs("SELECT k, sum(dec12 * dec7 * dec12) AS s FROM t GROUP BY k")
+    bothOurs("SELECT sum(dec12 * (1 - dec7) * (1 + dec7)) AS s FROM t")                           // decimal(30,6): TPC-H Q1's charge
+    bothOurs("SELECT sum(dec12 * big * dec7) AS s FROM t")                                        // decimal(38,6): the inner product escalates
+    // Past the capped precision: Spark's Multiply nulls the row in legacy mode and raises in ANSI mode; so do we.
+    withConf("spark.sql.ansi.enabled" -> "false") { bothOurs("SELECT sum(big * big * big) AS s FROM t") }
+    val past = intercept[Exception] { withPlugin(enabled = true) { spark.sql("SELECT sum(big * big * big) AS s FROM t").collect() } }
+    assert(past.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE"), past.getMessage)
+    // Still refused: a wide product anywhere but under a sum, and a product whose operand is neither a lane nor a product.
     checkFallback("SELECT dec12 * dec12 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
     // (the Final stage may still be ours: it merges the buffer Spark's Partial produced)
-    assert(nodesOf[HashAggregateExec](checkFallback("SELECT sum(dec12 * dec12 * dec7) AS s FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
+    assert(nodesOf[HashAggregateExec](checkFallback("SELECT sum((dec12 * dec12 + 1) * dec7) AS s FROM t", Seq.empty, "neither a lane nor a speculative product")).nonEmpty)
     assert(nodesOf[HashAggregateExec](checkFallback("SELECT max(dec12 * dec12) AS m FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
   }
 

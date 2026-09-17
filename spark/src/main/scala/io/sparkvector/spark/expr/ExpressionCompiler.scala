@@ -773,15 +773,21 @@ object ExpressionCompiler {
    * escalated rows exactly.
    */
   def speculativeDecimalMultiply(e: Expression, input: Seq[Attribute]): Option[Result] = e match {
-    case Multiply(l, r, mode) => (l.dataType, r.dataType, e.dataType) match {
+    case m @ Multiply(l, r, _) =>
+      // Spark 4.1's Multiply carries a NumericEvalContext; the mode lives inside it.
+      val mode = m.evalContext.evalMode
+      (l.dataType, r.dataType, e.dataType) match {
       case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
-          if !TypeMapping.isSupported(dt) && TypeMapping.isSupported(lt) && TypeMapping.isSupported(rt) &&
-            dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
+          if !TypeMapping.isSupported(dt) && dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
+        // An operand is a lane (at most 18 digits) or, recursively, such a product itself.
+        def operand(o: Expression): Result =
+          if (TypeMapping.isSupported(o.dataType)) compile(o, input)
+          else speculativeDecimalMultiply(o, input).getOrElse(Left(s"decimal operand ${o.dataType.simpleString} of ${o.sql} is neither a lane nor a speculative product"))
         Some(for {
-          le <- compile(l, input)
-          re <- compile(r, input)
+          le <- operand(l)
+          re <- operand(r)
           _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
-        } yield SpeculativeDecimalMulExpr(le, re, lt, rt, dt))
+        } yield SpeculativeDecimalMulExpr(le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context))
       case _ => None
     }
     case _ => None
