@@ -836,4 +836,41 @@ object VectorJoinPlanner {
       check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
     }
   }
+
+  /**
+   * A sort-merge join re-expressed as our shuffled hash join (#10, opt-in). Both operators require the
+   * same distribution of the same keys and produce the same rows for the same join types, so the
+   * hash join is a drop-in per partition; what changes is the memory profile -- the smaller side is
+   * held in a per-task hash table -- hence the build side is chosen by the runtime statistics of the
+   * two sides (`estimatedBuildSize`: an AQE stage's real size) and must fit `spark.vector.join.maxBuildSize`.
+   * A side without statistics is not assumed small: the rule of the issue is "when statistics say
+   * the build side fits". `left` / `right` are the join's inputs with the sorts Spark placed for the
+   * merge already removed (the caller strips them: a hash join does not need them).
+   */
+  def planSortMerge(
+      leftKeys: Seq[Expression], rightKeys: Seq[Expression], joinType: JoinType, condition: Option[Expression],
+      isSkewJoin: Boolean, left: SparkPlan, right: SparkPlan, maxBuildSize: Long): Either[String, VectorShuffledHashJoinExec] = {
+    if (isSkewJoin) Left("skew join not supported")
+    else {
+      val sides: Seq[BuildSide] = joinType match {
+        case _: InnerLike | FullOuter => Seq(BuildRight, BuildLeft)
+        case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => Seq(BuildRight)
+        case RightOuter => Seq(BuildLeft)
+        case _ => Nil
+      }
+      if (sides.isEmpty) Left(s"join type $joinType not supported")
+      else {
+        val sized = sides.flatMap { s =>
+          estimatedBuildSize(if (s == BuildLeft) left else right).map(size => (s, size))
+        }
+        if (sized.isEmpty) Left("no size statistics for a build side (a sort-merge join is re-expressed only when statistics say the build side fits)")
+        else {
+          val (buildSide, size) = sized.minBy(_._2)
+          if (size > maxBuildSize) Left(s"smallest side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize")
+          else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right)
+            .map(_ => VectorShuffledHashJoinExec(leftKeys, rightKeys, joinType, buildSide, condition, left, right))
+        }
+      }
+    }
+  }
 }

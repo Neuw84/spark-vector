@@ -23,6 +23,7 @@ object VectorConf {
   val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
   val BroadcastNestedLoopJoinEnabled = "spark.vector.exec.broadcastNestedLoopJoin.enabled"
   val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
+  val SortMergeJoinEnabled = "spark.vector.exec.sortMergeJoin.enabled"
   val JoinMaxBuildSize = "spark.vector.join.maxBuildSize"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
@@ -61,6 +62,12 @@ object VectorConf {
   def broadcastNestedLoopJoinEnabled(conf: SQLConf): Boolean = bool(conf, BroadcastNestedLoopJoinEnabled, default = true)
   /** Convert ShuffledHashJoinExec; over Spark's row shuffle both inputs go through RowToColumnarExec. */
   def shuffledHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, ShuffledHashJoinEnabled, default = true)
+  /**
+   * Re-express SortMergeJoinExec as our shuffled hash join when the smaller side's statistics fit
+   * `spark.vector.join.maxBuildSize` (#10). Opt-in: it trades Spark's streaming merge for a per-task
+   * hash table, a different memory profile.
+   */
+  def sortMergeJoinEnabled(conf: SQLConf): Boolean = bool(conf, SortMergeJoinEnabled, default = false)
   /**
    * Largest build side (bytes, size strings like `512m` accepted) a hash-style join converts for (#86);
    * the joins hold the build side in memory per task. Default: a per-core share of the off-heap

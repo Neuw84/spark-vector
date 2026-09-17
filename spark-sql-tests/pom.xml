@@ -26,6 +26,8 @@
     <sqlTests.exclude></sqlTests.exclude>
     <!-- -DsqlTests.updateBaseline=true rewrites src/test/resources/vector-sql-coverage.tsv from a full run. -->
     <sqlTests.updateBaseline>false</sqlTests.updateBaseline>
+    <!-- Extra JVM arguments, e.g. -Dspark.vector.exec.sortMergeJoin.enabled=true to run the suite under a non-default configuration. -->
+    <sqlTests.jvmArgs></sqlTests.jvmArgs>
     <spark.test.home>${project.build.directory}/spark-home</spark.test.home>
   </properties>
 
@@ -141,7 +143,7 @@
           <junitxml>.</junitxml>
           <filereports>SparkSqlTests.txt</filereports>
           <stdout>W</stdout>
-          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx6g -XX:-OmitStackTraceInFastThrow -Dsparkvector.agg.interleave=1 -Dspark.ui.enabled=false -Dspark.driver.host=localhost -Dspark.test.home=${spark.test.home} -Dspark.testing=true -Dspark.vector.sqlTests.filter=${sqlTests.filter} -Dspark.vector.sqlTests.updateBaseline=${sqlTests.updateBaseline} -Dspark.vector.sqlTests.exclude=${sqlTests.exclude}</argLine>
+          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx6g -XX:-OmitStackTraceInFastThrow -Dsparkvector.agg.interleave=1 ${sqlTests.jvmArgs} -Dspark.ui.enabled=false -Dspark.driver.host=localhost -Dspark.test.home=${spark.test.home} -Dspark.testing=true -Dspark.vector.sqlTests.filter=${sqlTests.filter} -Dspark.vector.sqlTests.updateBaseline=${sqlTests.updateBaseline} -Dspark.vector.sqlTests.exclude=${sqlTests.exclude}</argLine>
         </configuration>
         <executions>
           <execution>

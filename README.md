@@ -75,6 +75,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.broadcastNestedLoopJoin.enabled` | convert `BroadcastNestedLoopJoinExec` (non-equi joins) when the streamed side is columnar; inner/cross, semi/anti/existence and outer joins with the streamed side preserved |
 | `spark.vector.join.maxBuildSize` | largest build side (bytes or a size string) the hash-style joins convert for -- they hold it in memory per task; default 1 GiB, or `spark.memory.offHeap.size / spark.executor.cores` when off-heap is configured; larger estimates stay with Spark, unknown estimates convert |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
+| `spark.vector.exec.sortMergeJoin.enabled` | **off by default**; re-express `SortMergeJoinExec` as our shuffled hash join when the smaller side's statistics fit `spark.vector.join.maxBuildSize` and no parent relies on the merge's ordering (#10) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
@@ -437,8 +438,14 @@ and only then decide what the row becomes (kept or dropped, its passing pairs or
 a full outer join remembers which build rows were paired and emits the rest after the last
 streamed batch. Null keys never match. Double
 keys are refused because Spark compares them after NaN/zero normalisation and the key table by bits.
-Sort-merge joins are not converted; with `spark.sql.join.preferSortMergeJoin=false` or a
-`SHUFFLE_HASH` hint Spark plans the hash join instead.
+Sort-merge joins -- Spark's default for large equi joins -- are re-expressed as the shuffled hash
+join when `spark.vector.exec.sortMergeJoin.enabled` is set (off by default): the smaller side by the
+AQE stages' statistics becomes the per-task build table, it must fit `spark.vector.join.maxBuildSize`,
+the sorts Spark placed for the merge are dropped, and a merge join whose ordering a parent relies on
+(a window over the join key, a merge join above on the same key) stays Spark's. Same rows; tied rows
+under `ORDER BY` and unordered `LIMIT`s can come out in another order than Spark's order-preserving
+merge, so it is opt-in. Without it, `spark.sql.join.preferSortMergeJoin=false` or a `SHUFFLE_HASH`
+hint make Spark plan the hash join directly.
 
 ### Spark's SQL test suite
 
@@ -489,6 +496,6 @@ own operators, not ours).
   serializer that dumps the Arrow buffers would remove both.
 - A Parquet-to-Arrow reader of our own; Comet's reader covers the zero-copy case.
 - A columnar broadcast exchange of our own (the build side of a broadcast join is read from Spark's
-  `HashedRelation` once per task), sort-merge joins, a spilling sort or join, decimals wider than 18
+  `HashedRelation` once per task), a merge join of our own (the opt-in rewrite above is a hash join), a spilling sort or join, decimals wider than 18
   digits (two 64-bit lanes per value would be the next step), and TPC-H on real decimals: the
   benchmark data keeps decimals as doubles because `Decimal(12,2)` arithmetic exceeds 18 digits.

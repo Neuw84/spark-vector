@@ -243,4 +243,69 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkNested("SELECT count(*) AS n FROM tk CROSS JOIN dim WHERE tk.i < 500", Seq(classOf[VectorHashAggregateExec]))
     checkNested("SELECT dim.name FROM tk JOIN dim ON tk.i < 5")
   }
+
+  // Spark's default for large equi joins: no broadcast, sort-merge preferred, and our rewrite opted in.
+  private val SortMerge = Seq(
+    "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+    "spark.sql.join.preferSortMergeJoin" -> "true",
+    "spark.vector.exec.sortMergeJoin.enabled" -> "true")
+
+  private def checkSortMerge(sql: String, extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil): org.apache.spark.sql.DataFrame = {
+    // Spark plans the sort-merge join for this query, and re-expressed as our hash join neither the join nor
+    // the two sorts placed for the merge survive.
+    val planned = withPlugin(enabled = false) { val d = spark.sql(sql); d.collect(); d }
+    assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](planned).nonEmpty, finalPlan(planned).treeString)
+    val df = checkVectorized(sql, SHJ +: extra)
+    assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](df).isEmpty, finalPlan(df).treeString)
+    assert(nodesOf[org.apache.spark.sql.execution.SortExec](df).isEmpty && nodesOf[org.apache.spark.sql.vector.VectorSortExec](df).isEmpty, finalPlan(df).treeString)
+    df
+  }
+
+  test("sort-merge joins re-expressed as the shuffled hash join: every join type, duplicate and null keys, conditions") {
+    withConf(SortMerge: _*) {
+      checkSortMerge("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di")
+      checkSortMerge("SELECT tk.i, tk.l, dim.name FROM tk LEFT JOIN dim ON tk.l = dim.dl")
+      checkSortMerge("SELECT tk.i, dim.name FROM tk RIGHT JOIN dim ON tk.i50 = dim.di")
+      checkSortMerge("SELECT tk.i, dim.name, dim.di FROM tk FULL OUTER JOIN dim ON tk.i50 = dim.di")
+      checkSortMerge("SELECT tk.i FROM tk LEFT SEMI JOIN dim ON tk.s = dim.ds")
+      checkSortMerge("SELECT tk.i FROM tk LEFT ANTI JOIN dim ON tk.i50 = dim.di AND dim.weight > tk.d")
+      checkSortMerge("SELECT count(*), count(dim.name) FROM tk JOIN dim ON tk.i50 = dim.di AND tk.d > dim.weight", Seq(classOf[VectorHashAggregateExec]))
+      val existence = checkSortMerge("SELECT tk.i, EXISTS (SELECT 1 FROM dim WHERE dim.di = tk.i50 AND dim.weight > 60) AS e FROM tk WHERE tk.i < 3000")
+      def isExistence(df: org.apache.spark.sql.DataFrame): Boolean =
+      nodesOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec](df).exists(_.joinType.isInstanceOf[org.apache.spark.sql.catalyst.plans.ExistenceJoin]) ||
+        nodesOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec](df).exists(_.joinType.isInstanceOf[org.apache.spark.sql.catalyst.plans.ExistenceJoin])
+      assert(isExistence(existence), finalPlan(existence).treeString)
+      // Null keys pair with nothing, on both sides of an outer join (rows compared with Spark's above).
+      val nulls = checkSortMerge("SELECT tk.l, dim.dl FROM tk FULL OUTER JOIN dim ON tk.l = dim.dl")
+      assert(nulls.filter("l IS NULL").count() > 0 && nulls.filter("dl IS NULL").count() > 0 && nulls.filter("l = dl").count() > 0)
+      // Two joins on different keys: a shuffle sits between them, so each converts on its own.
+      checkSortMerge("SELECT tk.i, a.name, b.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.l = b.dl WHERE tk.i < 4000")
+    }
+  }
+
+  test("a sort-merge join stays Spark's when its ordering is relied on, its statistics are missing or too large, or by default") {
+    // Off by default: the rewrite changes the memory profile of Spark's default join, so the maintainer opts in.
+    withConf(SortMerge.take(2): _*) {
+      val df = withPlugin(enabled = true) { val d = spark.sql("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di"); d.collect(); d }
+      assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](df).nonEmpty, finalPlan(df).treeString)
+    }
+    withConf(SortMerge: _*) {
+      // A window partitioned by the join key is planned directly over the merge join, on its ordering.
+      checkFallback(
+        "SELECT tk.i, count(*) OVER (PARTITION BY tk.i50) AS c FROM tk JOIN dim ON tk.i50 = dim.di WHERE tk.i < 2000",
+        Seq(SHJ), "output ordering required by the parent operator")
+      // Two merge joins on the same key with no shuffle between them: the upper reads the lower's ordering.
+      val chained = checkFallback(
+        "SELECT tk.i, a.name, b.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.i50 = b.di WHERE tk.i < 2000",
+        Seq(SHJ), "output ordering required by the parent operator")
+      assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](chained).length === 2, finalPlan(chained).treeString)
+    }
+    withConf((SortMerge :+ ("spark.vector.join.maxBuildSize" -> "1")): _*) {
+      checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "exceeds spark.vector.join.maxBuildSize=1")
+    }
+    withConf((SortMerge :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
+      // Without adaptive execution the shuffles Spark inserts carry no statistics: no assumption is made.
+      checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "no size statistics")
+    }
+  }
 }
