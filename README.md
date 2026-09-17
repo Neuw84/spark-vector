@@ -431,7 +431,10 @@ none can overflow. Division follows Spark exactly: one long division with a half
 the scaled dividend fits (with a divisor below 10^18 Spark's two roundings cannot disagree with
 it), `BigDecimal` otherwise; a quotient past the result precision is null in legacy mode and an
 error in ANSI mode, like a cast that does not fit. Results wider than 18 digits (`Decimal(12,2) *
-Decimal(12,2)` is `Decimal(25,4)`) fall back with a reason. Output decimals are `BigIntVector`s
+Decimal(12,2)` is `Decimal(25,4)`) fall back with a reason -- except directly under a decimal `sum`,
+where the product is computed speculatively in 64 bits, checked per row with `Math.multiplyHigh`, and
+the rare row that overflows is added to the 128-bit sum exactly (#26): TPC-H's
+`sum(l_extendedprice * (1 - l_discount))` stays ours. Output decimals are `BigIntVector`s
 behind `VectorDecimalColumnVector`, which gives Spark's row conversion `getDecimal` over the lanes;
 into Comet they are widened to the 128-bit C Data layout.
 

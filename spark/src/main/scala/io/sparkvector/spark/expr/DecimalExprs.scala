@@ -304,3 +304,80 @@ final case class MakeDecimalExpr(child: VectorExpr, dataType: DecimalType, nullO
     }
   }
 }
+
+
+/** Rows an operator had to recompute exactly because the speculative narrow result overflowed 64 bits (#26). */
+object SpeculativeDecimals {
+  private val escalated = new java.util.concurrent.atomic.LongAdder
+  def escalatedRows(): Long = escalated.sum()
+  private[spark] def addEscalated(n: Int): Unit = escalated.add(n)
+}
+
+/**
+ * `a * b` over two decimals of at most 18 digits whose *declared* result is wider than 18 digits
+ * (`decimal(12,2) * decimal(14,2)` is `decimal(27,4)`): Spark's result type is a static rule, not a
+ * statement about the data, so the product is computed speculatively in the INT64 unscaled lane and
+ * checked per row with `Math.multiplyHigh` -- the high word of the 128-bit product must be the sign
+ * extension of the low word. Rows whose product does not fit are *escalated*: their exact product is
+ * returned beside the lane (as `BigInteger`, at the declared scale `s1 + s2`, which Spark never
+ * rounds when the declared precision is at most 38) and the lane's validity is cleared for them, so a
+ * consumer that can take exact values row by row -- the 128-bit decimal sum -- adds them exactly, and
+ * no wrong value ever leaves. No overflow of Spark's own can occur here: the declared precision holds
+ * every product of the operands' widths.
+ *
+ * This is deliberately not a general lane: only [[io.sparkvector.spark.agg]]'s wide decimal sum
+ * consumes it (through [[evalChecked]]); [[eval]] is never called.
+ */
+final case class SpeculativeDecimalMulExpr(
+    left: VectorExpr,
+    right: VectorExpr,
+    leftType: DecimalType,
+    rightType: DecimalType,
+    dataType: DecimalType)
+    extends VectorExpr {
+
+  override def children: Seq[VectorExpr] = Seq(left, right)
+
+  override def eval(ctx: EvalContext): VectorBuffers =
+    throw new IllegalStateException(s"speculative narrow decimal ${dataType.simpleString} is consumed only by the wide decimal sum")
+
+  /** The narrow products as an INT64 lane (overflowing rows invalid) plus the escalated rows and their exact products. */
+  final class Checked(val lane: VectorBuffers, val rows: Array[Int], val exact: Array[java.math.BigInteger])
+
+  def evalChecked(ctx: EvalContext): Checked = {
+    val n = ctx.numRows
+    val data = ArrowLayout.allocateData(ctx.arena, VecType.INT64, n)
+    val validity = ctx.bitmap()
+    // Operands: a lane each, or one literal (both literals never compile).
+    val (aLane, aLit) = left match { case lit: LiteralExpr => (null, lit.value.asInstanceOf[Decimal].toUnscaledLong); case e => (e.eval(ctx), 0L) }
+    val (bLane, bLit) = right match { case lit: LiteralExpr => (null, lit.value.asInstanceOf[Decimal].toUnscaledLong); case e => (e.eval(ctx), 0L) }
+    val aValid = if (aLane == null) null else aLane.validity()
+    val bValid = if (bLane == null) null else bLane.validity()
+    var rows: Array[Int] = null
+    var exact: Array[java.math.BigInteger] = null
+    var escalated = 0
+    var i = 0
+    while (i < n) {
+      val valid = (aValid == null || Bitmap.isSet(aValid, i)) && (bValid == null || Bitmap.isSet(bValid, i))
+      if (valid) {
+        val x = if (aLane == null) aLit else aLane.data().get(VectorBuffers.LE_LONG, i.toLong << 3)
+        val y = if (bLane == null) bLit else bLane.data().get(VectorBuffers.LE_LONG, i.toLong << 3)
+        val lo = x * y
+        if (Math.multiplyHigh(x, y) == (lo >> 63)) {
+          data.set(VectorBuffers.LE_LONG, i.toLong << 3, lo)
+          Bitmap.set(validity, i)
+        } else {
+          if (rows == null) { rows = new Array[Int](8); exact = new Array[java.math.BigInteger](8) }
+          if (escalated == rows.length) { rows = java.util.Arrays.copyOf(rows, escalated * 2); exact = java.util.Arrays.copyOf(exact, escalated * 2) }
+          rows(escalated) = i
+          exact(escalated) = java.math.BigInteger.valueOf(x).multiply(java.math.BigInteger.valueOf(y))
+          escalated += 1
+        }
+      }
+      i += 1
+    }
+    val lane = SegmentVectorBuffers.fixedWidth(VecType.INT64, n, validity, data)
+    if (escalated == 0) new Checked(lane, Array.emptyIntArray, Array.empty)
+    else new Checked(lane, java.util.Arrays.copyOf(rows, escalated), java.util.Arrays.copyOf(exact, escalated))
+  }
+}

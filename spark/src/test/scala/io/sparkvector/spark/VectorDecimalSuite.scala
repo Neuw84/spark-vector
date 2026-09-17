@@ -124,6 +124,47 @@ class VectorDecimalSuite extends VectorQuerySuite {
     checkFallback("SELECT k, sum(dec12) * 2 AS x FROM t GROUP BY k", Seq(Project), "exceeds 18 digits")
   }
 
+  test("a declared-wide product under a decimal sum is computed in 64 bits, its overflowing rows added exactly (#26)") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    def bothOurs(sql: String): Unit = {
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "both stages should be ours\n" + finalPlan(df).treeString)
+    }
+    // Products that fit in 64 bits: no escalation, one lane, the 128-bit sum as before.
+    val before = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+    bothOurs("SELECT sum(dec12 * dec12) AS s FROM t")                       // decimal(25,4)
+    bothOurs("SELECT sum(k * big) AS s FROM t")                             // decimal(22,3), fits
+    bothOurs("SELECT sum(dec12 * 1234567.89) AS s FROM t")                  // literal operand, decimal(22,4)
+    bothOurs("SELECT k, sum(dec12 * dec7) AS s FROM t GROUP BY k")           // decimal(20,4), grouped
+    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
+    // Every product overflows 64 bits: every non-null row is escalated and the total is still exact
+    // (a total past the sum's own decimal(38,4) is Spark's null in legacy mode, Spark's error in ANSI).
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      bothOurs("SELECT sum(big * big) AS s FROM t")                         // decimal(37,4); the total leaves (38,4) -> null
+      val nonNullBig = spark.sql("SELECT count(big) FROM t").collect().head.getLong(0)
+      assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before + nonNullBig)
+      bothOurs("SELECT k, sum(big * big) AS s, count(*) AS n FROM t GROUP BY k")
+      // Under a selection: rows a filter dropped are neither summed nor escalated.
+      val beforeFilter = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+      bothOurs("SELECT sum(big * big) AS s FROM t WHERE i % 2 = 0 AND dec7 IS NOT NULL")
+      val selected = spark.sql("SELECT count(big) FROM t WHERE i % 2 = 0 AND dec7 IS NOT NULL").collect().head.getLong(0)
+      assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == beforeFilter + selected, "only the selected rows escalate")
+    }
+    // Overflow in some rows only, spread across batches; grouped; a literal that overflows; totals that fit (ANSI, Spark 4's default).
+    bothOurs("SELECT sum(cast(if(i % 997 = 0, 999999999999999999, i) AS decimal(18,0)) * cast(if(i % 997 = 0, 999999999999999999, i) AS decimal(18,0))) AS s FROM t")
+    bothOurs("SELECT i % 3 AS g, sum(cast(if(i % 500 = 7, 999999999999999999, i) AS decimal(18,0)) * dec12) AS s FROM t GROUP BY i % 3")
+    bothOurs("SELECT sum(big * 100000) AS s FROM t")                         // decimal(25,2), every row overflows 64 bits
+    bothOurs("SELECT sum(dec12 * big) AS s FROM t")                          // decimal(31,4), most rows overflow 64 bits
+    // A total past the sum's decimal(38,4) raises in ANSI mode for both engines, with the same error class.
+    val ours = intercept[Exception] { withPlugin(enabled = true) { spark.sql("SELECT sum(big * big) AS s FROM t").collect() } }
+    assert(ours.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE"), ours.getMessage)
+    // Still refused: a wide product anywhere but under a sum, and a product with a wide operand.
+    checkFallback("SELECT dec12 * dec12 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
+    // (the Final stage may still be ours: it merges the buffer Spark's Partial produced)
+    assert(nodesOf[HashAggregateExec](checkFallback("SELECT sum(dec12 * dec12 * dec7) AS s FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
+    assert(nodesOf[HashAggregateExec](checkFallback("SELECT max(dec12 * dec12) AS m FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
+  }
+
   test("aggregates over decimals: sum, avg, min, max, count, grouped and not") {
     checkExact("SELECT sum(dec7), avg(dec7), min(dec12), max(dec12), count(dec7), min(dec18) FROM t WHERE i > 3", Seq(Filter, Agg))
     checkExact("SELECT k, sum(dec7), avg(dec7), max(dec7), count(*) FROM t GROUP BY k", Seq(Agg))
