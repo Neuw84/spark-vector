@@ -27,6 +27,18 @@ final case class AbsExpr(child: VectorExpr, ansi: Boolean, queryContext: QueryCo
 }
 
 /** `sign` / `signum`: double in (Spark casts), double out. */
+/** `sqrt` over a double lane: `Math.sqrt` per lane, NaN for a negative argument as in Spark. */
+final case class SqrtExpr(child: VectorExpr) extends VectorExpr {
+  override def dataType: DataType = DoubleType
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val data = ArrowLayout.allocateData(ctx.arena, VecType.FLOAT64, ctx.numRows)
+    MathKernels.sqrt(a, data)
+    SegmentVectorBuffers.fixedWidth(VecType.FLOAT64, ctx.numRows, a.validity(), data)
+  }
+}
+
 final case class SignumExpr(child: VectorExpr) extends VectorExpr {
   override def dataType: DataType = DoubleType
   override def children: Seq[VectorExpr] = Seq(child)

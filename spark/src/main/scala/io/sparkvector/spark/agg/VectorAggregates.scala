@@ -420,6 +420,14 @@ object VectorAggregates {
       case f: First if buffers.length == 2 && FirstAgg.supports(f.dataType) =>
         for (first <- ref(0); valueSet <- ref(1)) yield FirstMergeAgg(first, valueSet, f.dataType)
       case f: First => Left(s"first over ${f.dataType.simpleString} not supported")
+      case m: CentralMomentAgg if buffers.length == m.aggBufferAttributes.length =>
+        momentBuffers(buffers.indices.map(ref)).map(MomentsAgg(_, MomentsAgg.Central(buffers.length - 1), merge = true))
+      case _: Covariance if buffers.length == 4 =>
+        momentBuffers(buffers.indices.map(ref)).map(MomentsAgg(_, MomentsAgg.Covariance, merge = true))
+      case _: PearsonCorrelation if buffers.length == 6 =>
+        momentBuffers(buffers.indices.map(ref)).map(MomentsAgg(_, MomentsAgg.Correlation, merge = true))
+      case _: RegrSlope | _: RegrIntercept if buffers.length == 7 =>
+        momentBuffers(buffers.indices.map(ref)).map(MomentsAgg(_, MomentsAgg.Regression, merge = true))
       case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
     }
   }
@@ -440,6 +448,21 @@ object VectorAggregates {
 
   private def numericBuffer(dt: DataType)(b: VectorExpr): Either[String, VectorExpr] =
     if (numeric.contains(b.vecType)) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
+
+  /** The arguments of a moment statistic as double lanes. */
+  private def momentArgs(args: Seq[Expression], input: Seq[Attribute]): Either[String, Seq[VectorExpr]] =
+    args.foldRight[Either[String, List[VectorExpr]]](Right(Nil)) { (a, acc) =>
+      for (rest <- acc; child <- numericChild(a, input)) yield (if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType)) :: rest
+    }
+
+  /** The buffer columns of a moment statistic, every one a double. */
+  private def momentBuffers(refs: Seq[Either[String, VectorExpr]]): Either[String, Seq[VectorExpr]] =
+    refs.foldRight[Either[String, List[VectorExpr]]](Right(Nil)) { (r, acc) =>
+      for (rest <- acc; b <- r) yield {
+        if (b.vecType != VecType.FLOAT64) return Left(s"moment buffer ${b.dataType.simpleString} is not a double")
+        b :: rest
+      }
+    }
 
   private def compileFunction(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = f match {
     case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
@@ -468,7 +491,11 @@ object VectorAggregates {
             case _: LiteralExpr => Right(CountAgg(None))
             case e => Right(CountAgg(Some(e)))
           }
-        case _ => Left("count with several arguments not supported")
+        case several =>
+          // count(a, b): the rows where every argument is non-null (regr_count's replacement).
+          several.foldRight[Either[String, List[VectorExpr]]](Right(Nil)) { (a, acc) =>
+            for (rest <- acc; e <- ExpressionCompiler.compile(a, input)) yield e :: rest
+          }.map(CountAllAgg(_))
       }
 
     case m: Min if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = true, m.dataType))
@@ -502,6 +529,18 @@ object VectorAggregates {
       else numericChild(a.child, input).map { child =>
         AverageAgg(if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType))
       }
+
+    // The one-pass moment statistics: Spark's Welford step per row over doubles (the analyzer has
+    // cast the arguments), the buffers emitted as Spark's doubles, the result Spark's own expression.
+    case m: CentralMomentAgg =>
+      momentArgs(Seq(m.child), input).map(MomentsAgg(_, MomentsAgg.Central(m.aggBufferAttributes.length - 1), merge = false))
+    case c: Covariance =>
+      momentArgs(Seq(c.left, c.right), input).map(MomentsAgg(_, MomentsAgg.Covariance, merge = false))
+    case c: PearsonCorrelation =>
+      momentArgs(Seq(c.left, c.right), input).map(MomentsAgg(_, MomentsAgg.Correlation, merge = false))
+    // regr_slope / regr_intercept: a covariance and a variance of the independent variable (the right argument) over the same pairs.
+    case r: RegrSlope => momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
+    case r: RegrIntercept => momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
 
     case f: First if FirstAgg.supports(f.dataType) =>
       ExpressionCompiler.compile(f.child, input).flatMap {

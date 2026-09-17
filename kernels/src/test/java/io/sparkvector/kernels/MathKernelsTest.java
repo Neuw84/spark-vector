@@ -54,6 +54,15 @@ class MathKernelsTest {
         double got = outd.getAtIndex(VectorBuffers.LE_DOUBLE, i);
         if (Double.isNaN(expected[i])) assertTrue(Double.isNaN(got)); else assertEquals(expected[i], got, "signum of " + xd[i]);
       }
+      double[] xs = {4.0, 2.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY, 0.0, -0.0};
+      VectorBuffers as = ArrowLayout.ofDoubles(arena, xs, null);
+      MemorySegment outs = ArrowLayout.allocateData(arena, VecType.FLOAT64, xs.length);
+      MathKernels.sqrt(as, outs);
+      double[] expectedSqrt = {2.0, Math.sqrt(2.0), Double.NaN, Double.NaN, Double.POSITIVE_INFINITY, 0.0, -0.0};
+      for (int i = 0; i < xs.length; i++) {
+        double got = outs.getAtIndex(VectorBuffers.LE_DOUBLE, i);
+        if (Double.isNaN(expectedSqrt[i])) assertTrue(Double.isNaN(got)); else assertEquals(expectedSqrt[i], got, "sqrt of " + xs[i]);
+      }
     }
   }
 
