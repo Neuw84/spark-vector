@@ -234,6 +234,27 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("upper, lower, initcap and the trims") {
+    // Rows the ASCII path decides, and rows it hands to Spark's own implementation: multi-byte letters,
+    // the German sharp s, a Turkish dotted capital I, digits and punctuation at word starts.
+    val m = "CASE WHEN i % 8 = 0 THEN 'héllo wörld' WHEN i % 8 = 1 THEN 'straße' WHEN i % 8 = 2 THEN 'İstanbul ışık' WHEN i % 8 = 3 THEN '3abc o''neil a-b' WHEN i % 8 = 4 THEN 'ǅemal  two  spaces' WHEN i % 8 = 5 THEN '' WHEN i % 8 = 6 THEN 'MiXeD Case 42' ELSE s END"
+    checkVectorized(s"SELECT upper(s) AS a, lower(s) AS b, initcap(s) AS c, ucase($m) AS d0, lcase($m) AS e0, initcap($m) AS f, upper(concat(s, ' ', s)) AS g FROM t", Seq(Project))
+    // The same under the pre-ICU JVM case mappings.
+    withConf("spark.sql.icu.caseMappings.enabled" -> "false") {
+      checkVectorized(s"SELECT upper($m) AS a, lower($m) AS b, initcap($m) AS c FROM t", Seq(Project))
+    }
+    // Trims: spaces by default (only ASCII 32), a literal trim set incl. multi-byte code points, every form.
+    val p = "CASE WHEN i % 5 = 0 THEN concat('  ', s, '   ') WHEN i % 5 = 1 THEN concat(s, ' ') WHEN i % 5 = 2 THEN '   ' WHEN i % 5 = 3 THEN 'xyxhixyx' ELSE 'ééaéé' END"
+    checkVectorized(s"SELECT trim($p) AS a, ltrim($p) AS b, rtrim($p) AS c, btrim($p) AS d0, trim(BOTH FROM $p) AS e0, trim(LEADING FROM $p) AS f, trim(TRAILING FROM $p) AS g FROM t", Seq(Project))
+    checkVectorized(s"SELECT trim('xy' FROM $p) AS a, trim(BOTH 'éx' FROM $p) AS b, trim(LEADING 'xé' FROM $p) AS c, trim(TRAILING 'x' FROM $p) AS d0, ltrim('yx', $p) AS e0, rtrim('é', $p) AS f, btrim($p, ' x') AS g FROM t", Seq(Project))
+    // In a filter and as a grouping key; nested into the other string functions.
+    checkVectorized("SELECT i FROM t WHERE upper(s) = 'S1' OR trim(concat(' ', s)) = 's2'", Seq(Filter))
+    checkVectorized("SELECT upper(substring(s, 1, 1)) AS k, count(*) AS n, min(length(trim(concat(s, '  ')))) AS l FROM t GROUP BY upper(substring(s, 1, 1))", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: a collated column follows ICU rules; a trim set from a column.
+    checkFallback("SELECT upper(collate(s, 'UTF8_LCASE')) AS a FROM t", Seq(Project), "collated string follows ICU rules")
+    checkFallback("SELECT trim(s FROM concat('s', s)) AS a FROM t", Seq(Project), "non-literal trim string")
+  }
+
   test("concat, concat_ws and elt over several string inputs") {
     val m = "CASE WHEN i % 4 = 0 THEN 'héllo' WHEN i % 4 = 1 THEN '日本語' WHEN i % 4 = 2 THEN '😀' ELSE s END"
     val n = "CASE WHEN i % 3 = 0 THEN NULL ELSE s END"

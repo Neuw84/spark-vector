@@ -1,10 +1,11 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringLengthKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, StringTrim, StringTrimLeft, StringTrimRight, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, Upper, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
 
@@ -69,6 +70,15 @@ object ExpressionCompiler {
       else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+
+    // Case mapping: the ASCII rows in the kernel, the rest through Spark's own CollationSupport.
+    // A collated column follows ICU rules and is not byte-mapped -- the line Comet draws too.
+    case Upper(child) => caseMap(StringCaseKernels.Kind.UPPER, child, input, "upper")
+    case Lower(child) => caseMap(StringCaseKernels.Kind.LOWER, child, input, "lower")
+    case InitCap(child) => caseMap(StringCaseKernels.Kind.INITCAP, child, input, "initcap")
+    case StringTrim(src, trimStr) => trim(StringCaseKernels.Side.BOTH, src, trimStr, input, "trim")
+    case StringTrimLeft(src, trimStr) => trim(StringCaseKernels.Side.LEFT, src, trimStr, input, "ltrim")
+    case StringTrimRight(src, trimStr) => trim(StringCaseKernels.Side.RIGHT, src, trimStr, input, "rtrim")
 
     // Several string inputs: per-row lengths summed across them, one buffer, a per-input copy loop.
     // Array and binary forms are declined by type; an all-literal call folds in Spark.
@@ -718,6 +728,20 @@ object ExpressionCompiler {
         case c => Right(c)
       }
   }
+
+  private def caseMap(kind: StringCaseKernels.Kind, child: Expression, input: Seq[Attribute], what: String): Result =
+    if (child.dataType != StringType) Left(s"$what over ${child.dataType.sql.toLowerCase} not supported (a collated string follows ICU rules)")
+    else stringSubject(child, input, what).map(CaseMapExpr(kind, _, SQLConf.get.getConf(SQLConf.ICU_CASE_MAPPINGS_ENABLED)))
+
+  /** A trim with no trim string, or a literal one taken as a set of code points; a column trim set falls back. */
+  private def trim(side: StringCaseKernels.Side, src: Expression, trimStr: Option[Expression], input: Seq[Attribute], what: String): Result =
+    if (src.dataType != StringType) Left(s"$what over ${src.dataType.sql.toLowerCase} not supported")
+    else trimStr match {
+      case None => stringSubject(src, input, what).map(TrimExpr(side, _, None))
+      case Some(Literal(t: UTF8String, StringType)) => stringSubject(src, input, what).map(TrimExpr(side, _, Some(t.toString.codePoints().toArray)))
+      case Some(Literal(null, _)) => Left(s"$what with a null trim string")
+      case Some(_) => Left(s"$what with a non-literal trim string not supported")
+    }
 
   /** Several string arguments, each a UTF8 lane or a non-null literal; at least one must be a lane. */
   private def stringArgs(es: Seq[Expression], input: Seq[Attribute], what: String): Either[String, Seq[VectorExpr]] = {
