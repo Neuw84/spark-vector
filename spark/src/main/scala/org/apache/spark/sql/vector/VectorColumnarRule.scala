@@ -12,7 +12,7 @@ import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitio
 import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
+import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
@@ -146,6 +146,20 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         case j: BroadcastHashJoinExec if VectorConf.broadcastHashJoinEnabled(conf) =>
           // The build side is Spark's broadcast relation whatever it is; the streamed side must be
           // columnar.
+          val (buildPlan, streamedPlan) = j.buildSide match {
+            case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
+            case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
+          }
+          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)) match {
+            case Some(reason) => fallback(j, reason)
+            case None =>
+              VectorJoinPlanner.plan(j) match {
+                case Right(v) => v
+                case Left(reason) => fallback(j, reason)
+              }
+          }
+
+        case j: BroadcastNestedLoopJoinExec if VectorConf.broadcastNestedLoopJoinEnabled(conf) =>
           val (buildPlan, streamedPlan) = j.buildSide match {
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)

@@ -16,7 +16,7 @@ import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, HashedRelationBroadcastMode, HashJoin, ShuffledHashJoinExec}
+import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, HashedRelationBroadcastMode, HashJoin, ShuffledHashJoinExec}
 import org.apache.spark.sql.execution.vector.HashedRelationAccess
 import org.apache.spark.sql.types.{DataType, DecimalType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -148,6 +148,53 @@ case class VectorBroadcastHashJoinExec(
 }
 
 /**
+ * Columnar replacement for BroadcastNestedLoopJoinExec: a join with no equi-keys (an inequality
+ * join, a cross join with a filter, a non-equi `EXISTS`). The build side is Spark's identity
+ * broadcast of the rows, read once per task into columns; every build row is a candidate of every
+ * streamed row, and the streamed rows are processed in chunks sized to a fixed pair budget so the
+ * product is never materialised. Inner and cross joins with either build side; left semi, left
+ * anti, existence and left outer joins with the right side broadcast; right outer with the left
+ * side broadcast. An outer join whose preserved side is the broadcast one (and a full outer join)
+ * needs a matched bitmap over the broadcast side and is refused, as Comet refuses it.
+ */
+case class VectorBroadcastNestedLoopJoinExec(
+    joinType: JoinType,
+    buildSide: BuildSide,
+    condition: Option[Expression],
+    left: SparkPlan,
+    right: SparkPlan)
+    extends VectorHashJoinLike {
+
+  override def leftKeys: Seq[Expression] = Nil
+  override def rightKeys: Seq[Expression] = Nil
+
+  override def requiredChildDistribution: Seq[Distribution] = buildSide match {
+    case BuildLeft => BroadcastDistribution(IdentityBroadcastMode) :: UnspecifiedDistribution :: Nil
+    case BuildRight => UnspecifiedDistribution :: BroadcastDistribution(IdentityBroadcastMode) :: Nil
+  }
+
+  override def outputPartitioning: Partitioning = joinType match {
+    case _: InnerLike => streamedPlan.outputPartitioning
+    case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => left.outputPartitioning
+    case RightOuter => right.outputPartitioning
+    case _ => UnknownPartitioning(0)
+  }
+
+  override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
+    val spec = joinSpec
+    val m = vectorMetrics
+    val relation = buildPlan.executeBroadcast[Array[InternalRow]]()
+    streamedPlan.executeColumnar().mapPartitionsInternal { iter =>
+      val build = BuildTable.fromRelation(relation.value.iterator, spec)
+      new VectorHashJoinIterator(iter, build, spec, m)
+    }
+  }
+
+  override protected def withNewChildrenInternal(newLeft: SparkPlan, newRight: SparkPlan): SparkPlan =
+    copy(left = newLeft, right = newRight)
+}
+
+/**
  * Columnar replacement for ShuffledHashJoinExec: both sides arrive partitioned on the keys, the
  * build side of each partition is drained into columns first.
  */
@@ -189,14 +236,15 @@ case class VectorShuffledHashJoinExec(
  * (group id), the chain of build rows holding it.
  */
 final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val numRows: Int, spec: JoinSpec) extends AutoCloseable {
-  val table = new GroupKeyTable(spec.buildKeys.map(_.vecType))
+  /** The key table of an equi-join; a nested loop join (no keys) never builds one. */
+  lazy val table = new GroupKeyTable(spec.buildKeys.map(_.vecType))
   /** First build row of each key, -1 for none. */
   var head: Array[Int] = new Array[Int](0)
   /** Next build row with the same key, -1 at the end. */
   val next: Array[Int] = new Array[Int](numRows)
 
   def build(): BuildTable = {
-    if (numRows > 0) {
+    if (numRows > 0 && spec.buildKeys.nonEmpty) {
       val ctx = new EvalContext(arena, numRows, c => columns(c))
       val keys = spec.buildKeys.map(_.eval(ctx))
       val ids = new Array[Int](numRows)
@@ -337,6 +385,8 @@ private[vector] class VectorHashJoinIterator(
     with AutoCloseable {
 
   private val OutputBatchSize = 8192
+  /** A nested loop join pairs every streamed row with every build row: this bounds the pairs in flight. */
+  private val PairBudget = OutputBatchSize * 4
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashJoinExec")
   private val pending = new ArrayDeque[ColumnarBatch]()
@@ -356,6 +406,8 @@ private[vector] class VectorHashJoinIterator(
 
   private val numBuildCols = spec.buildTypes.length
   private val streamedWidth = spec.streamedWidth
+  /** No keys: a nested loop join, every build row is a candidate of every streamed row. */
+  private val nestedLoop = spec.streamedKeys.isEmpty
   private val isSemiOrAnti = spec.joinType == LeftSemi || spec.joinType == LeftAnti
   /** `ExistenceJoin`: the semi join's probe, emitting every streamed row plus a match boolean. */
   private val isExistence = spec.joinType.isInstanceOf[ExistenceJoin]
@@ -392,30 +444,51 @@ private[vector] class VectorHashJoinIterator(
     metrics.numInputBatches += 1
     EvalContexts.withBatch(batch) { ctx =>
       val n = ctx.numRows
-      val keys = spec.streamedKeys.map(_.eval(ctx))
-      val candidates = BuildTable.nonNullKeys(ctx, keys)
-      if (idScratch.length < n) idScratch = new Array[Int](n)
-      if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates)
-      else java.util.Arrays.fill(idScratch, 0, n, -1)
+      if (!nestedLoop) {
+        val keys = spec.streamedKeys.map(_.eval(ctx))
+        val candidates = BuildTable.nonNullKeys(ctx, keys)
+        if (idScratch.length < n) idScratch = new Array[Int](n)
+        if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates)
+        else java.util.Arrays.fill(idScratch, 0, n, -1)
+      }
+      // A hash join's candidates are few per row: one chunk. A nested loop's are the whole build
+      // side, so the streamed rows go in chunks that keep the pairs in flight under the budget.
+      val rowsPerChunk = if (nestedLoop) math.max(1, PairBudget / math.max(1, build.numRows)) else n
       spec.condition match {
-        case Some(cond) if isSemiOrAnti || keepUnmatched || isExistence => emitConditional(ctx, cond)
-        case _ if isExistence => emitExistence(ctx, i => idScratch(i) >= 0)
-        case _ if isSemiOrAnti => emitSemiAnti(ctx)
-        case _ => emitMatches(ctx)
+        case Some(cond) if isSemiOrAnti || keepUnmatched || isExistence =>
+          if (rowMatched.length < n) rowMatched = new Array[Boolean](n) else java.util.Arrays.fill(rowMatched, 0, n, false)
+          var from = 0
+          while (from < n) { val until = math.min(n, from + rowsPerChunk); emitConditional(ctx, cond, from, until); from = until }
+          if (isExistence) emitExistence(ctx, i => rowMatched(i))
+          else if (isSemiOrAnti) emitSemiAnti(ctx, i => rowMatched(i))
+        case _ if isExistence => emitExistence(ctx, i => firstCandidate(i) >= 0)
+        case _ if isSemiOrAnti => emitSemiAnti(ctx, i => firstCandidate(i) >= 0)
+        case _ =>
+          var from = 0
+          while (from < n) { val until = math.min(n, from + rowsPerChunk); emitMatches(ctx, from, until); from = until }
       }
     }
   }
 
   private def selected(ctx: EvalContext, i: Int): Boolean = ctx.selection == null || Bitmap.isSet(ctx.selection, i)
 
+  /** First candidate build row of streamed row `i`, -1 for none. */
+  private def firstCandidate(i: Int): Int =
+    if (nestedLoop) (if (build.numRows > 0) 0 else -1)
+    else if (idScratch(i) >= 0) build.head(idScratch(i)) else -1
+
+  /** The candidate after build row `r` for the same streamed row, -1 at the end. */
+  private def nextCandidate(r: Int): Int =
+    if (nestedLoop) (if (r + 1 < build.numRows) r + 1 else -1) else build.next(r)
+
   /** Semi/anti joins without a condition keep or drop streamed rows on the key lookup alone. */
-  private def emitSemiAnti(ctx: EvalContext): Unit = {
+  private def emitSemiAnti(ctx: EvalContext, matchedAt: Int => Boolean): Unit = {
     val n = ctx.numRows
     val sel = ctx.bitmap()
     val wantMatch = spec.joinType == LeftSemi
     var i = 0
     while (i < n) {
-      if (selected(ctx, i) && (idScratch(i) >= 0) == wantMatch) Bitmap.set(sel, i)
+      if (selected(ctx, i) && matchedAt(i) == wantMatch) Bitmap.set(sel, i)
       i += 1
     }
     compactStreamed(ctx, sel)
@@ -437,20 +510,19 @@ private[vector] class VectorHashJoinIterator(
   }
 
   /** Inner and outer joins whose condition, if any, an inner join applies to the gathered batch. */
-  private def emitMatches(ctx: EvalContext): Unit = {
-    val n = ctx.numRows
+  private def emitMatches(ctx: EvalContext, from: Int, until: Int): Unit = {
     var count = 0
-    var i = 0
-    while (i < n) {
+    var i = from
+    while (i < until) {
       if (selected(ctx, i)) {
-        var r = if (idScratch(i) >= 0) build.head(idScratch(i)) else -1
+        var r = firstCandidate(i)
         if (r < 0) {
           if (keepUnmatched) { count = append(count, i, -1); }
         } else {
           while (r >= 0) {
             count = append(count, i, r)
             if (buildMatched != null) buildMatched(r) = true
-            r = build.next(r)
+            r = nextCandidate(r)
           }
         }
       }
@@ -465,33 +537,23 @@ private[vector] class VectorHashJoinIterator(
    * when at least one of its pairs passed, exactly as if the condition had been checked per
    * candidate. Rows with no candidate at all have no pair here and stay unmatched.
    */
-  private def emitConditional(ctx: EvalContext, cond: VectorExpr): Unit = {
-    val n = ctx.numRows
+  private def emitConditional(ctx: EvalContext, cond: VectorExpr, from: Int, until: Int): Unit = {
     var count = 0
-    var i = 0
-    while (i < n) {
+    var i = from
+    while (i < until) {
       if (selected(ctx, i)) {
-        var r = if (idScratch(i) >= 0) build.head(idScratch(i)) else -1
-        while (r >= 0) { count = append(count, i, r); r = build.next(r) }
+        var r = firstCandidate(i)
+        while (r >= 0) { count = append(count, i, r); r = nextCandidate(r) }
       }
       i += 1
     }
     if (passed.length < count) passed = new Array[Boolean](probeIdx.length)
-    if (rowMatched.length < n) rowMatched = new Array[Boolean](n) else java.util.Arrays.fill(rowMatched, 0, n, false)
     evaluateCondition(ctx, cond, count)
     var p = 0
     while (p < count) { if (passed(p)) rowMatched(probeIdx(p)) = true; p += 1 }
-    if (isExistence) emitExistence(ctx, i => rowMatched(i))
-    else if (isSemiOrAnti) {
-      val sel = ctx.bitmap()
-      val wantMatch = spec.joinType == LeftSemi
-      i = 0
-      while (i < n) {
-        if (selected(ctx, i) && rowMatched(i) == wantMatch) Bitmap.set(sel, i)
-        i += 1
-      }
-      compactStreamed(ctx, sel)
-    } else emitOuterConditional(ctx, count)
+    // Semi, anti and existence joins decide per streamed row once every chunk has run (the caller
+    // reads `rowMatched`); an outer join emits this chunk's rows now.
+    if (keepUnmatched) emitOuterConditional(ctx, count, from, until)
   }
 
   /**
@@ -542,16 +604,16 @@ private[vector] class VectorHashJoinIterator(
    * Outer joins with a condition: per streamed row, its passing pairs, or one null-padded pair
    * when it matched no candidate (whether it had none or they all failed the condition).
    */
-  private def emitOuterConditional(ctx: EvalContext, count: Int): Unit = {
-    val n = ctx.numRows
+  private def emitOuterConditional(ctx: EvalContext, count: Int, from: Int, until: Int): Unit = {
+    val n = until - from
     if (outProbeIdx.length < count + n) {
       outProbeIdx = new Array[Int](count + n)
       outBuildIdx = new Array[Int](count + n)
     }
     var w = 0
     var p = 0
-    var i = 0
-    while (i < n) {
+    var i = from
+    while (i < until) {
       if (selected(ctx, i)) {
         if (rowMatched(i)) {
           while (p < count && probeIdx(p) == i) {
@@ -723,6 +785,20 @@ object VectorJoinPlanner {
       val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
       check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
     }
+  }
+
+  def plan(j: BroadcastNestedLoopJoinExec): Either[String, VectorBroadcastNestedLoopJoinExec] = {
+    val typeOk: Either[String, Unit] = j.joinType match {
+      case _: InnerLike => Right(())
+      case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if j.buildSide == BuildRight => Right(())
+      case RightOuter if j.buildSide == BuildLeft => Right(())
+      case FullOuter => Left("full outer nested loop join not supported (needs a matched bitmap over the broadcast side)")
+      case LeftOuter | RightOuter => Left(s"${j.joinType} nested loop join with the preserved side broadcast not supported (needs a matched bitmap over the broadcast side)")
+      case other => Left(s"join type $other with build side ${j.buildSide} not supported")
+    }
+    typeOk.flatMap { _ =>
+      j.condition.map(c => compileCondition(c, j.left.output ++ j.right.output).map(_ => ())).getOrElse(Right(()))
+    }.map(_ => VectorBroadcastNestedLoopJoinExec(j.joinType, j.buildSide, j.condition, j.left, j.right))
   }
 
   def plan(j: ShuffledHashJoinExec): Either[String, VectorShuffledHashJoinExec] = {

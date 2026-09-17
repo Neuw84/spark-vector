@@ -2,7 +2,7 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
-import org.apache.spark.sql.vector.{VectorBroadcastHashJoinExec, VectorFilterExec, VectorHashAggregateExec, VectorShuffledHashJoinExec}
+import org.apache.spark.sql.vector.{VectorBroadcastHashJoinExec, VectorBroadcastNestedLoopJoinExec, VectorFilterExec, VectorHashAggregateExec, VectorShuffledHashJoinExec}
 
 /**
  * Hash joins against Spark's. `t` (20k rows) is the streamed side, `dim` a small dimension table
@@ -13,6 +13,7 @@ class VectorJoinSuite extends VectorQuerySuite {
 
   private val BHJ = classOf[VectorBroadcastHashJoinExec]
   private val SHJ = classOf[VectorShuffledHashJoinExec]
+  private val BNLJ = classOf[VectorBroadcastNestedLoopJoinExec]
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
@@ -182,5 +183,38 @@ class VectorJoinSuite extends VectorQuerySuite {
       "(SELECT i, CASE WHEN i % 3 = 0 THEN 0.0 WHEN i % 3 = 1 THEN CAST('NaN' AS DOUBLE) ELSE d2 END AS k FROM t WHERE i < 300) b ON a.k = b.k"
     checkFallback(sql, Seq(BHJ), "join key type double not supported")
     checkFallback(sql.replace("SELECT count(*)", "SELECT /*+ SHUFFLE_HASH(b) */ count(*)"), Seq(SHJ), "join key type double not supported")
+  }
+
+  /** A nested loop join over a bounded streamed slice; asserts Spark's operator is gone. */
+  private def checkNested(sql: String, extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil): Unit = {
+    val df = checkVectorized(sql, BNLJ +: extra)
+    assert(nodesOf[org.apache.spark.sql.execution.joins.BroadcastNestedLoopJoinExec](df).isEmpty, finalPlan(df).treeString)
+  }
+
+  test("nested loop inner and cross joins: conditions matching none, some and all rows, with a literal") {
+    checkNested("SELECT tk.i, dim.di, dim.name FROM tk JOIN dim ON tk.i50 < dim.di WHERE tk.i < 2000")
+    checkNested("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 + dim.di > 60 AND dim.weight < 40.0 WHERE tk.i < 2000")
+    checkNested("SELECT tk.i, dim.di FROM tk JOIN dim ON tk.i50 > 100 WHERE tk.i < 2000") // none
+    checkNested("SELECT tk.i, dim.di FROM tk JOIN dim ON tk.i50 >= 0 AND dim.weight >= 0 WHERE tk.i < 300") // all
+    checkNested("SELECT tk.i, tk.s, dim.di, dim.name FROM tk CROSS JOIN dim WHERE tk.i < 500")
+    checkNested("SELECT dim.name, tk.i FROM dim JOIN tk ON dim.di * 100 < tk.i WHERE tk.i < 3000") // build side left
+    checkNested("SELECT count(*) AS n, sum(dim.weight) AS w FROM tk JOIN dim ON tk.d > dim.weight AND tk.l IS NOT NULL WHERE tk.i < 5000", Seq(classOf[VectorHashAggregateExec]))
+  }
+
+  test("nested loop semi, anti and existence joins: non-equi EXISTS") {
+    checkNested("SELECT tk.i FROM tk WHERE tk.i < 3000 AND EXISTS (SELECT 1 FROM dim WHERE dim.di > tk.i50 + 40)")
+    checkNested("SELECT tk.i, tk.s FROM tk WHERE tk.i < 3000 AND NOT EXISTS (SELECT 1 FROM dim WHERE dim.di > tk.i50 + 40)")
+    checkNested("SELECT tk.i FROM tk LEFT SEMI JOIN dim ON tk.i50 < dim.di - 45 WHERE tk.i < 3000")
+    checkNested("SELECT tk.i FROM tk LEFT ANTI JOIN dim ON tk.d < dim.weight WHERE tk.i < 3000")
+    checkNested("SELECT tk.i, EXISTS (SELECT 1 FROM dim WHERE dim.di > tk.i50 + 40) AS e FROM tk WHERE tk.i < 1000")
+  }
+
+  test("nested loop outer joins with the streamed side preserved; the broadcast-preserved forms fall back") {
+    checkNested("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 + 30 < dim.di WHERE tk.i < 2000")
+    checkNested("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 > 100 WHERE tk.i < 500") // nothing matches: null padded
+    checkNested("SELECT dim.name, tk.i FROM dim RIGHT JOIN tk ON tk.i50 + 30 < dim.di WHERE tk.i < 2000")
+    checkFallback("SELECT /*+ BROADCAST(tk) */ tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 < dim.di WHERE tk.i < 100", Seq(BNLJ), "preserved side broadcast")
+    // A WHERE on one side would turn the full join into a left join; filter beneath it instead.
+    checkFallback("SELECT t2.i, dim.name FROM (SELECT * FROM tk WHERE i < 100) t2 FULL JOIN dim ON t2.i50 < dim.di", Seq(BNLJ), "full outer nested loop join")
   }
 }

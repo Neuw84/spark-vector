@@ -312,6 +312,13 @@ that pin it.
   `keys()` of an unsafe map repeats a key once per row) and builds a `GroupKeyTable` over the key
   expressions (`GroupKeyTable.lookup` probes without inserting). No exchange of our own means a
   Spark join over the same broadcast still works; a columnar broadcast exchange is a listed gap.
+- `VectorBroadcastNestedLoopJoinExec` replaces `BroadcastNestedLoopJoinExec` (no equi-keys) with the
+  same `VectorHashJoinIterator`: `spec.streamedKeys.isEmpty` switches the candidate step from the key
+  table chain to "every build row" (`firstCandidate` / `nextCandidate`), and `probe` walks the streamed
+  rows in chunks of `PairBudget / build.numRows` so the pairs in flight stay bounded; semi/anti/existence
+  decide from `rowMatched` after all chunks, outer joins emit per chunk. The build side is Spark's
+  `IdentityBroadcastMode` array of rows. Full outer and outer-with-the-broadcast-side-preserved are
+  refused (a matched bitmap over a broadcast shared by every task).
 - `VectorShuffledHashJoinExec` replaces `ShuffledHashJoinExec` and, like the Final aggregate, accepts
   exchanges (or their AQE stages) as inputs on types alone: Spark inserts `RowToColumnarExec` under
   us for its row shuffle. `ClusteredDistribution` on both sides, `PartitioningCollection` out.
@@ -500,7 +507,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 204 Spark tests (177 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 207 Spark tests (180 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
