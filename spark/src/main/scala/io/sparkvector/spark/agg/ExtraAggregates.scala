@@ -12,7 +12,8 @@ import org.apache.spark.unsafe.types.UTF8String
  * ungrouped context's selection) admits and boxes Spark's internal value for the buffer; the merge
  * modes reuse the update classes over the buffer columns wherever the merge is the same operation.
  */
-private[agg] object Rows {
+/** Row-at-a-time helpers over lanes, shared with the window operator (boundary detection boxes keys). */
+object Rows {
   @inline def valid(v: VectorBuffers, i: Int): Boolean = v.validity() == null || Bitmap.isSet(v.validity(), i)
 
   /** Every row of the ungrouped context (selection honoured), as group 0. */

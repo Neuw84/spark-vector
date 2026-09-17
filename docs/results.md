@@ -511,6 +511,13 @@ execution leaves when it re-plans a shuffled join as a broadcast join at runtime
 operators ours (64%)** by default, 41 queries at 75% or more, 14 queries up (q6 17/33 to 24/33, q23a
 43/82 to 57/82, q23b 58/118 to 77/118, q14a 178/357 to 199/357), none down, all 103 checksums equal.
 
+Refreshed after the first window layer (#58: `row_number`, `rank`, `dense_rank`): **3065 of 4734
+operators ours (65%)** by default, q44 14/41 to 22/41, q47 and q57 36/70 to 42/70, q70 22/40 to 25/40,
+all checksums equal. Fourteen queries still carry a `Window`: seven for a whole-partition `avg` or
+`sum` (q12, q20, q47, q53, q57, q63, q89, q98 -- the next layer), five for a wide decimal column in the
+window's input (q36, q49, q51, q67 -- #28), and two for a `TINYINT` grouping-id column (q70, q86 -- the
+kernels have no 8- or 16-bit lane; widening those to INT32 at the adapter would be cheap).
+
 **Correctness: q66 returned every row twice (#162), now fixed.** The two channel aggregates of
 q66 are ours and emit a `decimal(28,2)` sum (#87); the union above refused that type and stayed Spark's,
 whose columnar `UnionExec` concatenates (the #128 upstream bug), so the aggregate planned without a
