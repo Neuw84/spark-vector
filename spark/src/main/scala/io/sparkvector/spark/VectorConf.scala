@@ -23,6 +23,7 @@ object VectorConf {
   val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
   val BroadcastNestedLoopJoinEnabled = "spark.vector.exec.broadcastNestedLoopJoin.enabled"
   val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
+  val JoinMaxBuildSize = "spark.vector.join.maxBuildSize"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
   val UiEnabled = "spark.vector.ui.enabled"
@@ -60,6 +61,19 @@ object VectorConf {
   def broadcastNestedLoopJoinEnabled(conf: SQLConf): Boolean = bool(conf, BroadcastNestedLoopJoinEnabled, default = true)
   /** Convert ShuffledHashJoinExec; over Spark's row shuffle both inputs go through RowToColumnarExec. */
   def shuffledHashJoinEnabled(conf: SQLConf): Boolean = bool(conf, ShuffledHashJoinEnabled, default = true)
+  /**
+   * Largest build side (bytes, size strings like `512m` accepted) a hash-style join converts for (#86);
+   * the joins hold the build side in memory per task. Default: a per-core share of the off-heap
+   * budget (`spark.memory.offHeap.size / spark.executor.cores`) when off-heap is configured, else 1 GiB.
+   */
+  def joinMaxBuildSize(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
+    val explicit = conf.getConfString(JoinMaxBuildSize, "")
+    if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit)
+    else {
+      val offHeap = if (sparkConf.getBoolean("spark.memory.offHeap.enabled", false)) sparkConf.getSizeAsBytes("spark.memory.offHeap.size", "0") else 0L
+      if (offHeap > 0) math.max(1L, offHeap / math.max(1, sparkConf.getInt("spark.executor.cores", 1))) else 1L << 30
+    }
+  }
   /** Also hand range-partitioned exchanges (global sorts) to Comet's native shuffle. */
   def cometRangeShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometRangeShuffleEnabled, default = true)
   def explainFallback(conf: SQLConf): Boolean = bool(conf, ExplainFallbackEnabled, default = false)

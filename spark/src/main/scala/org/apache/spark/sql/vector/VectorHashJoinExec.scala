@@ -756,6 +756,30 @@ object VectorJoinPlanner {
   def compileCondition(cond: Expression, output: Seq[Attribute]): Either[String, VectorExpr] =
     ExpressionCompiler.compilePredicate(cond, output)
 
+  /**
+   * The build side's estimated size in bytes: a materialised AQE stage's runtime statistics when the
+   * build side is one, the logical plan's estimate otherwise. None when unknown -- Spark's own
+   * "unknown" is `Long.MaxValue`, and a plan with no logical link has no estimate at all.
+   */
+  def estimatedBuildSize(plan: SparkPlan): Option[Long] = plan match {
+    case r: org.apache.spark.sql.execution.adaptive.AQEShuffleReadExec => estimatedBuildSize(r.child)
+    case q: org.apache.spark.sql.execution.adaptive.QueryStageExec => q.computeStats().map(_.sizeInBytes).flatMap(known)
+    case other => other.logicalLink.map(_.stats.sizeInBytes).flatMap(known)
+  }
+
+  private def known(size: BigInt): Option[Long] = if (size >= 0 && size < BigInt(Long.MaxValue)) Some(size.toLong) else None
+
+  /**
+   * The joins hold the build side in memory per task with no limit but the JVM's (#86): a build side
+   * estimated above `spark.vector.join.maxBuildSize` stays with Spark. An unknown estimate converts --
+   * Spark planned this join after its own size checks, so "unknown" means the statistic is absent,
+   * not that the side is large.
+   */
+  def buildSizeReason(buildPlan: SparkPlan, maxBuildSize: Long): Option[String] =
+    estimatedBuildSize(buildPlan).filter(_ > maxBuildSize).map { size =>
+      s"build side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize"
+    }
+
   private def supportedType(joinType: JoinType, buildSide: BuildSide): Either[String, Unit] = joinType match {
     case _: InnerLike | FullOuter => Right(())
     case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if buildSide == BuildRight => Right(())
