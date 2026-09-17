@@ -11,6 +11,7 @@ class VectorFilterSuite extends VectorQuerySuite {
   override protected def beforeAll(): Unit = {
     super.beforeAll()
     TestTables.createMixed(spark, newTempPath("filter/t"))
+    TestTables.createLineitem(spark, newTempPath("filter/lineitem"))
   }
 
   test("int comparison against literal") {
@@ -177,5 +178,45 @@ class VectorFilterSuite extends VectorQuerySuite {
     val plan = withPlugin(enabled = true)(spark.sql("SELECT * FROM t WHERE i > 5 AND l IS NOT NULL")).queryExecution.executedPlan
     val text = plan.treeString
     assert(text.contains("VectorFilter"), text)
+  }
+
+  test("scalar subqueries are literals by execution time: filters, projections, aggregates, merged struct fields, nulls") {
+    val Project = classOf[org.apache.spark.sql.vector.VectorProjectExec]
+    val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+    // In a filter, alone and combined; a string-valued and a boolean-valued subquery.
+    checkVectorized("SELECT i, d2 FROM t WHERE d2 > (SELECT avg(d2) FROM t)", Seq(Filter))
+    checkVectorized("SELECT count(*) FROM t WHERE l > (SELECT avg(l) FROM t) OR s = (SELECT max(s) FROM t)", Seq(Filter, Agg))
+    checkVectorized("SELECT i FROM t WHERE (SELECT bool_or(b) FROM t WHERE i < 3) AND i < 20", Seq(Filter))
+    // In a projection, in arithmetic and in a CASE over the result.
+    checkVectorized("SELECT i, (SELECT max(l) FROM t) AS m, i + (SELECT min(i) FROM t WHERE b) AS j, CASE WHEN (SELECT count(*) FROM t) > 10 THEN i ELSE -i END AS c FROM t WHERE i < 100", Seq(Project, Filter))
+    // Two subqueries over the same table are merged by Spark into one struct-valued subquery read through GetStructField.
+    val merged = checkVectorized("SELECT i FROM t WHERE d2 > (SELECT avg(d2) FROM t) AND i > (SELECT count(*) FROM t) / 3", Seq(Filter))
+    assert(finalPlan(merged).toString.contains("Subquery subquery"), finalPlan(merged).treeString)
+    // Under an aggregate and as an aggregate's input.
+    checkVectorized("SELECT i % 3 AS g, sum(d2 - (SELECT avg(d2) FROM t)) AS s, count(*) FROM t WHERE i < (SELECT max(i) FROM t) / 2 GROUP BY i % 3", Seq(Filter, Agg))
+    // A null result: no row passes the filter; the projected value is null.
+    checkVectorized("SELECT i FROM t WHERE i < (SELECT max(i) FROM t WHERE i < 0)", Seq(Filter))
+    checkVectorized("SELECT i, (SELECT max(d2) FROM t WHERE i < 0) AS nn FROM t WHERE i < 5", Seq(Project, Filter))
+    // A string subquery in a projection and in a LIKE-free comparison.
+    checkVectorized("SELECT i, (SELECT min(s) FROM t WHERE s IS NOT NULL) AS ms FROM t WHERE s > (SELECT min(s) FROM t WHERE s IS NOT NULL)", Seq(Project, Filter))
+  }
+
+  test("runtime bloom filter: the injected probe above the scan is ours") {
+    import org.apache.spark.sql.catalyst.expressions.BloomFilterMightContain
+    // A shuffle join whose small side has a selective filter makes Spark inject
+    // Filter(BloomFilterMightContain(subquery, xxhash64(key))) above the large side's scan.
+    withConf(
+      "spark.sql.optimizer.runtime.bloomFilter.enabled" -> "true",
+      "spark.sql.optimizer.runtime.bloomFilter.applicationSideScanSizeThreshold" -> "0",
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1") {
+      val sql = "SELECT count(*), sum(l_quantity) FROM lineitem JOIN t ON lineitem.l_partkey = t.i WHERE t.b AND t.i < 500"
+      val df = checkVectorized(sql, Seq(Filter))
+      val probes = nodesOf[VectorFilterExec](df).filter(_.condition.exists(_.isInstanceOf[BloomFilterMightContain]))
+      assert(probes.nonEmpty, "Spark injected no bloom filter probe, or it is not ours:\n" + finalPlan(df).treeString)
+      assert(!nodesOf[FilterExec](df).exists(_.condition.exists(_.isInstanceOf[BloomFilterMightContain])), finalPlan(df).treeString)
+      // A probe over a string key (a self-join whose small side is the filtered one).
+      val df2 = checkVectorized("SELECT count(*), sum(a.i) FROM t a JOIN t b ON a.s = b.s WHERE b.i < 40 AND b.b", Seq(Filter))
+      assert(nodesOf[VectorFilterExec](df2).exists(_.condition.exists(_.isInstanceOf[BloomFilterMightContain])), finalPlan(df2).treeString)
+    }
   }
 }

@@ -351,4 +351,16 @@ class VectorAggregateSuite extends VectorQuerySuite {
     allOurs("SELECT i % 3 AS g, stddev(d2) FILTER (WHERE b), corr(d2, i) FILTER (WHERE l IS NOT NULL), sum(l), avg(d2), count(*) FROM t GROUP BY i % 3")
     allOurs("SELECT l_returnflag, stddev_samp(l_quantity), var_pop(l_extendedprice), corr(l_quantity, l_extendedprice), covar_samp(l_discount, l_tax) FROM lineitem GROUP BY l_returnflag")
   }
+
+  test("NaN and negative zero grouping keys are normalised as Spark's") {
+    // Spark wraps a double key in KnownFloatingPointNormalized(NormalizeNaNAndZero(...)), which the
+    // compiler unwraps -- but a double grouping key itself is refused (the group table has no lane for
+    // it), so the plan falls back with the key-type reason, never a normalization one. Pinned so that a
+    // future double-key path inherits the test: rows agree with Spark (one NaN group, one zero group).
+    checkFallback(
+      "SELECT k, count(*) AS n, sum(i) AS s FROM (SELECT CASE WHEN i % 4 = 0 THEN -0.0 WHEN i % 4 = 1 THEN 0.0 WHEN i % 4 = 2 THEN CAST('NaN' AS DOUBLE) ELSE d2 END AS k, i FROM t) GROUP BY k",
+      Seq(Agg), "grouping key type double not supported")
+    // In a comparison the normalisation wrapper does not appear; the compare kernels already treat NaN = NaN and -0.0 = 0.0.
+    checkVectorized("SELECT count(*) FROM t WHERE (CASE WHEN i % 2 = 0 THEN -0.0 ELSE d2 END) = 0.0", Seq(Agg))
+  }
 }

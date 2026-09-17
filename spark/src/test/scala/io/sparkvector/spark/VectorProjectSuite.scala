@@ -226,6 +226,14 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i % 7 AS g, sum(exp(d2)), avg(log1p(i)), max(atan2(d2, i)), min(pow(d2, 2)) FROM t GROUP BY i % 7", Seq(Project, classOf[VectorHashAggregateExec]))
   }
 
+  test("xxhash64 is Spark's, type by type") {
+    // Bit for bit (tolerance is moot: longs compare exactly): ints, dates, longs, doubles incl. NaN and a
+    // negative zero (normalised like Spark's), booleans, strings with nulls, several arguments, a literal argument.
+    checkVectorized("SELECT xxhash64(i) AS a, xxhash64(l) AS b, xxhash64(d2) AS c, xxhash64(d) AS d0, xxhash64(-(d2 * 0.0)) AS e0, xxhash64(b) AS f, xxhash64(s) AS g, xxhash64(dt) AS h FROM t", Seq(Project))
+    checkVectorized("SELECT xxhash64(i, l, s) AS a, xxhash64(s, 'salt', i) AS b, xxhash64(l, d2, b, dt) AS c, xxhash64(CAST(i AS DECIMAL(10,2))) AS d0 FROM t", Seq(Project))
+    checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
+  }
+
   test("rounding: ceil, floor, rint, round, bround over doubles and integers") {
     // d2 = (id % 13) / 4 holds exact quarters and halves; d has NaN, infinities and nulls.
     checkVectorized("SELECT ceil(d) AS c, floor(d) AS f, rint(d) AS r, ceil(d2) AS c2, floor(d2) AS f2, rint(d2) AS r2, ceil(l) AS cl, floor(i) AS fi FROM t", Seq(Project))
