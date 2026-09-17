@@ -140,7 +140,10 @@ that pin it.
   `double[]` in place as a heap segment was measured at half the speed (the Vector API's heap
   segment path is not intrinsified as well), so Spark's `OnHeapColumnVector` batches are copied
   once into native memory per operator chain. Comet's and Arrow's off-heap buffers are wrapped
-  zero-copy with `MemorySegment.ofAddress(...).reinterpret(size)`.
+  zero-copy with `MemorySegment.ofAddress(...).reinterpret(size)`, and so are the fixed-width
+  columns of Spark's own `OffHeapColumnVector` (`spark.sql.columnVector.offheap.enabled=true`,
+  no dictionary) -- `SparkColumnVectorBuffers.wrappedOffHeapColumns()` counts them; strings and
+  dictionaries still take the copy. `docs/operators.md` "Scan compatibility" is the matrix.
 - Dictionary-encoded strings stay dictionary encoded end to end: the Spark adapter forwards
   Parquet dictionary indices, the filter compacts int32 indices and copies the small dictionary,
   `VectorDictionaryColumnVector` lets Spark's row conversion read them, and the aggregate hashes
@@ -493,7 +496,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 197 Spark tests (170 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 201 Spark tests (174 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -543,7 +546,8 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   2x slower for Comet itself and for us on uniformly spread survivors (`docs/results.md`). Comet's
   default format-level pruning already reaches our configurations.
 - Selective predicates with scattered survivors (TPC-H Q6) lose to Spark's codegen over Spark's
-  scan (0.86x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate. Over
+  scan (0.86x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate (the
+  off-heap wrap removes the copy for fixed-width columns; not yet measured on Q6, see #14). Over
   Comet's scan the copy is gone and the plugin beats Spark (1.12x) but not Comet's scan under
   Spark's codegen (1.17x).
 - Without Comet, the shuffle is Spark's row shuffle with a `ColumnarToRowExec` above the partial

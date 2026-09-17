@@ -49,6 +49,13 @@ public final class SparkColumnVectorBuffers {
 
   private SparkColumnVectorBuffers() {}
 
+  /** Test-visible counter: off-heap fixed-width columns handed over as views instead of copies. */
+  private static final java.util.concurrent.atomic.LongAdder WRAPPED_OFFHEAP_COLUMNS = new java.util.concurrent.atomic.LongAdder();
+
+  public static long wrappedOffHeapColumns() {
+    return WRAPPED_OFFHEAP_COLUMNS.sum();
+  }
+
   public static VectorBuffers copy(ColumnVector cv, int numRows, Arena arena) {
     VecType type = TypeMapping.vecTypeOf(cv.dataType());
     if (type == null) {
@@ -60,6 +67,17 @@ public final class SparkColumnVectorBuffers {
     }
     if (type.isFixedWidth() && cv instanceof WritableColumnVector w) {
       Dictionary dict = w.hasDictionary() ? dictionaryOf(w) : null;
+      if (dict == null && cv instanceof OffHeapColumnVector) {
+        // Off-heap Parquet batches (spark.sql.columnVector.offheap.enabled): the data already sits in
+        // native memory in Arrow's fixed-width layout, so the lane is a view of it, not a copy. The
+        // batch outlives every read of it (operators drain a batch before pulling the next one), as
+        // with the Comet and Iceberg zero-copy adapters.
+        MemorySegment view = wrapData(w, type, numRows);
+        if (view != null) {
+          WRAPPED_OFFHEAP_COLUMNS.increment();
+          return SegmentVectorBuffers.fixedWidth(type, numRows, validity, view);
+        }
+      }
       MemorySegment source =
           dict != null ? decodeDictionary(w, dict, type, numRows, validity) : wrapData(w, type, numRows);
       if (source != null) {

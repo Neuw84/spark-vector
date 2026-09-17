@@ -58,6 +58,24 @@ accelerated nor as a missed conversion. Row/columnar transitions (`ColumnarToRow
 `RowToColumnarExec`) and AQE plumbing (`AQEShuffleReadExec`, `ReusedExchangeExec`) are shown the
 same way.
 
+### Scan compatibility
+
+What makes a `FileSourceScanExec` a columnar input is decided by Spark, not by this project: the rule
+accepts a scan when `supportsColumnar` holds and every output column has a lane type. Pinned by
+`VectorScanSuite` (#61).
+
+| Case | What happens | Reason recorded |
+|---|---|---|
+| Parquet, vectorized reader (the default) | Columnar input. `OnHeapColumnVector` batches are copied once into native memory per operator chain (`SparkColumnVectorBuffers.copy`; reading the heap arrays in place was measured at half the kernel speed); dictionary-encoded strings stay dictionary encoded; dictionary-encoded numerics are decoded once per batch | -- |
+| Parquet, `spark.sql.columnVector.offheap.enabled=true` | Columnar input. Fixed-width columns (int, bigint, double, date, timestamp, decimal <= 18 stored as int/long) without a dictionary are handed over as **views** of the `OffHeapColumnVector`'s native memory -- no copy (`SparkColumnVectorBuffers.wrappedOffHeapColumns` counts them); the validity bitmap is derived from Spark's byte-per-row nulls, strings and dictionaries take the copy | -- |
+| Parquet, `spark.sql.parquet.enableVectorizedReader=false` | A row scan; nothing above it converts until a shuffle (a merging aggregate reads the shuffle and stays ours over `RowToColumnarExec`) | `child FileSourceScan is not columnar` |
+| Parquet with a nested column (struct, array, map) in the scan output | Spark 4's nested vectorized reader keeps the scan columnar, but the column has no lane, so the operator above falls back; prune the nested column and the rest converts (#19 will carry such columns through) | `unsupported column type <type> for <name>` |
+| Wide decimals (precision > 18) in the scan output | Columnar in Spark, refused here (#28) | `unsupported column type decimal(p,s) for <name>` |
+| ORC, vectorized reader (the default) | Columnar input through the adapter seam's generic copy (`OrcColumnVector` is read through the `ColumnVector` getters) | -- |
+| CSV, JSON, text, Avro, JDBC | Row-based readers; out of scope | `child <op> is not columnar` |
+| Comet's native scan, Iceberg's `BatchScanExec` | Columnar input, zero-copy through the registered adapters (see docs/comet.md, docs/iceberg.md) | -- |
+| Any other DSv2 columnar source | Columnar input, copied once per batch (#88) | -- |
+
 ## Planned
 
 Tracked issues, in the order they unblock TPC-H:
@@ -71,7 +89,6 @@ Tracked issues, in the order they unblock TPC-H:
 | `WindowExec`, `WindowGroupLimitExec` | #58 | Not converted |
 | `GenerateExec` (`explode`, `posexplode`) | #59 | Not converted |
 | `BroadcastNestedLoopJoinExec` | #60 | Not converted |
-| `FileSourceScanExec` -- widen and document what is accepted | #61 | Which readers/types count as columnar input |
 | `BatchScanExec` -- DSv2 sources beyond Iceberg | #62 | Verification per source (Delta, Hudi, built-in DSv2). Unknown columnar sources already work and are copied once per batch: `VectorUnknownSourceSuite` (#88) reads a test-only DSv2 source whose batches are a `ColumnVector` class no adapter knows, checks the rows against Spark under our filter, projection and aggregate, and asserts through the adapter seam's counters (`ColumnVectorAdapters.copiedColumns` / `adaptedColumns`) that every column took the copy path; a struct column falls back with `unsupported column type struct<...> for <name>` until #19 |
 | `DataWritingCommandExec` -- Parquet from Arrow batches | #64 | Not converted |
 | Arrow-based Python UDF operators | #65 | Not converted |
