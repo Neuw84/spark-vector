@@ -13,6 +13,7 @@ import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarR
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
@@ -129,6 +130,15 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
                 case Right(v) => v
                 case Left(reason) => fallback(t, reason)
               }
+          }
+
+        case w: WindowExec if VectorConf.windowEnabled(conf) =>
+          // Over any child on types alone: Spark plans Window above Sort above an exchange, and without a
+          // columnar shuffle that sort is Spark's, so RowToColumnarExec is inserted below us -- the window
+          // itself computes, and from here up the chain is columnar again.
+          typeReason(w.child) match {
+            case Some(reason) => fallback(w, reason)
+            case None => VectorWindowPlanner.plan(w).fold(reason => fallback(w, reason), v => v)
           }
 
         case s: SortExec if VectorConf.sortEnabled(conf) =>

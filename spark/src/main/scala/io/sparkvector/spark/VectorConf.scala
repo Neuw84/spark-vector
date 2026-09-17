@@ -19,6 +19,7 @@ object VectorConf {
   val CoalesceEnabled = "spark.vector.exec.coalesce.enabled"
   val ExpandEnabled = "spark.vector.exec.expand.enabled"
   val SampleEnabled = "spark.vector.exec.sample.enabled"
+  val WindowEnabled = "spark.vector.exec.window.enabled"
   val LocalTableScanEnabled = "spark.vector.exec.localTableScan.enabled"
   val BroadcastHashJoinEnabled = "spark.vector.exec.broadcastHashJoin.enabled"
   val BroadcastNestedLoopJoinEnabled = "spark.vector.exec.broadcastNestedLoopJoin.enabled"
@@ -54,6 +55,8 @@ object VectorConf {
   def expandEnabled(conf: SQLConf): Boolean = bool(conf, ExpandEnabled, default = true)
   /** Convert SampleExec without replacement over a columnar child (Spark's own Bernoulli sequence per partition). */
   def sampleEnabled(conf: SQLConf): Boolean = bool(conf, SampleEnabled, default = true)
+  /** Convert WindowExec for the ranking functions (row_number, rank, dense_rank); the child may be a row sort. */
+  def windowEnabled(conf: SQLConf): Boolean = bool(conf, WindowEnabled, default = true)
   /** Convert LocalTableScanExec (`VALUES`, small local relations) into one batch per partition; off by default. */
   def localTableScanEnabled(conf: SQLConf): Boolean = bool(conf, LocalTableScanEnabled, default = false)
   /** Convert BroadcastHashJoinExec over a columnar streamed side (the build side stays Spark's broadcast). */

@@ -271,6 +271,15 @@ that pin it.
   The union is columnar whatever its children are, provided one is: Spark's transitions insert
   `RowToColumnarExec` under the row children. Spark's own `UnionExec` is columnar only when every
   child is, and the UI classifies it as a Spark operator either way.
+- `VectorWindowExec` (#58, layer 1) computes `row_number` / `rank` / `dense_rank` in `VectorWindowIterator`: per
+  live row, `sameKeys` boxes the partition and order key lanes (`Rows.box`, null-safe equality -- `RankLike`
+  compares with `<=>`) against the previous row's, resets the counters on a new partition, bumps `rank` /
+  `denseRank` on a new peer group; state carries across batches. Requires exactly `WindowExec`'s
+  distribution and ordering (`requiredChildDistribution` / `requiredChildOrdering`), and the rule accepts
+  ANY child on types (`typeReason`) because the sort below is Spark's without a columnar shuffle -- Spark
+  inserts `RowToColumnarExec`. `VectorWindowPlanner.rankKind` refuses everything else with a reason naming
+  the function; double keys are refused like join keys. `WindowGroupLimitExec` (Spark's top-K below the
+  window, inserted for `rank <= k` filters) is not converted yet and sits as a row operator below us.
 - `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
   way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
   per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
@@ -546,7 +555,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 208 Spark tests (181 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 212 Spark tests (185 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
