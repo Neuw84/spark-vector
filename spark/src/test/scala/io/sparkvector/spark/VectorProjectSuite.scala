@@ -199,6 +199,33 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT CAST(d AS DECIMAL(10, 2)) % CAST(i + 1 AS DECIMAL(10, 2)) AS m FROM t", Seq(Project), "% over decimal(10,2) not supported")
   }
 
+  test("transcendental and trigonometric math: exp, log family, trig, hyperbolic, pow, atan2, hypot") {
+    // Bit for bit against Spark (tolerance 0): the kernel makes exactly the Math / StrictMath call
+    // Spark's generated code makes. d2 is 0..3 in quarter steps (0 where id % 13 = 0), i is 0..19999,
+    // l is a nullable bigint, d carries NaN and infinities.
+    def exact(sql: String, ops: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Seq(Project)): Unit = checkVectorized(sql, ops, tolerance = 0.0)
+    // exp / expm1 and the log family: null at or below the asymptote (log(0), log2(0), log1p(-1)), NaN stays NaN.
+    exact("SELECT exp(d2) AS a, expm1(d2 / 100) AS b, ln(i + 1) AS c, log(d2) AS d0, log2(i) AS e0, log10(l) AS f, log1p(d2 - 1.0) AS g, cbrt(i - 10000) AS h FROM t")
+    exact("SELECT exp(d) AS a, expm1(d) AS b, ln(d) AS c, log10(d) AS d0, log1p(d) AS e0, log2(-d) AS f, cbrt(d) AS g FROM t")
+    exact("SELECT exp(i) AS a, exp(-i) AS b, exp(l) AS c FROM t")
+    // Trigonometric, hyperbolic and inverse hyperbolic: NaN outside the domain (asin past 1, acosh below 1, atanh past 1).
+    exact("SELECT sin(d2) AS a, cos(d2) AS b, tan(d2) AS c, asin(d2 - 1.5) AS d0, acos(d2 / 3) AS e0, atan(i) AS f, atan(l - 30000) AS g FROM t")
+    exact("SELECT sinh(d2) AS a, cosh(d2) AS b, tanh(l / 1000) AS c, asinh(d2 - 1.5) AS d0, acosh(d2) AS e0, atanh(d2 - 2) AS f, sinh(i) AS g FROM t")
+    exact("SELECT sin(d) AS a, cos(d) AS b, tan(d) AS c, asin(d) AS d0, atan(d) AS e0, sinh(d) AS f, tanh(d) AS g, asinh(d) AS h, acosh(d) AS j, atanh(d) AS k FROM t")
+    // The reciprocals (csc(0) and cot(0) are infinite) and the angle conversions.
+    exact("SELECT cot(d2) AS a, sec(d2) AS b, csc(d2) AS c, degrees(d2) AS d0, radians(i) AS e0, degrees(l) AS f, radians(d) AS g FROM t")
+    // Binary: pow / power with a literal on either side and its overflow to infinity, atan2 incl. signed zeros,
+    // hypot, log(base, x) with a literal base or a literal argument and its null rules (either side non-positive).
+    exact("SELECT pow(d2, i % 5) AS a, power(2.0, i % 60) AS b, pow(i, 0.5) AS c, pow(10.0, i) AS d0, pow(d2 - 1.5, 3) AS e0, pow(l, 2) AS f, pow(d, 2) AS g, pow(0.0, d2 - 1) AS h FROM t")
+    exact("SELECT atan2(d2, i - 10000) AS a, atan2(d2 - 1.5, 0.0) AS b, atan2(0.0, d2 - 1.5) AS c, atan2(-d2 + d2, -1.0) AS d0, atan2(d, 1.0) AS e0, atan2(l, i) AS f FROM t")
+    exact("SELECT hypot(d2, l) AS a, hypot(i, 3.0) AS b, hypot(d, 1.0) AS c, hypot(d2 - 1.5, i - 10000) AS d0 FROM t")
+    exact("SELECT log(10, i) AS a, log(d2, 100) AS b, log(2, d2 - 1) AS c, log(0.5, d2) AS d0, log(i, d2) AS e0, log(-2.0, d2) AS f, log(d2, -1) AS g, log(d, d2) AS h, log(d2, d) AS j FROM t")
+    // Folded constants and mixes in filters and aggregates.
+    exact("SELECT pi() * d2 AS a, e() + i AS b, sin(pi() / 2 * d2) AS c, exp(1.0) - e() AS d0 FROM t")
+    exact("SELECT i FROM t WHERE exp(d2 / 3) > 2.0 AND ln(i + 1) < 9.0 AND NOT isnan(tan(d2))", Seq(Filter))
+    checkVectorized("SELECT i % 7 AS g, sum(exp(d2)), avg(log1p(i)), max(atan2(d2, i)), min(pow(d2, 2)) FROM t GROUP BY i % 7", Seq(Project, classOf[VectorHashAggregateExec]))
+  }
+
   test("rounding: ceil, floor, rint, round, bround over doubles and integers") {
     // d2 = (id % 13) / 4 holds exact quarters and halves; d has NaN, infinities and nulls.
     checkVectorized("SELECT ceil(d) AS c, floor(d) AS f, rint(d) AS r, ceil(d2) AS c2, floor(d2) AS f2, rint(d2) AS r2, ceil(l) AS cl, floor(i) AS fi FROM t", Seq(Project))
