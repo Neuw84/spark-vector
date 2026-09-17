@@ -295,7 +295,7 @@ postgreSQL/timestamp.sql	45	13	28
 postgreSQL/timestamp.sql_analyzer_test	15	0	0
 postgreSQL/union.sql	73	45	82
 postgreSQL/union.sql_analyzer_test	3	0	0
-postgreSQL/window_part1.sql	152	82	205
+postgreSQL/window_part1.sql	152	88	223
 postgreSQL/window_part1.sql_analyzer_test	23	0	0
 postgreSQL/window_part2.sql	113	3	3
 postgreSQL/window_part2.sql_analyzer_test	23	0	0
@@ -416,13 +416,13 @@ subquery/resolution-edge-cases.sql	17	0	0
 subquery/resolution-edge-cases.sql_analyzer_test	6	0	0
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql	24	3	3
 subquery/scalar-subquery/nested-scalar-subquery-count-bug.sql_analyzer_test	10	0	0
-subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	10
+subquery/scalar-subquery/scalar-subquery-count-bug.sql	54	6	8
 subquery/scalar-subquery/scalar-subquery-count-bug.sql_analyzer_test	12	0	0
 subquery/scalar-subquery/scalar-subquery-group-by.sql	26	6	12
 subquery/scalar-subquery/scalar-subquery-group-by.sql_analyzer_test	8	0	0
 subquery/scalar-subquery/scalar-subquery-predicate.sql	67	34	155
 subquery/scalar-subquery/scalar-subquery-predicate.sql_analyzer_test	8	0	0
-subquery/scalar-subquery/scalar-subquery-select.sql	55	14	20
+subquery/scalar-subquery/scalar-subquery-select.sql	55	14	22
 subquery/scalar-subquery/scalar-subquery-select.sql_analyzer_test	11	0	0
 subquery/scalar-subquery/scalar-subquery-set-op.sql	56	32	91
 subquery/scalar-subquery/scalar-subquery-set-op.sql_analyzer_test	3	0	0

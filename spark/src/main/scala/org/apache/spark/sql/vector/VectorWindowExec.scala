@@ -10,7 +10,7 @@ import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, DenseRank, Expression, NamedExpression, Rank, RowNumber, SortOrder, SpecifiedWindowFrame, UnboundedFollowing, UnboundedPreceding, WindowExpression, WindowSpecDefinition}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, Complete, Count, First, Last, Max, Min, Sum}
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, EmptyRow, FrameLessOffsetWindowFunction, Literal, NthValue}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CumeDist, EmptyRow, FrameLessOffsetWindowFunction, Literal, NTile, NthValue, PercentRank}
 import org.apache.spark.sql.types.{DateType, IntegerType, StringType, TimestampType, BooleanType, DecimalType => SparkDecimalType}
 import org.apache.spark.sql.catalyst.expressions.{CurrentRow, EvalMode, RangeFrame, RowFrame}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
@@ -63,8 +63,12 @@ import scala.collection.mutable
  * ROW`; the end of the peer group for the `RANGE` default), the frame's n-th row -- read from the held
  * copies of the partition's rows, across batch boundaries; `IGNORE NULLS` is refused.
  *
- * Sliding frames (`n PRECEDING`, suffixes), `percent_rank`, `cume_dist` and `ntile` are later layers;
- * each is refused with a reason naming the function and frame.
+ * The ranking functions that need the partition size -- `percent_rank`, `cume_dist`, `ntile` -- go through
+ * the same held-partition path (layer 1b), as do `row_number` / `rank` / `dense_rank` when they share an
+ * operator with an offset function.
+ *
+ * Sliding frames (`n PRECEDING`, suffixes) are the remaining layer; they are refused with a reason
+ * naming the function and frame.
  */
 case class VectorWindowExec(
     windowExpression: Seq[NamedExpression],
@@ -173,6 +177,7 @@ object VectorWindowPlanner {
       case _: RowNumber => Right(RowNumberKind)
       case _: Rank => Right(RankKind)
       case _: DenseRank => Right(DenseRankKind)
+      case _: PercentRank | _: CumeDist | _: NTile => Left(s"window function ${f.prettyName} needs the partition size (held-partition path)")
       // Only reached beside a ranking function: the aggregate frames themselves are judged first.
       case a: AggregateExpression => Left(s"window aggregate ${a.aggregateFunction.prettyName} beside a ranking function in one operator not supported")
       case other => Left(s"window function ${other.prettyName} not supported (row_number, rank and dense_rank are)")
@@ -214,11 +219,21 @@ object VectorWindowPlanner {
     case _ => None
   }
 
-  /** Offset-family kinds: a shifted row, the frame's first row, the frame's last row, the frame's n-th row. */
+  /**
+   * Offset-family kinds: a shifted row, the frame's first row, the frame's last row, the frame's n-th row;
+   * and the position-based ranking functions that need the partition size (`percent_rank`, `cume_dist`,
+   * `ntile`) or that sit beside offset functions in one operator (`row_number`, `rank`, `dense_rank`).
+   */
   val Shift = 0
   val FirstValue = 1
   val LastValue = 2
   val NthValueKind = 3
+  val RowNumberAt = 4
+  val RankAt = 5
+  val DenseRankAt = 6
+  val PercentRankAt = 7
+  val CumeDistAt = 8
+  val NTileAt = 9
 
   /**
    * A window function whose value is one row of the partition, read from the held rows: `kind` says
@@ -279,6 +294,16 @@ object VectorWindowPlanner {
       else frameKind(frame) match {
         case None => Left(s"$name over frame ${frame.sql} not supported")
         case Some(fk) => inputOrdinal(child, output).map(ord => OffsetFunction(if (isFirst) FirstValue else LastValue, ord, a.dataType, 0, null, fk))
+      }
+    case Alias(WindowExpression(_: RowNumber, _), _) => Right(OffsetFunction(RowNumberAt, -1, IntegerType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: Rank, _), _) => Right(OffsetFunction(RankAt, -1, IntegerType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: DenseRank, _), _) => Right(OffsetFunction(DenseRankAt, -1, IntegerType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: PercentRank, _), _) => Right(OffsetFunction(PercentRankAt, -1, DoubleType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: CumeDist, _), _) => Right(OffsetFunction(CumeDistAt, -1, DoubleType, 0, null, WholePartition))
+    case Alias(WindowExpression(n: NTile, _), _) =>
+      literalInt(n.buckets) match {
+        case Some(b) if b > 0 => Right(OffsetFunction(NTileAt, -1, IntegerType, b, null, WholePartition))
+        case _ => Left("ntile buckets must be a positive integer literal")
       }
     case Alias(WindowExpression(f, _), _) => Left(s"window function ${f.prettyName} is not an offset function")
     case other => Left(s"window expression ${other.sql} not supported")
@@ -365,6 +390,7 @@ object VectorWindowPlanner {
                 val mixed = w.windowExpression.map(aggregateWindow).flatten.map(_._2).distinct.length > 1
                 val offsetLike = w.windowExpression.exists {
                   case Alias(WindowExpression(f, _), _) => f.isInstanceOf[FrameLessOffsetWindowFunction] || f.isInstanceOf[NthValue] ||
+                    f.isInstanceOf[PercentRank] || f.isInstanceOf[CumeDist] || f.isInstanceOf[NTile] ||
                     (f match { case a: AggregateExpression => a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last]; case _ => false })
                   case _ => false
                 }
@@ -887,9 +913,12 @@ private[vector] class VectorWindowOffsetIterator(
   private var numPeers = 0
   private var posInPartition = 0
   private var globalRows = 0L
-  // Filled when a partition / peer group ends: its length / its last position.
+  // Filled when a partition / peer group ends: its length / its last position. Filled when they open:
+  // the peer group's first position and the partition's first peer ordinal (for dense_rank).
   private val partitionLength = mutable.ArrayBuffer.empty[Int]
   private val peerEnd = mutable.ArrayBuffer.empty[Int]
+  private val peerStart = mutable.ArrayBuffer.empty[Int]
+  private val partitionFirstPeer = mutable.ArrayBuffer.empty[Int]
   private val held = mutable.Queue.empty[Held]
   private val released = mutable.ArrayBuffer.empty[Held]
   // No longer addressable by any unreleased row, closed once the consumer is past their output too.
@@ -930,8 +959,11 @@ private[vector] class VectorWindowOffsetIterator(
           if (newPartition) {
             endPeer(); endPartition()
             numPartitions += 1; numPeers += 1; posInPartition = 0
+            partitionFirstPeer += numPeers - 1
+            peerStart += 0
           } else if (order.changed(i)) {
             endPeer(); numPeers += 1
+            peerStart += posInPartition
           }
           partition.remember(i)
           order.remember(i)
@@ -979,6 +1011,30 @@ private[vector] class VectorWindowOffsetIterator(
     }
   }
 
+  /**
+   * The position-based ranking functions of row `r` (Spark's definitions): `rank` is the peer group's first
+   * position + 1, `dense_rank` the peer ordinal within the partition + 1, `percent_rank` (rank - 1) / (n - 1)
+   * (0 for a single row), `cume_dist` rows up to the peer group's end over n, `ntile` Spark's bucket walk --
+   * the first `n % buckets` buckets hold one row more than `n / buckets`.
+   */
+  private def rankingValue(fn: VectorWindowPlanner.OffsetFunction, h: Held, r: Int, pos: Int, len: Int): Any = {
+    val peer = h.peerOf(r)
+    fn.kind match {
+      case VectorWindowPlanner.RowNumberAt => java.lang.Integer.valueOf(pos + 1)
+      case VectorWindowPlanner.RankAt => java.lang.Integer.valueOf(peerStart(peer) + 1)
+      case VectorWindowPlanner.DenseRankAt => java.lang.Integer.valueOf(peer - partitionFirstPeer(h.partOf(r)) + 1)
+      case VectorWindowPlanner.PercentRankAt =>
+        java.lang.Double.valueOf(if (len > 1) peerStart(peer).toDouble / (len - 1).toDouble else 0.0)
+      case VectorWindowPlanner.CumeDistAt => java.lang.Double.valueOf((peerEnd(peer) + 1).toDouble / len.toDouble)
+      case _ =>
+        val buckets = fn.offset
+        val size = len / buckets
+        val padding = len % buckets
+        val padded = padding * (size + 1)
+        java.lang.Integer.valueOf(if (pos < padded) pos / (size + 1) + 1 else (pos - padded) / size + padding + 1)
+    }
+  }
+
   /** Emits every held batch whose partitions have all ended; keeps released batches readable while needed. */
   private def release(): Unit = metrics.timed {
     while (held.nonEmpty && (inputDone || held.head.partOf(held.head.numRows - 1) < numPartitions - 1)) {
@@ -1003,6 +1059,8 @@ private[vector] class VectorWindowOffsetIterator(
             case VectorWindowPlanner.RunningRows => pos
             case _ => peerEnd(h.peerOf(r))
           }
+          if (fn.kind >= VectorWindowPlanner.RowNumberAt) rankingValue(fn, h, r, pos, len)
+          else {
           val target: Int = fn.kind match {
             case VectorWindowPlanner.Shift => pos + fn.offset
             case VectorWindowPlanner.FirstValue => 0
@@ -1014,6 +1072,7 @@ private[vector] class VectorWindowOffsetIterator(
             val g = h.firstGlobal + r + (target - pos)
             val src = if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) h else batchOf(g)
             valueAt(src, fn.inputOrdinal, (g - src.firstGlobal).toInt, fn.dataType)
+          }
           }
         }, allocator)
         f += 1

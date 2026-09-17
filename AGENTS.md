@@ -312,7 +312,12 @@ that pin it.
   Output columns are BORROWED from the held copies: a released batch stays in `released` until no later
   batch can address its partitions, then in `retired` until the consumer has moved past its output
   (`consumed`), and only then is closed -- do not shortcut this, `lag` reads earlier batches after they
-  were emitted. `IGNORE NULLS` and an offset function beside other kinds in one operator are refused.
+  were emitted. `IGNORE NULLS` and an offset function beside an aggregate in one operator are refused.
+  Layer 1b rides the same iterator: `RowNumberAt`/`RankAt`/`DenseRankAt`/`PercentRankAt`/`CumeDistAt`/`NTileAt`
+  kinds in `rankingValue` from `pos`, `peerStart(peer)`, `peerEnd(peer)`, `partitionFirstPeer(part)` and the
+  partition length (`percent_rank` = peerStart / (n - 1), `cume_dist` = (peerEnd + 1) / n, `ntile` = Spark's
+  padded-bucket walk from NTile's update expressions); an all-ranking operator still takes the streaming
+  `VectorWindowIterator`, the held path only when the partition size or an offset function is involved.
 - `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
   way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
   per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
@@ -588,7 +593,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 216 Spark tests (189 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 217 Spark tests (190 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
