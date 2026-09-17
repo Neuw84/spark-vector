@@ -92,7 +92,7 @@ that pin it.
 - Expressions compile to a small `VectorExpr` tree (`ColumnRef`, `LiteralExpr`, `CompareExpr`
   (numbers via `CompareKernels`, strings via `StringCompareKernels` in UTF8_BINARY order), `InExpr`
   (one equality pass per literal), `StringMatchExpr` (`startswith`/`endswith`/`contains`, i.e. the
-  `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), the several-input writers in `StringConcatExprs.scala` (`ConcatExpr`, `ConcatWsExpr`, `EltExpr` over `StringConcatKernels.Part` lanes-or-literals; `elt`'s ANSI raise checks only active rows), the string measures in `StringLengthExprs.scala` (`StringMeasureExpr` for length/octet_length/bit_length/ascii, once per dictionary entry via `StringLengthKernels.perEntry`, and `ChrExpr`), the string writers in
+  `LIKE` shapes `LikeSimplification` rewrites, via `StringMatchKernels`), the case and trim nodes in `StringCaseExprs.scala` (`CaseMapExpr`: ASCII rows in `StringCaseKernels`, flagged rows through `CollationSupport` with the session's ICU choice; `TrimExpr` over a literal code-point set), the several-input writers in `StringConcatExprs.scala` (`ConcatExpr`, `ConcatWsExpr`, `EltExpr` over `StringConcatKernels.Part` lanes-or-literals; `elt`'s ANSI raise checks only active rows), the string measures in `StringLengthExprs.scala` (`StringMeasureExpr` for length/octet_length/bit_length/ascii, once per dictionary entry via `StringLengthKernels.perEntry`, and `ChrExpr`), the string writers in
   `StringSliceExprs.scala` (`SubstringExpr`, `PadExpr`, `RepeatExpr`, `SpaceExpr`, `OverlayExpr` over
   `StringSliceKernels` -- the first kernel that produces new UTF8 data: two passes, per-row lengths and
   source ranges then one data buffer sized from their prefix sum; Spark's `UTF8String` code-point rules
@@ -483,7 +483,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 144 kernel tests, 177 Spark tests (150 without the Comet and Iceberg profiles;
+Current counts: 146 kernel tests, 178 Spark tests (151 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
