@@ -1,9 +1,10 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch}
+import io.sparkvector.spark.adapter.TypeMapping
+import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, RemappedColumnVector, SelectedColumnarBatch}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Attribute, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, NamedExpression, SortOrder}
 import org.apache.spark.sql.execution.{OrderPreservingUnaryExecNode, PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -17,6 +18,14 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * A [[SelectedColumnarBatch]] from the child is forwarded as such when the parent is a spark-vector
  * operator (`emitSelection`); otherwise the selection is applied here and only surviving rows are
  * materialised for Spark.
+ *
+ * A column whose type has no lane (struct, array, map, a decimal wider than 18 digits) does not
+ * disqualify the operator when the projection only passes it through: Spark's own vector for it is
+ * borrowed into the output batch, or viewed through a [[RemappedColumnVector]] when a selection is
+ * applied. The batch then mixes our Arrow vectors with the child's; Spark's `ColumnarToRowExec` reads
+ * both through the `ColumnVector` interface, our operators above refuse the column by type as before,
+ * and the Comet shuffle bridge declines such a child (a foreign vector cannot cross the C Data
+ * interface). Only computed expressions must compile.
  */
 case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan, emitSelection: Boolean = false)
     extends VectorExec
@@ -28,7 +37,10 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
   override protected def orderingExpressions: Seq[SortOrder] = child.outputOrdering
 
   @transient private lazy val compiled: Array[VectorExpr] = projectList.map { e =>
-    ExpressionCompiler.compile(e, child.output) match {
+    if (VectorProjectExec.isPassThrough(e)) {
+      val a = VectorProjectExec.passedThrough(e)
+      ColumnRef(child.output.indexWhere(_.exprId == a.exprId), a.dataType)
+    } else ExpressionCompiler.compile(e, child.output) match {
       case Right(v) => v
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize projection ${e.sql}: $reason")
     }
@@ -50,6 +62,21 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
   }
 
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
+}
+
+object VectorProjectExec {
+  /** A projection that forwards a child column as is (possibly renamed): never compiled, whatever its type. */
+  def isPassThrough(e: NamedExpression): Boolean = e match {
+    case _: AttributeReference => true
+    case Alias(_: AttributeReference, _) => true
+    case _ => false
+  }
+
+  def passedThrough(e: NamedExpression): AttributeReference = e match {
+    case a: AttributeReference => a
+    case Alias(a: AttributeReference, _) => a
+    case other => throw new IllegalArgumentException(s"not a pass-through: ${other.sql}")
+  }
 }
 
 private[vector] class VectorProjectIterator(
@@ -78,10 +105,14 @@ private[vector] class VectorProjectIterator(
         val compactTo = if (selected && (!emitSelection || !SelectionPolicy.keep(ctx.selectedCount, ctx.numRows))) ctx.selection else null
         val outRows = if (compactTo != null) ctx.selectedCount else ctx.numRows
         val columns = new Array[ColumnVector](exprs.length)
+        var foreignRows: Array[Int] = null // the selection as row ids, built once for the columns with no lane
         var c = 0
         while (c < columns.length) {
           val (name, dt) = outputAttrs(c)
           columns(c) = exprs(c) match {
+            case ColumnRef(ordinal, _) if compactTo != null && !TypeMapping.isSupported(dt) =>
+              if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(compactTo, ctx.numRows, outRows)
+              RemappedColumnVector.of(ctx.column(ordinal), foreignRows)
             case ColumnRef(ordinal, _) if compactTo != null =>
               ArrowOutput.compact(name, dt, ctx.input(ordinal), compactTo, outRows, allocator)
             case ColumnRef(ordinal, _) =>

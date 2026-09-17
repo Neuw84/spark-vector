@@ -1,6 +1,7 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.arrow.{ArrowOutput, SelectedColumnarBatch}
+import io.sparkvector.spark.adapter.TypeMapping
+import io.sparkvector.spark.arrow.{ArrowOutput, RemappedColumnVector, SelectedColumnarBatch}
 import io.sparkvector.spark.expr.{ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortOrder}
@@ -68,10 +69,16 @@ private[vector] class VectorFilterIterator(
         SelectedColumnarBatch.of(SelectedColumnarBatch.columnsOf(batch), ctx.numRows, selection, count, false)
       } else {
         val columns = new Array[ColumnVector](outputAttrs.length)
+        var foreignRows: Array[Int] = null // the selection as row ids, for columns with no lane (passed through)
         var c = 0
         while (c < columns.length) {
           val (name, dt) = outputAttrs(c)
-          columns(c) = ArrowOutput.compact(name, dt, ctx.input(c), selection, count, allocator)
+          columns(c) =
+            if (TypeMapping.isSupported(dt)) ArrowOutput.compact(name, dt, ctx.input(c), selection, count, allocator)
+            else {
+              if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(selection, ctx.numRows, count)
+              RemappedColumnVector.of(ctx.column(c), foreignRows)
+            }
           c += 1
         }
         metrics.numOutputBatches += 1

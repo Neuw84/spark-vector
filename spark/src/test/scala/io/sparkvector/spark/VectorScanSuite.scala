@@ -63,10 +63,12 @@ class VectorScanSuite extends VectorQuerySuite {
     assert(ColumnVectorAdapters.copiedColumns() > copiedBefore, "ORC vectors are foreign and copied")
   }
 
-  test("a nested column keeps Spark's scan columnar but our operators fall back on the type") {
-    val df = checkFallback("SELECT i, st.a AS a FROM t_struct WHERE i > 10", Seq(Filter), "unsupported column type struct")
+  test("a nested column keeps Spark's scan columnar; the filter passes it through, an accessor on it falls back") {
+    val df = checkFallback("SELECT i, st.a AS a FROM t_struct WHERE i > 10", Seq(Project), "st")
     assert(nodesOf[FileSourceScanExec](df).exists(_.supportsColumnar), "Spark 4's nested vectorized reader keeps the scan columnar\n" + finalPlan(df).treeString)
-    // Pruned away, the struct column no longer stands in the way.
+    assert(nodesOf[VectorFilterExec](df).nonEmpty, "the filter forwards the struct column untouched\n" + finalPlan(df).treeString)
+    checkVectorized("SELECT i, st FROM t_struct WHERE i > 10", Seq(Filter))
+    // Pruned away, the struct column plays no part.
     checkVectorized("SELECT i, l FROM t_struct WHERE i > 10 AND l IS NOT NULL", Seq(Filter))
   }
 }
