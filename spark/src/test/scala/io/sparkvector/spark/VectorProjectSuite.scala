@@ -171,6 +171,8 @@ class VectorProjectSuite extends VectorQuerySuite {
   test("math basics: abs, sign, positive, %, pmod, div, greatest, least, nanvl") {
     // Values against Spark (ANSI mode, Spark 4's default). i is 0..19999, l nullable, d has NaN and infinities.
     checkVectorized("SELECT abs(i - 10000) AS a, abs(l - 30000) AS b, abs(d) AS c, sign(d) AS sd, sign(i) AS si, positive(i) AS p, negative(l) AS ng FROM t", Seq(Project))
+    // sqrt: a negative argument is NaN, NaN and infinities pass through, integer arguments are cast by the analyzer.
+    checkVectorized("SELECT sqrt(d2) AS s1, sqrt(i) AS s2, sqrt(l) AS s3, sqrt(d) AS s4, sqrt(i - 10000) AS s5 FROM t", Seq(Project))
     checkVectorized("SELECT i % 7 AS m1, l % 13 AS m2, pmod(i - 10000, 7) AS p1, pmod(l - 30000, -13) AS p2, d % 2.5 AS m3, pmod(d, 3.0) AS p3, (i - 10000) % -7 AS m4 FROM t", Seq(Project))
     checkVectorized("SELECT i div 3 AS d1, (i - 10000) div -7 AS d2, l div 3 AS d3, 100000 div (i + 1) AS d4, 100 % (i + 1) AS m5, pmod(100, i + 1) AS p5 FROM t", Seq(Project))
     checkVectorized("SELECT greatest(i, 100, 5000) AS g1, least(i, 100, 5000) AS l1, greatest(l, CAST(i AS BIGINT)) AS g2, least(l, CAST(i AS BIGINT)) AS l2, greatest(d, d2) AS g3, least(d, d2, 1.0) AS l3 FROM t", Seq(Project))

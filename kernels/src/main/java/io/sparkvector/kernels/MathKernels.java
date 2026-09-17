@@ -69,6 +69,16 @@ public final class MathKernels {
     }
   }
 
+  /** {@code out = sqrt(a)} over FLOAT64 (Spark casts the argument to double); negative lanes give NaN, as Spark's. */
+  public static void sqrt(VectorBuffers a, MemorySegment out) {
+    requireType(a, VecType.FLOAT64, "sqrt");
+    int n = a.length();
+    MemorySegment d = a.data();
+    for (int i = 0; i < n; i++) {
+      out.setAtIndex(VectorBuffers.LE_DOUBLE, i, Math.sqrt(d.getAtIndex(VectorBuffers.LE_DOUBLE, i)));
+    }
+  }
+
   // ---------------------------------------------------------------- remainder
 
   /** {@code out = a <op> b}; lanes whose divisor is zero are left 0. */

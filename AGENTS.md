@@ -187,7 +187,13 @@ that pin it.
   (`Rows` loop + `GroupValues`): `min`/`max` over booleans and strings (`OrderedMinMaxAgg`, so
   `bool_and`/`bool_or`/`every`/`any`/`some`), `first`/`last` with and without `ignoreNulls`
   (`FirstAgg`/`FirstMergeAgg`, `LastAgg`), `bit_and`/`bit_or`/`bit_xor` (`BitAgg`), `max_by`/`min_by`
-  (`MaxMinByAgg`, ties take the later row like Spark's predicate); `count_if` arrives as `count` over a
+  (`MaxMinByAgg`, ties take the later row like Spark's predicate); the statistical family in
+  `StatAggregates.scala` (`MomentsAgg` with a `Kind` per Spark state: `CentralMomentAgg` incl. m3/m4,
+  `Covariance`, `PearsonCorrelation`, the regr_slope/intercept pair; update = Spark's row-by-row Welford
+  step in partition order, merge = Spark's `mergeExpressions`, buffers emitted as doubles so the Final
+  compiles Spark's own result expression -- `sqrt` was added to the compiler for it; tests compare at a
+  relative tolerance); `count(a, b)` counts rows with every argument non-null (`CountAllAgg`,
+  regr_count's replacement); `count_if` arrives as `count` over a
   rewritten boolean. A string buffer makes Spark plan `SortAggregateExec`: the rule builds the same
   hash operator from its fields, drops the sort Spark placed below when it is exactly the required one,
   and keeps the output ordering of a result-emitting stage with a `VectorSortExec` above.
@@ -460,7 +466,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 136 kernel tests, 167 Spark tests (140 without the Comet and Iceberg profiles;
+Current counts: 136 kernel tests, 168 Spark tests (141 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

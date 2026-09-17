@@ -94,7 +94,6 @@ class VectorAggregateSuite extends VectorQuerySuite {
 
   test("unsupported aggregates fall back") {
     checkFallback("SELECT approx_count_distinct(i) FROM t", Seq(Agg), "unsupported aggregate function")
-    checkFallback("SELECT stddev_samp(d) FROM t", Seq(Agg), "unsupported aggregate function")
     checkVectorized("SELECT first(d2, true), first(l, true), first(b, true), first(dt, true) FROM t WHERE i > 3", Seq(Agg))
   }
 
@@ -313,5 +312,43 @@ class VectorAggregateSuite extends VectorQuerySuite {
     // Q9 / Q14 / Q16 shapes: LIKE with a leading or trailing wildcard over dictionary pages.
     checkVectorized("SELECT l_returnflag, count(*) FROM lineitem WHERE l_comment LIKE 'cmt1%' GROUP BY l_returnflag", Seq(Filter, Agg))
     checkVectorized("SELECT count(*) FROM lineitem WHERE l_comment NOT LIKE '%9%' AND l_comment LIKE '%5'", Seq(Filter, Agg))
+  }
+
+  test("statistical aggregates: stddev, variance, skewness, kurtosis, covar, corr, regr_*") {
+    // Compared with Spark at a relative tolerance (never bit equality: the merge order across the
+    // shuffle is not ours to fix). Every stage ours, Partial and Final.
+    def allOurs(sql: String): Unit = {
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "every stage should be ours\n" + finalPlan(df).treeString)
+    }
+    // The family over doubles, integers (cast by the analyzer) and a nullable bigint, grouped and not.
+    allOurs("SELECT i % 7 AS g, stddev(d2), stddev_samp(i), stddev_pop(l), std(d2), variance(d2), var_samp(l), var_pop(i) FROM t GROUP BY i % 7")
+    allOurs("SELECT stddev(d2), stddev_pop(i), variance(l), var_pop(d2), skewness(d2), kurtosis(i), skewness(l), kurtosis(l) FROM t")
+    allOurs("SELECT i % 11 AS g, skewness(d2), kurtosis(d2), skewness(l), kurtosis(i) FROM t GROUP BY i % 11")
+    // A large mean with a small spread: the streaming update keeps the digits a sum of squares would lose.
+    allOurs("SELECT i % 5 AS g, stddev_samp(d2 + 1e9), var_pop(d2 + 1e9), stddev_pop(l + 1e12) FROM t GROUP BY i % 5")
+    allOurs("SELECT var_samp(d2 + 1e9), stddev(i + 1e9), skewness(d2 + 1e6), kurtosis(d2 + 1e6) FROM t")
+    // NaN and infinities in d propagate as NaN, as in Spark.
+    allOurs("SELECT stddev(d), variance(d), skewness(d), kurtosis(d) FROM t")
+    // Groups of one row (stddev_samp / var_samp / covar_samp / corr null, the population forms 0), constant columns
+    // (variance 0, skewness / kurtosis null on m2 = 0, corr NaN), no rows (null), and a filtered ungrouped shape.
+    allOurs("SELECT i AS g, stddev_samp(d2), stddev_pop(d2), var_samp(d2), var_pop(d2), covar_samp(d2, i), covar_pop(d2, i), corr(d2, i) FROM t WHERE i < 50 GROUP BY i")
+    allOurs("SELECT i % 4 AS g, stddev_samp(i div 20000), var_pop(i div 20000), skewness(i div 20000), kurtosis(i div 20000), covar_pop(i div 20000, d2) FROM t GROUP BY i % 4")
+    // corr over a constant column divides by sqrt(0): Spark's own evaluation raises DIVIDE_BY_ZERO under ANSI, and so does ours.
+    Seq(false, true).foreach { on =>
+      val e = intercept[Exception](withPlugin(enabled = on)(spark.sql("SELECT corr(i div 20000, d2) FROM t")).collect()).asInstanceOf[_root_.org.apache.spark.SparkThrowable]
+      assert(e.getCondition == "DIVIDE_BY_ZERO", s"plugin=$on: $e")
+    }
+    allOurs("SELECT stddev(d2), var_samp(l), covar_samp(d2, l), corr(d2, l), skewness(d2) FROM t WHERE i < 0")
+    allOurs("SELECT stddev_samp(d2), var_pop(l), corr(i, l) FROM t WHERE i > 19990")
+    // Covariance and correlation: nulls in either argument skip the pair; correlated, anti-correlated and independent shapes.
+    allOurs("SELECT i % 7 AS g, covar_samp(d2, i), covar_pop(l, d2), corr(i, d2), corr(l, i), corr(d2, -d2), covar_samp(i, 3.0 * i) FROM t GROUP BY i % 7")
+    allOurs("SELECT covar_samp(d2, l), covar_pop(i, l), corr(d2, l), corr(i, i % 13), covar_pop(d2 + 1e9, l + 1e9) FROM t")
+    // The regr_* family rewrites onto counts, averages and these moments.
+    allOurs("SELECT i % 7 AS g, regr_count(d2, l), regr_avgx(d2, l), regr_avgy(d2, l), regr_sxx(d2, l), regr_syy(d2, l), regr_sxy(d2, l), regr_slope(d2, l), regr_intercept(d2, l), regr_r2(d2, l) FROM t GROUP BY i % 7")
+    allOurs("SELECT regr_count(i, d2), regr_slope(i, d2), regr_intercept(i, d2), regr_r2(i, d2), regr_sxy(i, d2) FROM t WHERE i > 100")
+    // With FILTER, mixed with the plain aggregates, and the lineitem shape.
+    allOurs("SELECT i % 3 AS g, stddev(d2) FILTER (WHERE b), corr(d2, i) FILTER (WHERE l IS NOT NULL), sum(l), avg(d2), count(*) FROM t GROUP BY i % 3")
+    allOurs("SELECT l_returnflag, stddev_samp(l_quantity), var_pop(l_extendedprice), corr(l_quantity, l_extendedprice), covar_samp(l_discount, l_tax) FROM lineitem GROUP BY l_returnflag")
   }
 }
