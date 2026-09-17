@@ -152,12 +152,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
         case j: BroadcastHashJoinExec if VectorConf.broadcastHashJoinEnabled(conf) =>
           // The build side is Spark's broadcast relation whatever it is; the streamed side must be
-          // columnar.
+          // columnar -- or an exchange (its AQE stage, a shuffle read), which Spark converts below us
+          // with RowToColumnarExec exactly as for the shuffled hash join. That shape is what adaptive
+          // execution leaves when it re-plans a shuffled join as a broadcast join at runtime: the
+          // streamed side is then the bare shuffle read, and refusing it left the whole chain above
+          // (projects, aggregates) to Spark in eleven TPC-DS queries.
           val (buildPlan, streamedPlan) = j.buildSide match {
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          exchangeInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -171,7 +175,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          columnarInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          exchangeInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
