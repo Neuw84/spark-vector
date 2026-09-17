@@ -171,4 +171,16 @@ class VectorJoinSuite extends VectorQuerySuite {
       assert(nodesOf[BroadcastHashJoinExec](df).nonEmpty)
     }
   }
+
+  test("NaN and negative zero join keys are normalised as Spark's") {
+    // Both sides of a double-keyed join carry -0.0, 0.0 and NaN: Spark wraps the keys in
+    // KnownFloatingPointNormalized(NormalizeNaNAndZero(...)), which the compiler unwraps -- but a double
+    // join key is refused by type, so the plan falls back with that reason and the rows still agree.
+    // Pinned so that a future double-key path inherits the test.
+    val sql = "SELECT count(*), sum(a.i), sum(b.i) FROM " +
+      "(SELECT i, CASE WHEN i % 3 = 0 THEN -0.0 WHEN i % 3 = 1 THEN CAST('NaN' AS DOUBLE) ELSE d2 END AS k FROM t WHERE i < 300) a JOIN " +
+      "(SELECT i, CASE WHEN i % 3 = 0 THEN 0.0 WHEN i % 3 = 1 THEN CAST('NaN' AS DOUBLE) ELSE d2 END AS k FROM t WHERE i < 300) b ON a.k = b.k"
+    checkFallback(sql, Seq(BHJ), "join key type double not supported")
+    checkFallback(sql.replace("SELECT count(*)", "SELECT /*+ SHUFFLE_HASH(b) */ count(*)"), Seq(SHJ), "join key type double not supported")
+  }
 }

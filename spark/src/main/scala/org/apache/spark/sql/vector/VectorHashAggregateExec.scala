@@ -98,8 +98,9 @@ case class VectorHashAggregateExec(
     }
   }.toArray
 
-  @transient private lazy val compiled: Array[VectorAggFunction] = aggregateExpressions.map { agg =>
-    VectorAggregates.compile(agg, child.output) match {
+  // A merging stage's input is its grouping columns then the buffers (Spark's initialInputBufferOffset).
+  @transient private lazy val compiled: Array[VectorAggFunction] = aggregateExpressions.zip(VectorAggregates.bufferOffsets(groupingExpressions.length, aggregateExpressions)).map { case (agg, offset) =>
+    VectorAggregates.compile(agg, child.output, offset) match {
       case Right(f) => f
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate ${agg.sql}: $reason")
     }
@@ -428,10 +429,11 @@ object VectorAggregatePlanner {
 
   /** Wide decimal sum buffers a merging aggregate reads: the one wide input the operator accepts. */
   def wideSumBuffers(a: BaseAggregateExec): Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
-    a.aggregateExpressions.collect {
-      case agg if VectorAggregates.merges(agg.mode) && agg.aggregateFunction.isInstanceOf[Sum] && agg.aggregateFunction.dataType.isInstanceOf[DecimalType] =>
-        agg.aggregateFunction.inputAggBufferAttributes.head.exprId
-    }.toSet
+    a.aggregateExpressions.zip(VectorAggregates.bufferOffsets(a)).collect {
+      case (agg, offset) if VectorAggregates.merges(agg.mode) && agg.aggregateFunction.isInstanceOf[Sum] && agg.aggregateFunction.dataType.isInstanceOf[DecimalType] =>
+        // By id, and by Spark's position when the Final's function instance carries fresh ids.
+        Seq(agg.aggregateFunction.inputAggBufferAttributes.head.exprId) ++ a.child.output.lift(offset).map(_.exprId)
+    }.flatten.toSet
 
   /** Maps each result attribute to the grouping key or the (aggregate, buffer slot) producing it. */
   def outputLayout(
@@ -444,10 +446,17 @@ object VectorAggregatePlanner {
       aggregateExpressions.zipWithIndex.flatMap { case (agg, i) =>
         agg.aggregateFunction.inputAggBufferAttributes.zipWithIndex.map { case (a, slot) => a.exprId -> (BufferSlot(i, slot): OutputSlot) }
       }.toMap
-    val mapped = resultExpressions.map {
-      case a: Attribute =>
-        keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId)).toRight(s"result attribute ${a.name} is neither a grouping key nor an aggregation buffer")
-      case other => Left(s"result expression ${other.sql} is not a plain attribute")
+    // A buffer-emitting stage's result attributes are its keys then its buffers in order, so a result
+    // attribute whose id matches nothing (a function instance rewritten between planning and this
+    // check) is still bound by that position, as Spark binds it.
+    val positional: Seq[OutputSlot] =
+      groupingExpressions.indices.map(KeySlot(_): OutputSlot) ++
+        aggregateExpressions.zipWithIndex.flatMap { case (agg, i) => agg.aggregateFunction.inputAggBufferAttributes.indices.map(BufferSlot(i, _): OutputSlot) }
+    val mapped = resultExpressions.zipWithIndex.map {
+      case (a: Attribute, pos) =>
+        keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId)).orElse(if (resultExpressions.length == positional.length) positional.lift(pos) else None)
+          .toRight(s"result attribute ${a.name} is neither a grouping key nor an aggregation buffer")
+      case (other, _) => Left(s"result expression ${other.sql} is not a plain attribute")
     }
     mapped.collectFirst { case Left(r) => r } match {
       case Some(reason) => Left(reason)
@@ -491,7 +500,9 @@ object VectorAggregatePlanner {
     else if (readsExchange(a) && !finalEnabled) Left("merging aggregation stages disabled by configuration")
     else {
       val keyFailures = a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
-      val aggFailures = a.aggregateExpressions.flatMap(agg => VectorAggregates.compile(agg, a.child.output).left.toOption.map(r => s"${agg.sql}: $r"))
+      val aggFailures = a.aggregateExpressions.zip(VectorAggregates.bufferOffsets(a)).flatMap { case (agg, offset) =>
+        VectorAggregates.compile(agg, a.child.output, offset).left.toOption.map(r => s"${agg.sql}: $r")
+      }
       val failures = keyFailures ++ aggFailures
       val layoutCheck: Either[String, Seq[Any]] =
         if (results) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.aggregateAttributes, a.resultExpressions)

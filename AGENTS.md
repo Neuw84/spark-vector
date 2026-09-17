@@ -107,6 +107,12 @@ that pin it.
   Vector API's 1-2 ulp operators are deliberately not used), the rounding nodes in
   `PredicateExprs.scala` (`NullSafeEqExpr`, `IsNaNExpr`, `BoolCompareExpr`/`BoolCompareScalarExpr` on
   packed words, `InSetExpr` with a sorted-key binary search; over `PredicateKernels`),
+  `InjectedExprs.scala` (`SubqueryLiteralExpr` for a scalar subquery -- or any reference-free
+  expression over one -- read as a literal at execution: Spark evaluates it before the operator runs
+  and the result rides in the node; `XxHash64Expr` with Spark's `XXH64` steps per type; `BloomProbeExpr`
+  probing Spark's runtime bloom filter through Spark's `BloomFilter`; note that a merging aggregate
+  whose function instance was rewritten between stages -- `ReusedSubquery` in its input -- carries fresh
+  buffer exprIds, so `VectorAggregates` binds buffers by Spark's position when the ids do not match),
   `BitExprs.scala` (`BitBinaryExpr` for `& | ^` and the shifts, `BitNotExpr`, `BitCountExpr` over
   `BitKernels`; Java's semantics, `bit_count` on the value widened to a long like Spark's),
   `RoundExprs.scala` (`CeilFloorExpr`, `RintExpr`, `RoundExpr` for `round`/`bround`/two-argument
@@ -471,7 +477,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 138 kernel tests, 169 Spark tests (142 without the Comet and Iceberg profiles;
+Current counts: 138 kernel tests, 174 Spark tests (147 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

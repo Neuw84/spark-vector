@@ -363,7 +363,19 @@ object VectorAggregates {
    * merge the partial buffers (`inputAggBufferAttributes`) found in `input`. What the operator then
    * emits -- buffers or results -- is the planner's decision, not the function's.
    */
-  def compile(agg: AggregateExpression, input: Seq[Attribute]): Either[String, VectorAggFunction] =
+  /**
+   * The position in a merging stage's input of each aggregate's first buffer column: the grouping
+   * columns first, then every function's buffers in order -- Spark binds buffers by position, and the
+   * exprIds only happen to agree when the Partial's and the Final's function instances are the same
+   * object (a subquery rewrite between the two stages gives the Final a fresh instance).
+   */
+  def bufferOffsets(a: org.apache.spark.sql.execution.aggregate.BaseAggregateExec): Seq[Int] =
+    bufferOffsets(a.initialInputBufferOffset, a.aggregateExpressions)
+
+  def bufferOffsets(initialOffset: Int, aggregateExpressions: Seq[AggregateExpression]): Seq[Int] =
+    aggregateExpressions.scanLeft(initialOffset)((off, agg) => off + agg.aggregateFunction.inputAggBufferAttributes.length).init
+
+  def compile(agg: AggregateExpression, input: Seq[Attribute], bufferOffset: Int = -1): Either[String, VectorAggFunction] =
     agg.mode match {
       // `isDistinct` is only a marker in a physical plan: Spark's distinct rewrites have already
       // grouped by the distinct column below, so the function runs over deduplicated input as is.
@@ -375,20 +387,30 @@ object VectorAggregates {
           }
         }
       // The FILTER clause is applied while updating; merging buffers does not see it (Spark drops it).
-      case PartialMerge | Final => compileMerge(agg.aggregateFunction, input, finalResult = agg.mode == Final)
+      case PartialMerge | Final => compileMerge(agg.aggregateFunction, input, finalResult = agg.mode == Final, bufferOffset)
     }
 
   /** Whether `mode` advances the state by merging buffers rather than by reading the function's input. */
   def merges(mode: AggregateMode): Boolean = mode == PartialMerge || mode == Final
 
-  private def compileMerge(f: AggregateFunction, input: Seq[Attribute], finalResult: Boolean): Either[String, VectorAggFunction] = {
+  private def compileMerge(f: AggregateFunction, input: Seq[Attribute], finalResult: Boolean, bufferOffset: Int): Either[String, VectorAggFunction] = {
     val buffers = f.inputAggBufferAttributes
-    def ref(i: Int): Either[String, VectorExpr] = ExpressionCompiler.compile(buffers(i), input)
+    /** The input column holding buffer `i`: by exprId when the ids agree, by Spark's position otherwise. */
+    def bufferOrdinal(i: Int): Int = {
+      val byId = input.indexWhere(_.exprId == buffers(i).exprId)
+      if (byId >= 0) byId
+      else if (bufferOffset >= 0 && bufferOffset + i < input.length && input(bufferOffset + i).dataType == buffers(i).dataType) bufferOffset + i
+      else -1
+    }
+    def ref(i: Int): Either[String, VectorExpr] = {
+      val ordinal = bufferOrdinal(i)
+      if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}") else ExpressionCompiler.compile(input(ordinal), input)
+    }
     f match {
       case s: Sum if s.dataType.isInstanceOf[DecimalType] && buffers.length == 2 =>
         // The wide decimal sum's (sum, isEmpty) buffer: the sum column has no lane and is read from
         // the batch by ordinal; isEmpty is an ordinary boolean.
-        val sumOrdinal = input.indexWhere(_.exprId == buffers(0).exprId)
+        val sumOrdinal = bufferOrdinal(0)
         if (sumOrdinal < 0) Left(s"sum buffer ${buffers(0).name} not found in the input")
         else ref(1).map(empty => WideDecimalSumMergeAgg(sumOrdinal, empty, s.dataType.asInstanceOf[DecimalType], finalResult,
           nullOnOverflow = s.evalContext.evalMode != EvalMode.ANSI, s.origin.context))

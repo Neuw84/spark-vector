@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -26,6 +26,12 @@ object ExpressionCompiler {
   }
 
   def compile(expr: Expression, input: Seq[Attribute]): Result = expr match {
+    // A scalar subquery result in any reference-free shape (the ScalarSubquery, a struct field of a
+    // merged one, a CASE over such fields): a literal by the time the operator runs, read then.
+    case e if SubqueryLiteralExpr.isDeferred(e) =>
+      if (SubqueryLiteralExpr.supports(e.dataType)) Right(SubqueryLiteralExpr(e))
+      else Left(s"subquery result of type ${e.dataType.simpleString} not supported")
+
     case a: AttributeReference =>
       val ordinal = input.indexWhere(_.exprId == a.exprId)
       if (ordinal < 0) Left(s"unbound attribute ${a.name}")
@@ -178,6 +184,27 @@ object ExpressionCompiler {
     // function); the analyzer has cast the argument to double. pi() and e() fold to literals.
     case e: UnaryMathExpression if transcendental.contains(e.getClass) =>
       unaryMath(transcendental(e.getClass), e.child, e.prettyName, input)
+    case x: XxHash64 =>
+      x.children.find(c => !XxHash64Expr.supports(c.dataType)) match {
+        case Some(c) => Left(s"xxhash64 over ${c.dataType.simpleString} not supported")
+        case None =>
+          x.children.foldRight[Either[String, List[VectorExpr]]](Right(Nil)) { (c, acc) =>
+            for (rest <- acc; e <- compile(c, input)) yield e :: rest
+          }.map(cs => XxHash64Expr(cs, x.children.map(_.dataType), x.seed))
+      }
+    case b: BloomFilterMightContain =>
+      for {
+        filter <- {
+          val f = b.bloomFilterExpression
+          if (SubqueryLiteralExpr.isDeferred(f)) Right(SubqueryLiteralExpr(f)) // binary: read as bytes, never a lane
+          else Left("bloom filter is not a subquery result")
+        }
+        hash <- compile(b.valueExpression, input).flatMap {
+          case h if h.vecType == VecType.INT64 && !h.isInstanceOf[LiteralExpr] => Right(h)
+          case _ => Left("bloom filter probe value is not a long lane")
+        }
+      } yield BloomProbeExpr(filter, hash)
+
     case Pow(l, r) => binaryMath(TranscendentalKernels.Fn2.POW, l, r, "pow", input)
     case Atan2(l, r) => binaryMath(TranscendentalKernels.Fn2.ATAN2, l, r, "atan2", input)
     case Hypot(l, r) => binaryMath(TranscendentalKernels.Fn2.HYPOT, l, r, "hypot", input)
