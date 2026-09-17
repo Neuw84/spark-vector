@@ -581,6 +581,47 @@ Spark's Final the union's children were Spark's, whose union is partition-aware.
 columnar `UnionExec` has the same concatenation (fixed upstream later), which is why disabling ours
 did not help. All 103 queries now agree to 10 significant digits.
 
+## Phase 5: q9/q14/q17/q18 against Comet -- profiles and what they changed
+
+Profiling the four SF1 queries where `comet-scan-vector-shuffle` trailed `comet` the most led to
+three changes (plus `spark.vector.exec.strictFloatingPoint`, documented with the aggregation
+sections above).
+
+**Why q14 was slow: eight tasks rebuilding the same broadcast table.** The q14 JFR profile put 47%
+of all samples under `VectorBroadcastHashJoinExec`'s build path -- `BuildTable.fromRelation`,
+`ArrowLayout.ofStrings` (decoding `UTF8String`s to `java.lang.String` and back),
+`GroupKeyTable.insert` and `rehash` -- against 4% for Comet's whole native execution. Every task
+read Spark's 200k-row broadcast `HashedRelation` into columns and hashed it into a key table, so
+the same work ran once per task rather than once. Now the table is built once per executor and
+shared read-only by every task of every join over that relation (`BuildTable.sharedFromRelation`,
+keyed weakly on the relation object, arena freed by a `Cleaner` when the broadcast is dropped).
+Strings go straight from `UTF8String` bytes to Arrow memory, the build table skips the on-the-fly
+string dictionaries (`GroupKeyTable(types, false)`: join keys are mostly distinct, and an immutable
+table is what makes concurrent probing safe), and each probe passes its own hash scratch.
+
+**Double grouping and join keys** now compile: Spark's optimizer wraps them in
+`NormalizeNaNAndZero`, which is a real kernel pass (canonical NaN, `-0.0` to `0.0`), after which the
+key tables' bit comparison agrees with Spark's equality. This removed q18's Partial-aggregate
+fallback (`grouping key type double not supported` on `o_totalprice`) and the whole non-columnar
+cascade above it: q18 in `comet-scan-vector-shuffle` goes from 29/39 operators accelerated to 31/35.
+
+**Short-string copies** (`ByteCopy`): gathering q9's 320k joined rows spent 13% of samples in
+`MemorySegment.copy` set-up (session and bounds checks) for 10-25-byte strings. Runs of <= 16 bytes
+are now moved as two overlapping unaligned longs in the UTF8 gather and compact kernels. JMH
+(`GatherBenchmark`, 4096-row gathers from a 64k-row column, M3, noisy machine): 6-byte strings 414k
+vs 189k rows/us against the per-string `MemorySegment.copy` loop (2.2x); 12 and 25 bytes within
+noise of each other.
+
+The benchmark configurations also turn the opt-in sort-merge join rewrite on
+(`TpchRunner.VectorFast`), as Comet's native execution converts those joins too: q9 goes to 38/42
+operators accelerated (no `SortMergeJoin` row round trips left) and q18 to 31/35. The medians of the
+verification run are not quotable -- the machine carried a load average of 6-7 and `spark`'s own
+medians rose 20-50% over the phase-4 session -- but the checksums and operator counts are
+deterministic: q14/q17/q18 agree with Spark everywhere, and q9 differs from `spark` in the last ulp
+of 3 of 175 rows because the hash join feeds the double sums in a different row order than the merge
+join did (strict floating point reproduces Spark's rounding for the same row order, not across
+different plans).
+
 ## AVX2 / AVX-512
 
 Not measured: this document is written from an Apple M3. The kernels select the platform's
