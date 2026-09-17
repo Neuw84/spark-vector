@@ -233,6 +233,17 @@ object ExpressionCompiler {
                 case None => Left(s"cast date -> timestamp needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}")
                 case Some(offset) => Right(DateToTimestampExpr(ce, offset))
               }
+            case (StringType, IntegerType | LongType | DoubleType) => Right(StringToNumberExpr(ce, to, ansi, c.origin.context))
+            case (DateType | TimestampType, StringType) =>
+              c.timeZoneId match {
+                case None => Left("cast to string without a session zone")
+                case Some(zone) => Right(DateTimeToStringExpr(ce, from == DateType, zone))
+              }
+            case (StringType, DateType | TimestampType) =>
+              c.timeZoneId match {
+                case None => Left("cast from string without a session zone")
+                case Some(zone) => Right(StringToDateTimeExpr(ce, to == TimestampType, zone, ansi, c.origin.context))
+              }
             case (_, StringType) => Right(ToStringExpr(ce))
             case _ => Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
           }
@@ -571,7 +582,7 @@ object ExpressionCompiler {
   }
 
   /** A compiled non-literal date operand. */
-  /** The casts of the first slice of #43 (the widening kernel and the decimal path keep their own cases). */
+  /** The casts of #43 (the widening kernel and the decimal path keep their own cases). */
   private def sliceOneCast(c: Cast): Boolean = (c.child.dataType, c.dataType) match {
     case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => true
     case (IntegerType | LongType | DoubleType, BooleanType) => true
@@ -579,6 +590,9 @@ object ExpressionCompiler {
     case (StringType, BooleanType) => true
     case (DateType, TimestampType) => true
     case (from, StringType) if CastExprs.stringable(from) => true
+    case (StringType, IntegerType | LongType | DoubleType) => true
+    case (DateType | TimestampType, StringType) => true
+    case (StringType, DateType | TimestampType) => true
     case _ => false
   }
 
