@@ -91,11 +91,13 @@ object VectorConf {
   /** Also hand range-partitioned exchanges (global sorts) to Comet's native shuffle. */
   def cometRangeShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometRangeShuffleEnabled, default = true)
   /**
-   * Bit-identical floating-point results to Spark's (the default), like Comet's
-   * `spark.comet.exec.strictFloatingPoint`: double sums use one accumulator per group and add rows
-   * in order, instead of lane-parallel and interleaved partial sums that round differently in the
-   * last bits. Costs about 7% of aggregate kernel time (2.5% of TPC-H Q1 at SF10); `false` buys
-   * that back for queries that never compare a double sum for equality.
+   * Bit-identical floating-point results to Spark's (the default): double sums use one accumulator
+   * per group and add rows in order, instead of lane-parallel and interleaved partial sums that
+   * round differently in the last bits. Costs about 7% of aggregate kernel time (2.5% of TPC-H Q1
+   * at SF10); `false` buys that back for queries that never compare a double sum for equality.
+   * Comet's `spark.comet.exec.strictFloatingPoint` is the analogous switch with the opposite
+   * default (`false`) and mechanism (on, Comet falls back to Spark for operations that may differ;
+   * we compute the strict result in our kernels).
    */
   def strictFloatingPoint(conf: SQLConf): Boolean = bool(conf, StrictFloatingPoint, default = true)
   def explainFallback(conf: SQLConf): Boolean = bool(conf, ExplainFallbackEnabled, default = false)
