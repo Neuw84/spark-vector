@@ -68,7 +68,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.limit.enabled` | convert `LocalLimitExec` / `GlobalLimitExec` / `CollectLimitExec` over a columnar child (no offset); batches pass through until the boundary, the collect limit's final take goes through Spark's single-partition shuffle |
 | `spark.vector.exec.union.enabled` | convert `UnionExec` when at least one child is columnar (row children go through Spark's `RowToColumnarExec`); keep it on with Spark 4.1.3, whose own columnar union concatenates co-partitioned children it reports as partition-aligned |
 | `spark.vector.exec.coalesce.enabled` | convert `CoalesceExec` over a columnar child (no shuffle, batches forwarded) |
-| `spark.vector.exec.window.enabled` | convert `WindowExec` for `row_number`, `rank` and `dense_rank` over any child (a row sort below is converted by Spark's transitions) |
+| `spark.vector.exec.window.enabled` | convert `WindowExec` for `row_number`, `rank`, `dense_rank` and whole-partition aggregates over any child (a row sort below is converted by Spark's transitions) |
 | `spark.vector.exec.sample.enabled` | convert `SampleExec` without replacement over a columnar child: Spark's own Bernoulli sequence per partition as a selection bitmap, so a seed returns Spark's rows |
 | `spark.vector.exec.localTableScan.enabled` | convert `LocalTableScanExec` (`VALUES`, local relations) into one batch per partition; **off by default** -- nothing to accelerate, it only lets small-table tests run our operators |
 | `spark.vector.exec.expand.enabled` | convert `ExpandExec` (`ROLLUP` / `CUBE` / `GROUPING SETS`, the `count(distinct)` rewrite) over a columnar child: one borrowed-column batch per grouping set, no data copy |
@@ -236,7 +236,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Conditionals | `CASE WHEN ... [ELSE] END`, `IF`, `COALESCE`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` over any supported type, with `NULL`, numeric, string and boolean literal branches; a null condition counts as false, later branches are evaluated only where earlier ones did not match | conditionals producing wide decimals or nested types |
 | Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `count_if`, `min`, `max` (incl. booleans and strings), `avg`, `first`/`last`, `bool_and`/`bool_or`, `bit_and`/`bit_or`/`bit_xor`, `max_by`/`min_by`, the statistical family (`stddev`/`variance` pop and samp, `skewness`, `kurtosis`, `covar_*`, `corr`, `regr_*`; Spark's Welford update and merge, agreement to a relative tolerance) in every aggregate mode (`Partial`, `PartialMerge`, `Final`, `Complete`), with `FILTER` clauses, `DISTINCT` (Spark's rewrites, incl. TPC-H Q16's `count(distinct)`) and keys-only aggregates (`SELECT DISTINCT`, `UNION`); `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal; Spark's `SortAggregateExec` for string buffers converted too | double keys, `stddev`/`variance`, `ObjectHashAggregateExec` functions (`collect_*`, `percentile_*`) |
 | Sort | `SORT BY`/`ORDER BY` over a columnar child, every supported type as key, in memory | sorts over Spark's row shuffle (kept by Spark), spilling |
-| Windows | `row_number`, `rank`, `dense_rank` over `PARTITION BY ... ORDER BY ...` (one walk over the sorted input; a partition longer than a batch is one partition); the child may be Spark's row sort | aggregate windows, `lag`/`lead`/`first_value`, `percent_rank`/`cume_dist`/`ntile`, `WindowGroupLimitExec` (#58 layers 2-4) |
+| Windows | `row_number`, `rank`, `dense_rank` over `PARTITION BY ... ORDER BY ...` (one walk over the sorted input; a partition longer than a batch is one partition); whole-partition `sum`/`avg`/`count`/`min`/`max` and the rest of the aggregate family over non-decimal inputs (the default frame without `ORDER BY`, or `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`); the child may be Spark's row sort | running and sliding frames, decimal window aggregates (#28), `lag`/`lead`/`first_value`, `percent_rank`/`cume_dist`/`ntile`, `WindowGroupLimitExec` (#58) |
 | Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti, existence (`EXISTS` as a value), each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
 
 ## Benchmarks
@@ -393,7 +393,11 @@ partition where a partition key changes, a new peer group where an order key cha
 across batches -- and forwards every input column. The child may be Spark's row sort: `Window` sits
 above `Sort` above an exchange, and without a columnar shuffle that sort stays Spark's, so Spark
 converts rows to columns below us and the filter on the rank and everything above it run columnar.
-Aggregate windows, offset functions and `WindowGroupLimitExec` are the next layers.
+Whole-partition aggregates (`sum(x) OVER (PARTITION BY k)`: the default frame without `ORDER BY`) reuse
+the grouped aggregate functions with each partition as a group -- the value is computed exactly as the
+Final aggregate computes it -- and hold a partition's rows in memory until it ends, since the value is
+known only then. Decimal window aggregates wait for the 128-bit lane (#28); running and sliding frames,
+offset functions and `WindowGroupLimitExec` are the next layers.
 
 `ROLLUP`, `CUBE` and `GROUPING SETS` (and the rewrite Spark applies to `count(distinct)`) go through
 `ExpandExec`, which duplicates every row once per grouping set with the unused keys nulled and a

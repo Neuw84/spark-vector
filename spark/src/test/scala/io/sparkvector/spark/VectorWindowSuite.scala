@@ -53,14 +53,38 @@ class VectorWindowSuite extends VectorQuerySuite {
       Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
   }
 
+  test("whole-partition aggregates equal Spark: sum, avg, count, min, max over every partition shape") {
+    // The default frame without ORDER BY is the whole partition; s is null for one row in ten.
+    checkWindow("SELECT i, s, sum(l) OVER (PARTITION BY s) AS total, avg(l) OVER (PARTITION BY s) AS mean, count(*) OVER (PARTITION BY s) AS n FROM t")
+    checkWindow("SELECT i, min(d) OVER (PARTITION BY i % 7) AS lo, max(d) OVER (PARTITION BY i % 7) AS hi, count(nullif(l % 3, 0)) OVER (PARTITION BY i % 7) AS nn FROM t")
+    checkWindow("SELECT i, sum(i) OVER (PARTITION BY b, dt) AS total, avg(d) OVER (PARTITION BY b, dt) AS mean, max(s) OVER (PARTITION BY b, dt) AS last_s FROM t")
+    // The explicit whole-partition frame beside an ORDER BY is the same computation.
+    checkWindow("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t")
+    // No PARTITION BY: one partition of 20000 rows across several held batches, released at the end.
+    checkWindow("SELECT i, sum(l) OVER () AS total, count(*) OVER () AS n, avg(i) OVER () AS mean FROM t")
+    // Partitions of 4000 rows straddle batch boundaries; a batch is held until its last partition ends.
+    checkWindow("SELECT i, sum(l) OVER (PARTITION BY i DIV 4000) AS total, min(i) OVER (PARTITION BY i DIV 4000) AS lo FROM t")
+    // Empty-input partition (no rows survive the filter) and the chain above: filter, then group by the value.
+    checkWindow(
+      "SELECT total, count(*) AS n FROM (SELECT i, sum(l) OVER (PARTITION BY i % 5) AS total FROM t WHERE l % 2 = 0) w GROUP BY total",
+      Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
+    // Ranking and an aggregate in one query are two operators (different specs), both ours.
+    val both = checkWindow("SELECT i, rank() OVER (PARTITION BY s ORDER BY l) AS rk, sum(l) OVER (PARTITION BY s) AS total FROM t")
+    assert(nodesOf[VectorWindowExec](both).length === 2, finalPlan(both).treeString)
+  }
+
   test("other window functions and frames fall back with a reason; the operator can be disabled") {
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over a frame not supported")
-    checkFallback("SELECT i, avg(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM t", Seq(Window), "window aggregate avg")
+    checkFallback("SELECT i, avg(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM t", Seq(Window), "window aggregate avg over frame")
+    // The default frame with an ORDER BY is RANGE ... CURRENT ROW: a running aggregate, not a whole-partition one.
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "window aggregate sum over frame")
+    checkFallback("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over decimals not supported")
+    checkFallback("SELECT i, approx_count_distinct(l) OVER (PARTITION BY s) AS n FROM t", Seq(Window), "window aggregate approx_count_distinct:")
     checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous FROM t", Seq(Window), "window function lag not supported")
     checkFallback("SELECT i, percent_rank() OVER (PARTITION BY s ORDER BY i) AS pr FROM t", Seq(Window), "window function percent_rank not supported")
     checkFallback("SELECT i, rank() OVER (PARTITION BY d ORDER BY i) AS rk FROM t", Seq(Window), "double keys not supported")
-    // A ranking function beside an unsupported one in the same spec keeps the whole operator Spark's.
-    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "window aggregate sum")
+    // A ranking function beside an aggregate in the same spec keeps the whole operator Spark's.
+    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "window aggregate sum over frame")
+    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t", Seq(Window), "window aggregate sum over a frame not supported")
     withConf("spark.vector.exec.window.enabled" -> "false") {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk FROM t"); d.collect(); d }
       assert(nodesOf[WindowExec](df).nonEmpty && nodesOf[VectorWindowExec](df).isEmpty, finalPlan(df).treeString)
