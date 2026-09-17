@@ -71,8 +71,8 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.sample.enabled` | convert `SampleExec` without replacement over a columnar child: Spark's own Bernoulli sequence per partition as a selection bitmap, so a seed returns Spark's rows |
 | `spark.vector.exec.localTableScan.enabled` | convert `LocalTableScanExec` (`VALUES`, local relations) into one batch per partition; **off by default** -- nothing to accelerate, it only lets small-table tests run our operators |
 | `spark.vector.exec.expand.enabled` | convert `ExpandExec` (`ROLLUP` / `CUBE` / `GROUPING SETS`, the `count(distinct)` rewrite) over a columnar child: one borrowed-column batch per grouping set, no data copy |
-| `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
-| `spark.vector.exec.broadcastNestedLoopJoin.enabled` | convert `BroadcastNestedLoopJoinExec` (non-equi joins) when the streamed side is columnar; inner/cross, semi/anti/existence and outer joins with the streamed side preserved |
+| `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar or an exchange (the build side stays Spark's broadcast) |
+| `spark.vector.exec.broadcastNestedLoopJoin.enabled` | convert `BroadcastNestedLoopJoinExec` (non-equi joins) when the streamed side is columnar or an exchange; inner/cross, semi/anti/existence and outer joins with the streamed side preserved |
 | `spark.vector.join.maxBuildSize` | largest build side (bytes or a size string) the hash-style joins convert for -- they hold it in memory per task; default 1 GiB, or `spark.memory.offHeap.size / spark.executor.cores` when off-heap is configured; larger estimates stay with Spark, unknown estimates convert |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.exec.sortMergeJoin.enabled` | **off by default**; re-express `SortMergeJoinExec` as our shuffled hash join when the smaller side's statistics fit `spark.vector.join.maxBuildSize` and no parent relies on the merge's ordering (#10) |
@@ -419,7 +419,9 @@ mode, null otherwise), so a wide decimal sum runs on our operators in both stage
 
 ### Joins
 
-`BroadcastHashJoinExec` becomes `VectorBroadcastHashJoinExec` when the streamed side is columnar,
+`BroadcastHashJoinExec` becomes `VectorBroadcastHashJoinExec` when the streamed side is columnar or
+an exchange (adaptive execution re-plans a shuffled join as a broadcast join over the bare shuffle
+read; Spark converts it below us as for the shuffled hash join),
 and `BroadcastNestedLoopJoinExec` (a join with no equi-keys) becomes `VectorBroadcastNestedLoopJoinExec`:
 the same iterator with every broadcast row a candidate, the streamed rows chunked to a fixed pair
 budget so the condition is evaluated over gathered pairs and the product is never materialised.

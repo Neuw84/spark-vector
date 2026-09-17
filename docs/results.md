@@ -504,6 +504,11 @@ verdict is the next step), five whose other input is a row operator left to Spar
 name the sort-merge join as their blocker some sixty times; the flag is how to see which of those it
 lifts.
 
+Refreshed after the broadcast join learned to stream from a bare shuffle read (#98; the shape adaptive
+execution leaves when it re-plans a shuffled join as a broadcast join at runtime): **3042 of 4736
+operators ours (64%)** by default, 41 queries at 75% or more, 14 queries up (q6 17/33 to 24/33, q23a
+43/82 to 57/82, q23b 58/118 to 77/118, q14a 178/357 to 199/357), none down, all 103 checksums equal.
+
 **Correctness: q66 returned every row twice (#162), now fixed.** The two channel aggregates of
 q66 are ours and emit a `decimal(28,2)` sum (#87); the union above refused that type and stayed Spark's,
 whose columnar `UnionExec` concatenates (the #128 upstream bug), so the aggregate planned without a

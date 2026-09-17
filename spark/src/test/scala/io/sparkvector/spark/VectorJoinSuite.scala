@@ -308,4 +308,24 @@ class VectorJoinSuite extends VectorQuerySuite {
       checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "no size statistics")
     }
   }
+
+  test("a broadcast join whose streamed side is a bare shuffle read is ours (AQE's runtime broadcast conversion)") {
+    import org.apache.spark.sql.execution.RowToColumnarExec
+    import org.apache.spark.sql.execution.adaptive.AQEShuffleReadExec
+    // No broadcast at planning time (a shuffled join is planned), but adaptive execution sees the dimension's
+    // real size and re-plans the join as a broadcast join at runtime: the streamed side is then the bare
+    // shuffle read of the fact table, which Spark converts below us with RowToColumnarExec as it does for
+    // the shuffled hash join. Eleven TPC-DS queries at SF1 have this shape.
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.adaptive.autoBroadcastJoinThreshold" -> "10MB") {
+      val df = checkVectorized("SELECT tk.i, tk.l, dim.name FROM tk JOIN dim ON tk.i50 = dim.di WHERE tk.i < 4000", Seq(BHJ))
+      val bhj = nodesOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec](df)
+      assert(bhj.nonEmpty && nodesOf[org.apache.spark.sql.execution.joins.BroadcastHashJoinExec](df).isEmpty, finalPlan(df).treeString)
+      val streamed = if (bhj.head.buildSide == org.apache.spark.sql.catalyst.optimizer.BuildRight) bhj.head.left else bhj.head.right
+      assert(streamed.isInstanceOf[RowToColumnarExec] && streamed.children.head.isInstanceOf[AQEShuffleReadExec], finalPlan(df).treeString)
+      // Everything above the join stays columnar and ours: the aggregate no longer falls back on "child ... is not columnar".
+      checkVectorized("SELECT dim.name, count(*) AS n, sum(tk.l) AS s FROM tk JOIN dim ON tk.i50 = dim.di GROUP BY dim.name", Seq(BHJ, classOf[VectorHashAggregateExec]))
+      checkVectorized("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.l = dim.dl AND dim.weight > tk.d WHERE tk.i < 3000", Seq(BHJ))
+      checkVectorized("SELECT tk.i FROM tk LEFT SEMI JOIN dim ON tk.i50 = dim.di", Seq(BHJ))
+    }
+  }
 }

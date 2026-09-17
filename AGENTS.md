@@ -304,7 +304,9 @@ that pin it.
 
 ### 3.6b Joins
 
-- `VectorBroadcastHashJoinExec` replaces `BroadcastHashJoinExec` when the streamed side is columnar;
+- `VectorBroadcastHashJoinExec` replaces `BroadcastHashJoinExec` when the streamed side is columnar or
+  an exchange (`exchangeInputReason`, like the shuffled hash join: AQE's runtime broadcast conversion
+  leaves the streamed side as a bare `AQEShuffleRead`, which refused eleven TPC-DS queries' chains, #98);
   the build side is deliberately left as Spark's `BroadcastExchangeExec`/`HashedRelation`. Each task
   reads the relation's rows once into columns (`HashedRelationAccess` in
   `org.apache.spark.sql.execution.vector`, the relation being `private[execution]`;
@@ -537,7 +539,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 207 Spark tests (180 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 208 Spark tests (181 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
