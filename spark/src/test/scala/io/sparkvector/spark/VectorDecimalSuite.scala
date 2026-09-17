@@ -36,6 +36,17 @@ class VectorDecimalSuite extends VectorQuerySuite {
       .mode("overwrite")
       .parquet(path)
     spark.read.parquet(path).createOrReplaceTempView("t")
+    // Four rows near 10^38 in four partitions: any two of them summed leave the 38-digit result type
+    // of sum(decimal(38,0)) (p + 10 capped at 38), so the merge overflows while every partial fits.
+    val widePath = newTempPath("decimal/wide")
+    spark
+      .range(0, 4)
+      .selectExpr("cast(id as int) as i", "cast('99999999999999999999999999999999999990' as decimal(38,0)) + cast(id as decimal(38,0)) as v")
+      .repartition(4)
+      .write
+      .mode("overwrite")
+      .parquet(widePath)
+    spark.read.parquet(widePath).createOrReplaceTempView("wide")
   }
 
   /** Both runs, compared exactly on the string form of every value, order-insensitively. */
@@ -108,12 +119,9 @@ class VectorDecimalSuite extends VectorQuerySuite {
   test("results wider than 18 digits fall back with a reason") {
     checkFallback("SELECT dec12 * dec12 AS x FROM t WHERE i > 5", Seq(Project), "exceeds 18 digits")
     checkFallback("SELECT dec12 / dec7 AS x FROM t WHERE dec7 > 1", Seq(Project), "exceeds 18 digits")
-    // The merge side of a wide decimal sum is Spark's for now (#87): the Final stage falls back
-    // with its reason while our Partial runs.
-    val df = withPlugin(enabled = true) { val d = spark.sql("SELECT sum(dec12) FROM t"); d.collect(); d }
-    assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](df).nonEmpty, finalPlan(df).treeString)
-    val reasons = VectorFallback.reasons(finalPlan(df)).map(_._2)
-    assert(reasons.exists(r => r.contains("decimal(22,2)") || r.contains("2-column buffer")), reasons.mkString("; "))
+    // A wide decimal is accepted in exactly two places: the sum buffer a merge reads and the sum's
+    // result. Any other wide column still refuses the operator.
+    checkFallback("SELECT k, sum(dec12) * 2 AS x FROM t GROUP BY k", Seq(Project), "exceeds 18 digits")
   }
 
   test("aggregates over decimals: sum, avg, min, max, count, grouped and not") {
@@ -127,13 +135,13 @@ class VectorDecimalSuite extends VectorQuerySuite {
     checkVectorized("SELECT dec12, i FROM t SORT BY dec12 DESC", Seq(Sort))
   }
 
-  test("wide decimal sums: our Partial in 128 bits, Spark's Final merging the (sum, isEmpty) buffer") {
+  test("wide decimal sums: our Partial in 128 bits, our Final merging the (sum, isEmpty) buffer") {
     import org.apache.spark.sql.execution.aggregate.HashAggregateExec
     def partialOurs(sql: String): Unit = {
       val df = checkVectorized(sql, Seq(Agg))
       val ours = nodesOf[VectorHashAggregateExec](df)
-      assert(ours.exists(a => !a.isFinal), finalPlan(df).treeString)
-      assert(nodesOf[HashAggregateExec](df).nonEmpty, "Spark's Final should merge the wide buffer\n" + finalPlan(df).treeString)
+      assert(ours.exists(a => !a.isFinal) && ours.exists(_.isFinal), finalPlan(df).treeString)
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "both stages should be ours\n" + finalPlan(df).treeString)
       // The buffer the Partial emits is Spark's: a wide sum and isEmpty.
       assert(ours.filter(!_.isFinal).forall(_.output.exists(a => a.dataType.isInstanceOf[org.apache.spark.sql.types.DecimalType] && a.dataType.asInstanceOf[org.apache.spark.sql.types.DecimalType].precision > 18)), finalPlan(df).treeString)
     }
@@ -148,13 +156,39 @@ class VectorDecimalSuite extends VectorQuerySuite {
       "SELECT k, sum(big) FROM t WHERE i % 11 = 0 GROUP BY k",
       "SELECT sum(big) FROM t WHERE i % 11 = 0",
       // Mixed with the long-sum rewrite and other functions in the same operator.
-      "SELECT k, sum(dec7), sum(dec12), avg(dec7), max(big), count(*) FROM t GROUP BY k").foreach { sql =>
+      "SELECT k, sum(dec7), sum(dec12), avg(dec7), max(big), count(*) FROM t GROUP BY k",
+      // FILTER clauses: groups empty in every partition, and partially filtered ones.
+      "SELECT k, sum(big) FILTER (WHERE i < 0) AS none, sum(big) FILTER (WHERE i % 3 = 0) AS some FROM t GROUP BY k",
+      "SELECT sum(big) FILTER (WHERE i < 0), sum(dec12) FILTER (WHERE i > 19990) FROM t").foreach { sql =>
       checkExact(sql, Seq(Agg))
       partialOurs(sql)
     }
     // The sum really leaves 64 bits: the exact value, and the row count that gets it there.
     val total = spark.sql("SELECT sum(big) FROM t").collect().head.getDecimal(0)
     assert(total.unscaledValue().abs().bitLength() > 63, total.toString)
+  }
+
+  test("a wide sum past its declared precision: Spark's error in ANSI mode, null otherwise") {
+    // Each partition's partial fits; the merge of two rows does not. Spark's own Partial produces the
+    // buffers (the 38-digit input has no lane); our Final merges them and applies the overflow rule.
+    withPlugin(enabled = true) {
+      // Spark's Partial adds with null-on-overflow and leaves the raising to CheckOverflowInSum, so
+      // depending on how the scan is partitioned the merge sees a null buffer (ARITHMETIC_OVERFLOW,
+      // "Overflow in sum of decimals") or a total past 38 digits (NUMERIC_VALUE_OUT_OF_RANGE).
+      val e = intercept[Exception](spark.sql("SELECT sum(v) FROM wide").collect())
+      assert(causes(e).exists(t => t.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE") || t.getMessage.contains("ARITHMETIC_OVERFLOW")), s"expected an overflow error, got $e")
+      val sparkError = withPlugin(enabled = false)(intercept[Exception](spark.sql("SELECT sum(v) FROM wide").collect()))
+      assert(causes(sparkError).exists(t => t.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE") || t.getMessage.contains("ARITHMETIC_OVERFLOW")))
+      val df = spark.sql("SELECT sum(v) FROM wide WHERE i = 2")
+      assert(df.collect().head.getDecimal(0).toPlainString === "99999999999999999999999999999999999992")
+      assert(nodesOf[VectorHashAggregateExec](df).exists(_.isFinal), finalPlan(df).treeString)
+    }
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      val df = checkVectorized("SELECT sum(v) FROM wide", Seq(Agg))
+      assert(df.collect().head.isNullAt(0))
+      checkExact("SELECT i % 2 AS g, sum(v) FROM wide GROUP BY i % 2", Seq(Agg))
+      checkExact("SELECT sum(v) FROM wide WHERE i = 2", Seq(Agg))
+    }
   }
 
   test("both aggregate stages are ours for a decimal sum") {
