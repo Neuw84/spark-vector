@@ -86,6 +86,29 @@ public final class StringConcatKernels {
     return offsets;
   }
 
+  /**
+   * A UTF8 lane from per-row byte arrays -- the escape hatch for a per-row string result computed
+   * outside the kernels (a digest, a formatter). A null entry is a null row; {@code validity}, when
+   * given, is ANDed with the entries' presence.
+   */
+  public static SegmentVectorBuffers fromRows(byte[][] rows, MemorySegment validity, Arena arena) {
+    int n = rows.length;
+    MemorySegment out = ArrowLayout.allocateBitmap(arena, n);
+    long[] lengths = new long[n];
+    for (int i = 0; i < n; i++) {
+      if (rows[i] == null || !live(validity, i)) continue;
+      Bitmap.set(out, i);
+      lengths[i] = rows[i].length;
+    }
+    MemorySegment offsets = offsetsOf(lengths, n, arena);
+    MemorySegment data = ArrowLayout.allocateBytes(arena, offsets.getAtIndex(VectorBuffers.LE_INT, n));
+    for (int i = 0; i < n; i++) {
+      if (lengths[i] == 0) continue;
+      MemorySegment.copy(MemorySegment.ofArray(rows[i]), 0, data, offsets.getAtIndex(VectorBuffers.LE_INT, i), rows[i].length);
+    }
+    return SegmentVectorBuffers.utf8(n, out, offsets, data);
+  }
+
   /** {@code concat(parts...)}: {@code validity} is the AND of the parts' validities (the caller's). */
   public static SegmentVectorBuffers concat(Part[] parts, int n, MemorySegment validity, Arena arena) {
     long[] lengths = new long[n];

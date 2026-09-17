@@ -86,7 +86,7 @@ final case class XxHash64Expr(children: Seq[VectorExpr], types: Seq[DataType], s
 }
 
 object XxHash64Expr {
-  private val INT = 0; private val LONG = 1; private val DOUBLE = 2; private val BOOL = 3; private val UTF8 = 4
+  private[expr] val INT = 0; private[expr] val LONG = 1; private[expr] val DOUBLE = 2; private[expr] val BOOL = 3; private[expr] val UTF8 = 4
 
   def supports(dt: DataType): Boolean = dt match {
     case IntegerType | DateType | LongType | TimestampType | DoubleType | BooleanType | StringType => true
@@ -94,7 +94,7 @@ object XxHash64Expr {
     case _ => false
   }
 
-  private def kindOf(dt: DataType): Int = dt match {
+  private[expr] def kindOf(dt: DataType): Int = dt match {
     case IntegerType | DateType => INT
     case LongType | TimestampType | _: DecimalType => LONG
     case DoubleType => DOUBLE

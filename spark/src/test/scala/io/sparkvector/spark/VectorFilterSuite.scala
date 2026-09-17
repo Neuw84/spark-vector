@@ -123,7 +123,7 @@ class VectorFilterSuite extends VectorQuerySuite {
     // Inner wildcards are left as Like by the optimizer; 's%1' becomes Length(s) >= 2 AND ... which needs Length.
     checkFallback("SELECT * FROM t WHERE s LIKE 's%1%2'", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE s LIKE 's_'", Seq(Filter), "unsupported expression")
-    checkFallback("SELECT * FROM t WHERE hash(i) = 2", Seq(Filter), "unsupported expression")
+    checkFallback("SELECT * FROM t WHERE soundex(s) = 'S000'", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE s = reverse(s)", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE startswith(s, s)", Seq(Filter), "string pattern is not a literal")
     // The optimizer turns a long IN list into InSet; one holding NULL still falls back (Spark's result is null for non-members).
