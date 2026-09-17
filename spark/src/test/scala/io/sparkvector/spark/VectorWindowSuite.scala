@@ -142,6 +142,19 @@ class VectorWindowSuite extends VectorQuerySuite {
       Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
   }
 
+  test("percent_rank, cume_dist and ntile equal Spark, and ranking functions beside offsets share one operator") {
+    // Ties share values; a null partition key; single-row partitions (i % 7 with a narrow filter).
+    checkWindow("SELECT i, l, percent_rank() OVER (PARTITION BY s ORDER BY l % 5) AS pr, cume_dist() OVER (PARTITION BY s ORDER BY l % 5) AS cd FROM t")
+    checkWindow("SELECT i, ntile(4) OVER (PARTITION BY s ORDER BY l, i) AS q4, ntile(1) OVER (PARTITION BY s ORDER BY l, i) AS q1, ntile(1000) OVER (PARTITION BY i % 7 ORDER BY i) AS many FROM t")
+    checkWindow("SELECT i, percent_rank() OVER (PARTITION BY i ORDER BY l) AS single, cume_dist() OVER (PARTITION BY i ORDER BY l) AS one, ntile(3) OVER (PARTITION BY i ORDER BY l) AS b FROM t WHERE i < 50",
+      Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
+    // One 20000-row partition across batches; buckets that do not divide the size.
+    checkWindow("SELECT i, percent_rank() OVER (ORDER BY i % 100) AS pr, cume_dist() OVER (ORDER BY i % 100) AS cd, ntile(7) OVER (ORDER BY i) AS b FROM t")
+    // Ranking functions beside offsets in one spec: the held-partition path computes all of them.
+    checkWindow("SELECT i, row_number() OVER (PARTITION BY s ORDER BY l % 5, i) AS rn, rank() OVER (PARTITION BY s ORDER BY l % 5, i) AS rk, dense_rank() OVER (PARTITION BY s ORDER BY l % 5, i) AS dr, lag(l) OVER (PARTITION BY s ORDER BY l % 5, i) AS prev, percent_rank() OVER (PARTITION BY s ORDER BY l % 5, i) AS pr FROM t")
+    checkWindow("SELECT i, dense_rank() OVER (PARTITION BY i % 7 ORDER BY l % 3) AS dr, rank() OVER (PARTITION BY i % 7 ORDER BY l % 3) AS rk, first_value(l) OVER (PARTITION BY i % 7 ORDER BY l % 3) AS f FROM t")
+  }
+
   test("other window functions and frames fall back with a reason; the operator can be disabled") {
     // Sliding frames, a running frame of a function without a prefix form, and two frame kinds in one operator.
     checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS moving FROM t", Seq(Window), "window aggregate sum over frame")
@@ -150,10 +163,9 @@ class VectorWindowSuite extends VectorQuerySuite {
     checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS byrows FROM t", Seq(Window), "different frames in one operator")
     checkFallback("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over decimals not supported")
     checkFallback("SELECT i, approx_count_distinct(l) OVER (PARTITION BY s) AS n FROM t", Seq(Window), "window aggregate approx_count_distinct:")
-    checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, rank() OVER (PARTITION BY s ORDER BY i) AS rk FROM t", Seq(Window), "offset functions beside other window functions")
+    checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "offset functions beside other window functions")
     checkFallback("SELECT i, lag(l, 1) IGNORE NULLS OVER (PARTITION BY s ORDER BY i) AS previous FROM t", Seq(Window), "IGNORE NULLS not supported")
     checkFallback("SELECT i, first_value(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS f FROM t", Seq(Window), "first_value over frame")
-    checkFallback("SELECT i, percent_rank() OVER (PARTITION BY s ORDER BY i) AS pr FROM t", Seq(Window), "window function percent_rank not supported")
     checkFallback("SELECT i, rank() OVER (PARTITION BY d ORDER BY i) AS rk FROM t", Seq(Window), "double keys not supported")
     // A ranking function beside an aggregate in the same spec keeps the whole operator Spark's.
     checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "beside a ranking function in one operator")
