@@ -74,7 +74,7 @@ that pin it.
   Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the adapters +
   `ArrowOutput` + tests at all three vector widths.
 - Decimals ride on INT64 with the scale kept in the Spark type (`DecimalArithExpr`,
-  `DecimalCastExpr`, `UnscaledValueExpr`, `MakeDecimalExpr` in `expr/DecimalExprs.scala`;
+  `DecimalCastExpr` (also serving `CheckOverflow`, which Spark 4.1 no longer leaves in batch plans), `UnscaledValueExpr`, `MakeDecimalExpr` in `expr/DecimalExprs.scala`;
   `DecimalKernels` for rescaling, range checks and Spark-exact division). Spark's result types for
   `+ - *` leave room for every result so only `/` and casts check ranges. Output decimals are
   `VectorDecimalColumnVector` over a `BigIntVector` (Arrow's own `DecimalVector` is 128-bit and
@@ -483,7 +483,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 188 Spark tests (161 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 190 Spark tests (163 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
