@@ -266,6 +266,30 @@ class VectorProjectSuite extends VectorQuerySuite {
     }
   }
 
+  test("date_format, from_unixtime, unix_timestamp and date_trunc") {
+    val units = Seq("MICROSECOND", "MILLISECOND", "SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR", "yy", "mon", "dd")
+    for (zone <- Seq("UTC", "+05:30", "-03:00")) {
+      withConf("spark.sql.session.timeZone" -> zone) {
+        checkVectorized("SELECT date_format(ts, 'yyyy-MM-dd HH:mm:ss.SSSSSS') AS a, date_format(ts, 'EEEE, d MMM yyyy h:mm a') AS b, date_format(ts, 'Q/D/y XXX') AS c, date_format(d0, 'yyyy-MM-dd EEE') AS d1, from_unixtime(CAST(i AS BIGINT) * 100001 - 250000000) AS e0, from_unixtime(CAST(i AS BIGINT) * 3600, 'HH:mm dd/MM/yyyy') AS f, unix_timestamp(ts) AS g, unix_timestamp(d0) AS h, to_unix_timestamp(ts, 'yyyy') AS j, to_unix_timestamp(d0) AS k FROM ts", Seq(Project))
+        checkVectorized("SELECT " + units.zipWithIndex.map { case (u, k) => s"date_trunc('$u', ts) AS t$k" }.mkString(", ") + ", date_trunc('MONTH', d0) AS dm, date_trunc('week', d0) AS dw FROM ts", Seq(Project))
+      }
+    }
+    // A zone with rules: Spark's formatter handles a timestamp; a date's instant and date_trunc are ours and fall back.
+    withConf("spark.sql.session.timeZone" -> "America/New_York") {
+      checkVectorized("SELECT date_format(ts, 'yyyy-MM-dd HH:mm:ss zzz XXX') AS a, from_unixtime(CAST(i AS BIGINT) * 86400 * 30) AS b, unix_timestamp(ts) AS c FROM ts", Seq(Project))
+      checkFallback("SELECT date_format(d0, 'yyyy-MM-dd') AS a FROM ts", Seq(Project), "fixed-offset session zone")
+      checkFallback("SELECT unix_timestamp(d0) AS a FROM ts", Seq(Project), "fixed-offset session zone")
+      checkFallback("SELECT date_trunc('HOUR', ts) AS a FROM ts", Seq(Project), "fixed-offset session zone")
+    }
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT count(*) AS n FROM ts WHERE date_format(ts, 'HH') = '07' AND unix_timestamp(ts) % 2 = 0", Seq(Filter, classOf[VectorHashAggregateExec]))
+    checkVectorized("SELECT date_trunc('MONTH', ts) AS m, date_format(ts, 'yyyy-MM') AS k, count(*) AS n FROM ts GROUP BY date_trunc('MONTH', ts), date_format(ts, 'yyyy-MM')", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: parsing a string, a non-literal pattern, an unknown truncation unit (Spark gives null).
+    checkFallback("SELECT unix_timestamp(CAST(d0 AS STRING), 'yyyy-MM-dd') AS a FROM ts", Seq(Project), "parsing a string")
+    checkFallback("SELECT date_format(ts, CASE WHEN i % 2 = 0 THEN 'yyyy' ELSE 'MM' END) AS a FROM ts", Seq(Project), "non-literal pattern")
+    checkFallback("SELECT date_trunc('DECADE', ts) AS a FROM ts", Seq(Project), "not supported")
+  }
+
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {
     // hash must be Spark's exact Murmur3 -- every supported type incl. nulls, NaN, -0.0, dates, timestamps, short decimals, several columns, a seed.
     checkVectorized("SELECT hash(i) AS a, hash(l) AS b, hash(d) AS c, hash(d2) AS d0, hash(b) AS e0, hash(s) AS f, hash(dt) AS g, hash(CAST(d2 AS DECIMAL(10, 2))) AS h, hash(i, l, s, b, d) AS j, hash(-0.0d * i) AS k FROM t", Seq(Project))
