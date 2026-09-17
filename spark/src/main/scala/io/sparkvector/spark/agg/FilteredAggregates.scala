@@ -15,6 +15,7 @@ import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, 
  */
 final case class FilteredAgg(inner: VectorAggFunction, predicate: VectorExpr) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = inner.bufferTypes
+  override def emittedTypes(declared: Seq[DataType]): Seq[DataType] = inner.emittedTypes(declared)
 
   override def newState(): AggState = new AggState {
     private val s = inner.newState()
