@@ -299,48 +299,8 @@ private[vector] class VectorGroupedAggregateIterator(
     }
   }
 
-  private def bufferColumn(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int): ColumnVector = {
-    val count = to - from
-    dt match {
-      case d: DecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION =>
-        // The sum buffer of a wide decimal sum: boxed exact totals into Arrow's 128-bit vector.
-        val values = new Array[java.math.BigDecimal](count)
-        var o = 0
-        while (o < count) { values(o) = state.bufferValue(from + o, slot).asInstanceOf[java.math.BigDecimal]; o += 1 }
-        return ArrowOutput.decimalColumn(name, d, values, allocator)
-      case org.apache.spark.sql.types.StringType =>
-        // min/max, first/last, min_by/max_by over strings: boxed UTF8Strings into a varchar vector.
-        val values = new Array[Array[Byte]](count)
-        var o = 0
-        while (o < count) {
-          val v = state.bufferValue(from + o, slot)
-          values(o) = if (v == null) null else v.asInstanceOf[org.apache.spark.unsafe.types.UTF8String].getBytes
-          o += 1
-        }
-        return ArrowOutput.utf8Column(name, values, allocator)
-      case _ =>
-    }
-    val out: ArrowVectorBuffers = ArrowOutput.allocateFixed(name, dt, count, allocator)
-    val data = out.data()
-    val validity = out.validity()
-    var o = 0
-    while (o < count) {
-      state.bufferValue(from + o, slot) match {
-        case null => io.sparkvector.kernels.Bitmap.clear(validity, o)
-        case v: java.lang.Double =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())
-        case v: java.lang.Long =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
-        case v: java.lang.Integer =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
-        case v: java.lang.Boolean =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); io.sparkvector.kernels.Bitmap.setTo(data, o, v.booleanValue())
-        case other => throw new IllegalStateException(s"unexpected buffer value $other")
-      }
-      o += 1
-    }
-    ArrowOutput.finish(out, count, false)
-  }
+  private def bufferColumn(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int): ColumnVector =
+    AggBufferColumns.column(name, dt, state, slot, from, to, allocator)
 
   private def releaseCurrent(): Unit = {
     if (current != null) { current.close(); current = null }
@@ -542,5 +502,51 @@ object VectorAggregatePlanner {
         }
       }
     }
+  }
+}
+
+/** Boxed buffer values of a run of groups `[from, to)` as one Arrow column; shared with the window aggregate. */
+object AggBufferColumns {
+  def column(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int, allocator: BufferAllocator): ColumnVector = {
+    val count = to - from
+    dt match {
+      case d: DecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION =>
+        // The sum buffer of a wide decimal sum: boxed exact totals into Arrow's 128-bit vector.
+        val values = new Array[java.math.BigDecimal](count)
+        var o = 0
+        while (o < count) { values(o) = state.bufferValue(from + o, slot).asInstanceOf[java.math.BigDecimal]; o += 1 }
+        return ArrowOutput.decimalColumn(name, d, values, allocator)
+      case org.apache.spark.sql.types.StringType =>
+        // min/max, first/last, min_by/max_by over strings: boxed UTF8Strings into a varchar vector.
+        val values = new Array[Array[Byte]](count)
+        var o = 0
+        while (o < count) {
+          val v = state.bufferValue(from + o, slot)
+          values(o) = if (v == null) null else v.asInstanceOf[org.apache.spark.unsafe.types.UTF8String].getBytes
+          o += 1
+        }
+        return ArrowOutput.utf8Column(name, values, allocator)
+      case _ =>
+    }
+    val out: ArrowVectorBuffers = ArrowOutput.allocateFixed(name, dt, count, allocator)
+    val data = out.data()
+    val validity = out.validity()
+    var o = 0
+    while (o < count) {
+      state.bufferValue(from + o, slot) match {
+        case null => io.sparkvector.kernels.Bitmap.clear(validity, o)
+        case v: java.lang.Double =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())
+        case v: java.lang.Long =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
+        case v: java.lang.Integer =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+        case v: java.lang.Boolean =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); io.sparkvector.kernels.Bitmap.setTo(data, o, v.booleanValue())
+        case other => throw new IllegalStateException(s"unexpected buffer value $other")
+      }
+      o += 1
+    }
+    ArrowOutput.finish(out, count, false)
   }
 }

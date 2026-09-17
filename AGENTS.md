@@ -280,6 +280,16 @@ that pin it.
   inserts `RowToColumnarExec`. `VectorWindowPlanner.rankKind` refuses everything else with a reason naming
   the function; double keys are refused like join keys. `WindowGroupLimitExec` (Spark's top-K below the
   window, inserted for `rank <= k` filters) is not converted yet and sits as a row operator below us.
+  Layer 2, `VectorWindowAggregateIterator`: whole-partition frames (`SpecifiedWindowFrame(_, UnboundedPreceding,
+  UnboundedFollowing)`, Complete mode, no FILTER) reuse `VectorAggregates.compile` + `GroupedAggState` with
+  the partition ordinal as the group id (`GroupAssignment.of(ids, n, numGroups, arena, selection)`, ids
+  cumulative across batches), `AggBufferColumns.column` (shared with the hash aggregate) to lay a run of
+  partitions' buffers out as a batch, `compileFinalResults(Nil, aggs, resultAttrs, resultAttrs)` for the
+  values and `ArrowOutput.gather` to spread them over the rows. Batches are held as copies
+  (`ArrowOutput.copy` / `compact`) until their last row's partition has ended. Decimal aggregates are
+  refused: the Complete-mode decimal sum buffer is wide and `compileFinalResults`'s wide-sum shortcut
+  assumes a merge emitted the result -- gate on #28. The two modes never mix in one operator (a ranking
+  function needs `ORDER BY`, whose default frame is `RANGE ... CURRENT ROW`).
 - `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
   way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
   per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
@@ -555,7 +565,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 212 Spark tests (185 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 213 Spark tests (186 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
