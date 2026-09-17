@@ -348,7 +348,9 @@ aggregate stage boundaries are available to a JVM operator.
 - Adaptation of Spark's on-heap vectors. Reading Spark's `double[]` in place as a heap
   `MemorySegment` was tried and made the kernels twice as slow (the Vector API's heap-segment
   path is not intrinsified as well as the native one), so the batch is copied into native memory
-  once per operator chain; Q6 shows that copy is about half of the filter's cost. Comet's scan
+  once per operator chain; Q6 shows that copy is about half of the filter's cost -- and on Q6 the
+  copy is a *dictionary decode*, since Parquet writers dictionary-encode its predicate columns (see
+  "Q6 revisited" below: 20% of the JVM's samples, four times the comparisons). Comet's scan
   avoids it, and so would a Parquet reader of our own that writes Arrow memory directly.
 - Selective predicates with scattered survivors. Block skipping needs whole 64-row blocks to be
   dead; Q6's survivors are spread over 98% of the blocks. Evaluating the second conjunct only on
@@ -476,6 +478,42 @@ accumulator would open is larger than the double numbers suggest; and Q10 with d
 query where `vector` is markedly slower than Spark (0.53x) while still accelerating 6 of 22
 operators -- worth a profile before #27 lands, since it is the shape that will run more of our code
 afterwards.
+
+## Q6 revisited: the copy is a dictionary decode (#14)
+
+The Q6 analysis above blames two costs, and #61 built a lever for the first one: with
+`spark.sql.columnVector.offheap.enabled=true` the scan's fixed-width columns are handed to the
+kernels as views of Spark's native memory instead of being copied. Measured at SF10 under the
+protocol (one JVM per configuration, `local[8]`, 8 GB heap, 5 warm-up and 7 measured runs, a quiet
+shared x86 host -- so the absolute medians are not the M3 numbers above, only the ratios and the
+profile are the point):
+
+| configuration | spark | vector |
+|---|---:|---:|
+| on-heap column vectors (default) | 531.6 ms (1.00x) | 563.9 ms (0.94x) |
+| `spark.sql.columnVector.offheap.enabled=true` | 530.4 ms (1.00x) | 575.0 ms (0.92x) |
+
+The filter's kernel time is 1100 ms on-heap and 1128 ms off-heap (summed over 8 threads): the wrap
+changes nothing, because it never engages. The Parquet files DuckDB writes (and any writer with the
+default dictionary threshold) dictionary-encode all three predicate columns -- `l_shipdate`,
+`l_discount` and `l_quantity` are `PLAIN_DICTIONARY` in every column chunk; only `l_extendedprice` is
+`PLAIN` -- and the adapter decodes a dictionary-encoded column on either heap
+(`SparkColumnVectorBuffers.decodeDictionary`: copy the ids, mask the nulls, scan for the largest id,
+decode the table, gather, then copy into the arena). A JFR profile of the `vector` run puts that
+decode at **20.5% of all JVM samples**, against about 5% for every filter kernel together (the three
+comparisons, the bitmap work and the compaction) and 12% in Spark's own `VectorizedRleValuesReader`,
+which both engines pay. So the "copy" of the first cost is really the decode of a dictionary Spark
+kept, and it costs four times the comparisons it feeds.
+
+What that suggests, for the owner (measured here, not built): a dictionary-encoded predicate column
+should not be decoded at all -- evaluate the comparison over the dictionary *table* (2,526 dates,
+11 discounts, 50 quantities over the whole SF10 table, fewer per chunk) into one bit per id and gather the bits by id, which
+turns three full-column compares plus three decodes into three table compares plus three id gathers;
+the selection is then known before any value column is materialised, and only the survivors of
+`l_extendedprice` and `l_discount` (1.9%) need decoding for the product -- the issue's "fuse the copy
+with the compaction", in the form the data actually takes. A cheaper interim step is to gather
+directly into the arena segment instead of a heap array followed by a copy (one of the decode's five
+passes). `spark.sql.columnVector.offheap.enabled` is not a Q6 lever and is not recommended for it.
 
 ## TPC-DS coverage, scale factor 1
 

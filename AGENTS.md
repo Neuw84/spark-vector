@@ -736,8 +736,11 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   2x slower for Comet itself and for us on uniformly spread survivors (`docs/results.md`). Comet's
   default format-level pruning already reaches our configurations.
 - Selective predicates with scattered survivors (TPC-H Q6) lose to Spark's codegen over Spark's
-  scan (0.86x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate (the
-  off-heap wrap removes the copy for fixed-width columns; not yet measured on Q6, see #14). Over
+  scan (0.86x at SF10): the on-heap copy plus full-column evaluation of a 1.9% predicate. The
+  off-heap wrap (#61) does NOT help Q6 -- measured 0.92x vs 0.94x on-heap (#14): Parquet writers
+  dictionary-encode `l_shipdate`, `l_discount` and `l_quantity`, the wrap skips dictionary columns,
+  and the adapter's dictionary decode is 20% of the JVM's samples against ~5% for all filter kernels;
+  the lever is to evaluate comparisons over the dictionary table and gather bits by id. Over
   Comet's scan the copy is gone and the plugin beats Spark (1.12x) but not Comet's scan under
   Spark's codegen (1.17x).
 - Without Comet, the shuffle is Spark's row shuffle with a `ColumnarToRowExec` above the partial
