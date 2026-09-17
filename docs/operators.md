@@ -72,7 +72,7 @@ Tracked issues, in the order they unblock TPC-H:
 | `GenerateExec` (`explode`, `posexplode`) | #59 | Not converted |
 | `BroadcastNestedLoopJoinExec` | #60 | Not converted |
 | `FileSourceScanExec` -- widen and document what is accepted | #61 | Which readers/types count as columnar input |
-| `BatchScanExec` -- DSv2 sources beyond Iceberg | #62 | Verification per source (Delta, Hudi, built-in DSv2); unknown sources already work, copied once per batch |
+| `BatchScanExec` -- DSv2 sources beyond Iceberg | #62 | Verification per source (Delta, Hudi, built-in DSv2). Unknown columnar sources already work and are copied once per batch: `VectorUnknownSourceSuite` (#88) reads a test-only DSv2 source whose batches are a `ColumnVector` class no adapter knows, checks the rows against Spark under our filter, projection and aggregate, and asserts through the adapter seam's counters (`ColumnVectorAdapters.copiedColumns` / `adaptedColumns`) that every column took the copy path; a struct column falls back with `unsupported column type struct<...> for <name>` until #19 |
 | `DataWritingCommandExec` -- Parquet from Arrow batches | #64 | Not converted |
 | Arrow-based Python UDF operators | #65 | Not converted |
 | Spill for `VectorSortExec` and the hash joins | #12 | Both hold the partition / build side in memory |

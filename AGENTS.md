@@ -335,7 +335,10 @@ into these rather than adding special cases to operators.
   `ColumnVector` into `VectorBuffers`. Zero-copy adapters are tried first (our own
   `VectorArrowColumnVector`/`BorrowedColumnVector`, then anything registered through
   `ColumnVectorAdapters.register(Adapter)`, which is how the Comet and Iceberg adapters join
-  without a compile-time dependency); anything else is copied by `SparkColumnVectorBuffers`. An
+  without a compile-time dependency); anything else is copied by `SparkColumnVectorBuffers`.
+  `ColumnVectorAdapters.adaptedColumns()` / `copiedColumns()` count the two outcomes (test-visible in
+  local mode); `VectorUnknownSourceSuite` pins the copy fallback with a test-only DSv2 source whose
+  vectors no adapter knows (`test/UnknownColumnarSource.scala`). An
   adapter receives the batch's scratch arena for small derived buffers (Iceberg keeps nulls in a
   byte-per-row holder rather than an Arrow validity buffer, and hands strings over as Parquet
   dictionary indices) while the data buffers stay in place. A future Parquet reader of our own
@@ -490,7 +493,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 194 Spark tests (167 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 197 Spark tests (170 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
