@@ -519,7 +519,11 @@ all checksums equal. Fourteen queries still carry a `Window`: seven for a whole-
 8- or 16-bit lane; widening those to INT32 at the adapter would be cheap). The second window layer
 (whole-partition aggregates) does not move these numbers: every TPC-DS window aggregate is over a
 decimal (`avg(sum(ss_sales_price))`, `sum(itemrevenue)`), whose buffer is Spark's `Decimal(p + 10)` --
-the 128-bit lane of #28 gates all eight.
+the 128-bit lane of #28 gates all eight. The fourth layer, the per-partition top-k Spark plans under a
+`rank <= k` filter (`WindowGroupLimitExec`, Partial before the shuffle and Final after the sort), brings
+the tally to **3070 of 4736 (65%)**: q44 22/41 to 26/41 (its four group limits, which sat directly on our
+aggregates and forced them back to rows), q70 25/40 to 26/40; the group limits still Spark's are the
+ones over a wide decimal (q67) or the `TINYINT` grouping id (q70, q86), for the same reasons as their windows.
 
 **Correctness: q66 returned every row twice (#162), now fixed.** The two channel aggregates of
 q66 are ours and emit a `decimal(28,2)` sum (#87); the union above refused that type and stayed Spark's,
