@@ -397,8 +397,9 @@ object VectorAggregatePlanner {
       (wideSumResult(substituted, input) match {
         // The merge already applied isEmpty and the overflow rule at emission: forward the column.
         case Some(ordinal) => Right(ColumnRef(ordinal, e.dataType))
+        // A literal result (`'store' AS channel` beside the aggregates) is a constant column the
+        // result projection materialises like any other.
         case None => ExpressionCompiler.compile(substituted, input).flatMap {
-          case _: LiteralExpr => Left(s"literal result ${e.sql}")
           case v if !TypeMapping.isSupported(e.dataType) => Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
           case v => Right(v)
         }

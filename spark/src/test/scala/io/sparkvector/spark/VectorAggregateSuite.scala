@@ -376,6 +376,18 @@ class VectorAggregateSuite extends VectorQuerySuite {
     checkFallback("SELECT try_sum(CAST(l AS DECIMAL(12, 2))) AS a FROM t", Seq(Agg), "try_sum over a decimal")
   }
 
+  test("literal and typed-null result columns beside the aggregates") {
+    def allOurs(sql: String): Unit = {
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "every stage should be ours\n" + finalPlan(df).treeString)
+    }
+    // The TPC-DS channel shape: a string literal tagging each grouped aggregate, then a union of them.
+    allOurs("SELECT 'store' AS channel, i % 3 AS g, sum(l) AS s, count(*) AS n, CAST(NULL AS BIGINT) AS pad, 1 AS one FROM t GROUP BY i % 3")
+    allOurs("SELECT 'all' AS tag, count(*) AS n, sum(d2) AS s, 2.5D AS w, CAST(NULL AS STRING) AS pad FROM t")
+    allOurs("SELECT channel, g, sum(s) AS total FROM (SELECT 'store' AS channel, i % 3 AS g, sum(l) AS s FROM t GROUP BY i % 3 UNION ALL SELECT 'web' AS channel, i % 2 AS g, sum(i) AS s FROM t GROUP BY i % 2) u GROUP BY channel, g")
+    allOurs("SELECT i % 5 AS g, max(l) AS m, DATE '2020-01-01' AS d0, 'x' AS x FROM t WHERE i > 100 GROUP BY i % 5 HAVING max(l) > 0")
+  }
+
   test("NaN and negative zero grouping keys are normalised as Spark's") {
     // Spark wraps a double key in KnownFloatingPointNormalized(NormalizeNaNAndZero(...)), which the
     // compiler unwraps -- but a double grouping key itself is refused (the group table has no lane for

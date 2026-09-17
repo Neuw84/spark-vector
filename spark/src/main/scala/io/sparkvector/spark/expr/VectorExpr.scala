@@ -112,6 +112,16 @@ final case class LiteralExpr(value: Any, dataType: DataType) extends VectorExpr 
 }
 
 /**
+ * A typed null literal -- `CAST(NULL AS INT)`, the `NULL AS col` a union coerces, the null a CASE
+ * leaves in a branch -- as a column: every row invalid. Distinct from `LiteralExpr`, whose value the
+ * kernels read as a scalar, so nothing downstream has to test a literal for null.
+ */
+final case class NullLiteralExpr(dataType: DataType) extends VectorExpr {
+  override def children: Seq[VectorExpr] = Nil
+  override def eval(ctx: EvalContext): VectorBuffers = SubqueryLiteralExpr.nulls(dataType, ctx)
+}
+
+/**
  * Comparison of two same-typed operands, at most one of which is a literal. Numbers (and the types
  * carried as numeric lanes) go through `CompareKernels`; strings through `StringCompareKernels`, in
  * Spark's default UTF8_BINARY order.

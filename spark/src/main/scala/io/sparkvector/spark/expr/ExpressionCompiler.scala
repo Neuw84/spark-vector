@@ -43,7 +43,10 @@ object ExpressionCompiler {
       if (!TypeMapping.isSupported(b.dataType)) Left(s"unsupported type ${b.dataType.simpleString}")
       else Right(ColumnRef(b.ordinal, b.dataType))
 
-    case Literal(null, _) => Left("null literal")
+    // A typed null is an all-invalid column; the operators that need a *value* literal (comparison
+    // operands, IN lists, string arguments) match the Spark node before compiling and keep their reasons.
+    case Literal(null, dt) if TypeMapping.isSupported(dt) => Right(NullLiteralExpr(dt))
+    case Literal(null, dt) => Left(s"null literal of ${dt.simpleString}")
     case Literal(v, dt) if isLiteralType(dt) => Right(LiteralExpr(v, dt))
     case Literal(_, dt) => Left(s"unsupported literal type ${dt.simpleString}")
 
