@@ -635,4 +635,11 @@ class VectorProjectSuite extends VectorQuerySuite {
 
   private def causes(t: Throwable): Seq[Throwable] =
     Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).toSeq
+
+  test("nanvl evaluates its second argument only where the first is NaN, as Spark does") {
+    // 1.0 / (d - d) divides by zero on every finite row; Spark never evaluates it there and neither may we.
+    checkVectorized("SELECT i, nanvl(d, 1.0 / (d - d)) AS v FROM t", Seq(Project))
+    checkVectorized("SELECT i, nanvl(d, d2 / (d - d)) AS v FROM t WHERE i < 3000", Seq(Filter, Project))
+    checkVectorized("SELECT count(*) AS n FROM t WHERE nanvl(d, 1.0 / (d - d)) IS NULL", Seq(Filter))
+  }
 }

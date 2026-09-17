@@ -91,4 +91,29 @@ class AggKernelsTest {
       assertEquals(12.0, AggKernels.sumDouble(nullNaN));
     }
   }
+
+  @Test
+  void sequentialDoubleSumIsSparksRunningSum() {
+    try (Arena arena = Arena.ofConfined()) {
+      // Values whose sum depends on the order of addition; Spark adds them one by one into the running total.
+      double[] values = new double[1000];
+      for (int i = 0; i < values.length; i++) {
+        values[i] = 1.0 / (i % 10 + 1) * (i % 3 == 0 ? 1e10 : 1.0);
+      }
+      boolean[] nulls = new boolean[values.length];
+      for (int i = 0; i < nulls.length; i += 7) {
+        nulls[i] = true;
+      }
+      VectorBuffers a = ArrowLayout.ofDoubles(arena, values, nulls);
+      double expected = 0.25;
+      for (int i = 0; i < values.length; i++) {
+        if (!nulls[i]) {
+          expected += values[i];
+        }
+      }
+      assertEquals(expected, AggKernels.sumDoubleSequential(a, 0.25), "bit-identical to the sequential loop");
+      // The default mode keeps its contract: start plus the lane-parallel sum, equal up to rounding order.
+      assertEquals(0.25 + AggKernels.sumDouble(a), AggKernels.sumDoubleFrom(a, 0.25), Math.ulp(expected) * 64);
+    }
+  }
 }

@@ -85,8 +85,16 @@ public final class AggKernels {
 
   // ================================================================== sums
 
-  /** Sum of the valid doubles (0.0 when there are none). */
+  /**
+   * Sum of the valid doubles (0.0 when there are none). The lane-parallel sum rounds in a different
+   * order than Spark's sequential one (and so can differ in the last digits); with
+   * {@code sparkvector.agg.interleave=1} the sum is sequential, the order Spark uses, so that
+   * setting is bit-identical to Spark for doubles across the grouped and ungrouped paths.
+   */
   public static double sumDouble(VectorBuffers a) {
+    if (GroupedAccumulators.INTERLEAVE == 1) {
+      return sumDoubleSequential(a);
+    }
     MemorySegment d = a.data();
     MemorySegment validity = a.validity();
     int n = a.length();
@@ -119,6 +127,33 @@ public final class AggKernels {
       }
     }
     return acc.reduceLanes(VectorOperators.ADD);
+  }
+
+  /**
+   * {@code start} plus the valid doubles of {@code a}: the lane-parallel sum added to {@code start},
+   * or -- under {@code sparkvector.agg.interleave=1} -- the doubles added one after the other into
+   * {@code start} in row order, which is exactly Spark's running sum.
+   */
+  public static double sumDoubleFrom(VectorBuffers a, double start) {
+    return GroupedAccumulators.INTERLEAVE == 1 ? sumDoubleSequential(a, start) : start + sumDouble(a);
+  }
+
+  /** The valid doubles added one after the other in row order into {@code start}, as Spark's Sum does. */
+  static double sumDoubleSequential(VectorBuffers a) {
+    return sumDoubleSequential(a, 0.0);
+  }
+
+  static double sumDoubleSequential(VectorBuffers a, double start) {
+    MemorySegment d = a.data();
+    MemorySegment validity = a.validity();
+    int n = a.length();
+    double sum = start;
+    for (int i = 0; i < n; i++) {
+      if (validity == null || Bitmap.isSet(validity, i)) {
+        sum += d.getAtIndex(VectorBuffers.LE_DOUBLE, i);
+      }
+    }
+    return sum;
   }
 
   /** Sum of the valid longs (wrapping on overflow, like Spark's legacy mode). */

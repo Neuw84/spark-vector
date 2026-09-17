@@ -305,13 +305,17 @@ object BuildTable {
     val arena = Arena.ofShared()
     val types = spec.buildTypes
     val builders = types.map(dt => new RowColumnBuilder(dt))
+    var numRows = 0
     while (rows.hasNext) {
       val row = rows.next()
       var c = 0
       while (c < builders.length) { builders(c).add(row, c); c += 1 }
+      numRows += 1
     }
+    // The build side may have been pruned to no columns at all (a cross join that projects only
+    // the streamed side): the row count must not come from a column.
     val columns = builders.map(_.build(arena))
-    new BuildTable(arena, columns, if (columns.isEmpty) 0 else columns.head.length(), spec).build()
+    new BuildTable(arena, columns, numRows, spec).build()
   }
 }
 

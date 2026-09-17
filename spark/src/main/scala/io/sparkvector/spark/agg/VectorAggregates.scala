@@ -40,7 +40,7 @@ final case class SumDoubleAgg(input: VectorExpr) extends VectorAggFunction {
     override def update(ctx: EvalContext): Unit = {
       val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
-      if (c > 0) { sum += AggKernels.sumDouble(v); count += c }
+      if (c > 0) { sum = AggKernels.sumDoubleFrom(v, sum); count += c }
     }
     override def bufferValues: Array[Any] = Array(if (count == 0) null else java.lang.Double.valueOf(sum))
   }
@@ -407,7 +407,7 @@ final case class AverageAgg(input: VectorExpr) extends VectorAggFunction {
     override def update(ctx: EvalContext): Unit = {
       val v = ctx.masked(input.eval(ctx))
       val c = AggKernels.countValid(v)
-      if (c > 0) { sum += AggKernels.sumDouble(v); count += c }
+      if (c > 0) { sum = AggKernels.sumDoubleFrom(v, sum); count += c }
     }
     override def bufferValues: Array[Any] = Array(java.lang.Double.valueOf(sum), java.lang.Long.valueOf(count))
   }
@@ -448,7 +448,7 @@ final case class AverageMergeAgg(sum: VectorExpr, count: VectorExpr) extends Vec
     private var c = 0L
     override def update(ctx: EvalContext): Unit = {
       val sv = ctx.masked(sum.eval(ctx))
-      if (AggKernels.countValid(sv) > 0) s += AggKernels.sumDouble(sv)
+      if (AggKernels.countValid(sv) > 0) s = AggKernels.sumDoubleFrom(sv, s)
       val cv = ctx.masked(count.eval(ctx))
       if (AggKernels.countValid(cv) > 0) c += AggKernels.sumLong(cv)
     }
@@ -640,7 +640,12 @@ object VectorAggregates {
           // count(a, b): the rows where every argument is non-null (regr_count's replacement).
           several.foldRight[Either[String, List[VectorExpr]]](Right(Nil)) { (a, acc) =>
             for (rest <- acc; e <- ExpressionCompiler.compile(a, input)) yield e :: rest
-          }.map(CountAllAgg(_))
+          }.map { inputs =>
+            // A non-null literal argument (count(DISTINCT 3, 2) after the distinct rewrite) is never
+            // null, so only the lanes decide; all literals is count(*).
+            val lanes = inputs.filterNot(_.isInstanceOf[LiteralExpr])
+            if (lanes.isEmpty) CountAgg(None) else CountAllAgg(lanes)
+          }
       }
 
     case m: Min if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = true, m.dataType))

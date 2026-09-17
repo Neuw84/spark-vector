@@ -453,16 +453,30 @@ converted or not. Run it on demand, whole or by a regex over test-case names:
 benchmarks/scripts/run-spark-sql-tests.sh                 # everything
 benchmarks/scripts/run-spark-sql-tests.sh '^(group-by|join|decimal)'
 SQL_TESTS_EXCLUDE='^$' benchmarks/scripts/run-spark-sql-tests.sh   # include the excluded files too
+SQL_TESTS_UPDATE_BASELINE=true benchmarks/scripts/run-spark-sql-tests.sh   # full run; rewrite the coverage floor
 ```
 
 A few files are excluded by default (`VectorSQLQueryTestSuite.defaultExclude`): `explain*.sql`,
 whose golden output is Spark's own physical plan, the DataSketches files (`hll`, `kllquantiles`,
 `thetasketch`), whose library refuses to start on any JDK newer than 21, and `udtf/udtf.sql`, which
 needs `pyspark` installed (the Python UDF variants skip themselves without it and count as ignored).
-Everything else passes: 642 test cases, 111 ignored, with 1806 of the 33764 query executions running
-at least one spark-vector operator (the last line of the run reports these counts). Its first run
-found a bare literal projection (`SELECT 1 FROM ... HAVING max(id) > 0`) that compiled but could not
-be materialised, which is exactly the kind of gap it exists to catch. The test JVM runs with
+Everything else passes: 642 test cases, 111 ignored, with 2972 of the 33856 query executions running
+at least one spark-vector operator. Passing is the low bar -- a file passes just as well when every
+operator falls back -- so the run also prints a per-test-case table (executions, executions that ran
+one of our operators, operators) split into the 147 cases that run our operators and the 437 that never
+can (analyzer-only cases, DDL, files with no supported operator), and a full run compares every case
+with the checked-in floor `spark-sql-tests/src/test/resources/vector-sql-coverage.tsv`: a case that
+lost accelerated executions fails the suite, naming the case, because a fallback introduced by a planner
+change is otherwise invisible; cases above the floor are listed, and `SQL_TESTS_UPDATE_BASELINE=true`
+records them. The golden files pin Spark's summation order for doubles, so the suite's JVM runs with
+`-Dsparkvector.agg.interleave=1`, the mode in which our double sums add in Spark's order (the default
+rotates accumulators and can differ in the last digits; `docs/results.md`). The suite earns its keep:
+its first run found a bare literal projection (`SELECT 1 FROM ... HAVING max(id) > 0`) that compiled
+but could not be materialised, and the run that introduced the table found four more -- `nanvl`
+evaluating its second argument eagerly (`nanvl(c, 1/c)` raised where Spark keeps `c`), `count(DISTINCT
+3, 2)` evaluating a literal as a column, a collated string accepted as a lane (Spark's own
+`RowToColumnarExec` cannot convert one), and a cross join whose build side was pruned to no columns
+returning nothing. The test JVM runs with
 `-Dspark.testing=true` (the golden files assume Spark's test-mode defaults, such as the TIME type)
 and `-XX:-OmitStackTraceInFastThrow`: after enough ANSI overflows in one JVM, HotSpot's preallocated
 `ArithmeticException` carries no message and Spark's error formatting fails on the null (in Spark's

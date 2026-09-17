@@ -30,8 +30,11 @@ public final class TypeMapping {
     if (dt instanceof BooleanType) {
       return VecType.BOOL;
     }
-    if (dt instanceof StringType) {
-      return VecType.UTF8;
+    if (dt instanceof StringType st) {
+      // Kernels compare, group and sort bytes: only UTF8_BINARY strings are lanes. A collated
+      // string (STRING COLLATE UTF8_LCASE, ...) has no lane and the operator falls back -- Spark's
+      // own RowToColumnarExec cannot convert one either.
+      return st.isUTF8BinaryCollation() ? VecType.UTF8 : null;
     }
     if (dt instanceof DecimalType d && d.precision() <= MAX_DECIMAL_PRECISION) {
       // Unscaled value in long lanes, like Spark's own WritableColumnVector for Decimal(p <= 18).

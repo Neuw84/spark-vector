@@ -2,7 +2,7 @@ package io.sparkvector.spark.expr
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, CompareKernels, CompareOp, MathKernels, OverflowKernels, SegmentVectorBuffers, VecType, VectorBuffers}
+import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, CompareKernels, CompareOp, MathKernels, OverflowKernels, PredicateKernels, SegmentVectorBuffers, VecType, VectorBuffers}
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, DoubleType, LongType}
 import org.apache.spark.sql.vector.VectorErrors
@@ -165,7 +165,13 @@ final case class NanvlExpr(left: VectorExpr, right: VectorExpr) extends VectorEx
   override def eval(ctx: EvalContext): VectorBuffers = {
     val n = ctx.numRows
     val a = CaseWhenExpr.materialise(left, ctx)
-    val b = CaseWhenExpr.materialise(right, ctx)
+    // Spark's nanvl evaluates the second argument only where the first is NaN (a null first
+    // argument is null): `nanvl(c, 1/c)` must not raise DIVIDE_BY_ZERO on the rows that keep `c`.
+    val nan = ctx.bitmap()
+    PredicateKernels.isNaN(a, nan)
+    if (a.validity() != null) BitmapKernels.and(nan, a.validity(), nan, n)
+    if (ctx.active != null) BitmapKernels.and(nan, ctx.active, nan, n)
+    val b = ctx.withActive(nan)(CaseWhenExpr.materialise(right, ctx))
     val data = ArrowLayout.allocateData(ctx.arena, VecType.FLOAT64, n)
     val validity = ctx.bitmap()
     MathKernels.nanvl(a, b, data, validity)
