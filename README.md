@@ -72,6 +72,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.localTableScan.enabled` | convert `LocalTableScanExec` (`VALUES`, local relations) into one batch per partition; **off by default** -- nothing to accelerate, it only lets small-table tests run our operators |
 | `spark.vector.exec.expand.enabled` | convert `ExpandExec` (`ROLLUP` / `CUBE` / `GROUPING SETS`, the `count(distinct)` rewrite) over a columnar child: one borrowed-column batch per grouping set, no data copy |
 | `spark.vector.exec.broadcastHashJoin.enabled` | convert `BroadcastHashJoinExec` when the streamed side is columnar (the build side stays Spark's broadcast) |
+| `spark.vector.exec.broadcastNestedLoopJoin.enabled` | convert `BroadcastNestedLoopJoinExec` (non-equi joins) when the streamed side is columnar; inner/cross, semi/anti/existence and outer joins with the streamed side preserved |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
@@ -416,7 +417,10 @@ mode, null otherwise), so a wide decimal sum runs on our operators in both stage
 
 ### Joins
 
-`BroadcastHashJoinExec` becomes `VectorBroadcastHashJoinExec` when the streamed side is columnar.
+`BroadcastHashJoinExec` becomes `VectorBroadcastHashJoinExec` when the streamed side is columnar,
+and `BroadcastNestedLoopJoinExec` (a join with no equi-keys) becomes `VectorBroadcastNestedLoopJoinExec`:
+the same iterator with every broadcast row a candidate, the streamed rows chunked to a fixed pair
+budget so the condition is evaluated over gathered pairs and the product is never materialised.
 The build side is left exactly as Spark planned it, a `BroadcastExchangeExec` producing a
 `HashedRelation`: each task reads its rows once into columns and builds a `GroupKeyTable` over the
 keys (with a lookup-only probe), so no exchange of our own is needed and a Spark join over the same
