@@ -355,8 +355,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
     // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
     val isFinal = VectorAggregatePlanner.readsExchange(a)
-    // The wide decimal sum buffer (Decimal(p > 18)) is the one wide column a merging aggregate reads.
-    val inputReason = if (isFinal) typeReason(a.child, VectorAggregatePlanner.wideSumBuffers(a)) else columnarInputReason(a.child)
+    // The wide decimal sum and average buffers (Decimal(p > 18)) are the one kind of wide column a merging aggregate reads.
+    val inputReason = if (isFinal) typeReason(a.child, VectorAggregatePlanner.wideBuffers(a)) else columnarInputReason(a.child)
     inputReason match {
       case Some(reason) => fallback(original, reason)
       case None =>

@@ -208,7 +208,7 @@ nonansi/string-functions.sql	237	0	0
 nonansi/string-functions.sql_analyzer_test	10	0	0
 nonansi/timestamp.sql	112	0	0
 nonansi/timestamp.sql_analyzer_test	3	0	0
-nonansi/try_aggregates.sql	32	18	18
+nonansi/try_aggregates.sql	32	19	19
 nonansi/try_arithmetic.sql	72	4	4
 nonansi/try_datetime_functions.sql	5	0	0
 nonansi/try_element_at.sql	7	0	0
@@ -241,7 +241,7 @@ pipe-operators.sql	312	51	74
 pipe-operators.sql_analyzer_test	28	0	0
 pivot.sql	26	12	12
 pivot.sql_analyzer_test	3	0	0
-postgreSQL/aggregates_part1.sql	176	153	186
+postgreSQL/aggregates_part1.sql	176	156	189
 postgreSQL/aggregates_part1.sql_analyzer_test	11	0	0
 postgreSQL/aggregates_part2.sql	101	63	85
 postgreSQL/aggregates_part2.sql_analyzer_test	14	0	0
@@ -277,7 +277,7 @@ postgreSQL/join.sql	2424	385	1068
 postgreSQL/join.sql_analyzer_test	723	0	0
 postgreSQL/limit.sql	13	9	18
 postgreSQL/limit.sql_analyzer_test	2	0	0
-postgreSQL/numeric.sql	1119	13	24
+postgreSQL/numeric.sql	1119	14	25
 postgreSQL/numeric.sql_analyzer_test	519	0	0
 postgreSQL/select.sql	43	20	27
 postgreSQL/select.sql_analyzer_test	6	1	1
@@ -459,7 +459,7 @@ to_from_avro.sql_analyzer_test	6	0	0
 transform.sql	51	8	12
 transform.sql_analyzer_test	5	0	0
 try-string-functions.sql	35	0	0
-try_aggregates.sql	32	10	10
+try_aggregates.sql	32	11	11
 try_arithmetic.sql	60	4	4
 try_cast.sql	29	0	0
 try_datetime_functions.sql	5	0	0
@@ -502,7 +502,7 @@ typeCoercion/native/widenSetOperationTypes.sql	75	34	34
 typeCoercion/native/widenSetOperationTypes.sql_analyzer_test	1	0	0
 typeCoercion/native/windowFrameCoercion.sql	22	6	6
 typeCoercion/native/windowFrameCoercion.sql_analyzer_test	1	0	0
-udf/postgreSQL/udf-aggregates_part1.sql - Scala UDF	56	40	46
+udf/postgreSQL/udf-aggregates_part1.sql - Scala UDF	56	41	47
 udf/postgreSQL/udf-aggregates_part1.sql - Scala UDF_analyzer_test	2	0	0
 udf/postgreSQL/udf-aggregates_part2.sql - Scala UDF	28	17	19
 udf/postgreSQL/udf-aggregates_part2.sql - Scala UDF_analyzer_test	3	0	0

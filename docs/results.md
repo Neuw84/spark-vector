@@ -449,8 +449,17 @@ exchange). 22 of 22 checksums identical. What still holds decimals back: Q1's ne
 slice), the `avg` buffers (`decimal(25,2)`, the wide `avg` buffer), and the operators *above* a wide
 sum (`TakeOrderedAndProject` / `Filter` over `revenue`, `sum(l_quantity)`: a wide result column as an
 input, #28). Slice 2 of #26 (nested products) then removed Q1's `decimal(38,6)` reason as well: its
-aggregate now waits only on the `avg` buffers (`avg buffer decimal(25,2) exceeds 18 digits`), the
-wide `avg` being the next decimal step.
+aggregate then waited only on the `avg` buffers (`avg buffer decimal(25,2) exceeds 18 digits`). Slice 3
+(the wide `avg`: Spark's `(sum: decimal(p+10), count)` buffer on the same 128-bit accumulator, the
+result Spark's own division evaluated over the merged buffer) removed that reason from every query
+that carried it: Q1 is at 4/7 accelerated operators (from 2/7 -- both aggregate stages ours; what
+remains is the global sort over the shuffle, by design), the same count as on the double schema, and
+Q17 (`0.2 * avg(l_quantity)` in the correlated subquery) at 7/18 from 4/18 -- its aggregate stages
+convert, the multiplication *above* the wide average is still refused (`decimal result decimal(21,7)
+exceeds 18 digits`, a wide result as an input, #28). 22 of 22 checksums identical. No decimal `sum`
+or `avg` buffer reason is left on TPC-H; the decimal list is now only wide results consumed above
+their aggregate (`TakeOrderedAndProject` over `revenue`, `sum(x) / 7.0`, `sum(a) / sum(b)`,
+`0.5 * sum(l_quantity)`) and the `+`/`-` rescale shapes of #26's next slice.
 
 The rest of the decimal-only list is the cascade: `Filter: child HashAggregate is not columnar`,
 `BroadcastHashJoin: child Filter is not columnar`, `Project`/`Sort: child ... is not columnar` --

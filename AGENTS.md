@@ -80,7 +80,8 @@ that pin it.
   `VectorDecimalColumnVector` over a `BigIntVector` (Arrow's own `DecimalVector` is 128-bit and
   read through `BigDecimal` by Spark). Remember that the optimizer's `DecimalAggregates` turns
   `sum(decimal <= 8 digits)` into `MakeDecimal(sum(UnscaledValue(x)))`, an ANSI bigint sum, and
-  `avg(decimal <= 11 digits)` into a double average: that is the path decimal aggregates take.
+  `avg(decimal <= 11 digits)` into a double average: that is the path narrow decimal aggregates take;
+  wider ones go through `WideDecimalSumAgg` / `WideDecimalAvgAgg` and their merge counterparts.
 - Spark 4 defaults to ANSI mode. Double arithmetic is bit-identical in both modes, so it is
   compiled; integer `+ - *` and negation are computed wrapping and then checked with an overflow
   lane mask (`OverflowKernels`: the sign trick for add/subtract, the exact product for multiply,
@@ -603,7 +604,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 226 Spark tests (198 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 228 Spark tests (200 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -694,9 +695,22 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   exactly where a child escalated, and applies Spark's range check for a capped declared precision
   (`|v| >= 10^p` -> null in legacy, `VectorErrors.decimalPrecisionOverflow` in ANSI). Spark 4.1's
   `Multiply` carries a `NumericEvalContext`, not an `EvalMode` -- read `m.evalContext.evalMode`, a
-  pattern-bound third field compares unequal to every `EvalMode` value. Not yet: `+`/`-` (a rescale
-  can overflow too), wide products as values (needs a 128-bit output column on escalated batches),
-  `avg` over such products.
+  pattern-bound third field compares unequal to every `EvalMode` value. Slice 3: the wide decimal
+  `avg` (`WideDecimalAvgAgg` / `WideDecimalAvgMergeAgg`, Spark's `(sum: Decimal(p+10), count)` buffer;
+  `Escalation` is shared with the sum, so `avg(a * b)` is speculative too). Its `Final` result is not
+  re-derived: `DecimalAvgResult` binds `Average.evaluateExpression` to the two buffer slots and evaluates
+  it per group (`DecimalDivideWithOverflowCheck`: 39-digit half-up quotient, `toPrecision` to
+  `Decimal(p+4, s+4)`, `ARITHMETIC_OVERFLOW` on a null sum) -- exact by construction, one eval per group
+  like Spark's own Final. The function emits the result in the sum slot under the *result* type
+  (`VectorAggFunction.emittedTypes`; the exec builds its result-mode batch from those, not from the
+  declared buffer types) and `VectorAggregatePlanner.wideResult` forwards it like the sum's. Spark 4.1's
+  `Average` carries `evalMode` directly (unlike `Sum`/`Multiply`). Overflow convention: a partial or a
+  grouped total past `Decimal(p+10)` is null (Spark's `UnsafeRow` write nulls it, then
+  `DecimalAddNoOverflowCheck` keeps it null), but an UNGROUPED `Final` divides the exact total -- Spark's
+  generated ungrouped Final keeps the sum in a local nothing re-checks -- so `avg(big * big)` over the test
+  table is a value ungrouped and null grouped, in both engines. `Complete` mode (streaming planners only)
+  puts the result in the sum slot for both the wide sum and avg. Not yet: `+`/`-` (a rescale can overflow
+  too), wide products as values (needs a 128-bit output column on escalated batches).
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

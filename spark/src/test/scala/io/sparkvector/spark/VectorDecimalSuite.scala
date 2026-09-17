@@ -247,6 +247,77 @@ class VectorDecimalSuite extends VectorQuerySuite {
     assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
   }
 
+  test("wide decimal averages: our Partial in 128 bits, our Final merging the (sum, count) buffer and dividing as Spark does (#26)") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    import org.apache.spark.sql.types.DecimalType
+    def bothOurs(sql: String): Unit = {
+      checkExact(sql, Seq(Agg))
+      val df = checkVectorized(sql, Seq(Agg))
+      val ours = nodesOf[VectorHashAggregateExec](df)
+      assert(ours.exists(a => !a.isFinal) && ours.exists(_.isFinal), finalPlan(df).treeString)
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "both stages should be ours\n" + finalPlan(df).treeString)
+      // The buffer the Partial emits is Spark's: a wide sum and a count.
+      assert(ours.filter(!_.isFinal).forall(_.output.exists(a => a.dataType.isInstanceOf[DecimalType] && a.dataType.asInstanceOf[DecimalType].precision > 18)), finalPlan(df).treeString)
+    }
+    // Results within 18 digits (avg(dec12) is decimal(16,6)) and beyond (avg(dec18) is decimal(22,8)), grouped and not,
+    // sums past 64 bits (`big`), nulls, groups empty in every partition, FILTER clauses, beside the other functions.
+    Seq(
+      "SELECT avg(dec12) FROM t",
+      "SELECT avg(dec18) FROM t",
+      "SELECT k, avg(dec12), avg(dec18) FROM t GROUP BY k",
+      "SELECT avg(big), count(big), sum(big) FROM t",
+      "SELECT k, avg(big) FROM t GROUP BY k",
+      "SELECT s, avg(big), avg(dec12), sum(dec12) FROM t WHERE i > 100 GROUP BY s",
+      "SELECT k, avg(big) FROM t WHERE i % 11 = 0 GROUP BY k",
+      "SELECT avg(big) FROM t WHERE i % 11 = 0",
+      "SELECT k, sum(dec7), avg(dec7), avg(dec12), max(big), count(*) FROM t GROUP BY k",
+      "SELECT k, avg(big) FILTER (WHERE i < 0) AS none, avg(big) FILTER (WHERE i % 3 = 0) AS some FROM t GROUP BY k",
+      "SELECT avg(big) FILTER (WHERE i < 0), avg(dec12) FILTER (WHERE i > 19990) FROM t",
+      // try_avg is the same function in TRY mode.
+      "SELECT k, try_avg(dec12), try_avg(big) FROM t GROUP BY k").foreach(bothOurs)
+    // A declared-wide product under the average is speculative like the sum's (TPC-H Q1's shapes).
+    val before = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+    bothOurs("SELECT avg(dec12 * dec7) AS a FROM t")                               // decimal(20,4) product, decimal(24,8) result
+    bothOurs("SELECT k, avg(dec12 * (1 - dec7)) AS a, sum(dec12 * (1 - dec7)) AS s FROM t GROUP BY k")
+    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
+    bothOurs("SELECT k, avg(big * big) AS a FROM t WHERE i < 3000 GROUP BY k")      // every row escalates; the totals fit decimal(38,4)
+    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() > before)
+    // A total past the buffer's decimal(38,4): an ungrouped Final divides the exact total (Spark's generated
+    // code keeps it in a local nothing re-checks), a grouped one sees the buffer nulled; a partial past it is
+    // null from either engine. In ANSI mode the null buffer is Spark's own ARITHMETIC_OVERFLOW from the division.
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      bothOurs("SELECT avg(big * big) AS a FROM t")                                // partials fit, the total does not: a value
+      bothOurs("SELECT k, avg(big * big * 10) AS a, count(*) AS n FROM t GROUP BY k") // grouped totals past the buffer: null
+      bothOurs("SELECT avg(big * big * 10) AS a FROM t")                           // partials past the buffer: null
+      assert(spark.sql("SELECT avg(big * big * 10) AS a FROM t").collect().head.isNullAt(0))
+    }
+    val ours = intercept[Exception] { withPlugin(enabled = true) { spark.sql("SELECT k, avg(big * big * 10) AS a FROM t GROUP BY k").collect() } }
+    assert(ours.getMessage.contains("ARITHMETIC_OVERFLOW"), ours.getMessage)
+    val sparks = withPlugin(enabled = false)(intercept[Exception](spark.sql("SELECT k, avg(big * big * 10) AS a FROM t GROUP BY k").collect()))
+    assert(sparks.getMessage.contains("ARITHMETIC_OVERFLOW"), sparks.getMessage)
+    // try_avg nulls where avg raises.
+    bothOurs("SELECT k, try_avg(big * big * 10) AS a FROM t GROUP BY k")
+    // The average's result itself past 18 digits rides above the aggregate as a pass-through column.
+    checkExact("SELECT a FROM (SELECT k, avg(dec18) AS a FROM t GROUP BY k) WHERE a IS NOT NULL", Seq(Agg, Filter))
+    // A wide result inside another expression is refused (the projection would have to divide wide decimals).
+    assert(nodesOf[HashAggregateExec](checkFallback("SELECT avg(dec18) * 2 AS x FROM t", Seq.empty, "exceeds 18 digits")).nonEmpty)
+  }
+
+  test("sum(DISTINCT) and avg(DISTINCT) over wide decimals: every stage of the distinct rewrite ours") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    def allOurs(sql: String): Unit = {
+      checkExact(sql, Seq(Agg))
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[VectorHashAggregateExec](df).exists(_.isFinal), finalPlan(df).treeString)
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "every stage should be ours\n" + finalPlan(df).treeString)
+    }
+    allOurs("SELECT sum(DISTINCT dec12), avg(DISTINCT dec12), count(DISTINCT dec12) FROM t")
+    allOurs("SELECT k, sum(DISTINCT dec12), avg(DISTINCT dec12) FROM t GROUP BY k")
+    // Empty input: Spark's null, not the buffer's zero.
+    allOurs("SELECT sum(DISTINCT dec12), avg(DISTINCT dec12) FROM t WHERE i < 0")
+    allOurs("SELECT k, sum(DISTINCT big), avg(DISTINCT big) FROM t WHERE i % 11 = 0 GROUP BY k")
+  }
+
   test("CheckOverflow: null or Spark's error past the precision, identity for the declared type") {
     import org.apache.spark.sql.catalyst.expressions.CheckOverflow
     import org.apache.spark.sql.functions.col
