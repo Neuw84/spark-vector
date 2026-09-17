@@ -2,7 +2,8 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BoundReference, BRound, CaseWhen, Cast, Ceil, Coalesce, Contains, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sqrt, StartsWith, Subtract, TruncDate, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
+import io.sparkvector.kernels.TranscendentalKernels
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -173,6 +174,15 @@ object ExpressionCompiler {
       if (child.dataType != DoubleType) Left(s"sqrt over ${child.dataType.simpleString}")
       else numericChild(child, input, "sqrt").map(SqrtExpr(_))
 
+    // The transcendental family: one scalar call per lane, exactly Spark's (Math or StrictMath per
+    // function); the analyzer has cast the argument to double. pi() and e() fold to literals.
+    case e: UnaryMathExpression if transcendental.contains(e.getClass) =>
+      unaryMath(transcendental(e.getClass), e.child, e.prettyName, input)
+    case Pow(l, r) => binaryMath(TranscendentalKernels.Fn2.POW, l, r, "pow", input)
+    case Atan2(l, r) => binaryMath(TranscendentalKernels.Fn2.ATAN2, l, r, "atan2", input)
+    case Hypot(l, r) => binaryMath(TranscendentalKernels.Fn2.HYPOT, l, r, "hypot", input)
+    case Logarithm(l, r) => binaryMath(TranscendentalKernels.Fn2.LOG_BASE, l, r, "log", input)
+
     case e: Remainder => divideLike(DivideLikeExpr.Rem, e.left, e.right, e.dataType, e.evalMode, e, input)
     case e: Pmod => divideLike(DivideLikeExpr.Pmod, e.left, e.right, e.dataType, e.evalMode, e, input)
     case e: IntegralDivide => divideLike(DivideLikeExpr.Div, e.left, e.right, e.dataType, e.evalMode, e, input)
@@ -217,6 +227,39 @@ object ExpressionCompiler {
   }
 
   /** A compiled non-literal operand on an INT32 / INT64 / FLOAT64 lane (decimals are #49). */
+  private val transcendental: Map[Class[_], TranscendentalKernels.Fn] = {
+    import TranscendentalKernels.Fn._
+    Map(
+      classOf[Exp] -> EXP, classOf[Expm1] -> EXPM1, classOf[Log] -> LOG, classOf[Log2] -> LOG2,
+      classOf[Log10] -> LOG10, classOf[Log1p] -> LOG1P, classOf[Cbrt] -> CBRT,
+      classOf[Sin] -> SIN, classOf[Cos] -> COS, classOf[Tan] -> TAN,
+      classOf[Asin] -> ASIN, classOf[Acos] -> ACOS, classOf[Atan] -> ATAN,
+      classOf[Sinh] -> SINH, classOf[Cosh] -> COSH, classOf[Tanh] -> TANH,
+      classOf[Asinh] -> ASINH, classOf[Acosh] -> ACOSH, classOf[Atanh] -> ATANH,
+      classOf[Cot] -> COT, classOf[Sec] -> SEC, classOf[Csc] -> CSC,
+      classOf[ToDegrees] -> DEGREES, classOf[ToRadians] -> RADIANS)
+  }
+
+  private def doubleChild(e: Expression, input: Seq[Attribute], what: String): Result =
+    if (e.dataType != DoubleType) Left(s"$what over ${e.dataType.simpleString}")
+    else numericChild(e, input, what)
+
+  private def unaryMath(fn: TranscendentalKernels.Fn, child: Expression, what: String, input: Seq[Attribute]): Result =
+    doubleChild(child, input, what).map(UnaryMathExpr(fn, _))
+
+  /** A binary math function: both sides double, a literal on at most one side (both would have folded). */
+  private def binaryMath(fn: TranscendentalKernels.Fn2, l: Expression, r: Expression, what: String, input: Seq[Attribute]): Result =
+    if (l.dataType != DoubleType || r.dataType != DoubleType) Left(s"$what over ${l.dataType.simpleString}, ${r.dataType.simpleString}")
+    else for (a <- compile(l, input); b <- compile(r, input)) yield {
+      (a, b) match {
+        case (_: LiteralExpr, _: LiteralExpr) => return Left(s"$what of two literals")
+        case _ =>
+      }
+      if (!a.isInstanceOf[LiteralExpr] && !arithmeticTypes.contains(a.vecType)) return Left(s"$what over ${l.dataType.simpleString} not supported")
+      if (!b.isInstanceOf[LiteralExpr] && !arithmeticTypes.contains(b.vecType)) return Left(s"$what over ${r.dataType.simpleString} not supported")
+      BinaryMathExpr(fn, a, b)
+    }
+
   private def numericChild(e: Expression, input: Seq[Attribute], what: String): Result =
     compile(e, input).flatMap {
       case _: LiteralExpr => Left(s"$what of a literal")
