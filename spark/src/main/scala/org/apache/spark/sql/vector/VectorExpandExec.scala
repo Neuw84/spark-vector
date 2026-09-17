@@ -116,7 +116,26 @@ private[vector] class VectorExpandIterator(
                 case ColumnRef(ordinal, _) => ArrowOutput.compact(name, dt, ctx.input(ordinal), ctx.selection, n, allocator)
                 case lit: LiteralExpr if lit.value == null => ArrowOutput.nulls(name, dt, n, allocator)
                 case lit: LiteralExpr => ArrowOutput.constant(name, dt, lit.value, n, allocator)
-                case other => throw new IllegalStateException(s"expand slot is not a column or literal: $other")
+                case e => ArrowOutput.compact(name, dt, e.eval(ctx), ctx.selection, n, allocator)
+              }
+              c += 1
+            }
+            new ColumnarBatch(columns, n)
+          }
+        case batch if slots.exists(s => !s.isInstanceOf[ColumnRef] && !s.isInstanceOf[LiteralExpr]) =>
+          // A computed slot (Spark's distinct rewrite puts a FILTER condition such as `l IS NOT NULL`
+          // in the expanded row): evaluated over the batch and copied out; columns are still borrowed.
+          EvalContexts.withBatch(batch) { ctx =>
+            val n = batch.numRows()
+            val columns = new Array[ColumnVector](slots.length)
+            var c = 0
+            while (c < columns.length) {
+              val (name, dt) = outputAttrs(c)
+              columns(c) = slots(c) match {
+                case ColumnRef(ordinal, _) => BorrowedColumnVector.of(batch.column(ordinal))
+                case lit: LiteralExpr if lit.value == null => ArrowOutput.nulls(name, dt, n, allocator)
+                case lit: LiteralExpr => ArrowOutput.constant(name, dt, lit.value, n, allocator)
+                case e => ArrowOutput.copy(name, dt, e.eval(ctx), allocator)
               }
               c += 1
             }
@@ -171,7 +190,7 @@ private[vector] class VectorExpandIterator(
 /** Planning-time checks for the expand, shared by the rule. */
 object VectorExpandPlanner {
 
-  /** Every slot a column reference or a literal (incl. `NULL`) of a supported type. */
+  /** Every slot a literal (incl. `NULL`) of a supported type, or an expression that compiles. */
   def plan(e: ExpandExec): Either[String, VectorExpandExec] = {
     val outputFailures = e.output.filterNot(a => TypeMapping.isSupported(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
     val slotFailures = e.projections.zipWithIndex.flatMap { case (p, i) =>
@@ -180,8 +199,7 @@ object VectorExpandPlanner {
         case _: Literal => None
         case expr =>
           ExpressionCompiler.compile(expr, e.child.output) match {
-            case Right(_: ColumnRef) => None
-            case Right(_) => Some(s"projection $i: ${expr.sql} is not a column or literal")
+            case Right(_) => None
             case Left(reason) => Some(s"projection $i: ${expr.sql}: $reason")
           }
       }

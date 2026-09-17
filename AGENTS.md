@@ -182,8 +182,15 @@ that pin it.
   `aggregateAttributes` (Spark's distinct rewrite gives the Final distinct expression a fresh
   `resultId`). `FILTER` clauses apply in the update modes through `FilteredAgg` (a narrowed
   selection per function; grouped, a copy of the assignment with the other ids cleared).
-  `DISTINCT` is a marker only; keys-only aggregates emit their keys; `first(x, ignoreNulls)` exists
-  for the distinct rewrite's plain aggregates (`FirstAgg` / `FirstMergeAgg`).
+  `DISTINCT` is a marker only; keys-only aggregates emit their keys. Beyond the kernel-backed
+  `count`/`sum`/`min`/`max`/`avg`, the scalar per-row accumulators in `ExtraAggregates.scala`
+  (`Rows` loop + `GroupValues`): `min`/`max` over booleans and strings (`OrderedMinMaxAgg`, so
+  `bool_and`/`bool_or`/`every`/`any`/`some`), `first`/`last` with and without `ignoreNulls`
+  (`FirstAgg`/`FirstMergeAgg`, `LastAgg`), `bit_and`/`bit_or`/`bit_xor` (`BitAgg`), `max_by`/`min_by`
+  (`MaxMinByAgg`, ties take the later row like Spark's predicate); `count_if` arrives as `count` over a
+  rewritten boolean. A string buffer makes Spark plan `SortAggregateExec`: the rule builds the same
+  hash operator from its fields, drops the sort Spark placed below when it is exactly the required one,
+  and keeps the output ordering of a result-emitting stage with a `VectorSortExec` above.
   `spark.vector.exec.aggregate.final.enabled` turns the Final conversion off.
 - `GroupKeyTable` memoises group ids per combination of dictionary indices when every key is
   dictionary encoded and the product of dictionary sizes is small. Plain UTF8 keys are dictionary
@@ -453,7 +460,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 136 kernel tests, 166 Spark tests (139 without the Comet and Iceberg profiles;
+Current counts: 136 kernel tests, 167 Spark tests (140 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

@@ -2,10 +2,10 @@ package io.sparkvector.spark.agg
 
 import io.sparkvector.kernels.{AggKernels, Bitmap, CompareOp, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
 import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
-import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Literal}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import io.sparkvector.spark.adapter.TypeMapping
-import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, DoubleType, LongType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, DoubleType, LongType, StringType}
 
 /**
  * Running state of one aggregate function within one task. `bufferValues` yields the partial
@@ -402,17 +402,41 @@ object VectorAggregates {
           }
         }
       case _: Count => ref(0).map(CountMergeAgg.apply)
+      case m: Min if orderedLane(m.dataType) => ref(0).map(b => OrderedMinMaxAgg(b, isMin = true, m.dataType))
+      case m: Max if orderedLane(m.dataType) => ref(0).map(b => OrderedMinMaxAgg(b, isMin = false, m.dataType))
       case m: Min => ref(0).flatMap(numericBuffer(m.dataType)).map(b => MinMaxAgg(b, isMin = true, m.dataType))
       case m: Max => ref(0).flatMap(numericBuffer(m.dataType)).map(b => MinMaxAgg(b, isMin = false, m.dataType))
+      case b: BitAggregate if buffers.length == 1 && integralLane(b.dataType) =>
+        ref(0).map(v => BitAgg(v, bitOp(b), b.dataType))
+      case l: Last if buffers.length == 2 && FirstAgg.supports(l.dataType) =>
+        for (last <- ref(0); valueSet <- ref(1)) yield LastAgg(last, l.dataType, l.ignoreNulls, Some(valueSet))
+      case l: Last => Left(s"last over ${l.dataType.simpleString} not supported")
+      case m: MaxMinBy if buffers.length == 2 && FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(TypeMapping.vecTypeOf(m.orderingExpr.dataType)) =>
+        for (value <- ref(0); ordering <- ref(1)) yield MaxMinByAgg(value, ordering, isMax = m.isInstanceOf[MaxBy], m.valueExpr.dataType, m.orderingExpr.dataType)
+      case m: MaxMinBy => Left(s"${m.prettyName} over ${m.valueExpr.dataType.simpleString} by ${m.orderingExpr.dataType.simpleString} not supported")
       case a: Average =>
         if (a.dataType != DoubleType || buffers.length != 2) Left(s"avg producing ${a.dataType.simpleString} not supported")
         else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count)
-      case f: First if f.ignoreNulls && buffers.length == 2 && FirstAgg.supports(f.dataType) =>
+      case f: First if buffers.length == 2 && FirstAgg.supports(f.dataType) =>
         for (first <- ref(0); valueSet <- ref(1)) yield FirstMergeAgg(first, valueSet, f.dataType)
-      case f: First => Left(s"first over ${f.dataType.simpleString}${if (f.ignoreNulls) "" else " without ignoreNulls"} not supported")
+      case f: First => Left(s"first over ${f.dataType.simpleString} not supported")
       case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
     }
   }
+
+  /** min/max lanes handled by a comparison per row rather than the numeric kernels. */
+  private def orderedLane(dt: DataType): Boolean = dt == BooleanType || dt == StringType
+  private def integralLane(dt: DataType): Boolean = dt == org.apache.spark.sql.types.IntegerType || dt == LongType
+  private def bitOp(b: BitAggregate): BitAgg.Op = b match {
+    case _: BitAndAgg => BitAgg.And
+    case _: BitOrAgg => BitAgg.Or
+    case _ => BitAgg.Xor
+  }
+  private def orderedChild(e: Expression, input: Seq[Attribute]): Either[String, VectorExpr] =
+    ExpressionCompiler.compile(e, input).flatMap {
+      case _: LiteralExpr => Left("min/max of a literal")
+      case c => Right(c)
+    }
 
   private def numericBuffer(dt: DataType)(b: VectorExpr): Either[String, VectorExpr] =
     if (numeric.contains(b.vecType)) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
@@ -447,8 +471,29 @@ object VectorAggregates {
         case _ => Left("count with several arguments not supported")
       }
 
+    case m: Min if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = true, m.dataType))
+    case m: Max if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = false, m.dataType))
     case m: Min => numericChild(m.child, input).map(child => MinMaxAgg(child, isMin = true, m.dataType))
     case m: Max => numericChild(m.child, input).map(child => MinMaxAgg(child, isMin = false, m.dataType))
+    case b: BitAggregate if integralLane(b.dataType) =>
+      ExpressionCompiler.compile(b.child, input).flatMap {
+        case _: LiteralExpr => Left(s"${b.prettyName} of a literal")
+        case e => Right(BitAgg(e, bitOp(b), b.dataType))
+      }
+    case b: BitAggregate => Left(s"${b.prettyName} over ${b.dataType.simpleString} not supported")
+    case l: Last if FirstAgg.supports(l.dataType) =>
+      ExpressionCompiler.compile(l.child, input).flatMap {
+        case _: LiteralExpr => Left("last of a literal")
+        case e => Right(LastAgg(e, l.dataType, l.ignoreNulls, None))
+      }
+    case l: Last => Left(s"last over ${l.dataType.simpleString} not supported")
+    case m: MaxMinBy if FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(TypeMapping.vecTypeOf(m.orderingExpr.dataType)) =>
+      for {
+        value <- ExpressionCompiler.compile(m.valueExpr, input)
+        ordering <- ExpressionCompiler.compile(m.orderingExpr, input)
+        _ <- if (ordering.isInstanceOf[LiteralExpr]) Left(s"${m.prettyName} by a literal") else Right(())
+      } yield MaxMinByAgg(value, ordering, isMax = m.isInstanceOf[MaxBy], m.valueExpr.dataType, m.orderingExpr.dataType)
+    case m: MaxMinBy => Left(s"${m.prettyName} over ${m.valueExpr.dataType.simpleString} by ${m.orderingExpr.dataType.simpleString} not supported")
 
     case a: Average if a.child.dataType.isInstanceOf[DecimalType] =>
       Left(s"avg buffer ${a.aggBufferAttributes.head.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
@@ -458,12 +503,12 @@ object VectorAggregates {
         AverageAgg(if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType))
       }
 
-    case f: First if f.ignoreNulls && FirstAgg.supports(f.dataType) =>
+    case f: First if FirstAgg.supports(f.dataType) =>
       ExpressionCompiler.compile(f.child, input).flatMap {
         case _: LiteralExpr => Left("first of a literal")
-        case e => Right(FirstAgg(e, f.dataType))
+        case e => Right(FirstAgg(e, f.dataType, f.ignoreNulls))
       }
-    case f: First => Left(s"first over ${f.dataType.simpleString}${if (f.ignoreNulls) "" else " without ignoreNulls"} not supported")
+    case f: First => Left(s"first over ${f.dataType.simpleString} not supported")
 
     case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
   }

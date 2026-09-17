@@ -93,15 +93,9 @@ class VectorAggregateSuite extends VectorQuerySuite {
   }
 
   test("unsupported aggregates fall back") {
-    // first without ignoreNulls has no kernel (a null first value is a real value there); with it, it is ours.
-    checkFallback("SELECT first(d2) FROM t", Seq(Agg), "first over double without ignoreNulls not supported")
-    // first over a string is planned by Spark as SortAggregateExec, which we never touch (see min(s) below).
+    checkFallback("SELECT approx_count_distinct(i) FROM t", Seq(Agg), "unsupported aggregate function")
+    checkFallback("SELECT stddev_samp(d) FROM t", Seq(Agg), "unsupported aggregate function")
     checkVectorized("SELECT first(d2, true), first(l, true), first(b, true), first(dt, true) FROM t WHERE i > 3", Seq(Agg))
-    checkFallback("SELECT min(b) FROM t", Seq(Agg), "not supported")
-    // min over strings is planned by Spark as SortAggregateExec, which we never touch.
-    val df = withPlugin(enabled = true)(spark.sql("SELECT min(s) FROM t"))
-    df.collect()
-    assert(nodesOf[VectorHashAggregateExec](df).isEmpty)
   }
 
   test("PartialMerge: the second stage of a count(distinct) plan merges over the exchange") {
@@ -140,12 +134,40 @@ class VectorAggregateSuite extends VectorQuerySuite {
     val ko = checkVectorized("SELECT count(DISTINCT i) AS di, count(DISTINCT s) AS ds FROM t WHERE i > 1000", Seq(Agg))
     assert(nodesOf[VectorHashAggregateExec](ko).exists(_.aggregateExpressions.isEmpty), "the keys-only stage is ours\n" + finalPlan(ko).treeString)
     checkVectorized("SELECT count(DISTINCT i) AS di, count(DISTINCT s) AS ds, count(*) AS c FROM t WHERE i > 1000", Seq(Agg))
-    // A distinct with FILTER is also rewritten through Expand, but its first aggregate folds the filter
-    // condition with max over a boolean, which has no accumulator yet (#45): pinned as a fallback with
-    // that reason; the second aggregate (count FILTER, first FILTER) is ours.
+    // A distinct with FILTER is also rewritten through Expand; its first aggregate folds the filter
+    // condition with max over a boolean, which is an accumulator since #45: every stage is ours.
     val f = checkVectorized("SELECT s, count(DISTINCT i) FILTER (WHERE l IS NOT NULL) AS d, sum(l) AS sl FROM t GROUP BY s", Seq(Agg))
-    val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(f)).map(_._2)
-    assert(reasons.exists(_.contains("min/max over boolean not supported")), reasons.mkString("; ") + "\n" + finalPlan(f).treeString)
+    assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](f).isEmpty,
+      org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(f)).map(_._2).mkString("; ") + "\n" + finalPlan(f).treeString)
+  }
+
+  test("aggregate functions beyond count/sum/min/max/avg: booleans, strings, bits, first/last, min_by/max_by") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    def allOurs(sql: String): Unit = {
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "every stage should be ours\n" + finalPlan(df).treeString)
+    }
+    // min/max over booleans and strings (Spark's binary order; s has nulls), bool_and/bool_or and their aliases.
+    allOurs("SELECT i % 5 AS g, min(b), max(b), min(s), max(s), bool_and(b), bool_or(b), every(b), any(b), some(b) FROM t GROUP BY i % 5")
+    allOurs("SELECT min(b), max(b), min(s), max(s), bool_and(b), bool_or(b) FROM t WHERE i > 17")
+    // count_if is a count over a rewritten boolean.
+    allOurs("SELECT i % 3 AS g, count_if(b), count_if(l > 500), count_if(s IS NULL) FROM t GROUP BY i % 3")
+    allOurs("SELECT count_if(b), count_if(l IS NULL) FROM t")
+    // Bit aggregates over int and bigint (l has nulls), grouped and not.
+    allOurs("SELECT i % 4 AS g, bit_and(i), bit_or(i), bit_xor(i), bit_and(l), bit_or(l), bit_xor(l) FROM t GROUP BY i % 4")
+    allOurs("SELECT bit_and(i), bit_or(l), bit_xor(i) FROM t WHERE i BETWEEN 100 AND 1000")
+    // first/last with and without ignoreNulls: deterministic shapes -- a value constant within its group,
+    // and a single ordered partition for the null-sensitive forms.
+    allOurs("SELECT i % 5 AS g, first(i % 5), last(i % 5), first(s, true), last(s, true) FROM t GROUP BY i % 5")
+    allOurs("SELECT first(l), last(l), first(l, true), last(l, true), first(s), last(s, true) FROM (SELECT * FROM t WHERE i < 40 ORDER BY i)")
+    // min_by / max_by with unique orderings (ties are order-dependent in Spark too), int/double/string values and keys.
+    allOurs("SELECT i % 7 AS g, max_by(s, i), min_by(s, i), max_by(i, d2), min_by(l, i), max_by(d, i), min_by(b, d2) FROM t WHERE i < 5000 GROUP BY i % 7")
+    allOurs("SELECT max_by(s, i), min_by(i, i), max_by(l, d2) FROM t WHERE i > 100")
+    // Empty groups and no rows: nulls (zero for count_if), like Spark.
+    allOurs("SELECT min(s), max(b), bit_and(i), first(l), last(s), max_by(s, i), count_if(b) FROM t WHERE i < 0")
+    allOurs("SELECT i % 3 AS g, min(s), bool_or(b), bit_xor(l), last(s, true), min_by(s, i) FROM t WHERE i < 0 GROUP BY i % 3")
+    // Mixed with the existing functions and a FILTER clause in one operator.
+    allOurs("SELECT i % 6 AS g, count(*), sum(l), min(s) FILTER (WHERE b), max_by(s, l), bit_or(i) FILTER (WHERE i % 2 = 0), avg(i) FROM t GROUP BY i % 6")
   }
 
   test("FILTER clauses apply in the update stage, grouped and ungrouped") {
