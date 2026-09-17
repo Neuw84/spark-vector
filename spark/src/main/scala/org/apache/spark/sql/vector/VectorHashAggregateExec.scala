@@ -327,11 +327,13 @@ private[vector] class VectorGroupedAggregateIterator(
 /** Planning-time checks shared by the rule and the operator. */
 object VectorAggregatePlanner {
 
-  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8)
+  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64)
 
   /**
-   * Grouping keys: ints, longs, booleans and strings. Doubles are excluded because Spark wraps them
-   * in NormalizeNaNAndZero, which is not compiled (and would need its own equality semantics).
+   * Grouping keys: ints, longs, booleans, strings and doubles. The key table compares doubles by
+   * bits, which matches Spark because the optimizer wraps double grouping keys in
+   * NormalizeNaNAndZero (compiled to a real normalisation pass) at the updating stage, and the
+   * merging stage, like Spark's own, groups the already normalised values.
    */
   def compileKey(e: NamedExpression, input: Seq[Attribute]): Either[String, VectorExpr] =
     ExpressionCompiler.compile(e, input).flatMap {

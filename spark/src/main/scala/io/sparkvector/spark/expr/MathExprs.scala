@@ -26,6 +26,22 @@ final case class AbsExpr(child: VectorExpr, ansi: Boolean, queryContext: QueryCo
   }
 }
 
+/**
+ * Spark's `NormalizeNaNAndZero` over a double: every NaN becomes the canonical one and `-0.0`
+ * becomes `0.0`, so that the bit comparison of the group key table and the join tables agrees with
+ * Spark's equality on the grouping and join keys the optimizer wraps in it.
+ */
+final case class NormalizeDoubleExpr(child: VectorExpr) extends VectorExpr {
+  override def dataType: DataType = DoubleType
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val data = ArrowLayout.allocateData(ctx.arena, VecType.FLOAT64, ctx.numRows)
+    MathKernels.normalizeNaNAndZero(a, data)
+    SegmentVectorBuffers.fixedWidth(VecType.FLOAT64, ctx.numRows, a.validity(), data)
+  }
+}
+
 /** `sign` / `signum`: double in (Spark casts), double out. */
 /** `sqrt` over a double lane: `Math.sqrt` per lane, NaN for a negative argument as in Spark. */
 final case class SqrtExpr(child: VectorExpr) extends VectorExpr {

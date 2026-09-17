@@ -292,8 +292,11 @@ class VectorAggregateSuite extends VectorQuerySuite {
     assert(rows.nonEmpty, "the maximum revenue row must match itself")
   }
 
-  test("double grouping keys fall back") {
-    checkFallback("SELECT d2, count(*) FROM t GROUP BY d2", Seq(Agg), "grouping key type double not supported")
+  test("double grouping keys group by bits after Spark's normalisation") {
+    checkVectorized("SELECT d2, count(*) FROM t GROUP BY d2", Seq(Agg))
+    // d has NaNs, infinities and nulls.
+    checkVectorized("SELECT d, count(*), sum(i) FROM t GROUP BY d", Seq(Agg))
+    checkVectorized("SELECT s, d2, min(i), max(i) FROM t GROUP BY s, d2", Seq(Agg))
   }
 
   test("TPC-H Q1 end to end") {
@@ -413,13 +416,12 @@ class VectorAggregateSuite extends VectorQuerySuite {
   }
 
   test("NaN and negative zero grouping keys are normalised as Spark's") {
-    // Spark wraps a double key in KnownFloatingPointNormalized(NormalizeNaNAndZero(...)), which the
-    // compiler unwraps -- but a double grouping key itself is refused (the group table has no lane for
-    // it), so the plan falls back with the key-type reason, never a normalization one. Pinned so that a
-    // future double-key path inherits the test: rows agree with Spark (one NaN group, one zero group).
-    checkFallback(
+    // Spark wraps a double key in KnownFloatingPointNormalized(NormalizeNaNAndZero(...)); the compiler
+    // runs the normalisation as a real pass, so the group table's bit comparison puts every NaN in one
+    // group and both zeros in another, exactly as Spark does.
+    checkVectorized(
       "SELECT k, count(*) AS n, sum(i) AS s FROM (SELECT CASE WHEN i % 4 = 0 THEN -0.0 WHEN i % 4 = 1 THEN 0.0 WHEN i % 4 = 2 THEN CAST('NaN' AS DOUBLE) ELSE d2 END AS k, i FROM t) GROUP BY k",
-      Seq(Agg), "grouping key type double not supported")
+      Seq(Agg))
     // In a comparison the normalisation wrapper does not appear; the compare kernels already treat NaN = NaN and -0.0 = 0.0.
     checkVectorized("SELECT count(*) FROM t WHERE (CASE WHEN i % 2 = 0 THEN -0.0 ELSE d2 END) = 0.0", Seq(Agg))
   }

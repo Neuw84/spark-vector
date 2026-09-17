@@ -32,8 +32,8 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * candidate pairs of every streamed row first and only then decide what that row becomes: kept or
  * dropped (semi/anti), its passing pairs or one null-padded row (outer). A full outer join also
  * remembers which build rows were ever paired and emits the rest, null-padded, after the last
- * streamed batch. Null keys never match, as in Spark. Double keys are refused: Spark compares them
- * after NaN/zero normalisation, the key table by bits.
+ * streamed batch. Null keys never match, as in Spark. Double keys compare by bits, which agrees with
+ * Spark because its optimizer normalises NaN and -0.0 on every double join key (compiled as a pass).
  */
 trait VectorHashJoinLike extends VectorBinaryExec {
   def leftKeys: Seq[Expression]
@@ -138,7 +138,9 @@ case class VectorBroadcastHashJoinExec(
     val m = vectorMetrics
     val relation = buildPlan.executeBroadcast[Any]()
     streamedPlan.executeColumnar().mapPartitionsInternal { iter =>
-      val build = BuildTable.fromRelation(HashedRelationAccess.rows(relation.value), spec)
+      // The relation object stays referenced by this closure for the task's lifetime, which keeps
+      // the shared table (keyed on it) alive; see BuildTable.sharedFromRelation.
+      val build = BuildTable.sharedFromRelation(relation.value.asInstanceOf[AnyRef], spec)
       new VectorHashJoinIterator(iter, build, spec, m)
     }
   }
@@ -235,9 +237,13 @@ case class VectorShuffledHashJoinExec(
  * The build side of one task: its columns, a key table over the non-null-key rows and, per key
  * (group id), the chain of build rows holding it.
  */
-final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val numRows: Int, spec: JoinSpec) extends AutoCloseable {
-  /** The key table of an equi-join; a nested loop join (no keys) never builds one. */
-  lazy val table = new GroupKeyTable(spec.buildKeys.map(_.vecType))
+final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val numRows: Int, spec: JoinSpec, val shared: Boolean = false) extends AutoCloseable {
+  /**
+   * The key table of an equi-join; a nested loop join (no keys) never builds one. Built without
+   * on-the-fly string dictionaries: build keys are mostly distinct, and the table stays immutable
+   * after `build()`, which is what makes concurrent probing of a shared table safe.
+   */
+  lazy val table = new GroupKeyTable(spec.buildKeys.map(_.vecType), false)
   /** First build row of each key, -1 for none. */
   var head: Array[Int] = new Array[Int](0)
   /** Next build row with the same key, -1 at the end. */
@@ -261,7 +267,8 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
     this
   }
 
-  override def close(): Unit = arena.close()
+  /** A shared table (a broadcast relation's, used by every task of the executor) outlives its tasks. */
+  override def close(): Unit = if (!shared) arena.close()
 }
 
 object BuildTable {
@@ -301,7 +308,7 @@ object BuildTable {
    * The build side from Spark's broadcast relation: every row of every key, read through the
    * `InternalRow` getters into typed arrays, then laid out as columns.
    */
-  def fromRelation(rows: Iterator[InternalRow], spec: JoinSpec): BuildTable = {
+  def fromRelation(rows: Iterator[InternalRow], spec: JoinSpec, shared: Boolean = false): BuildTable = {
     val arena = Arena.ofShared()
     val types = spec.buildTypes
     val builders = types.map(dt => new RowColumnBuilder(dt))
@@ -315,7 +322,38 @@ object BuildTable {
     // The build side may have been pruned to no columns at all (a cross join that projects only
     // the streamed side): the row count must not come from a column.
     val columns = builders.map(_.build(arena))
-    new BuildTable(arena, columns, numRows, spec).build()
+    new BuildTable(arena, columns, numRows, spec, shared).build()
+  }
+
+  /**
+   * One build table per broadcast relation and join per executor, like Spark's `HashedRelation`
+   * itself, which every task of the executor reads and none rebuilds. Tasks probe the same table
+   * concurrently (it is read-only once built and its arena is shared); building is serialised on
+   * the relation. The relation object is the key, held weakly: Spark keeps it alive while the
+   * broadcast block is in memory, and a task holds it for its whole run through the operator's
+   * closure. When it is collected the table's native memory goes with it, through a `Cleaner`.
+   */
+  private val sharedTables = new java.util.WeakHashMap[AnyRef, java.util.HashMap[String, BuildTable]]()
+  private val cleaner = java.lang.ref.Cleaner.create()
+
+  def sharedFromRelation(relation: AnyRef, spec: JoinSpec): BuildTable = {
+    val perRelation = sharedTables.synchronized {
+      var m = sharedTables.get(relation)
+      if (m == null) { m = new java.util.HashMap[String, BuildTable](); sharedTables.put(relation, m) }
+      m
+    }
+    // The spec of one join over the relation; another join on other keys gets its own table.
+    val key = spec.buildKeys.mkString("|") + "#" + spec.buildTypes.mkString("|")
+    perRelation.synchronized {
+      var t = perRelation.get(key)
+      if (t == null) {
+        t = fromRelation(HashedRelationAccess.rows(relation), spec, shared = true)
+        val arena = t.arena
+        cleaner.register(relation, () => arena.close())
+        perRelation.put(key, t)
+      }
+      t
+    }
   }
 }
 
@@ -329,7 +367,9 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
   private var longs = if (vecType == VecType.INT64) new Array[Long](1024) else null
   private var doubles = if (vecType == VecType.FLOAT64) new Array[Double](1024) else null
   private var bools = if (vecType == VecType.BOOL) new Array[Boolean](1024) else null
-  private var strings = if (vecType == VecType.UTF8) new Array[String](1024) else null
+  private var bytes = if (vecType == VecType.UTF8) new Array[Byte](8192) else null
+  private var offsets = if (vecType == VecType.UTF8) new Array[Int](1025) else null
+  private var used = 0
 
   def add(row: InternalRow, ordinal: Int): Unit = {
     if (n == nulls.length) grow()
@@ -342,8 +382,14 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
       }
       case VecType.FLOAT64 => doubles(n) = row.getDouble(ordinal)
       case VecType.BOOL => bools(n) = row.getBoolean(ordinal)
-      case VecType.UTF8 => strings(n) = row.getUTF8String(ordinal).toString
+      case VecType.UTF8 =>
+        val str = row.getUTF8String(ordinal)
+        val len = str.numBytes()
+        if (used + len > bytes.length) bytes = java.util.Arrays.copyOf(bytes, math.max(bytes.length * 2, used + len))
+        str.writeToMemory(bytes, org.apache.spark.unsafe.Platform.BYTE_ARRAY_OFFSET + used)
+        used += len
     }
+    if (offsets != null) offsets(n + 1) = used
     n += 1
   }
 
@@ -354,7 +400,7 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
     if (longs != null) longs = java.util.Arrays.copyOf(longs, cap)
     if (doubles != null) doubles = java.util.Arrays.copyOf(doubles, cap)
     if (bools != null) bools = java.util.Arrays.copyOf(bools, cap)
-    if (strings != null) strings = java.util.Arrays.copyOf(strings, cap)
+    if (offsets != null) offsets = java.util.Arrays.copyOf(offsets, cap + 1)
   }
 
   def build(arena: Arena): VectorBuffers = {
@@ -364,7 +410,7 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
       case VecType.INT64 => ArrowLayout.ofLongs(arena, java.util.Arrays.copyOf(longs, n), nn)
       case VecType.FLOAT64 => ArrowLayout.ofDoubles(arena, java.util.Arrays.copyOf(doubles, n), nn)
       case VecType.BOOL => ArrowLayout.ofBooleans(arena, java.util.Arrays.copyOf(bools, n), nn)
-      case VecType.UTF8 => ArrowLayout.ofStrings(arena, java.util.Arrays.copyOf(strings, n)) // nulls stay null entries
+      case VecType.UTF8 => ArrowLayout.ofUtf8(arena, bytes, offsets, n, nn)
     }
   }
 }
@@ -407,6 +453,7 @@ private[vector] class VectorHashJoinIterator(
   /** Per streamed row, whether any of its candidates passed the condition. */
   private var rowMatched = new Array[Boolean](0)
   private var idScratch = new Array[Int](0)
+  private var hashScratch = new Array[Int](0)
 
   private val numBuildCols = spec.buildTypes.length
   private val streamedWidth = spec.streamedWidth
@@ -451,8 +498,8 @@ private[vector] class VectorHashJoinIterator(
       if (!nestedLoop) {
         val keys = spec.streamedKeys.map(_.eval(ctx))
         val candidates = BuildTable.nonNullKeys(ctx, keys)
-        if (idScratch.length < n) idScratch = new Array[Int](n)
-        if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates)
+        if (idScratch.length < n) { idScratch = new Array[Int](n); hashScratch = new Array[Int](n) }
+        if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates, hashScratch)
         else java.util.Arrays.fill(idScratch, 0, n, -1)
       }
       // A hash join's candidates are few per row: one chunk. A nested loop's are the whole build
@@ -745,7 +792,12 @@ private[vector] class VectorHashJoinIterator(
 /** Planning-time checks shared by the rule and the operators. */
 object VectorJoinPlanner {
 
-  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8)
+  /**
+   * Doubles included: Spark's optimizer wraps double join keys in NormalizeNaNAndZero (all NaNs and
+   * both zeros canonical), which is compiled to a real pass, so the tables' bit comparison agrees
+   * with Spark's equality.
+   */
+  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64)
 
   def compileKeys(keys: Seq[Expression], input: Seq[Attribute]): Array[VectorExpr] =
     keys.map(k => compileKey(k, input).fold(r => throw new IllegalStateException(s"cannot vectorize join key ${k.sql}: $r"), identity)).toArray

@@ -67,11 +67,12 @@ object ExpressionCompiler {
 
     case Alias(child, _) => compile(child, input)
 
-    // Spark (and Comet's plan normalisation) wrap doubles used in comparisons and grouping keys in
-    // NormalizeNaNAndZero so that all NaNs and both zeros compare equal. Our compare kernels already
-    // implement that ordering and double grouping keys are rejected, so both are identities here.
+    // Spark wraps doubles used as grouping, join and window keys in NormalizeNaNAndZero so that all
+    // NaNs and both zeros compare equal. The key tables compare bits, so the normalisation is a real
+    // pass over doubles (the marker around it is an identity); floats are not a supported lane type.
     case KnownFloatingPointNormalized(child) => compile(child, input)
-    case NormalizeNaNAndZero(child) => compile(child, input)
+    case NormalizeNaNAndZero(child) if child.dataType == DoubleType => compile(child, input).map(NormalizeDoubleExpr(_))
+    case NormalizeNaNAndZero(child) => Left(s"NormalizeNaNAndZero over ${child.dataType.simpleString} not supported")
 
     case EqualTo(l, r) => comparison(CompareOp.EQ, l, r, input)
     case LessThan(l, r) => comparison(CompareOp.LT, l, r, input)

@@ -187,6 +187,26 @@ class MathKernelsTest {
     }
   }
 
+  /** After normalisation, values Spark treats as equal grouping/join keys have identical bits. */
+  @Test
+  void normalizeNaNAndZeroCanonicalisesBits() {
+    try (Arena arena = Arena.ofConfined()) {
+      double otherNaN = Double.longBitsToDouble(0x7ff8000000000001L);
+      double[] x = {1.5, -0.0, 0.0, Double.NaN, otherNaN, -2.25, Double.NEGATIVE_INFINITY, Double.MIN_VALUE};
+      VectorBuffers a = ArrowLayout.ofDoubles(arena, x, null);
+      MemorySegment out = ArrowLayout.allocateData(arena, VecType.FLOAT64, x.length);
+      MathKernels.normalizeNaNAndZero(a, out);
+      long[] expected = {
+        Double.doubleToRawLongBits(1.5), Double.doubleToRawLongBits(0.0), Double.doubleToRawLongBits(0.0),
+        Double.doubleToRawLongBits(Double.NaN), Double.doubleToRawLongBits(Double.NaN), Double.doubleToRawLongBits(-2.25),
+        Double.doubleToRawLongBits(Double.NEGATIVE_INFINITY), Double.doubleToRawLongBits(Double.MIN_VALUE)
+      };
+      for (int i = 0; i < x.length; i++) {
+        assertEquals(expected[i], out.getAtIndex(VectorBuffers.LE_LONG, i), "bits of normalised " + x[i]);
+      }
+    }
+  }
+
   @Test
   void nanvlFollowsSparkEval() {
     try (Arena arena = Arena.ofConfined()) {

@@ -78,7 +78,19 @@ public final class GroupKeyTable {
   private int[][] indexScratch;
 
   public GroupKeyTable(VecType[] types) {
+    this(types, true);
+  }
+
+  /**
+   * @param encodePlainStrings whether plain UTF8 keys are dictionary-encoded on the fly (see
+   *     {@link #plainDictMaxEntries}). Group-by keys want it; a hash join's build side, whose keys
+   *     are mostly distinct, does not, and a table built without it is immutable once
+   *     {@link #assign} is done, so {@link #lookup(VectorBuffers[], int, int[], MemorySegment,
+   *     int[])} may run concurrently from several threads.
+   */
+  public GroupKeyTable(VecType[] types, boolean encodePlainStrings) {
     this.types = types.clone();
+    this.plainDictOverflowed = !encodePlainStrings;
     this.slots = new int[INITIAL_CAPACITY * 2];
     Arrays.fill(slots, -1);
     this.mask = slots.length - 1;
@@ -175,14 +187,23 @@ public final class GroupKeyTable {
    * probe side over a table built with {@link #assign}; returns the number of rows that matched.
    */
   public int lookup(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection) {
+    if (hashScratch.length < n) {
+      hashScratch = new int[Math.max(n, hashScratch.length * 2)];
+    }
+    return lookup(keys, n, outIds, selection, hashScratch);
+  }
+
+  /**
+   * {@link #lookup(VectorBuffers[], int, int[], MemorySegment)} with the caller's row-hash scratch
+   * ({@code hashes.length >= n}). On a table constructed without plain-string encoding this reads
+   * the table only, so concurrent probes from several threads (a broadcast join's tasks sharing one
+   * build table) are safe as long as nobody assigns to it any more.
+   */
+  public int lookup(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection, int[] hashes) {
     VectorBuffers[] encoded = encodeShortStrings(keys, n);
     if (encoded != null) {
       keys = encoded;
     }
-    if (hashScratch.length < n) {
-      hashScratch = new int[Math.max(n, hashScratch.length * 2)];
-    }
-    int[] hashes = hashScratch;
     HashKernels.init(hashes, n);
     for (VectorBuffers key : keys) {
       HashKernels.mixColumn(key, hashes);

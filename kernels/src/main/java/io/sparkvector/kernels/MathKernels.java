@@ -337,6 +337,24 @@ public final class MathKernels {
     }
   }
 
+  // ---------------------------------------------------------------- NormalizeNaNAndZero
+
+  /**
+   * Spark's {@code NormalizeNaNAndZero} over FLOAT64: every NaN becomes the canonical {@link
+   * Double#NaN}, {@code -0.0} becomes {@code 0.0}, everything else is copied. After it, values that
+   * Spark considers equal have equal bits, which is what the key table compares. Nulls keep their
+   * (unspecified) data.
+   */
+  public static void normalizeNaNAndZero(VectorBuffers a, MemorySegment out) {
+    requireType(a, VecType.FLOAT64, "normalizeNaNAndZero");
+    int n = a.length();
+    MemorySegment d = a.data();
+    for (int i = 0; i < n; i++) {
+      double x = d.getAtIndex(VectorBuffers.LE_DOUBLE, i);
+      out.setAtIndex(VectorBuffers.LE_DOUBLE, i, Double.isNaN(x) ? Double.NaN : x == 0.0 ? 0.0 : x);
+    }
+  }
+
   private static void requireType(VectorBuffers a, VecType type, String what) {
     if (a.type() != type) {
       throw new IllegalArgumentException(what + " over " + a.type());

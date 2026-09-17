@@ -141,6 +141,19 @@ public final class ArrowLayout {
         VecType.BOOL, values.length, validityFrom(arena, nulls, values.length), data);
   }
 
+  /**
+   * UTF8 column from already encoded bytes: value {@code i} is {@code bytes[offsets[i], offsets[i +
+   * 1])}, {@code offsets} has {@code n + 1} entries. Nothing is decoded or re-encoded on the way.
+   */
+  public static SegmentVectorBuffers ofUtf8(Arena arena, byte[] bytes, int[] offsets, int n, boolean[] nulls) {
+    MemorySegment offsetSegment = allocateOffsets(arena, n);
+    MemorySegment.copy(offsets, 0, offsetSegment, VectorBuffers.LE_INT, 0, n + 1);
+    int total = offsets[n];
+    MemorySegment data = allocateBytes(arena, total);
+    MemorySegment.copy(bytes, 0, data, ValueLayout.JAVA_BYTE, 0, total);
+    return SegmentVectorBuffers.utf8(n, validityFrom(arena, nulls, n), offsetSegment, data);
+  }
+
   /** UTF8 column; {@code null} entries become nulls. */
   public static SegmentVectorBuffers ofStrings(Arena arena, String[] values) {
     int n = values.length;
