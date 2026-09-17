@@ -117,7 +117,7 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i + 1.5D AS a, l * 0.5D AS b, i / 2 AS c FROM t WHERE i > 5", Seq(Project))
     // A plain decimal literal makes Spark cast the int to a decimal; both run on long lanes.
     checkVectorized("SELECT i + 1.5 AS a FROM t WHERE i > 5", Seq(Project))
-    checkFallback("SELECT CAST(d2 AS INT) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
+    checkFallback("SELECT CAST(dt AS STRING) AS a FROM t WHERE i > 5", Seq(Project), "unsupported cast")
   }
 
   // `l` is null on every seventh row (so `l > 3000` is a null condition there), `d` is null on
@@ -288,6 +288,50 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT unix_timestamp(CAST(d0 AS STRING), 'yyyy-MM-dd') AS a FROM ts", Seq(Project), "parsing a string")
     checkFallback("SELECT date_format(ts, CASE WHEN i % 2 = 0 THEN 'yyyy' ELSE 'MM' END) AS a FROM ts", Seq(Project), "non-literal pattern")
     checkFallback("SELECT date_trunc('DECADE', ts) AS a FROM ts", Seq(Project), "not supported")
+  }
+
+  test("casts: narrowing, booleans, date -> timestamp, to string") {
+    // Legacy narrowing: Java's rule -- a long wraps, a double truncates toward zero and saturates, NaN is 0.
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized("SELECT cast(l AS INT) AS a, cast(l * 1000000000 AS INT) AS b, cast(d AS INT) AS c, cast(d AS BIGINT) AS d1, cast(-d2 * 3 AS INT) AS e0, cast(d * 1e12 AS INT) AS f, cast(d * 1e300 AS BIGINT) AS g FROM t", Seq(Project))
+    }
+    // ANSI: in-range values agree; an out-of-range active row raises Spark's CAST_OVERFLOW; a filtered row never raises.
+    checkVectorized("SELECT cast(l AS INT) AS a, cast(d2 * 1000 AS INT) AS b, cast(-d2 AS BIGINT) AS c, cast(l AS DOUBLE) AS d1 FROM t", Seq(Project))
+    checkVectorized("SELECT cast(d AS INT) AS a, cast(d AS BIGINT) AS b FROM t WHERE d < 1000 AND d > -1000", Seq(Project, Filter))
+    val overflow = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT cast(d AS INT) AS a FROM t").collect()))
+    assert(causes(overflow).exists(_.getMessage.contains("CAST_OVERFLOW")), s"expected CAST_OVERFLOW, got $overflow")
+    val wrap = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT cast(l * 1000000000 AS INT) AS a FROM t").collect()))
+    assert(causes(wrap).exists(_.getMessage.contains("CAST_OVERFLOW")), s"expected CAST_OVERFLOW, got $wrap")
+    // Booleans both ways, incl. NaN (true) and the string spellings Spark accepts.
+    checkVectorized("SELECT cast(i AS BOOLEAN) AS a, cast(l AS BOOLEAN) AS b, cast(d AS BOOLEAN) AS c, cast(d2 AS BOOLEAN) AS d1, cast(b AS INT) AS e0, cast(b AS BIGINT) AS f, cast(b AS DOUBLE) AS g, cast(b AS STRING) AS h FROM t", Seq(Project))
+    checkVectorized("SELECT cast(CASE i % 12 WHEN 0 THEN 'true' WHEN 1 THEN ' T ' WHEN 2 THEN 'Yes' WHEN 3 THEN '1' WHEN 4 THEN 'y' WHEN 5 THEN 'FALSE' WHEN 6 THEN 'f' WHEN 7 THEN 'no' WHEN 8 THEN '0' WHEN 9 THEN 'N' WHEN 10 THEN NULL ELSE 'tRuE' END AS BOOLEAN) AS a FROM t", Seq(Project))
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized("SELECT cast(s AS BOOLEAN) AS a, cast(CASE WHEN i % 3 = 0 THEN 'yes' ELSE s END AS BOOLEAN) AS b FROM t", Seq(Project))
+    }
+    val badBool = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT cast(s AS BOOLEAN) AS a FROM t").collect()))
+    assert(causes(badBool).exists(_.getMessage.contains("CAST_INVALID_INPUT")), s"expected CAST_INVALID_INPUT, got $badBool")
+    checkVectorized("SELECT cast(s AS BOOLEAN) AS a FROM t WHERE s IS NULL", Seq(Project, Filter))
+    // Date -> timestamp under UTC and fixed offsets; a zone with rules falls back.
+    for (zone <- Seq("UTC", "+05:30", "-03:00")) {
+      withConf("spark.sql.session.timeZone" -> zone) {
+        checkVectorized("SELECT cast(dt AS TIMESTAMP) AS a FROM t", Seq(Project))
+        checkVectorized("SELECT cast(d0 AS TIMESTAMP) AS a, cast(ts AS DATE) AS b FROM ts", Seq(Project))
+      }
+    }
+    withConf("spark.sql.session.timeZone" -> "America/New_York") {
+      checkFallback("SELECT cast(dt AS TIMESTAMP) AS a FROM t", Seq(Project), "fixed-offset session zone")
+    }
+    // To string: Java's toString for ints, longs and doubles (incl. NaN, the infinities, -0.0, exponents).
+    checkVectorized("SELECT cast(i AS STRING) AS a, cast(l AS STRING) AS b, cast(d AS STRING) AS c, cast(d2 AS STRING) AS d1, cast(-d2 AS STRING) AS e0, cast(d * 1e20 AS STRING) AS f, cast(d / 1e10 AS STRING) AS g, cast(-i AS STRING) AS h FROM t", Seq(Project))
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT count(*) AS n FROM t WHERE cast(d2 AS INT) = 1 AND cast(i AS BOOLEAN)", Seq(Filter, classOf[VectorHashAggregateExec]))
+    checkVectorized("SELECT cast(d2 AS INT) AS k, cast(b AS STRING) AS s2, count(*) AS n FROM t GROUP BY cast(d2 AS INT), cast(b AS STRING)", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: try_cast, and the casts still on the list (string -> number, date -> string).
+    checkFallback("SELECT try_cast(d AS INT) AS a FROM t", Seq(Project), "try_cast")
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkFallback("SELECT cast(s AS INT) AS a FROM t", Seq(Project), "unsupported cast")
+    }
+    checkFallback("SELECT cast(dt AS STRING) AS a FROM t", Seq(Project), "unsupported cast")
   }
 
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {

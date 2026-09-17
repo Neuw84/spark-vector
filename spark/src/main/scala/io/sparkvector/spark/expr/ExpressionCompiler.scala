@@ -215,6 +215,29 @@ object ExpressionCompiler {
           }
       }
 
+    case c: Cast if c.evalMode == EvalMode.TRY && sliceOneCast(c) => Left("try_cast not supported")
+    case c: Cast if sliceOneCast(c) =>
+      val from = c.child.dataType
+      val to = c.dataType
+      val ansi = c.evalMode == EvalMode.ANSI
+      compile(c.child, input).flatMap {
+        case _: LiteralExpr => Left("cast of a literal")
+        case ce =>
+          (from, to) match {
+            case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => Right(NarrowCastExpr(ce, to, ansi, c.origin.context))
+            case (IntegerType | LongType | DoubleType, BooleanType) => Right(ToBooleanExpr(ce))
+            case (BooleanType, IntegerType | LongType | DoubleType) => Right(FromBooleanExpr(ce, to))
+            case (StringType, BooleanType) => Right(StringToBooleanExpr(ce, ansi, c.origin.context))
+            case (DateType, TimestampType) =>
+              DateExprs.fixedOffsetMicros(c.timeZoneId) match {
+                case None => Left(s"cast date -> timestamp needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}")
+                case Some(offset) => Right(DateToTimestampExpr(ce, offset))
+              }
+            case (_, StringType) => Right(ToStringExpr(ce))
+            case _ => Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
+          }
+      }
+
     case c: Cast =>
       val child = c.child
       val dt = c.dataType
@@ -548,6 +571,17 @@ object ExpressionCompiler {
   }
 
   /** A compiled non-literal date operand. */
+  /** The casts of the first slice of #43 (the widening kernel and the decimal path keep their own cases). */
+  private def sliceOneCast(c: Cast): Boolean = (c.child.dataType, c.dataType) match {
+    case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => true
+    case (IntegerType | LongType | DoubleType, BooleanType) => true
+    case (BooleanType, IntegerType | LongType | DoubleType) => true
+    case (StringType, BooleanType) => true
+    case (DateType, TimestampType) => true
+    case (from, StringType) if CastExprs.stringable(from) => true
+    case _ => false
+  }
+
   private def dateChild(e: Expression, input: Seq[Attribute]): Result =
     if (e.dataType != DateType) Left(s"date function over ${e.dataType.simpleString}")
     else compile(e, input).flatMap {

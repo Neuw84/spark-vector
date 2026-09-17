@@ -123,7 +123,7 @@ that pin it.
   `BitKernels`; Java's semantics, `bit_count` on the value widened to a long like Spark's),
   `RoundExprs.scala` (`CeilFloorExpr`, `RintExpr`, `RoundExpr` for `round`/`bround`/two-argument
   `ceil`/`floor` over `RoundKernels`; doubles take Spark's BigDecimal-of-toString path, decimals round
-  the unscaled value), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr`, `NegateExpr`, the decimal nodes, and
+  the unscaled value), `And/Or/Not`, `IsNull/IsNotNull`, `ArithExpr`, `CastExpr` (widening) and the cast slice in `CastExprs.scala` (`NarrowCastExpr`, `ToBooleanExpr`, `FromBooleanExpr`, `StringToBooleanExpr`, `DateToTimestampExpr`, `ToStringExpr` over `CastKernels.narrow/toBool/fromBool/daysToMicros`), `NegateExpr`, the decimal nodes, and
   `CaseWhenExpr` for `CASE WHEN`/`IF`/`COALESCE`: per-branch win masks carried forward as `active`,
   a null condition counts as false, `SelectKernels.select` blends -- literal branches, string and
   boolean ones included, are materialised as constant columns).
@@ -483,7 +483,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 150 kernel tests, 182 Spark tests (155 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 183 Spark tests (156 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

@@ -1,8 +1,10 @@
 package org.apache.spark.sql.vector
 
 import org.apache.spark.QueryContext
+import org.apache.spark.sql.catalyst.util.StringUtils
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.types.{DataType, Decimal}
+import org.apache.spark.unsafe.types.UTF8String
 
 /** Spark's error factories are `private[sql]`; this bridge lives inside that package tree. */
 object VectorErrors {
@@ -24,6 +26,14 @@ object VectorErrors {
   /** `make_date` with an invalid civil date in ANSI mode: Spark's DATETIME_FIELD_OUT_OF_BOUNDS family. */
   def dateTimeArgumentOutOfRange(cause: Exception): RuntimeException =
     QueryExecutionErrors.ansiDateTimeArgumentOutOfRange(cause)
+
+  /** An ANSI `cast(string AS boolean)` over a spelling Spark does not accept. */
+  def invalidBooleanInput(value: UTF8String, context: QueryContext): RuntimeException =
+    QueryExecutionErrors.invalidInputSyntaxForBooleanError(value, context)
+
+  /** Spark's accepted boolean spellings: `t`/`true`/`y`/`yes`/`1` and `f`/`false`/`n`/`no`/`0`, trimmed, any case. */
+  def isTrueString(s: UTF8String): Boolean = StringUtils.isTrueString(s)
+  def isFalseString(s: UTF8String): Boolean = StringUtils.isFalseString(s)
 
   /** A decimal result that does not fit the target precision (ANSI arithmetic and casts). */
   def decimalPrecisionOverflow(value: Decimal, precision: Int, scale: Int, context: QueryContext): ArithmeticException =

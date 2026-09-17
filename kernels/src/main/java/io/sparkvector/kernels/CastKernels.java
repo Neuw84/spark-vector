@@ -52,6 +52,81 @@ public final class CastKernels {
         || (from == VecType.INT64 && to == VecType.FLOAT64);
   }
 
+  // ---------------------------------------------------------------- narrowing, booleans, days (Spark's Cast)
+
+  /**
+   * Narrowing casts with Spark's legacy value rule -- Java's {@code (int)} / {@code (long)}: a long
+   * wraps, a double truncates toward zero and saturates, NaN becomes 0 -- and, when {@code overflow}
+   * is given, a bit per row whose value is outside the target's range by Spark's ANSI test
+   * ({@code v != (int) v} for a long; {@code floor(d) <= MAX && ceil(d) >= MIN} for a double, so NaN
+   * and the infinities are out of range).
+   */
+  public static void narrow(VectorBuffers a, VecType target, MemorySegment out, MemorySegment overflow) {
+    int n = a.length();
+    MemorySegment d = a.data();
+    switch (a.type()) {
+      case INT64 -> {
+        if (target != VecType.INT32) throw unsupported(a.type(), target);
+        for (int i = 0; i < n; i++) {
+          long v = d.getAtIndex(VectorBuffers.LE_LONG, i);
+          int r = (int) v;
+          out.setAtIndex(VectorBuffers.LE_INT, i, r);
+          if (overflow != null && r != v) Bitmap.set(overflow, i);
+        }
+      }
+      case FLOAT64 -> {
+        for (int i = 0; i < n; i++) {
+          double v = d.getAtIndex(VectorBuffers.LE_DOUBLE, i);
+          switch (target) {
+            case INT32 -> {
+              out.setAtIndex(VectorBuffers.LE_INT, i, (int) v);
+              if (overflow != null && !(Math.floor(v) <= Integer.MAX_VALUE && Math.ceil(v) >= Integer.MIN_VALUE)) Bitmap.set(overflow, i);
+            }
+            case INT64 -> {
+              out.setAtIndex(VectorBuffers.LE_LONG, i, (long) v);
+              if (overflow != null && !(Math.floor(v) <= Long.MAX_VALUE && Math.ceil(v) >= Long.MIN_VALUE)) Bitmap.set(overflow, i);
+            }
+            default -> throw unsupported(a.type(), target);
+          }
+        }
+      }
+      default -> throw unsupported(a.type(), target);
+    }
+  }
+
+  /** Spark's numeric-to-boolean cast: {@code v != 0}, so NaN is true. Sets bits in {@code outBits}. */
+  public static void toBool(VectorBuffers a, MemorySegment outBits) {
+    int n = a.length();
+    MemorySegment d = a.data();
+    switch (a.type()) {
+      case INT32 -> { for (int i = 0; i < n; i++) if (d.getAtIndex(VectorBuffers.LE_INT, i) != 0) Bitmap.set(outBits, i); }
+      case INT64 -> { for (int i = 0; i < n; i++) if (d.getAtIndex(VectorBuffers.LE_LONG, i) != 0L) Bitmap.set(outBits, i); }
+      case FLOAT64 -> { for (int i = 0; i < n; i++) if (d.getAtIndex(VectorBuffers.LE_DOUBLE, i) != 0.0) Bitmap.set(outBits, i); }
+      default -> throw unsupported(a.type(), VecType.BOOL);
+    }
+  }
+
+  /** Spark's boolean-to-numeric cast: true is 1, false is 0. */
+  public static void fromBool(VectorBuffers a, VecType target, MemorySegment out) {
+    int n = a.length();
+    MemorySegment bits = a.data();
+    switch (target) {
+      case INT32 -> { for (int i = 0; i < n; i++) out.setAtIndex(VectorBuffers.LE_INT, i, Bitmap.isSet(bits, i) ? 1 : 0); }
+      case INT64 -> { for (int i = 0; i < n; i++) out.setAtIndex(VectorBuffers.LE_LONG, i, Bitmap.isSet(bits, i) ? 1L : 0L); }
+      case FLOAT64 -> { for (int i = 0; i < n; i++) out.setAtIndex(VectorBuffers.LE_DOUBLE, i, Bitmap.isSet(bits, i) ? 1.0 : 0.0); }
+      default -> throw unsupported(VecType.BOOL, target);
+    }
+  }
+
+  /** Spark's date-to-timestamp cast under a fixed offset: local midnight as micros since the epoch. */
+  public static void daysToMicros(VectorBuffers a, long offsetMicros, MemorySegment out) {
+    int n = a.length();
+    MemorySegment d = a.data();
+    for (int i = 0; i < n; i++) {
+      out.setAtIndex(VectorBuffers.LE_LONG, i, d.getAtIndex(VectorBuffers.LE_INT, i) * 86_400_000_000L - offsetMicros);
+    }
+  }
+
   private static IllegalArgumentException unsupported(VecType from, VecType to) {
     return new IllegalArgumentException("unsupported cast " + from + " -> " + to);
   }
