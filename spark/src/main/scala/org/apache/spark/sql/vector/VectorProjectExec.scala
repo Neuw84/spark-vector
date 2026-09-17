@@ -1,10 +1,10 @@
 package org.apache.spark.sql.vector
 
 import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, RemappedColumnVector, SelectedColumnarBatch}
-import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, NestedFieldColumnVector, RemappedColumnVector, SelectedColumnarBatch}
+import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, NestedColumnRef, VectorExpr}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, GetStructField, NamedExpression, SortOrder}
 import org.apache.spark.sql.execution.{OrderPreservingUnaryExecNode, PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -38,8 +38,12 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
 
   @transient private lazy val compiled: Array[VectorExpr] = projectList.map { e =>
     if (VectorProjectExec.isPassThrough(e)) {
-      val a = VectorProjectExec.passedThrough(e)
-      ColumnRef(child.output.indexWhere(_.exprId == a.exprId), a.dataType)
+      val passed = VectorProjectExec.passedThrough(e)
+      ExpressionCompiler.nestedColumnPath(passed, child.output) match {
+        case Right((ordinal, Nil)) => ColumnRef(ordinal, passed.dataType)
+        case Right((ordinal, path)) => NestedColumnRef(ordinal, path, passed.dataType)
+        case Left(reason) => throw new IllegalStateException(s"cannot pass through ${e.sql}: $reason")
+      }
     } else ExpressionCompiler.compile(e, child.output) match {
       case Right(v) => v
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize projection ${e.sql}: $reason")
@@ -65,16 +69,30 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
 }
 
 object VectorProjectExec {
-  /** A projection that forwards a child column as is (possibly renamed): never compiled, whatever its type. */
+  /**
+   * A projection that forwards a child column as is (possibly renamed), whatever its type, or a struct
+   * field of one whose type has no lane (Spark's `NestedColumnAliasing` projects `st.inner` for a
+   * generate over it): never compiled, Spark's vector is passed through.
+   */
   def isPassThrough(e: NamedExpression): Boolean = e match {
     case _: AttributeReference => true
     case Alias(_: AttributeReference, _) => true
+    case g: GetStructField => !TypeMapping.isSupported(g.dataType) && isNestedColumn(g)
+    case Alias(g: GetStructField, _) => !TypeMapping.isSupported(g.dataType) && isNestedColumn(g)
     case _ => false
   }
 
-  def passedThrough(e: NamedExpression): AttributeReference = e match {
+  private def isNestedColumn(e: Expression): Boolean = e match {
+    case _: AttributeReference => true
+    case GetStructField(child, _, _) => isNestedColumn(child)
+    case _ => false
+  }
+
+  def passedThrough(e: NamedExpression): Expression = e match {
     case a: AttributeReference => a
     case Alias(a: AttributeReference, _) => a
+    case g: GetStructField => g
+    case Alias(g: GetStructField, _) => g
     case other => throw new IllegalArgumentException(s"not a pass-through: ${other.sql}")
   }
 }
@@ -113,6 +131,13 @@ private[vector] class VectorProjectIterator(
             case ColumnRef(ordinal, _) if compactTo != null && !TypeMapping.isSupported(dt) =>
               if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(compactTo, ctx.numRows, outRows)
               RemappedColumnVector.of(ctx.column(ordinal), foreignRows)
+            case NestedColumnRef(ordinal, path, _) =>
+              val field = NestedFieldColumnVector.of(ctx.column(ordinal), path.toArray, ctx.numRows)
+              if (compactTo == null) field
+              else {
+                if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(compactTo, ctx.numRows, outRows)
+                RemappedColumnVector.of(field, foreignRows)
+              }
             case ColumnRef(ordinal, _) if compactTo != null =>
               ArrowOutput.compact(name, dt, ctx.input(ordinal), compactTo, outRows, allocator)
             case ColumnRef(ordinal, _) =>

@@ -603,7 +603,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 221 Spark tests (193 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 225 Spark tests (197 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -663,6 +663,22 @@ the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers eit
   (`StructFieldExpr.withValidity` rebuilds a `SegmentVectorBuffers` of the lane's shape). A struct-typed
   field as a value, `arr[i]`, `map[key]` and `arr.field` are refused with reasons naming #50; nested
   results and the array/map/lambda families are recorded as not planned in `docs/expressions.md`.
+  A struct field whose type has no lane, projected as a value, is a pass-through too
+  (`VectorProjectExec.isPassThrough` accepts a `GetStructField` chain of such a type ->
+  `NestedColumnRef` -> `NestedFieldColumnVector.of(ctx.column, path, numRows)`, a view with the
+  ancestors' nulls folded in; remapped like any foreign column under a selection). `SizeExpr` and
+  `NestedValidityExpr` read the array/map length and the nulls of such a column from Spark's vector.
+- Generate (#59): `VectorGenerateExec` (spark/src/main/scala/org/apache/spark/sql/vector/VectorGenerateExec.scala)
+  replaces `GenerateExec` for `Explode`/`PosExplode` over a nested column path
+  (`ExpressionCompiler.nestedColumnPath`) with a lane element type. The iterator builds `rowIdx`/`elemIdx`
+  from the array lengths (a null/empty array -> one `-1` row under `outer`), gathers lanes with
+  `ArrowOutput.gather(ctx.input(ord), rowIdx)`, views foreign columns through `RemappedColumnVector`,
+  and writes the elements (one `getArray` per source row, boxed per element into
+  `AggBufferColumns.values`) and the iota position. Spark's `InferFiltersFromGenerate` puts
+  `size(arr) > 0 AND isnotnull(arr)` below a non-outer explode and `NestedColumnAliasing` projects
+  `st.inner` as `_extract_inner` -- both compile now, so the whole chain stays columnar. A
+  `VectorPlan` parent turns the filter below into a selection producer, so the iterator honours
+  `ctx.selection`.
 - Comet 1.0 reads Iceberg v3 tables (deletion vectors) through the JVM reader; the Iceberg adapter
   covers that path, but it is a copy of the validity bits and a per-batch dictionary decode, not a
   native read.

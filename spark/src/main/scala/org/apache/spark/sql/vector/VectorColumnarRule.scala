@@ -9,7 +9,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
+import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GenerateExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
@@ -88,6 +88,13 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           columnarInputReason(c.child) match {
             case Some(reason) => fallback(c, reason)
             case None => VectorStructuralPlanner.planCoalesce(c).fold(reason => fallback(c, reason), v => v)
+          }
+
+        case g: GenerateExec if VectorConf.generateEnabled(conf) =>
+          // The array column has no lane and is read as Spark's vector, so only the columnar contract is required.
+          forwardingInputReason(g.child) match {
+            case Some(reason) => fallback(g, reason)
+            case None => VectorGeneratePlanner.plan(g).fold(reason => fallback(g, reason), v => v)
           }
 
         case s: SampleExec if VectorConf.sampleEnabled(conf) =>

@@ -3,11 +3,11 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Size, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
-import org.apache.spark.sql.types.{BinaryType, BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, StructType, TimestampType}
+import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, MapType, StringType, TimestampType}
 
 /**
  * Translates Catalyst expressions into [[VectorExpr]] trees. Returns a human-readable reason on
@@ -49,6 +49,11 @@ object ExpressionCompiler {
         if (TypeMapping.isSupported(g.dataType)) Right(StructFieldExpr(ordinal, path, g.dataType))
         else Left(s"struct field ${g.sql} of type ${g.dataType.simpleString} not supported as a value (#50: nested results are not planned)")
       }
+    // size(arr) / size(map): the element count read from Spark's vector (Spark adds size(arr) > 0 below a non-outer explode).
+    case s: Size =>
+      val isMap = s.child.dataType.isInstanceOf[MapType]
+      if (!isMap && !s.child.dataType.isInstanceOf[ArrayType]) Left(s"size over ${s.child.dataType.simpleString} not supported")
+      else nestedColumnPath(s.child, input).map { case (ordinal, path) => SizeExpr(ordinal, path, isMap, s.legacySizeOfNull) }
     case g: GetArrayItem => Left(s"array element access ${g.sql} not supported (#50: only struct fields are read)")
     case g: GetMapValue => Left(s"map value access ${g.sql} not supported (#50: only struct fields are read)")
     case g: GetArrayStructFields => Left(s"array of struct fields ${g.sql} not supported (#50: only struct fields are read)")
@@ -457,14 +462,18 @@ object ExpressionCompiler {
   }
 
   /** The input column and the chain of field ordinals a struct-field access reads; anything but a column or a field of one is refused. */
-  private def structPath(e: Expression, input: Seq[Attribute]): Either[String, (Int, Seq[Int])] = e match {
+  private def structPath(e: Expression, input: Seq[Attribute]): Either[String, (Int, Seq[Int])] = nestedColumnPath(e, input)
+
+  /**
+   * A nested column as (input ordinal, chain of struct-field ordinals): a bare column, or a struct field
+   * of one at any depth. Shared with the operators that read Spark's vectors directly (the generate).
+   */
+  def nestedColumnPath(e: Expression, input: Seq[Attribute]): Either[String, (Int, Seq[Int])] = e match {
     case a: AttributeReference =>
       val ordinal = input.indexWhere(_.exprId == a.exprId)
-      if (ordinal < 0) Left(s"unbound attribute ${a.name}")
-      else if (!a.dataType.isInstanceOf[StructType]) Left(s"struct field access over ${a.dataType.simpleString} column ${a.name} not supported")
-      else Right((ordinal, Nil))
-    case GetStructField(child, ordinal, _) => structPath(child, input).map { case (o, path) => (o, path :+ ordinal) }
-    case other => Left(s"struct field access over ${other.sql} not supported (only a column or a field of one)")
+      if (ordinal < 0) Left(s"unbound attribute ${a.name}") else Right((ordinal, Nil))
+    case GetStructField(child, ordinal, _) => nestedColumnPath(child, input).map { case (o, path) => (o, path :+ ordinal) }
+    case other => Left(s"nested access over ${other.sql} not supported (only a column or a struct field of one)")
   }
 
   /** A compiled non-literal operand on an INT32 / INT64 / FLOAT64 lane (decimals are #49). */
@@ -1032,7 +1041,9 @@ object ExpressionCompiler {
     }
 
   private def nullTestChild(e: Expression, input: Seq[Attribute]): Result =
-    compile(e, input).flatMap {
+    if (!TypeMapping.isSupported(e.dataType) && nestedColumnPath(e, input).isRight)
+      nestedColumnPath(e, input).map { case (ordinal, path) => NestedValidityExpr(ordinal, path) }
+    else compile(e, input).flatMap {
       case _: LiteralExpr => Left("null test on literal")
       case v => Right(v)
     }
