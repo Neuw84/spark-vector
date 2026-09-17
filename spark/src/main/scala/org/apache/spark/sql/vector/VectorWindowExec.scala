@@ -9,7 +9,9 @@ import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, DenseRank, Expression, NamedExpression, Rank, RowNumber, SortOrder, SpecifiedWindowFrame, UnboundedFollowing, UnboundedPreceding, WindowExpression, WindowSpecDefinition}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, Complete, Count, Max, Min, Sum}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, Complete, Count, First, Last, Max, Min, Sum}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, EmptyRow, FrameLessOffsetWindowFunction, Literal, NthValue}
+import org.apache.spark.sql.types.{DateType, IntegerType, StringType, TimestampType, BooleanType, DecimalType => SparkDecimalType}
 import org.apache.spark.sql.catalyst.expressions.{CurrentRow, EvalMode, RangeFrame, RowFrame}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
 import org.apache.spark.sql.execution.SparkPlan
@@ -55,9 +57,14 @@ import scala.collection.mutable
  * Comet's shuffle that sort stays Spark's, so `RowToColumnarExec` is inserted below us; from here up
  * the chain (a filter on the rank, a projection, a limit) is columnar again.
  *
- * Sliding frames (`n PRECEDING`, suffixes), offset functions (`lag`, `lead`, `first_value`),
- * `percent_rank`, `cume_dist` and `ntile` are later layers; each is refused with a reason naming the
- * function and frame.
+ * Offset functions (layer 3): `lag`, `lead`, `first_value`, `last_value` and `nth_value` are one row
+ * of the partition each -- a row shifted by a literal offset (the default outside the partition), the
+ * partition's first row, the frame's last row (the partition; the current row for `ROWS ... CURRENT
+ * ROW`; the end of the peer group for the `RANGE` default), the frame's n-th row -- read from the held
+ * copies of the partition's rows, across batch boundaries; `IGNORE NULLS` is refused.
+ *
+ * Sliding frames (`n PRECEDING`, suffixes), `percent_rank`, `cume_dist` and `ntile` are later layers;
+ * each is refused with a reason naming the function and frame.
  */
 case class VectorWindowExec(
     windowExpression: Seq[NamedExpression],
@@ -86,6 +93,9 @@ case class VectorWindowExec(
   @transient private lazy val orderKeys: Array[VectorExpr] = orderSpec.map(o => compileKey(o.child)).filterNot(_.isInstanceOf[LiteralExpr]).toArray
 
   private def aggregateMode: Boolean = VectorWindowPlanner.aggregateWindows(windowExpression).isDefined
+  private def offsetMode: Boolean = !aggregateMode && VectorWindowPlanner.offsetWindows(windowExpression, child.output).isRight
+  @transient private lazy val offsets: Array[VectorWindowPlanner.OffsetFunction] =
+    VectorWindowPlanner.offsetWindows(windowExpression, child.output).getOrElse(throw new IllegalStateException("window expressions are not offset functions")).toArray
 
   @transient private lazy val kinds: Array[Int] = windowExpression.map(e => VectorWindowPlanner.rankKind(e).getOrElse(
     throw new IllegalStateException(s"cannot vectorize window function ${e.sql}"))).toArray
@@ -124,6 +134,12 @@ case class VectorWindowExec(
       val bufferAttrs = VectorAggregatePlanner.bufferAttributes(Nil, aggregates).map(a => (a.name, a.dataType)).toArray
       child.executeColumnar().mapPartitionsInternal { iter =>
         new VectorWindowAggregateIterator(iter, pk, ok, fr, cb, aggs, layout, bufferAttrs, results, childAttrs, windowAttrs, m)
+      }
+    } else if (offsetMode) {
+      val ok = orderKeys
+      val fs = offsets
+      child.executeColumnar().mapPartitionsInternal { iter =>
+        new VectorWindowOffsetIterator(iter, pk, ok, fs, childAttrs, windowAttrs, m)
       }
     } else {
       val ok = orderKeys
@@ -191,9 +207,87 @@ object VectorWindowPlanner {
 
   /** The aggregate and frame kind of `e`, if it is a Complete aggregate without FILTER over a frame we compute. */
   private def aggregateWindow(e: NamedExpression): Option[(AggregateExpression, Int)] = e match {
+    // first_value / last_value are positions in the frame, not prefixes: the offset family computes them.
+    case Alias(WindowExpression(a: AggregateExpression, _), _) if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
     case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, f)), _) if a.mode == Complete && a.filter.isEmpty =>
       frameKind(f).map(k => (a, k))
     case _ => None
+  }
+
+  /** Offset-family kinds: a shifted row, the frame's first row, the frame's last row, the frame's n-th row. */
+  val Shift = 0
+  val FirstValue = 1
+  val LastValue = 2
+  val NthValueKind = 3
+
+  /**
+   * A window function whose value is one row of the partition, read from the held rows: `kind` says
+   * which row, `frame` (an aggregate frame kind) where the frame ends for the position-based ones,
+   * `default` (Spark's internal representation) what a shifted row outside the partition yields.
+   */
+  final case class OffsetFunction(kind: Int, inputOrdinal: Int, dataType: DataType, offset: Int, default: Any, frame: Int)
+
+  private def literalInt(e: Expression): Option[Int] = e match {
+    case l: Literal if l.foldable && l.value != null && (l.dataType == IntegerType) => Some(l.value.asInstanceOf[Int])
+    case other if other.foldable && other.dataType == IntegerType => Option(other.eval(EmptyRow)).map(_.asInstanceOf[Int])
+    case _ => None
+  }
+
+  /** A foldable default in Spark's internal representation, with decimals as their unscaled long (the INT64 lane). */
+  private def literalDefault(e: Expression, dt: DataType): Either[String, Any] =
+    if (!e.foldable) Left("default value must be a literal")
+    else e.eval(EmptyRow) match {
+      case null => Right(null)
+      case d: org.apache.spark.sql.types.Decimal => Right(java.lang.Long.valueOf(d.toUnscaledLong))
+      case v => Right(v)
+    }
+
+  private def inputOrdinal(input: Expression, output: Seq[Attribute]): Either[String, Int] = input match {
+    case a: AttributeReference =>
+      val i = output.indexWhere(_.exprId == a.exprId)
+      if (i < 0) Left(s"input ${a.sql} is not a column of the child")
+      else if (!TypeMapping.isSupported(a.dataType)) Left(s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
+      else Right(i)
+    case other => Left(s"input ${other.sql} is not a column (Spark projects complex inputs below the window)")
+  }
+
+  /** `e` as an offset-family function, or why it is not one. */
+  private def offsetWindow(e: NamedExpression, output: Seq[Attribute]): Either[String, OffsetFunction] = e match {
+    case Alias(WindowExpression(f: FrameLessOffsetWindowFunction, _), _) =>
+      if (f.ignoreNulls) Left(s"${f.prettyName} IGNORE NULLS not supported")
+      else literalInt(f.offset) match {
+        case None => Left(s"${f.prettyName} offset must be an integer literal")
+        case Some(off) =>
+          for (ord <- inputOrdinal(f.input, output); dflt <- literalDefault(f.default, f.dataType).left.map(r => s"${f.prettyName}: $r"))
+            yield OffsetFunction(Shift, ord, f.dataType, off, dflt, WholePartition)
+      }
+    case Alias(WindowExpression(n: NthValue, WindowSpecDefinition(_, _, frame)), _) =>
+      if (n.ignoreNulls) Left("nth_value IGNORE NULLS not supported")
+      else (literalInt(n.offset), frameKind(frame)) match {
+        case (None, _) => Left("nth_value offset must be an integer literal")
+        case (_, None) => Left(s"nth_value over frame ${frame.sql} not supported")
+        case (Some(k), Some(fk)) => inputOrdinal(n.input, output).map(ord => OffsetFunction(NthValueKind, ord, n.dataType, k, null, fk))
+      }
+    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] =>
+      val (child, ignoreNulls, isFirst) = a.aggregateFunction match {
+        case fst: First => (fst.child, fst.ignoreNulls, true)
+        case lst: Last => (lst.child, lst.ignoreNulls, false)
+      }
+      val name = a.aggregateFunction.prettyName
+      if (ignoreNulls) Left(s"$name IGNORE NULLS not supported")
+      else if (a.filter.nonEmpty) Left(s"$name with FILTER not supported")
+      else frameKind(frame) match {
+        case None => Left(s"$name over frame ${frame.sql} not supported")
+        case Some(fk) => inputOrdinal(child, output).map(ord => OffsetFunction(if (isFirst) FirstValue else LastValue, ord, a.dataType, 0, null, fk))
+      }
+    case Alias(WindowExpression(f, _), _) => Left(s"window function ${f.prettyName} is not an offset function")
+    case other => Left(s"window expression ${other.sql} not supported")
+  }
+
+  /** All of the operator's expressions as offset-family functions, or the first reason one is not. */
+  def offsetWindows(es: Seq[NamedExpression], output: Seq[Attribute]): Either[String, Seq[OffsetFunction]] = {
+    val all = es.map(offsetWindow(_, output))
+    all.collectFirst { case Left(r) => r }.toLeft(all.collect { case Right(f) => f })
   }
 
   /** All of the operator's expressions as aggregates over ONE frame kind, or None when any is something else. */
@@ -232,6 +326,7 @@ object VectorWindowPlanner {
 
   /** Why a window aggregate is not computed: the frame, or the function itself. */
   private def aggregateReason(e: NamedExpression, input: Seq[Attribute]): Option[String] = e match {
+    case Alias(WindowExpression(a: AggregateExpression, _), _) if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
     case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) =>
       frameKind(frame) match {
         case Some(kind) =>
@@ -262,11 +357,23 @@ object VectorWindowPlanner {
         val kinds = w.windowExpression.map(rankKind)
         kinds.collectFirst { case Left(reason) => reason } match {
           case Some(reason) =>
-            // A ranking function beside an aggregate in one spec, an aggregate over another frame, or two
-            // frame kinds in one operator: say which.
-            val mixed = w.windowExpression.map(aggregateWindow).flatten.map(_._2).distinct.length > 1
-            Left(w.windowExpression.flatMap(aggregateReason(_, w.child.output)).headOption.getOrElse(
-              if (mixed) "window aggregates over different frames in one operator not supported" else reason))
+            offsetWindows(w.windowExpression, w.child.output) match {
+              case Right(_) => keyFailures.headOption.toLeft(VectorWindowExec(w.windowExpression, w.partitionSpec, w.orderSpec, w.child))
+              case Left(offsetReason) =>
+                // A ranking function beside an aggregate in one spec, an aggregate over another frame, two
+                // frame kinds in one operator, or an offset function we cannot read: say which.
+                val mixed = w.windowExpression.map(aggregateWindow).flatten.map(_._2).distinct.length > 1
+                val offsetLike = w.windowExpression.exists {
+                  case Alias(WindowExpression(f, _), _) => f.isInstanceOf[FrameLessOffsetWindowFunction] || f.isInstanceOf[NthValue] ||
+                    (f match { case a: AggregateExpression => a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last]; case _ => false })
+                  case _ => false
+                }
+                Left(w.windowExpression.flatMap(aggregateReason(_, w.child.output)).headOption.getOrElse(
+                  if (mixed) "window aggregates over different frames in one operator not supported"
+                  else if (offsetLike && !offsetReason.contains("is not an offset function")) offsetReason
+                  else if (offsetLike) "offset functions beside other window functions in one operator not supported"
+                  else reason))
+            }
           case None if w.orderSpec.isEmpty => Left("ranking window without an ORDER BY")
           case None => keyFailures.headOption.toLeft(VectorWindowExec(w.windowExpression, w.partitionSpec, w.orderSpec, w.child))
         }
@@ -742,6 +849,221 @@ private[vector] class VectorWindowGroupLimitIterator(
         metrics.numOutputRows += keptCount
         new ColumnarBatch(columns, keptCount)
       }
+    }
+  }
+}
+
+/**
+ * Offset functions over the held partition: `lag` / `lead` (a row shifted by a literal offset, the default
+ * outside the partition), `first_value` (the partition's first row), `last_value` (the last row of the
+ * frame: the partition, the current row for `ROWS ... CURRENT ROW`, the end of the peer group for the
+ * `RANGE` default) and `nth_value` (the frame's n-th row, null when the frame is shorter). Rows are held
+ * as copies until their partition has ended; a released batch stays readable (its columns are forwarded
+ * borrowed) until no later batch can still address a row of one of its partitions, since `lag` reads
+ * backwards across batch boundaries.
+ */
+private[vector] class VectorWindowOffsetIterator(
+    input: Iterator[ColumnarBatch],
+    partitionKeys: Array[VectorExpr],
+    orderKeys: Array[VectorExpr],
+    functions: Array[VectorWindowPlanner.OffsetFunction],
+    childAttrs: Array[(String, DataType)],
+    windowAttrs: Array[(String, DataType)],
+    metrics: VectorMetrics)
+    extends Iterator[ColumnarBatch] with AutoCloseable {
+
+  /** A held batch: owned copies of the live rows, each row's partition ordinal, position in it, and peer ordinal. */
+  private final class Held(val columns: Array[ColumnVector], val numRows: Int, val firstGlobal: Long,
+      val partOf: Array[Int], val posOf: Array[Int], val peerOf: Array[Int]) {
+    /** The consumer has moved past this batch's output (whose columns are borrowed from here). */
+    var consumed = false
+    def close(): Unit = columns.foreach(_.close())
+  }
+
+  private val allocator: BufferAllocator = VectorAllocators.newChild("VectorWindowExec")
+  private val partition = new KeyTracker(partitionKeys)
+  private val order = new KeyTracker(orderKeys)
+  private var numPartitions = 0
+  private var numPeers = 0
+  private var posInPartition = 0
+  private var globalRows = 0L
+  // Filled when a partition / peer group ends: its length / its last position.
+  private val partitionLength = mutable.ArrayBuffer.empty[Int]
+  private val peerEnd = mutable.ArrayBuffer.empty[Int]
+  private val held = mutable.Queue.empty[Held]
+  private val released = mutable.ArrayBuffer.empty[Held]
+  // No longer addressable by any unreleased row, closed once the consumer is past their output too.
+  private val retired = mutable.ArrayBuffer.empty[Held]
+  private val ready = mutable.Queue.empty[(ColumnarBatch, Held)]
+  private var inputDone = false
+  private var current: ColumnarBatch = _
+  private var currentHeld: Held = _
+  private var closed = false
+
+  Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
+
+  private def pruneRetired(): Unit = {
+    val (done, waiting) = retired.partition(_.consumed)
+    done.foreach(_.close())
+    retired.clear(); retired ++= waiting
+  }
+
+  private def endPeer(): Unit = if (numPeers > 0) peerEnd += posInPartition - 1
+  private def endPartition(): Unit = if (numPartitions > 0) partitionLength += posInPartition
+
+  private def consume(batch: ColumnarBatch): Unit = metrics.timed {
+    metrics.numInputBatches += 1
+    EvalContexts.withBatch(batch) { ctx =>
+      val n = ctx.numRows
+      val live = ctx.selection
+      val outRows = if (live == null) n else ctx.selectedCount
+      partition.startBatch(ctx)
+      order.startBatch(ctx)
+      val partOf = new Array[Int](outRows)
+      val posOf = new Array[Int](outRows)
+      val peerOf = new Array[Int](outRows)
+      var out = 0
+      var i = 0
+      while (i < n) {
+        if (live == null || Bitmap.isSet(live, i)) {
+          val newPartition = partition.changed(i)
+          if (newPartition) {
+            endPeer(); endPartition()
+            numPartitions += 1; numPeers += 1; posInPartition = 0
+          } else if (order.changed(i)) {
+            endPeer(); numPeers += 1
+          }
+          partition.remember(i)
+          order.remember(i)
+          partOf(out) = numPartitions - 1
+          posOf(out) = posInPartition
+          peerOf(out) = numPeers - 1
+          posInPartition += 1
+          out += 1
+        }
+        i += 1
+      }
+      val columns = new Array[ColumnVector](childAttrs.length)
+      var c = 0
+      while (c < childAttrs.length) {
+        val (name, dt) = childAttrs(c)
+        columns(c) = if (live == null) ArrowOutput.copy(name, dt, ctx.input(c), allocator) else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
+        c += 1
+      }
+      held.enqueue(new Held(columns, outRows, globalRows, partOf, posOf, peerOf))
+      globalRows += outRows
+    }
+  }
+
+  /** The held batch (released or not) holding global row `g`. */
+  private def batchOf(g: Long): Held = {
+    var i = released.length - 1
+    while (i >= 0) { val h = released(i); if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) return h; i -= 1 }
+    val it = held.iterator
+    while (it.hasNext) { val h = it.next(); if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) return h }
+    throw new IllegalStateException(s"row $g is no longer held")
+  }
+
+  /** Spark's internal representation of column `c` at row `r` of `h`, or null; decimals as their unscaled long. */
+  private def valueAt(h: Held, c: Int, r: Int, dt: DataType): Any = {
+    val col = h.columns(c)
+    if (col.isNullAt(r)) null
+    else dt match {
+      case IntegerType | DateType => java.lang.Integer.valueOf(col.getInt(r))
+      case LongType | TimestampType => java.lang.Long.valueOf(col.getLong(r))
+      case DoubleType => java.lang.Double.valueOf(col.getDouble(r))
+      case BooleanType => java.lang.Boolean.valueOf(col.getBoolean(r))
+      case StringType => col.getUTF8String(r).clone()
+      case d: SparkDecimalType => java.lang.Long.valueOf(col.getDecimal(r, d.precision, d.scale).toUnscaledLong)
+      case other => throw new IllegalStateException(s"offset window over $other")
+    }
+  }
+
+  /** Emits every held batch whose partitions have all ended; keeps released batches readable while needed. */
+  private def release(): Unit = metrics.timed {
+    while (held.nonEmpty && (inputDone || held.head.partOf(held.head.numRows - 1) < numPartitions - 1)) {
+      val h = held.dequeue()
+      // Rows of partitions before this batch's first one can no longer be addressed by anything unreleased.
+      val firstPart = h.partOf(0)
+      val (dead, alive) = released.partition(e => e.partOf(e.numRows - 1) < firstPart)
+      retired ++= dead
+      released.clear(); released ++= alive; released += h
+      pruneRetired()
+      val columns = new Array[ColumnVector](childAttrs.length + functions.length)
+      var c = 0
+      while (c < childAttrs.length) { columns(c) = BorrowedColumnVector.of(h.columns(c)); c += 1 }
+      var f = 0
+      while (f < functions.length) {
+        val fn = functions(f)
+        val (name, dt) = windowAttrs(f)
+        columns(childAttrs.length + f) = AggBufferColumns.values(name, dt, h.numRows, { r =>
+          val part = h.partOf(r); val pos = h.posOf(r); val len = partitionLength(part)
+          val frameEnd = fn.frame match {
+            case VectorWindowPlanner.WholePartition => len - 1
+            case VectorWindowPlanner.RunningRows => pos
+            case _ => peerEnd(h.peerOf(r))
+          }
+          val target: Int = fn.kind match {
+            case VectorWindowPlanner.Shift => pos + fn.offset
+            case VectorWindowPlanner.FirstValue => 0
+            case VectorWindowPlanner.LastValue => frameEnd
+            case _ => if (fn.offset - 1 <= frameEnd) fn.offset - 1 else -1
+          }
+          if (target < 0 || target >= len) { if (fn.kind == VectorWindowPlanner.Shift) fn.default else null }
+          else {
+            val g = h.firstGlobal + r + (target - pos)
+            val src = if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) h else batchOf(g)
+            valueAt(src, fn.inputOrdinal, (g - src.firstGlobal).toInt, fn.dataType)
+          }
+        }, allocator)
+        f += 1
+      }
+      metrics.numOutputBatches += 1
+      metrics.numOutputRows += h.numRows
+      ready.enqueue((new ColumnarBatch(columns, h.numRows), h))
+    }
+  }
+
+  override def hasNext: Boolean = {
+    while (ready.isEmpty && !inputDone) {
+      if (input.hasNext) {
+        val batch = input.next()
+        if (batch.numRows() > 0) consume(batch)
+      } else {
+        inputDone = true
+        endPeer(); endPartition()
+      }
+      release()
+    }
+    ready.nonEmpty
+  }
+
+  override def next(): ColumnarBatch = {
+    if (!hasNext) throw new NoSuchElementException("no more batches")
+    releaseCurrent()
+    val (batch, h) = ready.dequeue()
+    current = batch
+    currentHeld = h
+    current
+  }
+
+  private def releaseCurrent(): Unit = if (current != null) {
+    current.close()
+    current = null
+    currentHeld.consumed = true
+    currentHeld = null
+    pruneRetired()
+  }
+
+  override def close(): Unit = {
+    if (!closed) {
+      closed = true
+      if (current != null) { current.close(); current = null }
+      ready.foreach(_._1.close()); ready.clear()
+      held.foreach(_.close()); held.clear()
+      released.foreach(_.close()); released.clear()
+      retired.foreach(_.close()); retired.clear()
+      allocator.close()
     }
   }
 }

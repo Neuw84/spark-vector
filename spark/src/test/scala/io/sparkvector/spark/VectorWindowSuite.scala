@@ -123,15 +123,36 @@ class VectorWindowSuite extends VectorQuerySuite {
     withConf("spark.sql.ansi.enabled" -> "false") { checkWindow(overflowing) }
   }
 
+  test("offset functions equal Spark: lag, lead, first_value, last_value, nth_value over the held partition") {
+    // lag/lead with the default null, an explicit default, offsets past the partition, a negative lag (a lead).
+    checkWindow("SELECT i, l, lag(l) OVER (PARTITION BY s ORDER BY i) AS prev, lead(l) OVER (PARTITION BY s ORDER BY i) AS nxt FROM t")
+    checkWindow("SELECT i, lag(s, 2, 'none') OVER (PARTITION BY i % 7 ORDER BY l, i) AS p2, lead(dt, 3) OVER (PARTITION BY i % 7 ORDER BY l, i) AS n3, lag(d, -1) OVER (PARTITION BY i % 7 ORDER BY l, i) AS back FROM t")
+    checkWindow("SELECT i, lead(b, 1, true) OVER (PARTITION BY s ORDER BY l % 5, i) AS nb, lag(nullif(l % 3, 0), 1, -1L) OVER (PARTITION BY s ORDER BY l % 5, i) AS pn FROM t")
+    // first_value / last_value: whole partition (no ORDER BY), the RANGE default (peers share the group's last row), ROWS.
+    checkWindow("SELECT i, first_value(l) OVER (PARTITION BY s) AS f, last_value(s) OVER (PARTITION BY i % 7) AS lst FROM t")
+    checkWindow("SELECT i, l, first_value(l) OVER (PARTITION BY s ORDER BY l % 5) AS f, last_value(l) OVER (PARTITION BY s ORDER BY l % 5) AS peer_last, last_value(l) OVER (PARTITION BY s ORDER BY l % 5, i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS self FROM t")
+    checkWindow("SELECT i, first(dt) OVER (PARTITION BY s ORDER BY i) AS f, last(nullif(l % 3, 0)) OVER (PARTITION BY s ORDER BY i) AS l3 FROM t")
+    // nth_value: null while the frame has fewer than n rows; whole-partition and running frames.
+    checkWindow("SELECT i, nth_value(l, 3) OVER (PARTITION BY s ORDER BY i) AS third, nth_value(s, 2) OVER (PARTITION BY i % 7 ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS second FROM t")
+    // Offsets across several held batches: one 20000-row partition, lag over 5000 rows and a lead near the end.
+    checkWindow("SELECT i, lag(l, 5000) OVER (ORDER BY i) AS far_back, lead(l, 7) OVER (ORDER BY i) AS ahead, first_value(i) OVER (ORDER BY i) AS f, last_value(i) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lst FROM t")
+    // Partitions straddling batches, several functions with different offsets in one operator, the chain above.
+    checkWindow(
+      "SELECT s, count(*) AS n FROM (SELECT s, l, lag(l, 1) OVER (PARTITION BY i DIV 4000 ORDER BY i) AS p1, lag(l, 2) OVER (PARTITION BY i DIV 4000 ORDER BY i) AS p2 FROM t WHERE l % 2 = 0) w WHERE p1 > p2 GROUP BY s",
+      Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
+  }
+
   test("other window functions and frames fall back with a reason; the operator can be disabled") {
     // Sliding frames, a running frame of a function without a prefix form, and two frame kinds in one operator.
     checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS moving FROM t", Seq(Window), "window aggregate sum over frame")
     checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS suffix FROM t", Seq(Window), "window aggregate sum over frame")
-    checkFallback("SELECT i, first(l) OVER (PARTITION BY s ORDER BY i) AS f FROM t", Seq(Window), "running frame for first not supported")
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, first(l) OVER (PARTITION BY s ORDER BY i) AS f FROM t", Seq(Window), "offset functions beside other window functions")
     checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS byrows FROM t", Seq(Window), "different frames in one operator")
     checkFallback("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over decimals not supported")
     checkFallback("SELECT i, approx_count_distinct(l) OVER (PARTITION BY s) AS n FROM t", Seq(Window), "window aggregate approx_count_distinct:")
-    checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous FROM t", Seq(Window), "window function lag not supported")
+    checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, rank() OVER (PARTITION BY s ORDER BY i) AS rk FROM t", Seq(Window), "offset functions beside other window functions")
+    checkFallback("SELECT i, lag(l, 1) IGNORE NULLS OVER (PARTITION BY s ORDER BY i) AS previous FROM t", Seq(Window), "IGNORE NULLS not supported")
+    checkFallback("SELECT i, first_value(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS f FROM t", Seq(Window), "first_value over frame")
     checkFallback("SELECT i, percent_rank() OVER (PARTITION BY s ORDER BY i) AS pr FROM t", Seq(Window), "window function percent_rank not supported")
     checkFallback("SELECT i, rank() OVER (PARTITION BY d ORDER BY i) AS rk FROM t", Seq(Window), "double keys not supported")
     // A ranking function beside an aggregate in the same spec keeps the whole operator Spark's.
