@@ -98,7 +98,7 @@ that pin it.
   source ranges then one data buffer sized from their prefix sum; Spark's `UTF8String` code-point rules
   and first-byte width table; dictionary input read through the dictionary, plain output; a 1 GiB
   per-batch cap and a 2^20 literal bound decline runaway counts; reuse `substringRange`/`numChars`/
-  `byteOffsetOfChar` for the remaining string issues), the date nodes in `DateExprs.scala`
+  `byteOffsetOfChar` for the remaining string issues), the datetime arithmetic in `DateArithExprs.scala` (`RelabelExpr`, `EpochScaleExpr`, `DateScalarExpr` for last_day/add_months/next_day/weekofyear, `MonthsBetweenExpr`, `MakeDateExpr` over `DateKernels`' month cores -- `lengthOfMonth`, `lastDay`, `addMonths`, `nextDay`, `weekOfYear`, `monthsBetween`, `makeDate`), the date nodes in `DateExprs.scala`
   (`DateFieldExpr`/`DateTruncExpr` over `DateKernels`' civil-from-days arithmetic, `TimestampToDateExpr`/`TimeFieldExpr`
   under a fixed-offset session zone only -- zones with rules fall back), `MonotonicIdExpr`
   (`monotonically_increasing_id()`: partition prefix from the task context plus a per-task counter
@@ -483,7 +483,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 149 kernel tests, 180 Spark tests (153 without the Comet and Iceberg profiles;
+Current counts: 150 kernel tests, 181 Spark tests (154 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

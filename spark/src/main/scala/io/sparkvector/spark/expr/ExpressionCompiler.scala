@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, Upper, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
@@ -249,6 +249,38 @@ object ExpressionCompiler {
     case e @ DateSub(start, days) => dateArith(ArithOp.SUB, start, days, e.dataType, input)
     case e @ DateDiff(end, start) if end.dataType == DateType && start.dataType == DateType =>
       dateArith(ArithOp.SUB, end, start, e.dataType, input)
+
+    // Day-number relabels and epoch scaling: the lane is the same, only Spark's type changes.
+    case UnixDate(child) => dateChild(child, input).map(RelabelExpr(_, IntegerType))
+    case DateFromUnixDate(child) => intLane(child, input, "date_from_unix_date").map(RelabelExpr(_, DateType))
+    case MicrosToTimestamp(child) => integralLane(child, input, "timestamp_micros").map(RelabelExpr(_, TimestampType))
+    case UnixMicros(child) => timestampLane(child, input, "unix_micros").map(RelabelExpr(_, LongType))
+    case SecondsToTimestamp(child) if child.dataType == IntegerType || child.dataType == LongType =>
+      integralLane(child, input, "timestamp_seconds").map(EpochScaleExpr(_, 1000000L, toMicros = true, TimestampType))
+    case SecondsToTimestamp(child) => Left(s"timestamp_seconds over ${child.dataType.simpleString} not supported")
+    case MillisToTimestamp(child) => integralLane(child, input, "timestamp_millis").map(EpochScaleExpr(_, 1000L, toMicros = true, TimestampType))
+    case UnixSeconds(child) => timestampLane(child, input, "unix_seconds").map(EpochScaleExpr(_, 1000000L, toMicros = false, LongType))
+    case UnixMillis(child) => timestampLane(child, input, "unix_millis").map(EpochScaleExpr(_, 1000L, toMicros = false, LongType))
+
+    // Month and week arithmetic on the civil-date conversion.
+    case LastDay(child) => dateChild(child, input).map(DateScalarExpr(DateScalarExpr.LastDay, _, None, DateType))
+    case WeekOfYear(child) => dateChild(child, input).map(DateScalarExpr(DateScalarExpr.WeekOfYear, _, None, IntegerType))
+    case AddMonths(start, months) =>
+      for (d <- dateChild(start, input); m <- intArg(months, input, "add_months")) yield DateScalarExpr(DateScalarExpr.AddMonths, d, Some(m), DateType)
+    case NextDay(start, Literal(day: UTF8String, StringType), _) =>
+      val code = DateKernels.dayOfWeekCode(day.toString)
+      if (code < 0) Left(s"next_day with an unknown day name '$day'") else dateChild(start, input).map(DateScalarExpr(DateScalarExpr.NextDay(code), _, None, DateType))
+    case NextDay(_, _, _) => Left("next_day with a non-literal day name not supported")
+    case e @ MonthsBetween(a, b, Literal(roundOff: Boolean, BooleanType), tz) =>
+      DateExprs.fixedOffsetMicros(tz) match {
+        case None => Left(s"months_between needs a fixed-offset session zone, not ${tz.getOrElse("none")}")
+        case Some(offset) =>
+          for (ca <- instantLane(a, input, "months_between"); cb <- instantLane(b, input, "months_between"))
+            yield MonthsBetweenExpr(ca._1, cb._1, ca._2, cb._2, roundOff, offset)
+      }
+    case e @ MakeDate(y, m, d, failOnError) =>
+      for (cy <- intLane(y, input, "make_date"); cm <- intLane(m, input, "make_date"); cd <- intLane(d, input, "make_date"))
+        yield MakeDateExpr(cy, cm, cd, failOnError, e.origin.context)
 
     // Per-partition prefix plus a running row number; state lives in the node, per task.
     case _: MonotonicallyIncreasingID => Right(MonotonicIdExpr())
@@ -500,6 +532,25 @@ object ExpressionCompiler {
       case _: LiteralExpr => Left("date function on a literal")
       case c => Right(c)
     }
+
+  private def intLane(e: Expression, input: Seq[Attribute], what: String): Result =
+    if (e.dataType != IntegerType) Left(s"$what argument ${e.dataType.simpleString} is not an int") else compile(e, input)
+
+  private def integralLane(e: Expression, input: Seq[Attribute], what: String): Result =
+    if (e.dataType != IntegerType && e.dataType != LongType) Left(s"$what over ${e.dataType.simpleString} not supported")
+    else compile(e, input).flatMap { case _: LiteralExpr => Left(s"$what of a literal"); case c => Right(c) }
+
+  private def timestampLane(e: Expression, input: Seq[Attribute], what: String): Result =
+    if (e.dataType != TimestampType) Left(s"$what over ${e.dataType.simpleString} not supported")
+    else compile(e, input).flatMap { case _: LiteralExpr => Left(s"$what of a literal"); case c => Right(c) }
+
+  /** A timestamp lane, or a date lane behind Spark's date -> timestamp cast (the flag says which). */
+  private def instantLane(e: Expression, input: Seq[Attribute], what: String): Either[String, (VectorExpr, Boolean)] = e match {
+    case Cast(child, TimestampType, _, _) if child.dataType == DateType => compile(child, input).map(c => (c, true))
+    case _ if e.dataType == TimestampType => compile(e, input).map(c => (c, false))
+    case _ if e.dataType == DateType => compile(e, input).map(c => (c, true))
+    case _ => Left(s"$what over ${e.dataType.simpleString} not supported")
+  }
 
   private def dateField(field: DateKernels.Field, child: Expression, input: Seq[Attribute]): Result =
     dateChild(child, input).map(DateFieldExpr(field, _))

@@ -234,6 +234,38 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("datetime arithmetic: last_day, add_months, months_between, next_day, make_date, weekofyear, epoch scaling") {
+    // Day-number relabels and epoch scaling, incl. negative instants.
+    checkVectorized("SELECT unix_date(d0) AS a, date_from_unix_date(i - 2500) AS b, unix_micros(ts) AS c, unix_millis(ts) AS d1, unix_seconds(ts) AS e0, timestamp_micros(i * 1234567L) AS f, timestamp_millis(i * 100000L - 5000000000L) AS g, timestamp_seconds(i - 2500) AS h, timestamp_seconds(CAST(i AS BIGINT) * 100000) AS j FROM ts", Seq(Project))
+    // Month and week arithmetic across month ends, leap days and pre-1970 dates (d0 spans 1969-12 .. 1971-01; dt spans the mixed table).
+    checkVectorized("SELECT last_day(d0) AS a, add_months(d0, 1) AS b, add_months(d0, -13) AS c, add_months(d0, i % 30 - 15) AS d1, weekofyear(d0) AS e0, next_day(d0, 'Mon') AS f, next_day(d0, 'SUNDAY') AS g, next_day(d0, 'th') AS h, make_date(1970 + i % 60, i % 12 + 1, i % 28 + 1) AS j FROM ts", Seq(Project))
+    checkVectorized("SELECT last_day(dt) AS a, add_months(dt, 6) AS b, weekofyear(dt) AS c, months_between(dt, date '2000-01-15') AS d1, months_between(date '2001-03-31', dt, false) AS e0 FROM t", Seq(Project))
+    // months_between over timestamps and dates under UTC and fixed offsets; a zone with rules falls back.
+    for (zone <- Seq("UTC", "+05:30", "-03:00")) {
+      withConf("spark.sql.session.timeZone" -> zone) {
+        checkVectorized("SELECT months_between(ts, timestamp '1970-01-31 10:30:00') AS a, months_between(timestamp '1969-10-30 00:00:00', ts) AS b, months_between(ts, d0) AS c, months_between(d0, ts, false) AS d1, months_between(ts, ts) AS e0 FROM ts", Seq(Project))
+      }
+    }
+    withConf("spark.sql.session.timeZone" -> "America/New_York") {
+      checkFallback("SELECT months_between(ts, d0) AS a FROM ts", Seq(Project), "fixed-offset session zone")
+    }
+    // make_date: invalid dates give null when ANSI is off, raise Spark's error under ANSI, never for a filtered row.
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized("SELECT make_date(2023, i % 14, i % 32) AS a, make_date(i % 3 - 1, 2, 29) AS b FROM t", Seq(Project))
+    }
+    checkVectorized("SELECT make_date(2024, 2, i % 29 + 1) AS a FROM t WHERE i % 29 < 28", Seq(Project, Filter))
+    val e = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT make_date(2023, 2, i % 30 + 1) AS a FROM t").collect()))
+    assert(causes(e).exists(_.getMessage.contains("DATETIME_FIELD_OUT_OF_BOUNDS")), s"expected DATETIME_FIELD_OUT_OF_BOUNDS, got $e")
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT i FROM ts WHERE last_day(d0) = d0 OR weekofyear(d0) = 53", Seq(Filter))
+    checkVectorized("SELECT add_months(last_day(d0), 1) AS k, count(*) AS n, min(unix_seconds(ts)) AS m FROM ts GROUP BY add_months(last_day(d0), 1)", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: a non-literal day name, an unknown day name.
+    checkFallback("SELECT next_day(d0, CASE WHEN i % 2 = 0 THEN 'MO' ELSE 'TU' END) AS a FROM ts", Seq(Project), "non-literal day name")
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkFallback("SELECT next_day(d0, 'Xy') AS a FROM ts", Seq(Project), "unknown day name")
+    }
+  }
+
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {
     // hash must be Spark's exact Murmur3 -- every supported type incl. nulls, NaN, -0.0, dates, timestamps, short decimals, several columns, a seed.
     checkVectorized("SELECT hash(i) AS a, hash(l) AS b, hash(d) AS c, hash(d2) AS d0, hash(b) AS e0, hash(s) AS f, hash(dt) AS g, hash(CAST(d2 AS DECIMAL(10, 2))) AS h, hash(i, l, s, b, d) AS j, hash(-0.0d * i) AS k FROM t", Seq(Project))
