@@ -1,9 +1,9 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -69,6 +69,18 @@ object ExpressionCompiler {
       else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+
+    // The measuring family: an INT32 per string, once per dictionary entry on dictionary input.
+    case Length(child) if child.dataType == StringType => stringSubject(child, input, "length").map(StringMeasureExpr(StringLengthKernels.Measure.CHARS, _))
+    case OctetLength(child) if child.dataType == StringType => stringSubject(child, input, "octet_length").map(StringMeasureExpr(StringLengthKernels.Measure.BYTES, _))
+    case BitLength(child) if child.dataType == StringType => stringSubject(child, input, "bit_length").map(StringMeasureExpr(StringLengthKernels.Measure.BITS, _))
+    case Ascii(child) => stringSubject(child, input, "ascii").map(StringMeasureExpr(StringLengthKernels.Measure.ASCII, _))
+    case Chr(child) =>
+      compile(child, input).flatMap {
+        case _: LiteralExpr => Left("chr of a literal")
+        case c if c.vecType == VecType.INT32 || c.vecType == VecType.INT64 => Right(ChrExpr(c))
+        case _ => Left(s"chr over ${child.dataType.simpleString} not supported")
+      }
 
     // The slicing family writes new UTF8 data: Spark's UTF8String semantics per lane (left/right are
     // Spark's own rewrites onto substring; binary inputs are not lanes and fall back).
