@@ -352,6 +352,30 @@ class VectorAggregateSuite extends VectorQuerySuite {
     allOurs("SELECT l_returnflag, stddev_samp(l_quantity), var_pop(l_extendedprice), corr(l_quantity, l_extendedprice), covar_samp(l_discount, l_tax) FROM lineitem GROUP BY l_returnflag")
   }
 
+  test("try_sum nulls the whole group on overflow; try_avg is avg over doubles") {
+    def allOurs(sql: String): Unit = {
+      val df = checkVectorized(sql, Seq(Agg))
+      assert(nodesOf[HashAggregateExec](df).isEmpty, "every stage should be ours\n" + finalPlan(df).treeString)
+    }
+    // l is 0..~60000 (null where id % 7 = 3): scaled by 5e13 every value fits a long but any group's
+    // sum overflows; unscaled sums never do. Group 0 is poisoned, groups 1 and 2 are exact.
+    val mixed = "CASE WHEN i % 3 = 0 THEN l * 50000000000000 ELSE l END"
+    for (ansi <- Seq("true", "false")) {
+      withConf("spark.sql.ansi.enabled" -> ansi) {
+        allOurs(s"SELECT i % 3 AS g, try_sum($mixed) AS a, try_sum(l) AS b, try_sum(i) AS c, sum(l) AS d1, count(*) AS n FROM t GROUP BY i % 3")
+        allOurs(s"SELECT try_sum($mixed) AS a, try_sum(l) AS b, try_sum(i) AS c FROM t")
+        // A group with nulls only is null (isEmpty), a group with one value is that value, a filtered subset agrees.
+        allOurs("SELECT i % 7 AS g, try_sum(l) AS a, try_sum(CASE WHEN i % 7 = 3 THEN l END) AS b, try_sum(CASE WHEN i = 5 THEN l * 50000000000000 END) AS c FROM t GROUP BY i % 7")
+        allOurs(s"SELECT i % 3 AS g, try_sum($mixed) AS a FROM t WHERE i % 2 = 0 GROUP BY i % 3")
+        // Doubles: Spark's Sum in TRY mode has no isEmpty buffer and never overflows; try_avg sums in doubles.
+        allOurs("SELECT i % 5 AS g, try_sum(d2) AS a, try_avg(l) AS b, try_avg(i) AS c, try_avg(d2) AS d1, try_sum(d) AS e0 FROM t GROUP BY i % 5")
+        allOurs(s"SELECT try_sum(d2) AS a, try_avg($mixed) AS b, try_avg(d) AS c FROM t")
+      }
+    }
+    // Decimals keep their own path.
+    checkFallback("SELECT try_sum(CAST(l AS DECIMAL(12, 2))) AS a FROM t", Seq(Agg), "try_sum over a decimal")
+  }
+
   test("NaN and negative zero grouping keys are normalised as Spark's") {
     // Spark wraps a double key in KnownFloatingPointNormalized(NormalizeNaNAndZero(...)), which the
     // compiler unwraps -- but a double grouping key itself is refused (the group table has no lane for

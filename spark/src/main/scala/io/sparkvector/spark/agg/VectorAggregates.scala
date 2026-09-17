@@ -205,6 +205,119 @@ final case class WideDecimalSumMergeAgg(
   }
 }
 
+/**
+ * `try_sum` over an integral input -- Spark's `Sum` in TRY mode: the buffer is `(sum: bigint, isEmpty)`
+ * like the decimal sum's, the rows are added exactly, and the first overflow poisons the group -- its
+ * `sum` is null from then on and stays null through every later row and merge, exactly as Spark's
+ * `Add(sum, child, TRY)` leaves a null that no later add revives. Spark's Final result,
+ * `If(isEmpty, null, sum)`, compiles over the emitted buffer as an ordinary expression.
+ */
+final case class TrySumLongAgg(input: VectorExpr) extends VectorAggFunction {
+  override def bufferTypes: Seq[DataType] = Seq(LongType, BooleanType)
+
+  private final class State(var groups: Int) {
+    var sum = new Array[Long](groups)
+    var nonEmpty = new Array[Boolean](groups)
+    var poisoned = new Array[Boolean](groups)
+    def ensure(n: Int): Unit = if (n > groups) {
+      sum = java.util.Arrays.copyOf(sum, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
+    }
+    def add(v: VectorBuffers, validity: java.lang.foreign.MemorySegment, n: Int, groupOf: Int => Int): Unit = {
+      val wide = v.`type`() == VecType.INT64
+      var i = 0
+      while (i < n) {
+        val g = groupOf(i)
+        if (g >= 0 && (validity == null || Bitmap.isSet(validity, i))) {
+          nonEmpty(g) = true
+          if (!poisoned(g)) {
+            val x = if (wide) v.data().getAtIndex(VectorBuffers.LE_LONG, i) else v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong
+            val r = sum(g) + x
+            // Overflow iff both operands share a sign the result does not (Math.addExact's test).
+            if (((sum(g) ^ r) & (x ^ r)) < 0) poisoned(g) = true else sum(g) = r
+          }
+        }
+        i += 1
+      }
+    }
+    def value(g: Int, slot: Int): Any =
+      if (slot == 1) java.lang.Boolean.valueOf(!nonEmpty(g))
+      else if (poisoned(g)) null
+      else java.lang.Long.valueOf(sum(g))
+  }
+
+  override def newState(): AggState = new AggState {
+    private val state = new State(1)
+    override def update(ctx: EvalContext): Unit = {
+      val v = ctx.masked(input.eval(ctx))
+      state.add(v, v.validity(), ctx.numRows, _ => 0)
+    }
+    override def bufferValues: Array[Any] = Array(state.value(0, 0), state.value(0, 1))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val state = new State(64)
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
+      state.ensure(groups.numGroups())
+      val v = input.eval(ctx)
+      val ids = groups.ids()
+      state.add(v, groups.effectiveValidity(v), groups.numRows(), i => ids(i))
+    }
+    override def bufferValue(g: Int, slot: Int): Any = state.value(g, slot)
+  }
+}
+
+/** The merge modes of `try_sum`: Spark's rules -- a null `sum` on a non-empty row poisons the group, sums add exactly, `isEmpty = isEmpty && other.isEmpty`. */
+final case class TrySumLongMergeAgg(sum: VectorExpr, isEmpty: VectorExpr) extends VectorAggFunction {
+  override def bufferTypes: Seq[DataType] = Seq(LongType, BooleanType)
+
+  private final class State(var groups: Int) {
+    var total = new Array[Long](groups)
+    var nonEmpty = new Array[Boolean](groups)
+    var poisoned = new Array[Boolean](groups)
+    def ensure(n: Int): Unit = if (n > groups) {
+      total = java.util.Arrays.copyOf(total, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
+    }
+    def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
+      val sv = sum.eval(ctx)
+      val empty = isEmpty.eval(ctx)
+      val n = ctx.numRows
+      var i = 0
+      while (i < n) {
+        val g = groupOf(i)
+        if (g >= 0 && !(empty.validity() != null && !Bitmap.isSet(empty.validity(), i)) && !Bitmap.isSet(empty.data(), i)) {
+          nonEmpty(g) = true
+          if (sv.validity() != null && !Bitmap.isSet(sv.validity(), i)) poisoned(g) = true
+          else if (!poisoned(g)) {
+            val x = sv.data().getAtIndex(VectorBuffers.LE_LONG, i)
+            val r = total(g) + x
+            if (((total(g) ^ r) & (x ^ r)) < 0) poisoned(g) = true else total(g) = r
+          }
+        }
+        i += 1
+      }
+    }
+    def value(g: Int, slot: Int): Any =
+      if (slot == 1) java.lang.Boolean.valueOf(!nonEmpty(g))
+      else if (poisoned(g)) null
+      else java.lang.Long.valueOf(total(g))
+  }
+
+  override def newState(): AggState = new AggState {
+    private val state = new State(1)
+    override def update(ctx: EvalContext): Unit =
+      state.merge(ctx, i => if (ctx.selection == null || Bitmap.isSet(ctx.selection, i)) 0 else -1)
+    override def bufferValues: Array[Any] = Array(state.value(0, 0), state.value(0, 1))
+  }
+  override def newGroupedState(): GroupedAggState = new GroupedAggState {
+    private val state = new State(64)
+    override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
+      state.ensure(groups.numGroups())
+      val ids = groups.ids()
+      state.merge(ctx, i => ids(i))
+    }
+    override def bufferValue(g: Int, slot: Int): Any = state.value(g, slot)
+  }
+}
+
 /** COUNT(*) when `input` is None, otherwise COUNT of non-null values of the expression. */
 final case class CountAgg(input: Option[VectorExpr]) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(LongType)
@@ -407,8 +520,9 @@ object VectorAggregates {
       if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}") else ExpressionCompiler.compile(input(ordinal), input)
     }
     f match {
-      case s: Sum if s.evalContext.evalMode == EvalMode.TRY => Left("try_sum not supported (Spark nulls the whole group on overflow)")
-      case a: Average if a.evalMode == EvalMode.TRY => Left("try_avg not supported (Spark nulls the whole group on overflow)")
+      case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType == LongType && buffers.length == 2 =>
+        for (sum <- ref(0); empty <- ref(1)) yield TrySumLongMergeAgg(sum, empty)
+      case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType.isInstanceOf[DecimalType] => Left("try_sum over a decimal not supported")
       case s: Sum if s.dataType.isInstanceOf[DecimalType] && buffers.length == 2 =>
         // The wide decimal sum's (sum, isEmpty) buffer: the sum column has no lane and is read from
         // the batch by ordinal; isEmpty is an ordinary boolean.
@@ -489,8 +603,13 @@ object VectorAggregates {
     }
 
   private def compileFunction(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = f match {
-    case s: Sum if s.evalContext.evalMode == EvalMode.TRY => Left("try_sum not supported (Spark nulls the whole group on overflow)")
-    case a: Average if a.evalMode == EvalMode.TRY => Left("try_avg not supported (Spark nulls the whole group on overflow)")
+    // try_sum over an integral input: Spark's (sum, isEmpty) buffer with the whole group nulled on overflow.
+    case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType == LongType =>
+      numericChild(s.child, input).flatMap { child =>
+        if (child.vecType == VecType.INT32 || child.vecType == VecType.INT64) Right(TrySumLongAgg(child))
+        else Left(s"try_sum over ${s.child.dataType.simpleString} not supported")
+      }
+    case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType.isInstanceOf[DecimalType] => Left("try_sum over a decimal not supported")
     case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
       // Only reached for decimals of more than 8 digits (the optimizer rewrites smaller ones to a
       // long sum): the buffer is Spark's (sum: Decimal(p + 10, s), isEmpty) pair, the sum wider than

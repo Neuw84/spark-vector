@@ -85,7 +85,7 @@ that pin it.
   compiled; integer `+ - *` and negation are computed wrapping and then checked with an overflow
   lane mask (`OverflowKernels`: the sign trick for add/subtract, the exact product for multiply,
   `MIN_VALUE` for negation), raising Spark's `ARITHMETIC_OVERFLOW` with `Math.*Exact`'s message and
-  the `try_*` hint, and the `try_*` forms (`nullOnOverflow` on `ArithExpr` / `NarrowCastExpr`) null those rows instead; ANSI `sum(bigint)` is overflow-checked the same way (`AggKernels.sumLongExact`
+  the `try_*` hint, and the `try_*` forms (`nullOnOverflow` on `ArithExpr` / `NarrowCastExpr`) null those rows instead; `try_sum` (`TrySumLongAgg` / `TrySumLongMergeAgg`, Spark's `(sum, isEmpty)` buffer) poisons the whole group on its first overflow; ANSI `sum(bigint)` is overflow-checked the same way (`AggKernels.sumLongExact`
   carries a sign-trick overflow lane; `GroupedAccumulators.LongSum(checked)` uses `Math.addExact`).
   ANSI errors (overflow, division by zero, decimal overflow) are raised only for rows that are active
   (survive earlier conjuncts / the selection), matching Spark's short-circuit semantics.
@@ -483,7 +483,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 152 kernel tests, 185 Spark tests (158 without the Comet and Iceberg profiles;
+Current counts: 152 kernel tests, 186 Spark tests (159 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

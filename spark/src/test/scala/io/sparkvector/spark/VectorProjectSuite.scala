@@ -381,9 +381,9 @@ class VectorProjectSuite extends VectorQuerySuite {
     // In a filter and as a grouping key.
     checkVectorized("SELECT count(*) AS n, count(try_add(i, 2147483000)) AS m FROM t WHERE try_divide(i, i % 3) IS NULL", Seq(Filter, classOf[VectorHashAggregateExec]))
     checkVectorized("SELECT try_cast(d AS INT) AS k, count(*) AS n FROM t GROUP BY try_cast(d AS INT)", Seq(Project, classOf[VectorHashAggregateExec]))
-    // Declined: decimals keep their own path, and the aggregate forms are the next slice.
+    // Declined: decimals keep their own path (scalar and aggregate).
     checkFallback("SELECT try_add(CAST(i AS DECIMAL(10, 2)), CAST(l AS DECIMAL(12, 2))) AS a FROM t", Seq(Project), "try_*")
-    checkFallback("SELECT try_sum(l) AS a, try_avg(i) AS b FROM t", Seq(classOf[VectorHashAggregateExec]), "try_sum")
+    checkFallback("SELECT try_sum(CAST(l AS DECIMAL(12, 2))) AS a FROM t", Seq(classOf[VectorHashAggregateExec]), "try_sum over a decimal")
   }
 
   test("hash, xxhash64 seeds, md5, sha1, sha2 and crc32") {
