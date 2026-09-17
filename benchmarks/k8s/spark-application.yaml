@@ -1,0 +1,77 @@
+# spark-operator SparkApplication for one (configuration, dataset) pair of the cluster runner (#246).
+# Template: NOT yet run against a cluster. Substitute IMAGE, S3_BUCKET, DATASET, CONFIG and add the
+# engine sparkConf entries `benchmarks/scripts/submit-cluster.sh <CONFIG> ... ` prints with DRY_RUN=1
+# (spark.plugins, spark.vector.*, spark.comet.*, spark.shuffle.manager, spark.memory.offHeap.*).
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: spark-vector-tpcds-CONFIG-DATASET
+  namespace: spark-team-a
+spec:
+  type: Scala
+  mode: cluster
+  image: IMAGE            # Spark 4.1.x on JDK 25 with benchmarks.jar, the Comet Spark 4.1 jar, iceberg-spark-runtime-4.1_2.13
+  imagePullPolicy: IfNotPresent
+  mainClass: io.sparkvector.benchmarks.TpcdsRunner
+  mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
+  arguments:
+    - "--cluster"
+    - "--config"
+    - "CONFIG"
+    - "--tables"
+    - "s3a://S3_BUCKET/tpcds/sf1000/parquet"     # or catalog:<namespace> for the Iceberg datasets
+    - "--dataset"
+    - "DATASET"
+    - "--queries-dir"
+    - "s3a://S3_BUCKET/tpcds/queries"            # q1.sql ... q99.sql, q14a.sql ... (omit when the tests jar is on the image)
+    - "--out"
+    - "s3a://S3_BUCKET/results/DATASET"
+    - "--iterations"
+    - "1"
+    - "--warmup"
+    - "0"
+  sparkVersion: "4.1.3"
+  sparkConf:
+    spark.sql.adaptive.enabled: "true"
+    spark.driver.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
+    spark.executor.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
+    # Engine configuration for CONFIG goes here (see submit-cluster.sh DRY_RUN=1); `spark` has none.
+    # S3: the cluster's IRSA role and the S3A committer settings of the reference apply unchanged.
+  restartPolicy:
+    type: Never
+  driver:
+    cores: 4
+    memory: "16g"
+    serviceAccount: spark-team-a
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
+  executor:
+    instances: 8
+    cores: 4
+    memory: "24g"
+    memoryOverhead: "4g"
+    volumeMounts:
+      - name: tmp                # JFR recordings of the profiling protocol (#251) land in /tmp
+        mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
