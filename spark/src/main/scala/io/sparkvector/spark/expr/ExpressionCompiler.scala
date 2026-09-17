@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, Floor, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, MakeDecimal, Minute, MonotonicallyIncreasingID, Month, Multiply, NaNvl, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringLPad, StringRepeat, StringRPad, StringSpace, Substring, Subtract, Tan, Tanh, ToDegrees, ToRadians, TruncDate, UnaryMathExpression, UnaryMinus, UnaryPositive, UnscaledValue, WeekDay, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
@@ -69,6 +69,15 @@ object ExpressionCompiler {
       else numericChild(child, input, "isnan").map(IsNaNExpr(_))
 
     case StartsWith(l, r) => stringMatch(StringMatchKernels.Kind.PREFIX, l, r, input)
+
+    // Several string inputs: per-row lengths summed across them, one buffer, a per-input copy loop.
+    // Array and binary forms are declined by type; an all-literal call folds in Spark.
+    case Concat(children) if children.nonEmpty && children.forall(_.dataType == StringType) =>
+      stringArgs(children, input, "concat").map(ConcatExpr)
+    case ConcatWs(children) if children.nonEmpty && children.forall(_.dataType == StringType) =>
+      stringArgs(children, input, "concat_ws").map(ps => ConcatWsExpr(ps.head, ps.tail))
+    case e @ Elt(children, failOnError) if children.length > 1 && children.tail.forall(_.dataType == StringType) =>
+      for (i <- intArg(children.head, input, "elt"); ps <- stringArgs(children.tail, input, "elt")) yield EltExpr(i, ps, failOnError, e.origin.context)
 
     // The measuring family: an INT32 per string, once per dictionary entry on dictionary input.
     case Length(child) if child.dataType == StringType => stringSubject(child, input, "length").map(StringMeasureExpr(StringLengthKernels.Measure.CHARS, _))
@@ -708,6 +717,16 @@ object ExpressionCompiler {
         case c if c.vecType != VecType.UTF8 => Left(s"$what argument ${e.dataType.simpleString} not supported")
         case c => Right(c)
       }
+  }
+
+  /** Several string arguments, each a UTF8 lane or a non-null literal; at least one must be a lane. */
+  private def stringArgs(es: Seq[Expression], input: Seq[Attribute], what: String): Either[String, Seq[VectorExpr]] = {
+    val compiled = es.foldLeft[Either[String, Vector[VectorExpr]]](Right(Vector.empty)) { (acc, e) =>
+      for (done <- acc; c <- stringArg(e, input, what)) yield done :+ c
+    }
+    compiled.flatMap { ps =>
+      if (ps.forall(_.isInstanceOf[LiteralExpr])) Left(s"$what of literals only") else Right(ps)
+    }
   }
 
   /** An int argument: an INT32 lane or an int literal, the literal bounded when it sizes the output. */

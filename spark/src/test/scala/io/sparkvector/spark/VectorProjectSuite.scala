@@ -234,6 +234,30 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i FROM t WHERE xxhash64(i) % 5 = 0 AND xxhash64(s, i) > 0", Seq(Filter))
   }
 
+  test("concat, concat_ws and elt over several string inputs") {
+    val m = "CASE WHEN i % 4 = 0 THEN 'héllo' WHEN i % 4 = 1 THEN '日本語' WHEN i % 4 = 2 THEN '😀' ELSE s END"
+    val n = "CASE WHEN i % 3 = 0 THEN NULL ELSE s END"
+    // concat: null-intolerant; literals between lanes; many inputs; multi-byte; nested in the other string functions.
+    checkVectorized(s"SELECT concat(s, '-', $m) AS a, concat(s, $n) AS b, concat(s) AS c, concat(s, s, s, s, s, s, s, s) AS d0, concat('<', $m, '|', $n, '>') AS e0, upper_cased AS f FROM (SELECT *, concat(substring(s, 1, 1), lpad(s, 4, '0')) AS upper_cased FROM t)", Seq(Project))
+    // concat_ws: literal and lane separators, null separator, nulls skipped, a single live input, no live input.
+    checkVectorized(s"SELECT concat_ws(',', s, $n, $m) AS a, concat_ws($n, s, 'x') AS b, concat_ws('', s, s) AS c, concat_ws(' / ', $n, $n) AS d0, concat_ws(s, 'a', 'b', $n) AS e0, concat_ws('・', $m, $n, s) AS f FROM t", Seq(Project))
+    // elt: lane and literal indices, out-of-range and null indices give null when ANSI is off, a null pick.
+    withConf("spark.sql.ansi.enabled" -> "false") {
+      checkVectorized(s"SELECT elt(i % 4, s, $m, 'lit') AS a, elt(2, s, $n) AS b, elt(i % 3 - 1, s, s) AS c, elt(CASE WHEN i % 5 = 0 THEN NULL ELSE 1 END, s) AS d0 FROM t", Seq(Project))
+    }
+    // ANSI: an out-of-range index raises Spark's INVALID_ARRAY_INDEX; a filtered row never raises.
+    checkVectorized(s"SELECT elt(i % 2 + 1, s, $m) AS a FROM t", Seq(Project))
+    checkVectorized("SELECT elt(i, s, s, s) AS a FROM t WHERE i BETWEEN 1 AND 3", Seq(Project, Filter))
+    val e = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT elt(i % 4, s, s) AS a FROM t").collect()))
+    assert(causes(e).exists(_.getMessage.contains("INVALID_ARRAY_INDEX")), s"expected INVALID_ARRAY_INDEX, got $e")
+    // In a filter and as a grouping key.
+    checkVectorized("SELECT i FROM t WHERE concat(s, '!') = 's1!' OR concat_ws('', s, s) = 's2s2'", Seq(Filter))
+    checkVectorized("SELECT concat_ws('-', s, substring(s, 2)) AS k, count(*) AS n FROM t GROUP BY concat_ws('-', s, substring(s, 2))", Seq(Project, classOf[VectorHashAggregateExec]))
+    // Declined: binary and array forms.
+    checkFallback("SELECT concat(CAST(s AS BINARY), CAST(s AS BINARY)) AS a FROM t", Seq(Project), "unsupported")
+    checkFallback("SELECT concat_ws(',', array(s, s)) AS a FROM t", Seq(Project), "unsupported")
+  }
+
   test("length, octet_length, bit_length, ascii and chr") {
     val m = "CASE WHEN i % 4 = 0 THEN 'héllo wörld' WHEN i % 4 = 1 THEN '日本語テキスト' WHEN i % 4 = 2 THEN '😀x😀y' ELSE s END"
     // Every alias, over ASCII with nulls and over multi-byte text: code points vs bytes vs bits.
@@ -361,7 +385,7 @@ class VectorProjectSuite extends VectorQuerySuite {
   }
 
   test("unsupported expressions in a projection fall back") {
-    checkFallback("SELECT concat(s, 'x') AS c FROM t WHERE i > 5", Seq(Project), "unsupported expression")
+    checkFallback("SELECT reverse(s) AS c FROM t WHERE i > 5", Seq(Project), "unsupported expression")
     checkFallback("SELECT hash(i) AS m FROM t WHERE i > 5", Seq(Project), "unsupported expression")
   }
 

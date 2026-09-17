@@ -13,6 +13,10 @@ object VectorErrors {
   def remainderByZero(context: QueryContext): ArithmeticException =
     QueryExecutionErrors.remainderByZeroError(context)
 
+  /** `elt` with an index outside `1..count` in ANSI mode: Spark's INVALID_ARRAY_INDEX. */
+  def invalidArrayIndex(index: Int, count: Int, context: QueryContext): ArrayIndexOutOfBoundsException =
+    QueryExecutionErrors.invalidArrayIndexError(index, count, context)
+
   /** A decimal result that does not fit the target precision (ANSI arithmetic and casts). */
   def decimalPrecisionOverflow(value: Decimal, precision: Int, scale: Int, context: QueryContext): ArithmeticException =
     QueryExecutionErrors.cannotChangeDecimalPrecisionError(value, precision, scale, context)
