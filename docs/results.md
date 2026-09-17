@@ -613,7 +613,9 @@ vs 189k rows/us against the per-string `MemorySegment.copy` loop (2.2x); 12 and 
 noise of each other.
 
 The benchmark configurations also turn the opt-in sort-merge join rewrite on
-(`TpchRunner.VectorFast`), as Comet's native execution converts those joins too: q9 goes to 38/42
+(`TpchRunner.VectorFast`): Comet accelerates those joins too -- natively, as merge joins; its own
+hash-join replacement, `spark.comet.exec.forceShuffledHashJoin`, is likewise off by default -- and
+the rewrite is our only way to. q9 goes to 38/42
 operators accelerated (no `SortMergeJoin` row round trips left) and q18 to 31/35. The medians of the
 verification run are not quotable -- the machine carried a load average of 6-7 and `spark`'s own
 medians rose 20-50% over the phase-4 session -- but the checksums and operator counts are
