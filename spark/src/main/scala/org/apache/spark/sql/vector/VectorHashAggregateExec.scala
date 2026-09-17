@@ -507,21 +507,24 @@ object VectorAggregatePlanner {
 
 /** Boxed buffer values of a run of groups `[from, to)` as one Arrow column; shared with the window aggregate. */
 object AggBufferColumns {
-  def column(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int, allocator: BufferAllocator): ColumnVector = {
-    val count = to - from
+  def column(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int, allocator: BufferAllocator): ColumnVector =
+    values(name, dt, to - from, o => state.bufferValue(from + o, slot), allocator)
+
+  /** Boxed values `get(0 until count)` (Spark's internal representation, or null) as one Arrow column. */
+  def values(name: String, dt: DataType, count: Int, get: Int => Any, allocator: BufferAllocator): ColumnVector = {
     dt match {
       case d: DecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION =>
         // The sum buffer of a wide decimal sum: boxed exact totals into Arrow's 128-bit vector.
         val values = new Array[java.math.BigDecimal](count)
         var o = 0
-        while (o < count) { values(o) = state.bufferValue(from + o, slot).asInstanceOf[java.math.BigDecimal]; o += 1 }
+        while (o < count) { values(o) = get(o).asInstanceOf[java.math.BigDecimal]; o += 1 }
         return ArrowOutput.decimalColumn(name, d, values, allocator)
       case org.apache.spark.sql.types.StringType =>
         // min/max, first/last, min_by/max_by over strings: boxed UTF8Strings into a varchar vector.
         val values = new Array[Array[Byte]](count)
         var o = 0
         while (o < count) {
-          val v = state.bufferValue(from + o, slot)
+          val v = get(o)
           values(o) = if (v == null) null else v.asInstanceOf[org.apache.spark.unsafe.types.UTF8String].getBytes
           o += 1
         }
@@ -533,7 +536,7 @@ object AggBufferColumns {
     val validity = out.validity()
     var o = 0
     while (o < count) {
-      state.bufferValue(from + o, slot) match {
+      get(o) match {
         case null => io.sparkvector.kernels.Bitmap.clear(validity, o)
         case v: java.lang.Double =>
           io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())

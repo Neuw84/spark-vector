@@ -100,18 +100,43 @@ class VectorWindowSuite extends VectorQuerySuite {
     assert(nodesOf[VectorWindowExec](both).length === 2, finalPlan(both).treeString)
   }
 
+  test("running aggregates equal Spark: the default RANGE frame with ORDER BY and ROWS UNBOUNDED PRECEDING") {
+    // The default frame of an ordered aggregate window is RANGE ... CURRENT ROW: peers share the value at the end of their group.
+    checkWindow("SELECT i, l, sum(l) OVER (PARTITION BY s ORDER BY l % 5) AS running, count(*) OVER (PARTITION BY s ORDER BY l % 5) AS n FROM t")
+    checkWindow("SELECT i, avg(i) OVER (PARTITION BY i % 7 ORDER BY dt) AS mean, min(l) OVER (PARTITION BY i % 7 ORDER BY dt) AS lo, max(s) OVER (PARTITION BY i % 7 ORDER BY dt) AS hi FROM t")
+    // ROWS: a prefix over rows, ties or not; nulls in the values and in the order key.
+    checkWindow("SELECT i, sum(nullif(l % 3, 0)) OVER (PARTITION BY s ORDER BY l % 5, i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM t")
+    checkWindow("SELECT i, count(nullif(l % 3, 0)) OVER (PARTITION BY s ORDER BY nullif(l % 3, 0) ROWS UNBOUNDED PRECEDING) AS nn, max(d) OVER (PARTITION BY s ORDER BY nullif(l % 3, 0) ROWS UNBOUNDED PRECEDING) AS hi FROM t")
+    // One partition of 20000 rows, per-row groups across several held batches; sums of doubles too.
+    checkWindow("SELECT i, sum(l) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running, sum(d) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS dsum FROM t WHERE d = d AND abs(d) < 1e300")
+    // Partitions straddling batches with the RANGE default; then the chain above.
+    checkWindow("SELECT i, sum(l) OVER (PARTITION BY i DIV 4000 ORDER BY i % 100) AS running FROM t")
+    checkWindow(
+      "SELECT s, max(running) AS m FROM (SELECT s, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t WHERE l % 2 = 0) w GROUP BY s",
+      Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]](classOf[VectorFilterExec]))
+    // ANSI: a running bigint sum that overflows raises like Spark; non-ANSI wraps.
+    val overflowing = "SELECT i, sum(CASE WHEN i = 1 THEN 9223372036854775807L ELSE l END) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM t WHERE i < 10"
+    withConf("spark.sql.ansi.enabled" -> "true") {
+      val e = intercept[Exception] { withPlugin(enabled = true) { spark.sql(overflowing).collect() } }
+      assert(e.getMessage.contains("ARITHMETIC_OVERFLOW") || e.getMessage.contains("overflow"), e.getMessage)
+    }
+    withConf("spark.sql.ansi.enabled" -> "false") { checkWindow(overflowing) }
+  }
+
   test("other window functions and frames fall back with a reason; the operator can be disabled") {
-    checkFallback("SELECT i, avg(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM t", Seq(Window), "window aggregate avg over frame")
-    // The default frame with an ORDER BY is RANGE ... CURRENT ROW: a running aggregate, not a whole-partition one.
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "window aggregate sum over frame")
+    // Sliding frames, a running frame of a function without a prefix form, and two frame kinds in one operator.
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS moving FROM t", Seq(Window), "window aggregate sum over frame")
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS suffix FROM t", Seq(Window), "window aggregate sum over frame")
+    checkFallback("SELECT i, first(l) OVER (PARTITION BY s ORDER BY i) AS f FROM t", Seq(Window), "running frame for first not supported")
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS byrows FROM t", Seq(Window), "different frames in one operator")
     checkFallback("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over decimals not supported")
     checkFallback("SELECT i, approx_count_distinct(l) OVER (PARTITION BY s) AS n FROM t", Seq(Window), "window aggregate approx_count_distinct:")
     checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous FROM t", Seq(Window), "window function lag not supported")
     checkFallback("SELECT i, percent_rank() OVER (PARTITION BY s ORDER BY i) AS pr FROM t", Seq(Window), "window function percent_rank not supported")
     checkFallback("SELECT i, rank() OVER (PARTITION BY d ORDER BY i) AS rk FROM t", Seq(Window), "double keys not supported")
     // A ranking function beside an aggregate in the same spec keeps the whole operator Spark's.
-    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "window aggregate sum over frame")
-    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t", Seq(Window), "window aggregate sum over a frame not supported")
+    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window), "beside a ranking function in one operator")
+    checkFallback("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk, sum(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total FROM t", Seq(Window), "beside a ranking function in one operator")
     withConf("spark.vector.exec.window.enabled" -> "false") {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i, rank() OVER (PARTITION BY s ORDER BY i) AS rk FROM t"); d.collect(); d }
       assert(nodesOf[WindowExec](df).nonEmpty && nodesOf[VectorWindowExec](df).isEmpty, finalPlan(df).treeString)

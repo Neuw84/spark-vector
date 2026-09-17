@@ -236,7 +236,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Conditionals | `CASE WHEN ... [ELSE] END`, `IF`, `COALESCE`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` over any supported type, with `NULL`, numeric, string and boolean literal branches; a null condition counts as false, later branches are evaluated only where earlier ones did not match | conditionals producing wide decimals or nested types |
 | Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `count_if`, `min`, `max` (incl. booleans and strings), `avg`, `first`/`last`, `bool_and`/`bool_or`, `bit_and`/`bit_or`/`bit_xor`, `max_by`/`min_by`, the statistical family (`stddev`/`variance` pop and samp, `skewness`, `kurtosis`, `covar_*`, `corr`, `regr_*`; Spark's Welford update and merge, agreement to a relative tolerance) in every aggregate mode (`Partial`, `PartialMerge`, `Final`, `Complete`), with `FILTER` clauses, `DISTINCT` (Spark's rewrites, incl. TPC-H Q16's `count(distinct)`) and keys-only aggregates (`SELECT DISTINCT`, `UNION`); `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums; keys of Int/Long/Boolean/String/Date/Decimal; Spark's `SortAggregateExec` for string buffers converted too | double keys, `stddev`/`variance`, `ObjectHashAggregateExec` functions (`collect_*`, `percentile_*`) |
 | Sort | `SORT BY`/`ORDER BY` over a columnar child, every supported type as key, in memory | sorts over Spark's row shuffle (kept by Spark), spilling |
-| Windows | `row_number`, `rank`, `dense_rank` over `PARTITION BY ... ORDER BY ...` (one walk over the sorted input; a partition longer than a batch is one partition); whole-partition `sum`/`avg`/`count`/`min`/`max` and the rest of the aggregate family over non-decimal inputs (the default frame without `ORDER BY`, or `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`); the child may be Spark's row sort; the per-partition top-k Spark inserts under a `rank <= k` filter (`WindowGroupLimitExec`, both modes) | running and sliding frames, decimal window aggregates (#28), `lag`/`lead`/`first_value`, `percent_rank`/`cume_dist`/`ntile` (#58) |
+| Windows | `row_number`, `rank`, `dense_rank` over `PARTITION BY ... ORDER BY ...` (one walk over the sorted input; a partition longer than a batch is one partition); whole-partition `sum`/`avg`/`count`/`min`/`max` and the rest of the aggregate family over non-decimal inputs (the default frame without `ORDER BY`, or `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`); running `sum`/`avg`/`count`/`min`/`max` (`ROWS` or `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, the latter the default with `ORDER BY`); the child may be Spark's row sort; the per-partition top-k Spark inserts under a `rank <= k` filter (`WindowGroupLimitExec`, both modes) | sliding frames, decimal window aggregates (#28), `lag`/`lead`/`first_value`, `percent_rank`/`cume_dist`/`ntile` (#58) |
 | Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti, existence (`EXISTS` as a value), each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
 
 ## Benchmarks
@@ -399,8 +399,11 @@ Final aggregate computes it -- and hold a partition's rows in memory until it en
 known only then. A filter `rank <= k` on a ranking window makes Spark plan a per-partition top-k
 (`WindowGroupLimitExec`) below the window in two modes -- before the shuffle over whatever produced the
 rows, and after the sort -- and both are ours: the same ranking walk, keeping a row while its rank is at
-most k, so the operators feeding the shuffle stay columnar. Decimal window aggregates wait for the
-128-bit lane (#28); running and sliding frames and the offset functions are the next layers.
+most k, so the operators feeding the shuffle stay columnar. Running frames (`sum(x) OVER (PARTITION BY k
+ORDER BY d)`, whose default frame is `RANGE ... CURRENT ROW`, and the `ROWS` form) make each peer group
+or row a group and combine its buffers with the running buffers before it -- sums and counts add,
+`min`/`max` compare -- so the same result expression yields the running value. Decimal window
+aggregates wait for the 128-bit lane (#28); sliding frames and the offset functions are the next layers.
 
 `ROLLUP`, `CUBE` and `GROUPING SETS` (and the rewrite Spark applies to `count(distinct)`) go through
 `ExpandExec`, which duplicates every row once per grouping set with the unused keys nulled and a
