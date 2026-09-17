@@ -11,7 +11,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, AttributeSet, CheckOverflowInSum, Expression, If, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateMode, Complete, DeclarativeAggregate, Final, Partial, PartialMerge, Sum}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning, UnspecifiedDistribution}
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.{PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, HashAggregateExec}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{DataType, DecimalType}
@@ -44,10 +44,19 @@ case class VectorHashAggregateExec(
     aggregateAttributes: Seq[Attribute],
     resultExpressions: Seq[NamedExpression],
     child: SparkPlan)
-    extends VectorExec {
+    extends VectorExec with PartitioningPreservingUnaryExecNode {
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
-  override def outputPartitioning: Partitioning = child.outputPartitioning
+
+  /**
+   * The child's partitioning expressed over this operator's output, through the result aliases, as
+   * Spark's HashAggregateExec reports it: `GROUP BY d_year` with `d_year AS year` in the result is
+   * partitioned by `year`, not by the input attribute `d_year` this operator no longer outputs. A
+   * union above compares its children's partitionings over their outputs -- an expression naming an
+   * attribute the child does not output makes the union's partitioning unknown at execution, and its
+   * plain concatenation then emits every key once per child (TPC-DS q66: 10 rows for Spark's 5, #162).
+   */
+  override protected def outputExpressions: Seq[NamedExpression] = resultExpressions
 
   /** Same contract as HashAggregateExec, so adaptive execution treats the exchange below alike. */
   override def requiredChildDistribution: List[Distribution] = requiredChildDistributionExpressions match {

@@ -487,6 +487,33 @@ from 27 queries to 9 -- those sum a *wide input* (`decimal(27,2)` totals of a `U
 sums) or average a decimal, which need a wide lane rather than a wide accumulator (#28). All 103
 queries agree with Spark to 10 significant digits.
 
+Refreshed again after the string, datetime, cast and `try_*` families, nested loop joins, sampling
+and the literal work (#37--#49, #52, #60, #63): **2956 of 4735 operators ours (62%)**, 40 queries at
+75% or more, 47 at 50% or more, and the first fully accelerated query, q9 (every operator ours; its
+plan has no global sort). Sort-merge joins are named in 19 queries. With the opt-in rewrite of
+sort-merge joins into the shuffled hash join (#10, `spark.vector.exec.sortMergeJoin.enabled=true`):
+**3051 of 4682 operators ours (65%)**, 44 queries at 75% or more; 12 queries change -- ten gain
+(q8, q11, q14a, q14b, q25, q29, q31, q54, q72 and q78, q72 from 16/51 to 37/49, q25 and q29 from 14/38
+to 27/36) and two lose a few (q38, q92: adaptive execution re-plans a join as a broadcast join whose
+streamed side is then the bare row shuffle read, which our broadcast join refuses -- accepting an
+exchange as the streamed input, as the shuffled join does, would recover them). Eleven queries still
+carry a sort-merge join: four chains of merge joins on the same key with no shuffle in between (q10,
+q35, q69, q95 -- the lower join's ordering is what the upper one reads, so both stay; a chain-aware
+verdict is the next step), five whose other input is a row operator left to Spark for a wide decimal
+(q1, q30, q81, q44, q64, q97), and q51 with a `decimal(27,2)` join column. The per-query TPC-DS issues
+name the sort-merge join as their blocker some sixty times; the flag is how to see which of those it
+lifts.
+
+**Correctness: q66 returned every row twice (#162), now fixed.** The two channel aggregates of
+q66 are ours and emit a `decimal(28,2)` sum (#87); the union above refused that type and stayed Spark's,
+whose columnar `UnionExec` concatenates (the #128 upstream bug), so the aggregate planned without a
+shuffle on the union's partitioning saw every warehouse once per channel. Two fixes: the union is
+planned whatever its children's types -- it forwards batches and reads nothing -- and our aggregate
+reports its output partitioning through its result aliases as Spark's `HashAggregateExec` does
+(q66 groups by `d_year` and outputs it as `year`; a partitioning naming an attribute the operator does
+not output is one a union cannot match, and the union then falls back to concatenation at execution).
+All 103 queries agree with Spark again.
+
 **Correctness: three checksums differed, now fixed (#128).** q33, q56 and q60 -- the same template,
 three sales channels aggregated per item and combined with `UNION ALL` -- returned 100 rows under both
 configurations but with different sums (for q33, `i_manufact_id` 1000 totalled 8756.30 under Spark
