@@ -197,6 +197,55 @@ class VectorDecimalSuite extends VectorQuerySuite {
     assert(nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](df).isEmpty, finalPlan(df).treeString)
   }
 
+  test("CheckOverflow: null or Spark's error past the precision, identity for the declared type") {
+    import org.apache.spark.sql.catalyst.expressions.CheckOverflow
+    import org.apache.spark.sql.functions.col
+    import org.apache.spark.sql.types.DecimalType
+    import org.apache.spark.sql.vector.TestExprs.column
+    // Spark 4.1 leaves no CheckOverflow in a batch plan, so the node is built directly and viewed.
+    def view(name: String, nullOnOverflow: Boolean, target: DecimalType, source: String = "dec12"): Unit =
+      spark.table("t").select(col("i"), col(source), column(CheckOverflow(org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute(source), target, nullOnOverflow)).as("c"))
+        .createOrReplaceTempView(name)
+    // decimal(5,2) holds at most 999.99: some values of dec12 (about -3000 .. 7000) fit, others do not.
+    view("co_null", nullOnOverflow = true, DecimalType(5, 2))
+    checkExact("SELECT i, dec12, c FROM co_null", Seq(Project))
+    checkExact("SELECT count(c) AS fit, count(*) AS n FROM co_null", Seq(Agg))
+    // Rescaling up is exact and never overflows; the declared type itself is the identity.
+    view("co_up", nullOnOverflow = false, DecimalType(16, 6))
+    checkExact("SELECT i, c, c * 2 AS d FROM co_up", Seq(Project))
+    view("co_same", nullOnOverflow = false, DecimalType(12, 2))
+    checkExact("SELECT i, c FROM co_same WHERE c > 0", Seq(Project, Filter))
+    // Rounding down half-up like Spark's toPrecision, from a decimal with a larger scale.
+    view("co_round", nullOnOverflow = true, DecimalType(18, 1), source = "dec18")
+    checkExact("SELECT i, dec18, c FROM co_round", Seq(Project))
+    // nullOnOverflow = false raises Spark's NUMERIC_VALUE_OUT_OF_RANGE -- for active rows only.
+    view("co_raise", nullOnOverflow = false, DecimalType(5, 2))
+    val e = intercept[Exception](withPlugin(enabled = true)(spark.sql("SELECT c FROM co_raise").collect()))
+    assert(causes(e).exists(_.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE")), s"expected NUMERIC_VALUE_OUT_OF_RANGE, got $e")
+    checkExact("SELECT i, c FROM co_raise WHERE dec12 BETWEEN -900 AND 900", Seq(Project, Filter))
+  }
+
+  test("the DecimalAggregates rewrite: MakeDecimal over sum(UnscaledValue), and no CheckOverflow anywhere") {
+    import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+    def allOurs(sql: String): Unit = {
+      val plan = withPlugin(enabled = false)(spark.sql(sql).queryExecution.optimizedPlan.toString)
+      assert(plan.contains("MakeDecimal") && plan.contains("UnscaledValue"), s"expected the DecimalAggregates shape in\n$plan")
+      assert(!plan.contains("CheckOverflow("), s"Spark 4.1 should not insert CheckOverflow here\n$plan")
+      checkExact(sql, Seq(Agg))
+      withPlugin(enabled = true) { val df = spark.sql(sql); df.collect(); assert(nodesOf[HashAggregateExec](df).isEmpty, "every stage should be ours\n" + finalPlan(df).treeString) }
+    }
+    allOurs("SELECT sum(dec7) AS s FROM t")
+    allOurs("SELECT i % 5 AS g, sum(dec7) AS s, count(*) AS n FROM t GROUP BY i % 5")
+    allOurs("SELECT i % 3 AS g, sum(dec7) + sum(k) AS total, sum(k) AS sk FROM t GROUP BY i % 3")
+    allOurs("SELECT i % 7 AS g, sum(dec7) AS s FROM t WHERE dec7 IS NOT NULL AND i > 500 GROUP BY i % 7")
+    // The arithmetic operators check their own overflow in 4.1: no CheckOverflow wraps them either.
+    for (sql <- Seq("SELECT dec7 * dec12 AS a, dec7 + dec12 AS b, dec18 / dec7 AS c, -dec7 AS d, dec7 + 1.5 AS e0 FROM t",
+                    "SELECT avg(dec7) AS a, avg(dec12) AS b FROM t")) {
+      val plan = withPlugin(enabled = false)(spark.sql(sql).queryExecution.optimizedPlan.toString)
+      assert(!plan.contains("CheckOverflow("), s"Spark 4.1 should not insert CheckOverflow here\n$plan")
+    }
+  }
+
   private def causes(t: Throwable): Seq[Throwable] =
     Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).toSeq
 }

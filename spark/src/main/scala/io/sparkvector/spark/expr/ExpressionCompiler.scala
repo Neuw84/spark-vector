@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GreaterThan, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
@@ -199,6 +199,24 @@ object ExpressionCompiler {
         case c if c.vecType != VecType.INT64 => Left(s"make_decimal of ${c.dataType.simpleString}")
         case c if !TypeMapping.isSupported(m.dataType) => Left(s"make_decimal into ${m.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
         case c => Right(MakeDecimalExpr(c, m.dataType.asInstanceOf[DecimalType], m.nullOnOverflow))
+      }
+
+    // CheckOverflow(child, decimal(p, s), nullOnOverflow) is Spark's `toPrecision(p, s, HALF_UP)`:
+    // a rescale plus a range check, null or NUMERIC_VALUE_OUT_OF_RANGE past the precision. Spark
+    // 4.1 no longer leaves it in batch plans (the decimal operators check internally, as
+    // DecimalArithExpr does), so this is the identity when the child already has the declared type
+    // and the decimal cast's own rescale-and-check otherwise.
+    case c @ CheckOverflow(child, dt, nullOnOverflow) =>
+      child.dataType match {
+        case _ if !TypeMapping.isSupported(dt) => Left(s"check_overflow into ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+        case f: DecimalType if !TypeMapping.isSupported(f) => Left(s"check_overflow over ${f.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+        case f: DecimalType =>
+          compile(child, input).flatMap {
+            case _: LiteralExpr => Left("check_overflow of a literal")
+            case ce if f == dt => Right(ce)
+            case ce => Right(DecimalCastExpr(ce, f, dt, ansi = !nullOnOverflow, c.origin.context))
+          }
+        case other => Left(s"check_overflow over ${other.simpleString}")
       }
 
     // Casts to the operand's own type (Spark's Average emits `sum.cast(double)` on a double sum).
