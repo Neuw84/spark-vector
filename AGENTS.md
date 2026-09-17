@@ -300,7 +300,19 @@ that pin it.
   straddling two held batches is the one earlier group a later batch re-reads) with `prefixCombiners` --
   `addLong` (ANSI `Math.addExact` -> `VectorErrors.arithmeticOverflow`), `addDouble`, `extreme` via
   `Comparable` -- and `AggBufferColumns.values` lays them out for `compileFinalResults`. Functions without a
-  slot-wise prefix (first/last, stats, bit_*) are refused; an operator mixing two frame kinds is refused.
+  slot-wise prefix (stats, bit_*) are refused; an operator mixing two frame kinds is refused.
+  Layer 3, `VectorWindowOffsetIterator`: `VectorWindowPlanner.offsetWindows` maps `lag`/`lead`
+  (`FrameLessOffsetWindowFunction`: `offset()` is already signed -- `Lag.offset = -inputOffset` -- and must fold
+  to an int; `default()` must fold; both via `eval(EmptyRow)`, decimals boxed as their unscaled long),
+  `first_value`/`last_value` (`First`/`Last` AggregateExpressions -- routed here, not to the prefix family)
+  and `nth_value` to `OffsetFunction(kind, inputOrdinal, dt, offset, default, frame)`; inputs must be child
+  columns (Spark projects complex inputs below the window). Rows are held as copies with (partition
+  ordinal, position, peer ordinal) per row and `partitionLength` / `peerEnd` filled as groups end; the
+  target row is addressed globally (`firstGlobal + r + (target - pos)`) and found in `released` or `held`.
+  Output columns are BORROWED from the held copies: a released batch stays in `released` until no later
+  batch can address its partitions, then in `retired` until the consumer has moved past its output
+  (`consumed`), and only then is closed -- do not shortcut this, `lag` reads earlier batches after they
+  were emitted. `IGNORE NULLS` and an offset function beside other kinds in one operator are refused.
 - `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
   way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
   per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
@@ -576,7 +588,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 215 Spark tests (188 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 216 Spark tests (189 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

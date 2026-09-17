@@ -237,7 +237,7 @@ parse-query-correctness.sql_analyzer_test	31	1	2
 parse-schema-string.sql	4	0	0
 percentiles.sql	33	0	0
 percentiles.sql_analyzer_test	5	0	0
-pipe-operators.sql	312	43	59
+pipe-operators.sql	312	43	63
 pipe-operators.sql_analyzer_test	28	0	0
 pivot.sql	26	12	12
 pivot.sql_analyzer_test	3	0	0
@@ -295,7 +295,7 @@ postgreSQL/timestamp.sql	45	13	28
 postgreSQL/timestamp.sql_analyzer_test	15	0	0
 postgreSQL/union.sql	73	45	82
 postgreSQL/union.sql_analyzer_test	3	0	0
-postgreSQL/window_part1.sql	152	70	172
+postgreSQL/window_part1.sql	152	82	205
 postgreSQL/window_part1.sql_analyzer_test	23	0	0
 postgreSQL/window_part2.sql	113	3	3
 postgreSQL/window_part2.sql_analyzer_test	23	0	0
@@ -579,7 +579,7 @@ view-schema-type-evolution.sql_analyzer_test	48	0	0
 view-with-default-collation.sql	192	22	32
 view-with-default-collation.sql_analyzer_test	72	0	0
 window-with-aggregates.sql	9	8	26
-window.sql	346	60	156
+window.sql	346	96	192
 window.sql_analyzer_test	40	0	0
 xml-functions.sql	22	0	0
 xml-functions.sql_analyzer_test	3	0	0
