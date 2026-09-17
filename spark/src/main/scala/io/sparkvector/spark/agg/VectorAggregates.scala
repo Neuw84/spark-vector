@@ -407,6 +407,8 @@ object VectorAggregates {
       if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}") else ExpressionCompiler.compile(input(ordinal), input)
     }
     f match {
+      case s: Sum if s.evalContext.evalMode == EvalMode.TRY => Left("try_sum not supported (Spark nulls the whole group on overflow)")
+      case a: Average if a.evalMode == EvalMode.TRY => Left("try_avg not supported (Spark nulls the whole group on overflow)")
       case s: Sum if s.dataType.isInstanceOf[DecimalType] && buffers.length == 2 =>
         // The wide decimal sum's (sum, isEmpty) buffer: the sum column has no lane and is read from
         // the batch by ordinal; isEmpty is an ordinary boolean.
@@ -487,6 +489,8 @@ object VectorAggregates {
     }
 
   private def compileFunction(f: AggregateFunction, input: Seq[Attribute]): Either[String, VectorAggFunction] = f match {
+    case s: Sum if s.evalContext.evalMode == EvalMode.TRY => Left("try_sum not supported (Spark nulls the whole group on overflow)")
+    case a: Average if a.evalMode == EvalMode.TRY => Left("try_avg not supported (Spark nulls the whole group on overflow)")
     case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
       // Only reached for decimals of more than 8 digits (the optimizer rewrites smaller ones to a
       // long sum): the buffer is Spark's (sum: Decimal(p + 10, s), isEmpty) pair, the sum wider than
