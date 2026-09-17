@@ -524,6 +524,9 @@ the 128-bit lane of #28 gates all eight. The fourth layer, the per-partition top
 the tally to **3070 of 4736 (65%)**: q44 22/41 to 26/41 (its four group limits, which sat directly on our
 aggregates and forced them back to rows), q70 25/40 to 26/40; the group limits still Spark's are the
 ones over a wide decimal (q67) or the `TINYINT` grouping id (q70, q86), for the same reasons as their windows.
+The later window layers (running frames, offset functions, `percent_rank`/`cume_dist`/`ntile`, sliding frames)
+complete the operator's scope without moving the TPC-DS tally: the suite's remaining window fallbacks are all
+decimal (#28) or the `TINYINT` grouping id; q51's sliding `sum` is over a decimal too.
 
 **Correctness: q66 returned every row twice (#162), now fixed.** The two channel aggregates of
 q66 are ours and emit a `decimal(28,2)` sum (#87); the union above refused that type and stayed Spark's,

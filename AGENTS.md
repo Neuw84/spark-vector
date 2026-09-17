@@ -318,6 +318,16 @@ that pin it.
   partition length (`percent_rank` = peerStart / (n - 1), `cume_dist` = (peerEnd + 1) / n, `ntile` = Spark's
   padded-bucket walk from NTile's update expressions); an all-ranking operator still takes the streaming
   `VectorWindowIterator`, the held path only when the partition size or an offset function is involved.
+  Layer 2c, sliding frames, same iterator: `VectorWindowPlanner.slidingAggregate` maps sum/count/avg/min/max
+  over `SpecifiedWindowFrame(RowFrame, lo, hi)` with literal bounds (and the RANGE unbounded/current-row
+  bounds, so a running aggregate beside a sliding one shares the operator) to `SlidingSum..SlidingMax` with
+  `frameLo`/`frameHi` (`UnboundedLo` / `UnboundedHi` / `PeerEndHi` sentinels) and `inputType` (a sum over ints
+  reads ints, yields longs). `slidingValue`: a frame starting at the partition advances a per-function
+  `runningStates` (rows added in order as the end moves -- Spark's UnboundedPrecedingWindowFunctionFrame);
+  any other frame re-aggregates its rows in order per row (Spark's SlidingWindowFunctionFrame does the same,
+  so double sums are bit-identical and the O(n x frame) cost is Spark's). `aggregateReason` defers ROWS
+  frames with literal bounds to `slidingAggregate` for the reason text. `RANGE ... n PRECEDING` needs
+  order-key value comparisons and is refused.
 - `VectorSampleExec` (no replacement) is a selection producer like the filter, marked by the rule the same
   way: per partition it seeds Spark's own `BernoulliCellSampler` with `seed + partitionIndex` and draws once
   per *live* row in order -- the row path and codegen of `SampleExec` do exactly that, so the rows match
@@ -593,7 +603,7 @@ A change is not done until all of the following that apply have run green, local
    batch size) was wrong, and the profile showed the real cause in one look. Only when the
    profile is understood does the fix, the doc entry and the rerun follow, in that order.
 
-Current counts: 153 kernel tests, 217 Spark tests (190 without the Comet and Iceberg profiles;
+Current counts: 153 kernel tests, 218 Spark tests (191 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

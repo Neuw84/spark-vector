@@ -10,7 +10,7 @@ import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, DenseRank, Expression, NamedExpression, Rank, RowNumber, SortOrder, SpecifiedWindowFrame, UnboundedFollowing, UnboundedPreceding, WindowExpression, WindowSpecDefinition}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, Complete, Count, First, Last, Max, Min, Sum}
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CumeDist, EmptyRow, FrameLessOffsetWindowFunction, Literal, NTile, NthValue, PercentRank}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CumeDist, EmptyRow, FrameLessOffsetWindowFunction, Literal, NTile, NthValue, PercentRank, UnboundedFollowing => UnboundedFollowingBound}
 import org.apache.spark.sql.types.{DateType, IntegerType, StringType, TimestampType, BooleanType, DecimalType => SparkDecimalType}
 import org.apache.spark.sql.catalyst.expressions.{CurrentRow, EvalMode, RangeFrame, RowFrame}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
@@ -67,8 +67,15 @@ import scala.collection.mutable
  * the same held-partition path (layer 1b), as do `row_number` / `rank` / `dense_rank` when they share an
  * operator with an offset function.
  *
- * Sliding frames (`n PRECEDING`, suffixes) are the remaining layer; they are refused with a reason
- * naming the function and frame.
+ * Sliding frames (layer 2c): `sum`, `avg`, `count`, `min`, `max` over `ROWS BETWEEN a AND b` with any
+ * literal bounds (`n PRECEDING`/`FOLLOWING`, `CURRENT ROW`, unbounded either side) are re-aggregated per
+ * row over the frame's rows in order, as Spark's own sliding frames are -- so double sums are bit-identical
+ * -- and a frame starting at the partition is advanced incrementally as its end moves, as Spark's
+ * unbounded-preceding frame is. When such an aggregate shares an operator with a running frame, an
+ * offset or a ranking function, all of them take this path.
+ *
+ * `RANGE` frames with value offsets, `IGNORE NULLS`, decimal aggregates (#28) and the other aggregate
+ * functions over sliding frames are refused with a reason naming the function and frame.
  */
 case class VectorWindowExec(
     windowExpression: Seq[NamedExpression],
@@ -240,7 +247,66 @@ object VectorWindowPlanner {
    * which row, `frame` (an aggregate frame kind) where the frame ends for the position-based ones,
    * `default` (Spark's internal representation) what a shifted row outside the partition yields.
    */
-  final case class OffsetFunction(kind: Int, inputOrdinal: Int, dataType: DataType, offset: Int, default: Any, frame: Int)
+  final case class OffsetFunction(kind: Int, inputOrdinal: Int, dataType: DataType, offset: Int, default: Any, frame: Int,
+      frameLo: Int = 0, frameHi: Int = 0, checked: Boolean = false, countAll: Boolean = false, context: org.apache.spark.QueryContext = null,
+      inputType: DataType = null)
+
+  /** Sliding-frame aggregates (`ROWS BETWEEN a AND b`, any bounds): re-aggregated per row over the frame's rows, in order, as Spark does. */
+  val SlidingSum = 10
+  val SlidingCount = 11
+  val SlidingAvg = 12
+  val SlidingMin = 13
+  val SlidingMax = 14
+  /** Frame bound sentinels in `frameLo` / `frameHi` (relative row offsets otherwise). */
+  val UnboundedLo = Int.MinValue
+  val UnboundedHi = Int.MaxValue
+  /** `frameHi` for the `RANGE ... CURRENT ROW` upper bound: the end of the current peer group. */
+  val PeerEndHi = Int.MaxValue - 1
+
+  private def frameBound(b: Expression, upper: Boolean): Option[Int] = b match {
+    case UnboundedPreceding => Some(UnboundedLo)
+    case UnboundedFollowingBound => Some(UnboundedHi)
+    case CurrentRow => Some(0)
+    case other => literalInt(other)
+  }
+
+  /** A sum/count/avg/min/max over a `ROWS` frame with literal bounds (or a `RANGE` frame's unbounded/current-row bounds). */
+  private def slidingAggregate(a: AggregateExpression, frame: Expression, output: Seq[Attribute]): Either[String, OffsetFunction] = {
+    val name = a.aggregateFunction.prettyName
+    if (a.filter.nonEmpty) return Left(s"window aggregate $name with FILTER not supported")
+    if (a.mode != Complete) return Left(s"window aggregate $name in mode ${a.mode} not supported")
+    if (a.dataType.isInstanceOf[DecimalType] || a.aggregateFunction.children.exists(_.dataType.isInstanceOf[DecimalType]))
+      return Left(s"window aggregate $name over decimals not supported (its buffer is a wide decimal)")
+    val bounds: Either[String, (Int, Int)] = frame match {
+      case SpecifiedWindowFrame(RowFrame, lower, upper) =>
+        (frameBound(lower, upper = false), frameBound(upper, upper = true)) match {
+          case (Some(lo), Some(hi)) => Right((lo, hi))
+          case _ => Left(s"window aggregate $name over frame ${frame.sql}: bounds must be literals")
+        }
+      case SpecifiedWindowFrame(RangeFrame, UnboundedPreceding, CurrentRow) => Right((UnboundedLo, PeerEndHi))
+      case SpecifiedWindowFrame(RangeFrame, UnboundedPreceding, UnboundedFollowingBound) => Right((UnboundedLo, UnboundedHi))
+      case SpecifiedWindowFrame(RangeFrame, _, _) => Left(s"window aggregate $name over frame ${frame.sql} not supported (RANGE frames with value offsets)")
+      case other => Left(s"window aggregate $name over frame ${other.sql} not supported")
+    }
+    bounds.flatMap { case (lo, hi) =>
+      a.aggregateFunction match {
+        case sum: Sum if sum.evalContext.evalMode == EvalMode.TRY => Left(s"window aggregate try_sum over a sliding frame not supported")
+        case sum: Sum if sum.dataType == LongType || sum.dataType == DoubleType =>
+          inputOrdinal(sum.child, output).map(ord => OffsetFunction(SlidingSum, ord, sum.dataType, 0, null, WholePartition, lo, hi,
+            checked = sum.evalContext.evalMode == EvalMode.ANSI, context = sum.origin.context, inputType = sum.child.dataType))
+        case c: Count => c.children match {
+          case Seq(l: Literal) if l.value != null => Right(OffsetFunction(SlidingCount, -1, LongType, 0, null, WholePartition, lo, hi, countAll = true))
+          case Seq(child) => inputOrdinal(child, output).map(ord => OffsetFunction(SlidingCount, ord, LongType, 0, null, WholePartition, lo, hi, inputType = child.dataType))
+          case _ => Left("window count over several columns in a sliding frame not supported")
+        }
+        case av: Average if av.dataType == DoubleType =>
+          inputOrdinal(av.child, output).map(ord => OffsetFunction(SlidingAvg, ord, DoubleType, 0, null, WholePartition, lo, hi, inputType = av.child.dataType))
+        case m: Min => inputOrdinal(m.child, output).map(ord => OffsetFunction(SlidingMin, ord, m.dataType, 0, null, WholePartition, lo, hi))
+        case m: Max => inputOrdinal(m.child, output).map(ord => OffsetFunction(SlidingMax, ord, m.dataType, 0, null, WholePartition, lo, hi))
+        case other => Left(s"window aggregate ${other.prettyName} over a sliding frame not supported (sum, avg, count, min and max are)")
+      }
+    }
+  }
 
   private def literalInt(e: Expression): Option[Int] = e match {
     case l: Literal if l.foldable && l.value != null && (l.dataType == IntegerType) => Some(l.value.asInstanceOf[Int])
@@ -295,6 +361,7 @@ object VectorWindowPlanner {
         case None => Left(s"$name over frame ${frame.sql} not supported")
         case Some(fk) => inputOrdinal(child, output).map(ord => OffsetFunction(if (isFirst) FirstValue else LastValue, ord, a.dataType, 0, null, fk))
       }
+    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) => slidingAggregate(a, frame, output)
     case Alias(WindowExpression(_: RowNumber, _), _) => Right(OffsetFunction(RowNumberAt, -1, IntegerType, 0, null, WholePartition))
     case Alias(WindowExpression(_: Rank, _), _) => Right(OffsetFunction(RankAt, -1, IntegerType, 0, null, WholePartition))
     case Alias(WindowExpression(_: DenseRank, _), _) => Right(OffsetFunction(DenseRankAt, -1, IntegerType, 0, null, WholePartition))
@@ -360,7 +427,11 @@ object VectorWindowPlanner {
             Some(s"window aggregate ${a.aggregateFunction.prettyName} over decimals not supported (its buffer is a wide decimal)")
           else VectorAggregates.compile(a, input).left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r")
             .orElse(if (kind == WholePartition) None else prefixCombiners(a).left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r"))
-        case None => Some(s"window aggregate ${a.aggregateFunction.prettyName} over frame ${frame.sql} not supported (whole-partition and running frames are)")
+        case None => frame match {
+          case SpecifiedWindowFrame(RowFrame, lower, upper) if frameBound(lower, upper = false).isDefined && frameBound(upper, upper = true).isDefined =>
+            slidingAggregate(a, frame, input).left.toOption
+          case _ => Some(s"window aggregate ${a.aggregateFunction.prettyName} over frame ${frame.sql} not supported (RANGE frames with value offsets)")
+        }
       }
     case _ => None
   }
@@ -390,7 +461,7 @@ object VectorWindowPlanner {
                 val mixed = w.windowExpression.map(aggregateWindow).flatten.map(_._2).distinct.length > 1
                 val offsetLike = w.windowExpression.exists {
                   case Alias(WindowExpression(f, _), _) => f.isInstanceOf[FrameLessOffsetWindowFunction] || f.isInstanceOf[NthValue] ||
-                    f.isInstanceOf[PercentRank] || f.isInstanceOf[CumeDist] || f.isInstanceOf[NTile] ||
+                    f.isInstanceOf[PercentRank] || f.isInstanceOf[CumeDist] || f.isInstanceOf[NTile] || f.isInstanceOf[AggregateExpression] ||
                     (f match { case a: AggregateExpression => a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last]; case _ => false })
                   case _ => false
                 }
@@ -1035,6 +1106,89 @@ private[vector] class VectorWindowOffsetIterator(
     }
   }
 
+  /** Running aggregate over the rows of one frame, fed in row order (Spark re-aggregates a frame the same way). */
+  private abstract class SlidingState { def reset(): Unit; def add(v: Any): Unit; def result: Any }
+  private def newState(fn: VectorWindowPlanner.OffsetFunction): SlidingState = fn.kind match {
+    case VectorWindowPlanner.SlidingSum if fn.dataType == LongType => new SlidingState {
+      var sum = 0L; var count = 0L
+      def reset(): Unit = { sum = 0L; count = 0L }
+      def add(v: Any): Unit = if (v != null) {
+        val x = v match { case l: java.lang.Long => l.longValue(); case i: java.lang.Integer => i.longValue() }
+        if (fn.checked) { try sum = Math.addExact(sum, x) catch { case _: ArithmeticException => throw VectorErrors.arithmeticOverflow("long overflow", "try_sum", fn.context) } }
+        else sum += x
+        count += 1
+      }
+      def result: Any = if (count == 0) null else java.lang.Long.valueOf(sum)
+    }
+    case VectorWindowPlanner.SlidingSum => new SlidingState {
+      var sum = 0.0; var count = 0L
+      def reset(): Unit = { sum = 0.0; count = 0L }
+      def add(v: Any): Unit = if (v != null) { sum += v.asInstanceOf[java.lang.Double].doubleValue(); count += 1 }
+      def result: Any = if (count == 0) null else java.lang.Double.valueOf(sum)
+    }
+    case VectorWindowPlanner.SlidingCount => new SlidingState {
+      var n = 0L
+      def reset(): Unit = n = 0L
+      def add(v: Any): Unit = if (fn.countAll || v != null) n += 1
+      def result: Any = java.lang.Long.valueOf(n)
+    }
+    case VectorWindowPlanner.SlidingAvg => new SlidingState {
+      var sum = 0.0; var count = 0L
+      def reset(): Unit = { sum = 0.0; count = 0L }
+      def add(v: Any): Unit = if (v != null) { sum += v.asInstanceOf[Number].doubleValue(); count += 1 }
+      def result: Any = if (count == 0) null else java.lang.Double.valueOf(sum / count)
+    }
+    case k => new SlidingState {
+      val isMin = k == VectorWindowPlanner.SlidingMin
+      var current: Any = null
+      def reset(): Unit = current = null
+      def add(v: Any): Unit = if (v != null) {
+        if (current == null) current = v
+        else { val cmp = current.asInstanceOf[Comparable[Any]].compareTo(v); if ((cmp > 0) == isMin) current = v }
+      }
+      def result: Any = current
+    }
+  }
+
+  /** Reads the function's input at partition-relative position `target` of the partition row `r` of `h` belongs to. */
+  private def inputAt(fn: VectorWindowPlanner.OffsetFunction, h: Held, r: Int, pos: Int, target: Int): Any = {
+    if (fn.inputOrdinal < 0) java.lang.Boolean.TRUE
+    else {
+      val g = h.firstGlobal + r + (target - pos)
+      val src = if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) h else batchOf(g)
+      valueAt(src, fn.inputOrdinal, (g - src.firstGlobal).toInt, if (fn.inputType != null) fn.inputType else fn.dataType)
+    }
+  }
+
+  // Per function: the running state of an UNBOUNDED PRECEDING frame for the partition being released
+  // (rows are added as the upper bound advances, in order, exactly Spark's UnboundedPrecedingWindowFunctionFrame).
+  private val runningStates = new Array[SlidingState](functions.length)
+  private val runningPart = Array.fill(functions.length)(-1)
+  private val runningEnd = new Array[Int](functions.length)
+
+  /** The sliding aggregate of row `r`: its frame clamped to the partition, re-aggregated in order (or advanced, when the frame starts at the partition). */
+  private def slidingValue(f: Int, fn: VectorWindowPlanner.OffsetFunction, h: Held, r: Int, pos: Int, len: Int): Any = {
+    val part = h.partOf(r)
+    val hi = fn.frameHi match {
+      case VectorWindowPlanner.UnboundedHi => len - 1
+      case VectorWindowPlanner.PeerEndHi => peerEnd(h.peerOf(r))
+      case d => math.min(len - 1, pos + d)
+    }
+    if (fn.frameLo == VectorWindowPlanner.UnboundedLo) {
+      if (runningStates(f) == null) runningStates(f) = newState(fn)
+      val st = runningStates(f)
+      if (runningPart(f) != part) { st.reset(); runningPart(f) = part; runningEnd(f) = -1 }
+      while (runningEnd(f) < hi) { runningEnd(f) += 1; st.add(inputAt(fn, h, r, pos, runningEnd(f))) }
+      st.result
+    } else {
+      val lo = math.max(0, pos + fn.frameLo)
+      val st = newState(fn)
+      var t = lo
+      while (t <= hi) { st.add(inputAt(fn, h, r, pos, t)); t += 1 }
+      st.result
+    }
+  }
+
   /** Emits every held batch whose partitions have all ended; keeps released batches readable while needed. */
   private def release(): Unit = metrics.timed {
     while (held.nonEmpty && (inputDone || held.head.partOf(held.head.numRows - 1) < numPartitions - 1)) {
@@ -1059,7 +1213,8 @@ private[vector] class VectorWindowOffsetIterator(
             case VectorWindowPlanner.RunningRows => pos
             case _ => peerEnd(h.peerOf(r))
           }
-          if (fn.kind >= VectorWindowPlanner.RowNumberAt) rankingValue(fn, h, r, pos, len)
+          if (fn.kind >= VectorWindowPlanner.SlidingSum) slidingValue(f, fn, h, r, pos, len)
+          else if (fn.kind >= VectorWindowPlanner.RowNumberAt) rankingValue(fn, h, r, pos, len)
           else {
           val target: Int = fn.kind match {
             case VectorWindowPlanner.Shift => pos + fn.offset
