@@ -331,12 +331,19 @@ that pin it.
   columnar `UnionExec`. Run the TPC-DS harness (`run-tpcds.sh`, SF1 in scratch, ~5 minutes) after any
   change to an operator's output contract.
 - `SortMergeJoinExec` is re-expressed as `VectorShuffledHashJoinExec` under the opt-in
-  `spark.vector.exec.sortMergeJoin.enabled` (#10): `VectorJoinPlanner.planSortMerge` picks the smaller
+  `spark.vector.exec.sortMergeJoin.enabled` (#10): `VectorJoinPlanner.sortMergeBuildSide` picks the smaller
   side by `estimatedBuildSize` (both sides must have statistics -- without AQE they do not -- and the
   smaller must fit the budget), the rule strips the two required sorts (`sortMergeInputs`), and a
-  top-down pre-pass (`markSortMergeJoins`, tag `VectorExecRule.OrderingNeeded`) keeps a merge join whose
-  ordering an ancestor relies on; the pre-pass and the transform share one verdict (`sortMergeConversion`)
-  so a join deemed to convert never leaves a Spark merge join above it reading unsorted input. Tie order
+  top-down pre-pass (`markSortMergeJoins`) keeps a merge join whose ordering an ancestor relies on. The
+  pass decides every merge join (tag `VectorExecRule.SortMergeDecision`: a build side, or the reason it
+  stays) from a bottom-up, memoised eligibility (`sortMergeEligibility`) that judges inputs by what they
+  will be after the transform -- an exchange, a converting merge join (so same-key chains convert whole,
+  #102), a project or filter over one, any other operator the rule replaces when its output types are
+  lanes -- and the transform builds from that decision instead of re-deriving it (our operators carry no
+  size estimate). The judgement is optimistic and self-healing: when a join stays after all, `resorted`
+  puts a `VectorSortExec` over a converted child that no longer offers the ordering, so a wrong guess
+  costs a sort, never a row (`VectorJoinSuite` has the shape: an aggregate input that does not convert
+  above a chain that did). Tie order
   under `ORDER BY` and unordered `LIMIT` picks differ from Spark's order-preserving merge (three
   `subquery/in-subquery` golden files); `SQL_TESTS_JVM_ARGS` runs the golden suite under the flag.
 - All three hash-style joins refuse a build side whose estimate exceeds `spark.vector.join.maxBuildSize`
