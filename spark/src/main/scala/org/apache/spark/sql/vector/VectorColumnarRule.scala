@@ -267,7 +267,13 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
                   val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
                   v.setTagValue(VectorExecRule.SortMergeWhy, why)
                   v
-                case Some(reason) => fallback(resorted(j), reason)
+                case Some(reason) =>
+                  // The rewrite's inputs must be exchanges or ours. The merge join could take the join
+                  // instead (it reads Spark's sorted inputs as they are), but measured on TPC-DS q97 --
+                  // a full outer join of two 300k-row unique-key sides over Spark's aggregates -- it ran
+                  // 2960 ms against 385 ms for Spark's own merge join (the per-run bookkeeping, #286), so
+                  // the join stays Spark's until the merge join walks runs without a run object.
+                  fallback(resorted(j), reason)
               }
             case Some(Left(why)) =>
               VectorJoinPlanner.planMergeJoin(j) match {

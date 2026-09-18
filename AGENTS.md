@@ -458,7 +458,10 @@ that pin it.
   its reason the `SortMergeWhy` tag both operators print (`Sort-merge join as hash join: right side fits
   spark.vector.join.maxBuildSize by statistics` / `as merge join: the row order reaches a limit or a
   sort` / `ordering relied on by the parent` / `no size statistics ...`). A hash join below a merge join
-  (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). Spark's contract is kept (clustered distribution, both children
+  (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). A hash rewrite whose inputs are
+  refused (Spark's operators below, q97) does NOT fall through to the merge join: measured, the merge
+  join over Spark's row inputs on q97 ran 2960 ms against 385 ms for Spark's own (per-run bookkeeping
+  over unique keys, #286); the join stays Spark's until the merge join walks runs without a run object. Spark's contract is kept (clustered distribution, both children
   sorted by the keys ascending, the preserved side's ordering out), so the sorts below stay and no
   pre-pass, build side or statistics are involved: the rule's `merge` case plans it directly
   (`VectorJoinPlanner.planMergeJoin`: keys and condition compile, every column a lane, any SMJ join
