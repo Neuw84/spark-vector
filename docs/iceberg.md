@@ -80,6 +80,7 @@ plain string and dictionary string columns were adapted rather than copied.
 - The per-batch dictionary decode is not cached across the batches of a row group.
 - Comet 1.0 reads v3 tables through the JVM reader; the adapter path above applies to them.
 
-Wide decimals (`decimal(p > 18)`) from either reader become a DECIMAL128 lane (#257): today through
-`getDecimal` per row; the Iceberg reader keeps them as a 16-byte `FixedSizeBinaryVector` of big-endian
-bytes, whose direct two-limb conversion is the next step.
+Wide decimals (`decimal(p > 18)`) from either reader become a DECIMAL128 lane (#257). Iceberg's
+reader keeps them as a `FixedSizeBinaryVector` of big-endian bytes -- as many per value as the
+precision needs, twelve for `decimal(27,2)` -- which the adapter converts limb by limb (a dictionary
+form is decoded once per batch); Comet's native scan hands over Arrow `Decimal128` in place.
