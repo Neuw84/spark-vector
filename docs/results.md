@@ -493,43 +493,101 @@ keep all; a null build key: keep none) and, otherwise, the null-key streamed row
 from 7 to 11 of 17 operators on our side (SF1 decimals, `vector`, one run), and like Q13 its only
 remaining reason is the global sort. Neither query has an expression or join reason left.
 
-## Iceberg merge-on-read: the harness (#260)
+## Iceberg merge-on-read, v2: positional and equality deletes (#260 harness, #261 study)
 
 The local harness (`gen-iceberg-mor.sh`, `run-tpch.sh --iceberg ... --variant ...`, `docs/iceberg.md`)
-builds `lineitem` variants with the delete shapes a lakehouse table carries between compactions and runs
-every configuration over them. The study itself is #261 (v2 positional and equality deletes) and #262
-(v3 deletion vectors); what follows is the validation run of the harness -- SF1 decimals, the 8-core
-x86 host of the decimal tables above, `local[8]`, 1 warm-up and 3 measured iterations, `spark` against
-`vector`, JVM reader (`BatchScanExec`) in both -- so the medians are indicative, the checksums and the
-merge ratios exact. All 30 cells returned identical checksums; the adapter's counters read 5402462 live
-of 6001215 physical rows on the 10 % variants (90.0 %), as the generator's README says they should.
+builds `lineitem` variants with the delete shapes a lakehouse table carries between compactions and
+runs every configuration over them. This is the v2 study over Iceberg's JVM reader (`BatchScanExec`
+under both engines): SF1 decimals, the 8-core x86 host of the decimal tables above, `local[8]`, 5
+warm-up and 10 measured iterations per cell, `spark` against `vector`, a quiet machine (load 1.9). All
+50 cells returned identical checksums, and the adapter's counters read exactly what the generator's
+README says (5402462 live of 6001215 rows read at 10 %, 4201747 at 30 %). The Comet configurations
+were not measured (no Comet jar on this host); v3 deletion vectors are #262.
 
-| variant | q1 spark | q1 vector | q6 spark | q6 vector | probe-sum spark | probe-sum vector | live/physical |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `plain` | 1823 | 535 (3.41x) | 169 | 208 (0.81x) | 129 | 98 (1.32x) | - |
-| `pos_10` | 2024 | 537 (3.77x) | 224 | 315 (0.71x) | 173 | 160 (1.08x) | 90.0 % |
-| `pos_10_clustered` | 1702 | **8339 (0.20x)** | 263 | 300 (0.88x) | 158 | 137 (1.16x) | 92.0 % |
-| `pos_upd_1` | 1746 | **8872 (0.20x)** | 218 | 350 (0.62x) | 185 | 175 (1.06x) | 88.0 % |
-| `eq_10` | 2033 | 847 (2.40x) | 402 | 580 (0.69x) | 351 | 330 (1.06x) | 90.0 % |
-| `dv_10` | 1843 | 520 (3.54x) | 203 | 243 (0.84x) | 149 | 115 (1.29x) | 90.0 % |
+Medians in milliseconds; in parentheses the ratio to the same engine on `plain` (what the deletes
+cost that engine: below 1 is slower), then `vector`'s speedup over `spark` on the same variant.
 
-Three things the run already says, all for #261 to take up:
+| variant | live % | probe-sum spark | probe-sum vector | probe-group spark | probe-group vector | q6 spark | q6 vector | q1 spark | q1 vector |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `plain` | 100 | 104 | 76 (1.38x) | 148 | 92 (1.61x) | 149 | 145 (1.03x) | 1650 | 379 (4.36x) |
+| `pos_2` | 98 | 140 (0.74) | 128 (0.59, 1.10x) | 182 (0.81) | 153 (0.60, 1.19x) | 176 (0.85) | 215 (0.67, 0.82x) | 1653 (1.00) | 416 (0.91, 3.98x) |
+| `pos_10` | 90 | 125 (0.83) | 108 (0.70, 1.16x) | 170 (0.87) | 142 (0.65, 1.20x) | 166 (0.89) | 204 (0.71, 0.82x) | 1516 (1.09) | 381 (0.99, 3.98x) |
+| `pos_30` | 70 | 127 (0.82) | 116 (0.66, 1.10x) | 167 (0.89) | 134 (0.69, 1.24x) | 158 (0.94) | 194 (0.75, 0.81x) | 1263 (1.31) | 382 (0.99, 3.30x) |
+| `pos_10_clustered` | 92 | 124 (0.84) | 124 (0.61, 1.00x) | 181 (0.82) | 140 (0.66, 1.29x) | 165 (0.90) | 215 (0.67, 0.77x) | 1523 (1.08) | 400 (0.95, 3.81x) |
+| `pos_30_clustered` | 71 | 124 (0.84) | 116 (0.65, 1.07x) | 169 (0.88) | 138 (0.67, 1.23x) | 159 (0.93) | 184 (0.79, 0.87x) | 1224 (1.35) | 389 (0.97, 3.14x) |
+| `pos_upd_1` | 88 | 147 (0.71) | 131 (0.58, 1.12x) | 188 (0.79) | 156 (0.59, 1.20x) | 178 (0.84) | 232 (0.62, 0.76x) | 1606 (1.03) | 450 (0.84, 3.57x) |
+| `pos_upd_5` | 84 | 159 (0.65) | 148 (0.51, 1.08x) | 225 (0.66) | 160 (0.58, 1.40x) | 212 (0.70) | 233 (0.62, 0.91x) | 1807 (0.91) | 392 (0.97, 4.61x) |
+| `eq_2` | 98 | 231 (0.45) | 201 (0.38, 1.15x) | 285 (0.52) | 234 (0.39, 1.22x) | 275 (0.54) | 311 (0.46, 0.88x) | 1786 (0.92) | 510 (0.74, 3.50x) |
+| `eq_10` | 90 | 330 (0.32) | 372 (0.20, 0.89x) | 377 (0.39) | 355 (0.26, 1.06x) | 386 (0.38) | 451 (0.32, 0.86x) | 1872 (0.88) | 674 (0.56, 2.78x) |
 
-- **Clustered deletes and the update/merge shape make Q1 sixteen times slower under `vector`**, and
-  only Q1: the partial `VectorHashAggregateExec`'s kernel time goes from 1.0 s (summed over tasks, on
-  `pos_10`) to 63 s on `pos_10_clustered`, while the filter and the project above the same scan are
-  unchanged (26 ms, 4 ms) and the probes and Q6 are as fast as on the scattered variant. Whole
-  64-row blocks inactive -- the shape the active-block skipping exists for -- or the extra small data
-  files of the update send the aggregate down a slow path; the minimum of the three runs (2.5 s) is
-  also far from the median, so it is not a constant cost. A profile of Q1 on `pos_10_clustered` is the
-  first step.
-- `count(*)` on `plain` is Iceberg's manifest lookup (`LocalTableScanExec`) for every engine, so the
-  probe measures a scan only on the deleted variants -- the scan tag on the per-query line is what
-  shows it.
-- Equality deletes cost both engines about twice the time of the same share of positional deletes
-  (`probe-sum` 351 vs 173 ms under `spark`), and Q6 on any deleted variant is slower under `vector`
-  than under `spark` here as on the plain Parquet SF1 tables above (the sort of the tiny result and the
-  columnar transitions dominate at this size).
+`probe-count` is left out: on `plain` it is Iceberg's manifest lookup (`LocalTableScanExec`, 38 ms for
+both engines) and on the deleted variants it costs both engines the same 95-105 ms (positional) or
+190-330 ms (equality) -- the delete cost alone, with nothing to compute.
+
+### What the numbers say
+
+**The hypothesis is refuted, and the refutation is informative.** The margin of `vector` over `spark`
+does not grow with the delete share; it shrinks. On the pure-merge probe (`probe-sum`) `vector` is
+1.38x faster on `plain` and 1.00-1.16x on every positional variant, whatever the percentage and the
+layout; on `probe-group` 1.61x becomes 1.19-1.40x; on Q1 4.36x becomes 3.1-4.0x. The reason is in the
+`vs plain` columns: **the deletes cost a fixed price per batch that is flat in the delete share** --
+`spark` pays 20-25 ms on `probe-sum` at 2 %, 10 % and 30 % alike, `vector` pays 30-50 ms -- and a
+fixed price hurts the faster engine's ratio more. The reasoning of the hypothesis was about the
+per-row indirection (`mapping[i]` per column access in Spark's codegen against our in-place kernels
+over a bitmap); at these sizes that term is invisible against the per-batch work.
+
+**Where the fixed price goes: Iceberg's own delete handling, in both engines.** JFR on `vector`
+(`probe-sum`, `pos_30` scattered and clustered, 8 iterations) has Iceberg at the top of every
+list: `ColumnarBatchUtil.buildRowIdMapping` (the `int[]` the reader builds per batch),
+`Deletes.toPositionIndexes` and `JavaHashes.hashCode(CharSequence)` (the position index built per
+task from the delete files, keyed by data-file path), the roaring-bitmap search under it. The two
+costs the issue named on our side barely register: `ArrowLayout.selectionFromIndices` is one sample
+in either profile and `validityFromNullBytes` none, so the mapping-to-bitmap conversion is not the
+problem and neither is the validity copy. Our extra 10-25 ms over Spark's price is the kernels
+walking every physical row of a forwarded selection to use 70-98 % of them (the `ColumnarBatchRow`
+path Spark uses skips the deleted rows before codegen sees them), plus the aggregate's selection
+handling.
+
+**Scattered and clustered deletes cost the same.** `pos_10` against `pos_10_clustered` and `pos_30`
+against `pos_30_clustered` are within noise on every query for both engines. Whole inactive 64-row
+blocks -- the shape `EvalContext`'s active-block skipping exists for -- buy nothing here, because the
+per-batch price is paid before any kernel runs and the kernels' per-row work over a 70 %-dense
+selection is already small.
+
+**Equality deletes are the expensive kind, for both engines and more so for ours.** `eq_10` costs
+`spark` 3x on `probe-sum` (104 to 330 ms) and `vector` 5x (76 to 372 ms); `eq_10` is the one
+variant where `vector` loses the probe (0.89x). Iceberg's JVM reader evaluates the equality predicate
+per row on a `ColumnarBatchRow` to build the mapping (`ColumnarBatchUtil.buildRowIdMapping` with an
+`EqualityDeleteFilter`), which is row-at-a-time work in front of a columnar reader and dominates
+everything else. The candidate optimisation the issue describes -- take the position-filtered batch
+and evaluate the equality-delete set as our own `IN` / anti-join over the batch -- is the only lever
+that would move these numbers; recorded here, not implemented (it needs the reader to expose the
+un-applied equality deletes, which the 1.11 API does not).
+
+**The forwarding threshold is not the lever.** `sparkvector.selection.minFraction` decides whether a
+filter or project forwards a selection or compacts (0.5: forward when at least half the rows
+survive). On `pos_30` under `vector` (7 iterations) raising it to 0.8 changes nothing on the probes
+(within 3 %); compacting always (1.01) makes `probe-sum` 130 to 112 ms, `probe-group` 160 to 143 ms
+and Q6 232 to 195 ms, but Q1 404 to 468 ms -- the compaction of seven columns costs more than the
+kernels save. A delete-derived selection is not different enough from a predicate's to earn its own
+knob; the default stays.
+
+**Q6 is slower under `vector` than under `spark` on every deleted variant** (0.76-0.91x) while it is
+even on `plain` (1.03x). Q6 keeps 2 % of the rows: on `plain` the filter compacts once and the
+aggregate sees a tiny batch; on a deleted variant the filter's predicate runs over a batch that
+already carries a selection, and the compaction is of a selection-over-selection. Spark's codegen
+fuses the delete mapping and the predicate into one row loop. This is the one shape where our
+per-row work over the physical rows shows, and it is at most 40 ms per query at SF1.
+
+**A transient, not a cliff.** In two of the sixteen `vector` JVMs of this and the harness's
+validation run, Q1 took about 8 s on two or three consecutive iterations (once after five warm-up
+runs on `pos_upd_5`: 8035, 7963, 679, then 380-460 ms) with the partial `VectorHashAggregateExec`
+reporting 60 s of kernel time summed over tasks and the other operators unchanged. It does not
+reproduce on demand: 24 iterations under JFR on the two variants it first appeared on ran at 450 ms
+with the aggregate at 1.0 s. The signature -- growth across iterations inside one JVM, then recovery
+-- is a JIT deoptimisation storm in the aggregate rather than an algorithmic cost of the delete
+layout (the harness's first write-up read it as the latter; this run corrects it). It is worth
+catching with `-XX:+PrintCompilation` on a run that shows it; it is listed in AGENTS.md section 7.
 
 ## Q6 revisited: the copy is a dictionary decode (#14)
 
