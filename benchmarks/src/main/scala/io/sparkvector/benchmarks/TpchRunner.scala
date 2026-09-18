@@ -33,8 +33,10 @@ object TpchRunner {
    * A benchmark: its tables (each a Parquet directory of that name under `--data`), the table whose
    * row count labels a dataset in the reports, and its queries in report order.
    */
-  final case class Suite(name: String, title: String, tables: Seq[String], anchorTable: String, queries: Seq[(String, String)]) {
-    lazy val queryMap: Map[String, String] = queries.toMap
+  final case class Suite(name: String, title: String, tables: Seq[String], anchorTable: String, queries: Seq[(String, String)],
+      /** Runnable by name but not part of a default run (the MoR probes). */
+      probes: Seq[(String, String)] = Nil) {
+    lazy val queryMap: Map[String, String] = (queries ++ probes).toMap
     def queryOrder: Seq[String] = queries.map(_._1)
   }
 
@@ -109,7 +111,7 @@ object TpchRunner {
   val Queries: Map[String, String] = TpchQueries.All.toMap
   val QueryOrder: Seq[String] = TpchQueries.All.map(_._1)
 
-  val Tpch: Suite = Suite("tpch", "TPC-H", Tables, "lineitem", TpchQueries.All)
+  val Tpch: Suite = Suite("tpch", "TPC-H", Tables, "lineitem", TpchQueries.All, TpchQueries.Probes)
 
   /** The tables a query reads, from its text: every table name is a distinct word (underscores included). */
   def tablesOf(suite: Suite, sql: String): Set[String] = {
@@ -141,7 +143,11 @@ object TpchRunner {
       /** Query texts from `<dir>/<name>.sql` instead of the classpath (a cluster image without the tests jar). */
       queriesDir: Option[String] = None,
       /** The data-on-EKS-style report over every `.jsonl` under a directory (local or any Hadoop file system). */
-      clusterReport: Option[String] = None)
+      clusterReport: Option[String] = None,
+      /** Local Iceberg merge-on-read harness (#260): the Hadoop catalog warehouse `gen-iceberg-mor.sh` wrote ... */
+      icebergWarehouse: Option[String] = None,
+      /** ... and the `<namespace>.<variant>` table in it that stands in for `lineitem`; the dataset label is `iceberg:<namespace>.<variant>`. */
+      icebergVariant: Option[String] = None)
 
   def main(argv: Array[String]): Unit = mainWith(Tpch, argv)
 
@@ -174,6 +180,8 @@ object TpchRunner {
     case "--dataset" :: v :: rest => parse(rest, a.copy(dataset = Some(v)))
     case "--queries-dir" :: v :: rest => parse(rest, a.copy(queriesDir = Some(v)))
     case "--cluster-report" :: v :: rest => parse(rest, a.copy(clusterReport = Some(v)))
+    case "--iceberg" :: v :: rest => parse(rest, a.copy(icebergWarehouse = Some(v)))
+    case "--variant" :: v :: rest => parse(rest, a.copy(icebergVariant = Some(v)))
     case "--conf" :: kv :: rest =>
       val Array(k, v) = kv.split("=", 2)
       parse(rest, a.copy(extraConf = a.extraConf + (k -> v)))
@@ -202,6 +210,9 @@ object TpchRunner {
           .config("spark.sql.adaptive.enabled", "true")
           .config("spark.driver.host", "localhost")
         (conf ++ args.extraConf).foreach { case (k, v) => builder.config(k, v) }
+        // The Iceberg MoR harness: the generator's Hadoop catalog on this session (the plugin comes
+        // through spark.plugins, so Iceberg's SQL extensions do not displace it).
+        args.icebergWarehouse.foreach(w => IcebergMorGenerator.catalogConf(new File(w).getAbsolutePath).foreach { case (k, v) => builder.config(k, v) })
         builder.getOrCreate()
       }
     val listener = new ClusterRunner.StageMetricsListener
@@ -219,9 +230,20 @@ object TpchRunner {
           p
         }
       require(present.contains(suite.anchorTable), s"$source holds no ${suite.anchorTable} table (see gen-${suite.name}.sh)")
+      // The Iceberg MoR harness: one generated variant stands in for lineitem; the other tables stay Parquet.
+      val variant = args.icebergVariant.map { v =>
+        require(args.icebergWarehouse.isDefined, "--variant needs --iceberg <warehouse>")
+        require(suite.anchorTable == "lineitem", "--variant is a TPC-H lineitem table")
+        val table = s"${IcebergMorGenerator.Catalog}.$v"
+        require(spark.catalog.tableExists(table), s"$table does not exist in ${args.icebergWarehouse.get} (see gen-iceberg-mor.sh)")
+        spark.table(table).createOrReplaceTempView("lineitem")
+        val snapshot = spark.sql(s"SELECT snapshot_id FROM $table.snapshots ORDER BY committed_at DESC LIMIT 1").collect()(0).getLong(0)
+        println(s"[${suite.name}] lineitem is the Iceberg table $table at snapshot $snapshot")
+        v
+      }
       val rowCount = spark.table(suite.anchorTable).count()
       // The dataset label the reports group by: the last path element (`sf1`, `sf10`), or --dataset.
-      val data = args.dataset.getOrElse(if (args.cluster) source.stripSuffix("/").split('/').last else args.data)
+      val data = args.dataset.getOrElse(variant.map(v => s"iceberg:$v").getOrElse(if (args.cluster) source.stripSuffix("/").split('/').last else args.data))
       // Query texts: the classpath (the tests jar) or, on a cluster image without it, `<dir>/<name>.sql`.
       val queryMap = args.queriesDir.map(d => ClusterRunner.queriesFrom(spark, d, args.queries).toMap).getOrElse(suite.queryMap)
       val env = ClusterRunner.Environment.of(spark)
