@@ -212,13 +212,29 @@ reads instead of one array copy of the column; none moved the random fixed-width
 noise. The scratch -- five arrays of the partition's length -- is what the chunked runs of slice 2
 bound to the run size.
 
-Runs and the merge (`SortBenchmark.runs8`: the same rows sorted as eight runs, then `RunMerge` walked
-to the end; random INT64, one key): 1M rows 49 ms as one sort against 81 ms as eight runs and a merge,
-10M rows 674 ms against 949 ms. The merge is a binary heap over the runs' cursors -- three compares per
-row for eight runs, each one unsigned compare of per-run normalised key arrays -- and costs about
-30 ns/row at 10M, so at these sizes chunking is not a speed-up: it bounds the sort's scratch to the
-run and is the shape a spill plugs into. A loser tree would halve the compares; the widened leaf of
-#285's third item is the other lever.
+Runs and the merge (`SortBenchmark.runs8`: the same rows sorted as eight runs, then `RunMerge` -- a
+loser tree over the runs' cursors with the widened leaf, a block of the winner's rows below the
+runner-up's key emitted in one step -- walked to the end; INT64, one key, ms):
+
+| input | 1M, one sort | 1M, 8 runs + merge | 10M, one sort | 10M, 8 runs + merge |
+|---|---:|---:|---:|---:|
+| random | 50 | 85 | 685 | 1010 |
+| presorted | 6.4 | 7.7 | 112 | 98 |
+| low cardinality (100 values) | 18.7 | 20.1 | 322 | 258 |
+
+On random keys the merge costs about 30 ns/row and chunking is not a speed-up (a loser tree in place
+of the heap changed nothing, so the cost is not the compares but the per-row bookkeeping and the
+gather through the runs' permutations): runs bound the sort's scratch to the run and are the shape a
+spill plugs into. On presorted and low-cardinality keys the widened leaf turns the merge into block
+moves and eight runs beat one sort at 10M. Under a limit each run keeps only its first *n* rows for
+the merge (top-N by run), so `ORDER BY ... LIMIT n` over a large partition merges *n* rows per run.
+
+TPC-DS SF1, the three queries with the large window sorts (`run-tpcds.sh --queries q67,q70,q86`, 3
+iterations, 1 warm-up, medians): q67 1495 ms Spark / 1818 ms ours (20/26 operators), q70 496 / 552
+(26/40), q86 188 / 213 (10/19). Our sort runs in two of the three plans (the window's local sort) and
+the take-ordered in one; at SF1 these partitions are far below a run, so the numbers say nothing about
+runs -- they are the window queries' SF1 reading on a shared build host with three iterations, in which the
+plugin trails Spark by 10-20 %; a coverage reading, not a timing one, and not moved by this issue.
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
