@@ -7,6 +7,7 @@ object VectorConf {
 
   val Enabled = "spark.vector.enabled"
   val FilterEnabled = "spark.vector.exec.filter.enabled"
+  val MergeRowsEnabled = "spark.vector.exec.mergeRows.enabled"
   val ProjectEnabled = "spark.vector.exec.project.enabled"
   val AggregateEnabled = "spark.vector.exec.aggregate.enabled"
   val FinalAggregateEnabled = "spark.vector.exec.aggregate.final.enabled"
@@ -35,6 +36,7 @@ object VectorConf {
 
   def isEnabled(conf: SQLConf): Boolean = bool(conf, Enabled, default = true)
   def filterEnabled(conf: SQLConf): Boolean = bool(conf, FilterEnabled, default = true)
+  def mergeRowsEnabled(conf: SQLConf): Boolean = bool(conf, MergeRowsEnabled, default = true)
   def projectEnabled(conf: SQLConf): Boolean = bool(conf, ProjectEnabled, default = true)
   def aggregateEnabled(conf: SQLConf): Boolean = bool(conf, AggregateEnabled, default = true)
   /** Convert Final-mode aggregates too (their input is a shuffle, converted to columnar by Spark). */

@@ -179,6 +179,30 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     assertScanUnder(m, Filter)
   }
 
+  /**
+   * The columnar MergeRows (#21) is planned over its join: it converts when MergeRowsExec's child is
+   * columnar. Today the merge's join is never ours -- the target side carries Iceberg's struct
+   * `_partition` metadata column, which the hash join does not pass through (the sort-merge route
+   * refuses it with `unsupported column type struct<> for _partition`) -- so the operator records
+   * why and Spark's runs. `VectorMergeRowsSuite` exercises the operator itself over a columnar child.
+   */
+  icebergTest("MergeRows records why the merge's join is not ours, and the merge is unchanged (#21)") {
+    val Db = IcebergTables.Db
+    IcebergTables.createMergeSource(spark)
+    val on = s"$Db.m_row_on"
+    val off = s"$Db.m_row_off"
+    IcebergTables.createMixedMor(spark, on, formatVersion = 2)
+    IcebergTables.createMixedMor(spark, off, formatVersion = 2)
+    withPlugin(enabled = false)(spark.sql(IcebergTables.mergeSql(off)).collect())
+    withConf(VectorConf.SortMergeJoinEnabled -> "true", "spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.ExplainFallbackEnabled -> "true") {
+      withPlugin(enabled = true)(spark.sql(IcebergTables.mergeSql(on)).collect())
+    }
+    val readAll = "SELECT i, l, d, d2, dt, b, s FROM %s ORDER BY i"
+    val expected = withPlugin(enabled = false)(spark.sql(readAll.format(off)).collect())
+    val actual = withPlugin(enabled = false)(spark.sql(readAll.format(on)).collect())
+    assertRowsEqual(expected, actual, 1e-9, "table contents after MERGE INTO")
+  }
+
   icebergTest("plugin disabled leaves the same scan feeding Spark operators") {
     useTable("t_pos")
     withConf(VectorConf.Enabled -> "false") {
