@@ -584,3 +584,106 @@ final case class WideDecimalArithExpr(
       v
     }
 }
+
+/**
+ * Casts to and from the DECIMAL128 lane (#258): decimal to decimal at any width (a rescale half up
+ * and the precision check), int / long / double to a wide decimal, a wide decimal to double, long,
+ * int or string. A value that does not fit the target is null in legacy mode and Spark's
+ * `CAST_OVERFLOW` error in ANSI mode, for the active rows only, as in [[DecimalCastExpr]].
+ */
+final case class WideDecimalCastExpr(child: VectorExpr, from: DataType, dataType: DataType, ansi: Boolean, queryContext: QueryContext)
+    extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(child)
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    val a = child.eval(ctx)
+    (from, dataType) match {
+      case (f: DecimalType, t: DecimalType) if TypeMapping.isSupported(t) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.INT64, n)
+        val invalid = ctx.bitmap()
+        WideDecimalCastKernels.toNarrow(a, f.scale, t.scale, t.precision, n, data, invalid)
+        finish(ctx, a, VecType.INT64, data, invalid)
+      case (f: DecimalType, t: DecimalType) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.DECIMAL128, n)
+        val invalid = ctx.bitmap()
+        WideDecimalCastKernels.toWide(a, f.scale, t.scale, t.precision, n, data, invalid)
+        finish(ctx, a, VecType.DECIMAL128, data, invalid)
+      case (IntegerType | LongType | DateType, t: DecimalType) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.DECIMAL128, n)
+        val invalid = ctx.bitmap()
+        WideDecimalCastKernels.fromIntegral(a, t.scale, t.precision, n, data, invalid)
+        finish(ctx, a, VecType.DECIMAL128, data, invalid)
+      case (DoubleType, t: DecimalType) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.DECIMAL128, n)
+        val invalid = ctx.bitmap()
+        WideDecimalCastKernels.fromDouble(a, t.scale, t.precision, n, data, invalid)
+        finish(ctx, a, VecType.DECIMAL128, data, invalid)
+      case (f: DecimalType, DoubleType) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.FLOAT64, n)
+        WideDecimalCastKernels.toDouble(a, f.scale, n, data)
+        SegmentVectorBuffers.fixedWidth(VecType.FLOAT64, n, a.validity(), data)
+      case (f: DecimalType, LongType) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.INT64, n)
+        val invalid = ctx.bitmap()
+        WideDecimalCastKernels.toLong(a, f.scale, n, data, invalid)
+        // Legacy mode wraps, exactly what the kernel wrote; ANSI raises.
+        raiseIfAnsi(ctx, a, invalid)
+        SegmentVectorBuffers.fixedWidth(VecType.INT64, n, a.validity(), data)
+      case (f: DecimalType, IntegerType) =>
+        val data = ArrowLayout.allocateData(ctx.arena, VecType.INT32, n)
+        val invalid = ctx.bitmap()
+        WideDecimalCastKernels.toInt(a, f.scale, n, data, invalid)
+        raiseIfAnsi(ctx, a, invalid)
+        SegmentVectorBuffers.fixedWidth(VecType.INT32, n, a.validity(), data)
+      case (f: DecimalType, StringType) =>
+        // Spark's Cast prints a decimal in plain notation under ANSI and as BigDecimal.toString otherwise (ToStringBase.useDecimalPlainString).
+        WideDecimalCastKernels.toUtf8(ctx.arena, a, f.scale, n, ansi)
+      case other => throw new IllegalStateException(s"unsupported wide decimal cast $other")
+    }
+  }
+
+  /** The Spark value of input row `i`, for the ANSI error message. */
+  private def sourceValue(a: VectorBuffers, i: Int): Any = from match {
+    case f: DecimalType if a.`type`() == VecType.DECIMAL128 => Decimal(new java.math.BigDecimal(a.getDecimal128(i), f.scale))
+    case f: DecimalType => Decimal.createUnsafe(a.getLong(i), f.precision, f.scale)
+    case IntegerType | DateType => a.getInt(i)
+    case LongType => a.getLong(i)
+    case DoubleType => a.getDouble(i)
+    case _ => null
+  }
+
+  private def raiseIfAnsi(ctx: EvalContext, a: VectorBuffers, invalid: MemorySegment): Unit = {
+    val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
+    if (count > 0 && ansi) {
+      val i = DecimalExprs.firstSet(rows, ctx.numRows)
+      throw org.apache.spark.sql.vector.VectorErrors.castOverflow(sourceValue(a, i), from, dataType)
+    }
+  }
+
+  private def finish(ctx: EvalContext, a: VectorBuffers, lane: VecType, data: MemorySegment, invalid: MemorySegment): VectorBuffers = {
+    val n = ctx.numRows
+    val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
+    var validity = a.validity()
+    if (count > 0) {
+      if (ansi) {
+        val i = DecimalExprs.firstSet(rows, n)
+        throw org.apache.spark.sql.vector.VectorErrors.castOverflow(sourceValue(a, i), from, dataType)
+      }
+      validity = DecimalExprs.without(ctx, validity, invalid)
+    }
+    SegmentVectorBuffers.fixedWidth(lane, n, validity, data)
+  }
+}
+
+/** `-x` and `abs(x)` over the DECIMAL128 lane (#258): two's complement on the limbs; a valid decimal never overflows either. */
+final case class WideDecimalUnaryExpr(child: VectorExpr, abs: Boolean, dataType: DecimalType) extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    val a = child.eval(ctx)
+    val data = ArrowLayout.allocateData(ctx.arena, VecType.DECIMAL128, n)
+    if (abs) WideDecimalCastKernels.abs(a, n, data) else WideDecimalCastKernels.negate(a, n, data)
+    SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, n, a.validity(), data)
+  }
+}

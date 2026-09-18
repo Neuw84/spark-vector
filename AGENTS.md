@@ -648,7 +648,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 168 kernel tests, 258 Spark tests (230 without the Comet and Iceberg profiles;
+Current counts: 170 kernel tests, 261 Spark tests (233 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
