@@ -3,7 +3,7 @@ package io.sparkvector.spark.expr
 import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BinaryArithmetic, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Size, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BinaryArithmetic, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Size, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, Like, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
@@ -185,6 +185,7 @@ object ExpressionCompiler {
       } yield OverlayExpr(s, r, p, l)
     case EndsWith(l, r) => stringMatch(StringMatchKernels.Kind.SUFFIX, l, r, input)
     case Contains(l, r) => stringMatch(StringMatchKernels.Kind.CONTAINS, l, r, input)
+    case like: Like => likeTokens(like, input)
 
     case And(l, r) => binaryBoolean(l, r, input)(AndExpr.apply)
     case Or(l, r) => binaryBoolean(l, r, input)(OrExpr.apply)
@@ -1055,6 +1056,32 @@ object ExpressionCompiler {
     case Literal(v: Int, IntegerType) if v > maxLiteral => Left(s"$what count $v exceeds the batch output cap")
     case _ if e.dataType != IntegerType => Left(s"$what argument ${e.dataType.simpleString} is not an int")
     case _ => compile(e, input)
+  }
+
+  /**
+   * `LIKE` with several `%` wildcards -- the shape `LikeSimplification` leaves alone -- as a
+   * multi-token matcher (#264): the pattern is split on `%` into a prefix, tokens found in order,
+   * and a suffix. `_`, escape characters and collated strings stay with Spark.
+   */
+  private def likeTokens(like: Like, input: Seq[Attribute]): Result = like.right match {
+    case Literal(null, _) => Left("null LIKE pattern")
+    case Literal(p: UTF8String, StringType) =>
+      val pattern = p.toString
+      if (pattern.indexOf('_') >= 0) Left("LIKE pattern with a `_` wildcard not supported")
+      else if (pattern.indexOf(like.escapeChar) >= 0) Left("LIKE pattern with an escape character not supported")
+      else if (pattern.indexOf('%') < 0) Left("LIKE pattern without a wildcard (Spark folds it to an equality)")
+      else compile(like.left, input).flatMap {
+        case _: LiteralExpr => Left("LIKE on a literal")
+        case c if c.vecType != VecType.UTF8 => Left(s"LIKE over ${like.left.dataType.simpleString} not supported")
+        case c =>
+          val parts = pattern.split("%", -1)
+          val prefix = parts.head.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+          val suffix = parts.last.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+          val tokens = parts.slice(1, parts.length - 1).filter(_.nonEmpty).map(_.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+          Right(LikeTokensExpr(c, prefix, tokens, suffix))
+      }
+    case _: Literal => Left(s"LIKE pattern of type ${like.right.dataType.simpleString}")
+    case _ => Left("LIKE pattern is not a literal")
   }
 
   private def stringMatch(kind: StringMatchKernels.Kind, l: Expression, r: Expression, input: Seq[Attribute]): Result =

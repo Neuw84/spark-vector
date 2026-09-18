@@ -113,6 +113,24 @@ public final class ScalarReference {
     }
   }
 
+  /**
+   * Oracle for {@link StringMatchKernels#matchTokens}: the {@code LIKE} pattern rebuilt as the regex
+   * Spark compiles it to ({@code %} is {@code .*}, everything else quoted, DOTALL) and run on the
+   * decoded string -- a different algorithm on a different representation.
+   */
+  public static void likeTokens(VectorBuffers a, byte[] prefix, byte[][] tokens, byte[] suffix, MemorySegment out) {
+    StringBuilder re = new StringBuilder("^").append(java.util.regex.Pattern.quote(new String(prefix, java.nio.charset.StandardCharsets.UTF_8)));
+    for (byte[] t : tokens) {
+      re.append(".*").append(java.util.regex.Pattern.quote(new String(t, java.nio.charset.StandardCharsets.UTF_8)));
+    }
+    re.append(".*").append(java.util.regex.Pattern.quote(new String(suffix, java.nio.charset.StandardCharsets.UTF_8))).append("$");
+    java.util.regex.Pattern p = java.util.regex.Pattern.compile(re.toString(), java.util.regex.Pattern.DOTALL);
+    int n = a.length();
+    for (int i = 0; i < n; i++) {
+      Bitmap.setTo(out, i, !a.isNull(i) && p.matcher(a.getString(i)).matches());
+    }
+  }
+
   // ---------------------------------------------------------------- dates
 
   /** Oracle for {@code DateKernels.field}: {@code java.time.LocalDate} on each lane. */

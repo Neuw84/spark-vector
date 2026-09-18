@@ -251,6 +251,21 @@ final case class StringMatchExpr(kind: StringMatchKernels.Kind, child: VectorExp
   }
 }
 
+/**
+ * `LIKE '[prefix%]tok1%tok2[%...][%suffix]'` with several wildcards and no `_` or escapes, as a
+ * multi-token matcher over the string column (#264). Null lanes share the child's validity.
+ */
+final case class LikeTokensExpr(child: VectorExpr, prefix: Array[Byte], tokens: Array[Array[Byte]], suffix: Array[Byte]) extends VectorExpr {
+  override def dataType: DataType = BooleanType
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val bits = ctx.bitmap()
+    StringMatchKernels.matchTokens(a, prefix, tokens, suffix, ctx.active, bits)
+    SegmentVectorBuffers.fixedWidth(VecType.BOOL, ctx.numRows, a.validity(), bits)
+  }
+}
+
 final case class NotExpr(child: VectorExpr) extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(child)

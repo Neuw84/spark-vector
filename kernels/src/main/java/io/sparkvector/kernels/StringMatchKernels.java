@@ -68,6 +68,101 @@ public final class StringMatchKernels {
     }
   }
 
+  /**
+   * A {@code LIKE} pattern with several wildcards, {@code [prefix%]tok1%tok2[%...][%suffix]}, as a
+   * multi-token matcher (#264): the prefix must occupy the start, each token is found left to right
+   * with the search resuming after the previous match (leftmost matches leave the most room, so
+   * greedy is exact), and the suffix must occupy the end without overlapping the last match. Empty
+   * tokens ({@code %%}) match trivially and should be dropped by the caller. No {@code _} and no
+   * escapes: those stay with Spark. One result bit per row, null lanes arbitrary, as {@link #match}.
+   */
+  public static void matchTokens(
+      VectorBuffers a, byte[] prefix, byte[][] tokens, byte[] suffix, MemorySegment active, MemorySegment out) {
+    if (a.type() != VecType.UTF8) {
+      throw new IllegalArgumentException("expected UTF8, got " + a.type());
+    }
+    int n = a.length();
+    MemorySegment[] segs = new MemorySegment[tokens.length];
+    for (int t = 0; t < tokens.length; t++) {
+      segs[t] = MemorySegment.ofArray(tokens[t]);
+    }
+    MemorySegment pre = MemorySegment.ofArray(prefix);
+    MemorySegment suf = MemorySegment.ofArray(suffix);
+    VectorBuffers dict = a.dictionary();
+    if (dict != null) {
+      int m = dict.length();
+      boolean[] verdict = new boolean[m];
+      MemorySegment doff = dict.offsets();
+      MemorySegment ddata = dict.data();
+      for (int j = 0; j < m; j++) {
+        int start = doff.get(VectorBuffers.LE_INT, (long) j << 2);
+        int end = doff.get(VectorBuffers.LE_INT, (long) (j + 1) << 2);
+        verdict[j] = matchesTokens(ddata, start, end, pre, prefix, segs, tokens, suf, suffix);
+      }
+      StringCompareKernels.gather(a.data(), n, verdict, active, out);
+      return;
+    }
+    MemorySegment off = a.offsets();
+    MemorySegment data = a.data();
+    for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L);
+        continue;
+      }
+      int base = w << 6, limit = Math.min(64, n - base);
+      long word = 0L;
+      int start = off.get(VectorBuffers.LE_INT, (long) base << 2);
+      for (int k = 0; k < limit; k++) {
+        int end = off.get(VectorBuffers.LE_INT, (long) (base + k + 1) << 2);
+        if (matchesTokens(data, start, end, pre, prefix, segs, tokens, suf, suffix)) {
+          word |= 1L << k;
+        }
+        start = end;
+      }
+      Bitmap.setWord(out, w, n, word);
+    }
+  }
+
+  /** Whether {@code s[start, end)} matches {@code prefix%tok...%suffix}; see {@link #matchTokens}. */
+  public static boolean matchesTokens(
+      MemorySegment s, long start, long end,
+      MemorySegment pre, byte[] prefix, MemorySegment[] segs, byte[][] tokens, MemorySegment suf, byte[] suffix) {
+    long len = end - start;
+    if (prefix.length + suffix.length > len) {
+      return false;
+    }
+    if (prefix.length > 0 && MemorySegment.mismatch(s, start, start + prefix.length, pre, 0, prefix.length) >= 0) {
+      return false;
+    }
+    long limit = end - suffix.length; // the suffix's region is off limits to the tokens
+    if (suffix.length > 0 && MemorySegment.mismatch(s, limit, end, suf, 0, suffix.length) >= 0) {
+      return false;
+    }
+    long pos = start + prefix.length;
+    for (int t = 0; t < tokens.length; t++) {
+      byte[] tok = tokens[t];
+      int plen = tok.length;
+      if (plen == 0) {
+        continue;
+      }
+      long found = -1;
+      byte first = tok[0];
+      long last = limit - plen; // last position a match can start at
+      for (long p = pos; p <= last; p++) {
+        if (s.get(ValueLayout.JAVA_BYTE, p) == first
+            && (plen == 1 || MemorySegment.mismatch(s, p + 1, p + plen, segs[t], 1, plen) < 0)) {
+          found = p;
+          break;
+        }
+      }
+      if (found < 0) {
+        return false;
+      }
+      pos = found + plen;
+    }
+    return true;
+  }
+
   /** Whether {@code s[start, end)} matches the pattern under {@code kind}. */
   public static boolean matches(Kind kind, MemorySegment s, long start, long end, MemorySegment pat, byte[] pattern) {
     int plen = pattern.length;

@@ -149,7 +149,7 @@ class VectorJoinSuite extends VectorQuerySuite {
   }
 
   test("unsupported joins fall back with a reason") {
-    checkFallback("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%y%z'", Seq(BHJ), "unsupported expression")
+    checkFallback("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND soundex(tk.s) = 'X000'", Seq(BHJ), "unsupported expression")
     // A simplified LIKE (StartsWith) in the condition is compiled.
     checkVectorized("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%'", Seq(BHJ))
   }

@@ -84,7 +84,7 @@ class VectorSortSuite extends VectorQuerySuite {
   }
 
   test("unsupported sort keys fall back with a reason") {
-    checkFallback("SELECT i, s FROM t SORT BY s LIKE 'a%b%c'", Seq(Sort), "Like")
+    checkFallback("SELECT i, s FROM t SORT BY soundex(s)", Seq(Sort), "SoundEx")
     checkVectorized("SELECT i, s FROM t SORT BY s LIKE 's1%', i", Seq(Sort)) // the simplified shape compiles
   }
 
@@ -155,7 +155,7 @@ class VectorSortSuite extends VectorQuerySuite {
 
   test("ORDER BY ... LIMIT falls back with a reason: offset, unsupported key, disabled") {
     checkFallback("SELECT i FROM t ORDER BY i LIMIT 5 OFFSET 2", Seq(TopN), "offset 2 not supported")
-    checkFallback("SELECT i FROM t ORDER BY s LIKE 'a%b%c' LIMIT 5", Seq(TopN), "Like")
+    checkFallback("SELECT i FROM t ORDER BY soundex(s) LIMIT 5", Seq(TopN), "SoundEx")
     withConf(VectorConf.TakeOrderedEnabled -> "false") {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM t ORDER BY i LIMIT 5"); d.collect(); d }
       assert(nodesOf[VectorTakeOrderedAndProjectExec](df).isEmpty)

@@ -105,10 +105,10 @@ class VectorAccelerationUiSuite extends SparkVectorFunSuite with Eventually {
     // A LIKE with inner wildcards does not compile to the kernels, so the filter stays with Spark and the
     // rule records why. That is a genuine miss, unlike a scan or an exchange.
     val fellBack = PlanAcceleration.fromPlan(
-      spark.sql("SELECT i FROM t WHERE s LIKE 'a%b%c'").queryExecution.executedPlan)
+      spark.sql("SELECT i FROM t WHERE soundex(s) = 'S000'").queryExecution.executedPlan)
     assert(fellBack.countBy(Engine.Spark) >= 1)
     assert(!fellBack.fullyAccelerated)
     assert(fellBack.fallbacks.nonEmpty, "the fallback reason should be recorded on the node")
-    assert(fellBack.fallbacks.exists(_._2.contains("Like")))
+    assert(fellBack.fallbacks.exists(_._2.contains("SoundEx")))
   }
 }

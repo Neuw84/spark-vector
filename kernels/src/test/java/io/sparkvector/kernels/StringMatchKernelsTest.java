@@ -139,4 +139,71 @@ class StringMatchKernelsTest {
       }
     }
   }
+
+  /** Splits a LIKE pattern on `%` into prefix, non-empty tokens and suffix, as the compiler does. */
+  private static void checkTokens(Arena arena, VectorBuffers a, String like) {
+    String[] parts = like.split("%", -1);
+    byte[] prefix = parts[0].getBytes(StandardCharsets.UTF_8);
+    byte[] suffix = parts[parts.length - 1].getBytes(StandardCharsets.UTF_8);
+    java.util.List<byte[]> toks = new java.util.ArrayList<>();
+    for (int i = 1; i < parts.length - 1; i++) {
+      if (!parts[i].isEmpty()) {
+        toks.add(parts[i].getBytes(StandardCharsets.UTF_8));
+      }
+    }
+    byte[][] tokens = toks.toArray(new byte[0][]);
+    MemorySegment expected = ArrowLayout.allocateBitmap(arena, a.length());
+    MemorySegment actual = ArrowLayout.allocateBitmap(arena, a.length());
+    ScalarReference.likeTokens(a, prefix, tokens, suffix, expected);
+    StringMatchKernels.matchTokens(a, prefix, tokens, suffix, null, actual);
+    for (int i = 0; i < a.length(); i++) {
+      if (!a.isNull(i)) {
+        assertEquals(Bitmap.isSet(expected, i), Bitmap.isSet(actual, i), "LIKE '" + like + "' row " + i + " (" + a.getString(i) + ")");
+      }
+    }
+  }
+
+  @Test
+  void multiTokenLikeMatchesTheRegexOracleOnPlainAndDictionaryColumns() {
+    try (Arena arena = Arena.ofConfined()) {
+      Random rnd = new Random(264);
+      String[] likes = {
+        "%special%requests%", "%Customer%Complaints%", "%green%metallic%", "%a%b%", "%aa%ab%", "%a%a%a%",
+        "PROMO%COPPER%", "%PROMO%PLUS", "the%ones", "%日%本%", "日%本%語", "%本%語", "%e%\u0301%", "%\u00e9%",
+        "%%", "%%a%%", "a%%b", "%", "%z%z%z%z%z%", "%requests%special%", "STANDARD%PROMO", "%aaab%b%", "%%aab%%a%%"
+      };
+      for (int n : new int[] {1, 63, 64, 65, 500, 4096}) {
+        String[] values = randomStrings(rnd, n);
+        VectorBuffers plain = ArrowLayout.ofStrings(arena, values);
+        VectorBuffers dict = dictionaryEncoded(arena, values);
+        for (String like : likes) {
+          checkTokens(arena, plain, like);
+          checkTokens(arena, dict, like);
+        }
+      }
+      // Random tokens over random ASCII strings: many near misses and overlaps.
+      for (int round = 0; round < 200; round++) {
+        int n = 1 + rnd.nextInt(300);
+        String[] values = new String[n];
+        for (int i = 0; i < n; i++) {
+          StringBuilder sb = new StringBuilder();
+          for (int k = rnd.nextInt(12); k > 0; k--) {
+            sb.append((char) ('a' + rnd.nextInt(3)));
+          }
+          values[i] = rnd.nextInt(9) == 0 ? null : sb.toString();
+        }
+        StringBuilder like = new StringBuilder();
+        int parts = 2 + rnd.nextInt(4);
+        for (int p = 0; p < parts; p++) {
+          if (p > 0) {
+            like.append('%');
+          }
+          for (int k = rnd.nextInt(3); k > 0; k--) {
+            like.append((char) ('a' + rnd.nextInt(3)));
+          }
+        }
+        checkTokens(arena, ArrowLayout.ofStrings(arena, values), like.toString());
+      }
+    }
+  }
 }
