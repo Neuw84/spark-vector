@@ -839,6 +839,27 @@ Spark's Final the union's children were Spark's, whose union is partition-aware.
 columnar `UnionExec` has the same concatenation (fixed upstream later), which is why disabling ours
 did not help. All 103 queries now agree to 10 significant digits.
 
+Refreshed after the 128-bit decimal lane (#257: the lane and its scan, #258: the kernels that compute on
+it, #259: every operator carries it -- the aggregate's keys, inputs and wide results, the column movers,
+the hash joins' keys and payloads, the window's frames and keys): **3425 of 4655 operators ours (73%)**,
+65 queries at 75% or more (from the low forties), 37 between 50% and 75%, none between 25% and 50%; q9 stays the one
+fully accelerated plan and q17 is empty at SF1 (0/1 under both configurations). All 103 checksums agree
+with Spark. The queries the wide-decimal issues named: q1 28/36, q30 34/44, q81 33/43 (their `decimal(24,7)`
+averages and `decimal(19,2)` totals were the inputs no lane could carry), q64 126/169, q51 23/35 (its
+`decimal(27,2)` running totals through the window and the join on them), q66 38/48 (the union of channel
+sums), q67 20/26 (the group limit over a wide key), and the windows q12 13/18, q20 13/18, q47 and q57
+50/70, q53 and q63 18/24, q89 17/23, q98 12/20. What still names a decimal is computed, not carried, and
+all of it is the *result* of a wide division: `round` over a `decimal(37,20)` quotient (q2, seven
+columns), `CASE WHEN ... THEN a / b END` whose result is `decimal(37,20)` or `decimal(38,14)` (q4, q11,
+q31, q74 -- the year-over-year ratios), and a scalar subquery whose value is `decimal(32,6)` to
+`decimal(38,8)` (q14a/b, q23a/b, q24a/b). Those three are one follow-up to the #258 kernel set: the
+conditional, the rounding and the literal over the wide lane. The other reasons are the ones this
+section has carried since the start -- Spark's global `Sort` over its row shuffle (21 plans read a bare
+`AQEShuffleRead`), the `TINYINT` grouping id of the `ROLLUP` plans (q36, q70, q86), sort-merge joins
+without the opt-in flag -- and the cascades below them (a `Project` whose child is not columnar, 11).
+The tally is not #259's alone: the run counts everything merged since the last refresh, and the
+operators that count moved from 4736 to 4655 with the plans that changed in between, so the percentages
+and the per-query readings are the comparable figures, not the raw counts.
 ## Phase 5: q9/q14/q17/q18 against Comet -- profiles and what they changed
 
 Profiling the four SF1 queries where `comet-scan-vector-shuffle` trailed `comet` the most led to

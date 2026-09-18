@@ -362,6 +362,10 @@ Three more came out of profiling TPC-H rather than microbenchmarks (see
    of copying it into native memory doubled the filter's time; one copy into native memory wins.
 6. Per-group masked reductions only pay off for one or two groups on 128-bit vectors; grouped
    aggregation scatters into per-group accumulators otherwise.
+7. A lane nobody computes on still pays. The 128-bit decimal lane has no SIMD path (two-limb scalar
+   loops throughout), yet carrying it through every operator moved TPC-DS from 65% to 73% of operators
+   ours: the wins are the chains that stayed columnar around a wide column -- a `decimal(27,2)` running
+   total no longer sends the window, the join on it and the aggregate above back to rows.
 
 ### Sort
 
@@ -428,7 +432,7 @@ or row a group and combine its buffers with the running buffers before it -- sum
 the held rows across batch boundaries; `percent_rank`, `cume_dist` and `ntile`, which need the partition
 size, take the same path, as do sliding frames (`sum(x) OVER (... ROWS BETWEEN 2 PRECEDING AND 1
 FOLLOWING)`), re-aggregated per row over the frame's rows in order exactly as Spark's sliding frames are.
-Decimal window aggregates wait for the 128-bit lane (#28); `RANGE` frames with value offsets are refused.
+Decimal window aggregates run over the 128-bit lane for whole-partition and running frames (#259); a sliding frame over a decimal and `RANGE` frames with value offsets are refused.
 
 `ROLLUP`, `CUBE` and `GROUPING SETS` (and the rewrite Spark applies to `count(distinct)`) go through
 `ExpandExec`, which duplicates every row once per grouping set with the unused keys nulled and a

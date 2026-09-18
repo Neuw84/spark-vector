@@ -84,11 +84,14 @@ that pin it.
   for wide decimals while `TypeMapping.hasLane` is true; operators that merely move a column (filter
   compaction, projection pass-through, the sort's keys and payloads) ask `hasLane`, the hash aggregate
   reads the lane as grouping keys and as `sum` / `avg` / `min` / `max` / `count` / `first` / `last` inputs and
-  computes arithmetic over wide sums in its result projection (#259, slice 1), the expression
-  compiler routes a wide operand to the wide kernels explicitly (`isWideDecimal`), and everything
-  else that reads one (join keys and payloads, window keys and frames, the `round` family, `%`) asks
-  `isSupported` until #259 flips it. The TPC-H data is still generated with decimals as doubles
-  (`Decimal(12,2) * Decimal(12,2)` is 25 digits) until the joins and the window read the lane too.
+  computes arithmetic over wide sums in its result projection, the column movers (take-ordered,
+  limits, sample, expand, union, coalesce), the hash joins (keys and payloads) and the window
+  (partition and order keys, whole-partition and running frames) carry it (#259), and the expression
+  compiler routes a wide operand to the wide kernels explicitly (`isWideDecimal`). What still asks
+  `isSupported` computes on the lane rather than carrying it: the conditional (`CASE WHEN` with a wide
+  result), the `round` family, `%`, a scalar subquery of a wide type, a sliding window frame over a
+  decimal -- the TPC-DS reasons that remain name exactly those (docs/results.md). The TPC-H data is
+  still generated with decimals as doubles (`Decimal(12,2) * Decimal(12,2)` is 25 digits).
   Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the adapters +
   `ArrowOutput` + tests at all three vector widths.
 - Decimals ride on INT64 with the scale kept in the Spark type (`DecimalArithExpr`,
