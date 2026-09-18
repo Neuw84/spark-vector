@@ -40,7 +40,7 @@ case class VectorExpandExec(projections: Seq[Seq[Expression]], output: Seq[Attri
       // operands, but here they are whole constant columns.
       case Literal(v, dt) => LiteralExpr(v, dt)
       case e =>
-        ExpressionCompiler.compile(e, child.output) match {
+        ExpressionCompiler.compileLaneColumn(e, child.output) match {
           case Right(c) => c
           case Left(reason) => throw new IllegalStateException(s"cannot vectorize expand slot ${e.sql}: $reason")
         }
@@ -192,13 +192,13 @@ object VectorExpandPlanner {
 
   /** Every slot a literal (incl. `NULL`) of a supported type, or an expression that compiles. */
   def plan(e: ExpandExec): Either[String, VectorExpandExec] = {
-    val outputFailures = e.output.filterNot(a => TypeMapping.isSupported(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
+    val outputFailures = e.output.filterNot(a => TypeMapping.hasLane(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
     val slotFailures = e.projections.zipWithIndex.flatMap { case (p, i) =>
       p.flatMap {
-        case Literal(_, dt) if !TypeMapping.isSupported(dt) => Some(s"projection $i: literal of unsupported type ${dt.simpleString}")
+        case Literal(_, dt) if !TypeMapping.hasLane(dt) => Some(s"projection $i: literal of unsupported type ${dt.simpleString}")
         case _: Literal => None
         case expr =>
-          ExpressionCompiler.compile(expr, e.child.output) match {
+          ExpressionCompiler.compileLaneColumn(expr, e.child.output) match {
             case Right(_) => None
             case Left(reason) => Some(s"projection $i: ${expr.sql}: $reason")
           }

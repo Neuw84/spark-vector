@@ -202,6 +202,38 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   }
 
   private val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+  private val TopN = classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec]
+  private val Collect = classOf[org.apache.spark.sql.vector.VectorCollectLimitExec]
+  private val LocalLimit = classOf[org.apache.spark.sql.vector.VectorLocalLimitExec]
+  private val Sample = classOf[org.apache.spark.sql.vector.VectorSampleExec]
+  private val Expand = classOf[org.apache.spark.sql.vector.VectorExpandExec]
+  private val Union = classOf[org.apache.spark.sql.vector.VectorUnionExec]
+  private val Coalesce = classOf[org.apache.spark.sql.vector.VectorCoalesceExec]
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: the column movers carry wide decimals -- take-ordered, limits, sample, expand, union, coalesce (#259)") {
+      // ORDER BY a wide key with LIMIT: Spark's top-k over our batches, the projection applied by Spark's
+      // row projection, the result a batch with a DECIMAL128 lane. All four null orderings.
+      for (order <- Seq("ASC NULLS FIRST", "ASC NULLS LAST", "DESC NULLS FIRST", "DESC NULLS LAST")) {
+        checkVectorized(s"SELECT i, w38, w27 FROM $t ORDER BY w38 $order, i LIMIT 25", Seq(TopN))
+      }
+      checkVectorized(s"SELECT w27, w20 * 2 AS d FROM $t WHERE i > 100 ORDER BY w27 DESC, i LIMIT 40", Seq(TopN, Filter))
+      // Limits: a collect limit and a local limit over wide columns, across a batch boundary.
+      checkVectorized(s"SELECT i, w38, w20 FROM $t LIMIT 5000", Seq(Collect))
+      assert(nodesOf[org.apache.spark.sql.vector.VectorLocalLimitExec](
+        checkVectorized(s"SELECT count(*) AS c, sum(w20) AS s FROM (SELECT w20 FROM $t LIMIT 7000)", Seq(Agg))).nonEmpty)
+      // A sample keeps the wide columns with their rows.
+      checkVectorized(s"SELECT i, w38, w27 FROM $t TABLESAMPLE (30 PERCENT) REPEATABLE (7)", Seq(Sample))
+      // Expand: a wide grouping key nulled per grouping set (a wide null constant column), a wide sum through it.
+      checkVectorized(s"SELECT w27, i % 3 AS k, count(*) AS c, sum(w20) AS s, grouping_id() AS gid FROM $t WHERE i < 4000 GROUP BY ROLLUP(w27, i % 3)", Seq(Expand, Agg))
+      checkVectorized(s"SELECT w27, w20, count(*) AS c FROM $t WHERE i < 3000 GROUP BY GROUPING SETS ((w27), (w20), ())", Seq(Expand, Agg))
+      // Union of two wide-sum aggregates (q66's shape: two channels summed then unioned), and a wide key coalesced.
+      checkVectorized(
+        s"SELECT k, s FROM (SELECT i % 5 AS k, sum(w27) AS s FROM $t WHERE i % 2 = 0 GROUP BY i % 5 UNION ALL SELECT i % 5 AS k, sum(w20) AS s FROM $t WHERE i % 2 = 1 GROUP BY i % 5) u",
+        Seq(Union, Agg))
+      checkVectorized(s"SELECT /*+ COALESCE(1) */ i, w38 FROM $t WHERE i % 7 = 0", Seq(Coalesce, Filter))
+    }
+  }
 
   Seq("tw_dict", "tw_plain").foreach { t =>
     test(s"$t: wide decimal grouping keys, inputs and result arithmetic in the hash aggregate (#259)") {

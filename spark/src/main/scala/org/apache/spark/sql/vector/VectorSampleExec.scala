@@ -143,7 +143,7 @@ object VectorSamplePlanner {
     else Right(VectorSampleExec(s.lowerBound, s.upperBound, s.seed, s.child))
 
   def planLocalTableScan(l: LocalTableScanExec): Either[String, VectorLocalTableScanExec] =
-    l.output.find(a => !TypeMapping.isSupported(a.dataType)) match {
+    l.output.find(a => !TypeMapping.hasLane(a.dataType)) match {
       case Some(a) => Left(s"unsupported type ${a.dataType.simpleString} for local table column ${a.name}")
       case None if l.stream.isDefined => Left("streaming local table scan")
       case None => Right(VectorLocalTableScanExec(l.output, l.rows))
