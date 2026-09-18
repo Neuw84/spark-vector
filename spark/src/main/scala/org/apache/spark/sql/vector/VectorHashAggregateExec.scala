@@ -1,6 +1,6 @@
 package org.apache.spark.sql.vector
 
-import io.sparkvector.kernels.{GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
+import io.sparkvector.kernels.{Bitmap, GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.agg.{AggState, GroupedAggState, VectorAggFunction, VectorAggregates}
 import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators}
@@ -539,11 +539,27 @@ object AggBufferColumns {
   def values(name: String, dt: DataType, count: Int, get: Int => Any, allocator: BufferAllocator): ColumnVector = {
     dt match {
       case d: DecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION =>
-        // The sum buffer of a wide decimal sum: boxed exact totals into Arrow's 128-bit vector.
-        val values = new Array[java.math.BigDecimal](count)
+        // The sum buffer of a wide decimal sum: the exact totals written as two limbs each into a
+        // DECIMAL128 lane (Arrow's 128-bit vector), which the merge side reads back in place (#257).
+        val out = ArrowOutput.allocateFixed(name, d, count, allocator)
+        val data = out.data()
+        val validity = out.validity()
+        var anyNull = false
         var o = 0
-        while (o < count) { values(o) = get(o).asInstanceOf[java.math.BigDecimal]; o += 1 }
-        return ArrowOutput.decimalColumn(name, d, values, allocator)
+        while (o < count) {
+          get(o) match {
+            case null =>
+              anyNull = true
+              Bitmap.setTo(validity, o, false)
+              io.sparkvector.kernels.Decimal128.set(data, o, 0L, 0L)
+            case v: java.math.BigDecimal =>
+              val unscaled = v.unscaledValue()
+              Bitmap.setTo(validity, o, true)
+              io.sparkvector.kernels.Decimal128.set(data, o, io.sparkvector.kernels.Decimal128.hiOf(unscaled), io.sparkvector.kernels.Decimal128.loOf(unscaled))
+          }
+          o += 1
+        }
+        return ArrowOutput.finish(out, count, !anyNull)
       case org.apache.spark.sql.types.StringType =>
         // min/max, first/last, min_by/max_by over strings: boxed UTF8Strings into a varchar vector.
         val values = new Array[Array[Byte]](count)
