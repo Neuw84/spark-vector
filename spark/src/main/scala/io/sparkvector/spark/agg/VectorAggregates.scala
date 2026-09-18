@@ -125,6 +125,15 @@ private[agg] final class Escalation {
 }
 
 private[agg] object Escalation {
+  /**
+   * The group's exact total: the 128-bit accumulator plus the escalated rows. An accumulator that
+   * left 128 bits (a DECIMAL128 input, #259) is reported as 10^38, past every decimal precision, so the
+   * callers' limit check turns it into the null or the ANSI error Spark produces for an overflowed sum.
+   */
+  private val pastAnyPrecision = java.math.BigInteger.TEN.pow(38)
+  def total(acc: GroupedAccumulators.WideLongSum, extra: Escalation, g: Int): java.math.BigInteger =
+    if (acc.overflowed(g)) pastAnyPrecision else extra.total(g, acc.sum(g))
+
   /** Evaluates `input` for one batch: the lane to accumulate, and the escalated rows folded into `extra`. */
   def evalInput(input: VectorExpr, ctx: EvalContext, extra: Escalation, groupOf: Int => Int): VectorBuffers = input match {
     case s: SpeculativeDecimalExpr =>
@@ -193,7 +202,7 @@ final case class WideDecimalSumAgg(
     }
     override def bufferValues: Array[Any] = {
       val count = acc.count(0) + extra.count(0)
-      Array(sumValue(count, extra.total(0, acc.sum(0))), java.lang.Boolean.valueOf(count == 0))
+      Array(sumValue(count, Escalation.total(acc, extra, 0)), java.lang.Boolean.valueOf(count == 0))
     }
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
@@ -206,7 +215,7 @@ final case class WideDecimalSumAgg(
     }
     override def bufferValue(g: Int, slot: Int): Any = {
       val count = acc.count(g) + extra.count(g)
-      if (slot == 0) sumValue(count, extra.total(g, acc.sum(g))) else java.lang.Boolean.valueOf(count == 0)
+      if (slot == 0) sumValue(count, Escalation.total(acc, extra, g)) else java.lang.Boolean.valueOf(count == 0)
     }
   }
 }
@@ -283,7 +292,7 @@ final case class WideDecimalAvgAgg(input: VectorExpr, bufferType: DecimalType, r
     }
     override def bufferValues: Array[Any] = {
       val count = acc.count(0) + extra.count(0)
-      Array(sumValue(count, extra.total(0, acc.sum(0)), ungrouped = true), java.lang.Long.valueOf(count))
+      Array(sumValue(count, Escalation.total(acc, extra, 0), ungrouped = true), java.lang.Long.valueOf(count))
     }
   }
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
@@ -296,7 +305,7 @@ final case class WideDecimalAvgAgg(input: VectorExpr, bufferType: DecimalType, r
     }
     override def bufferValue(g: Int, slot: Int): Any = {
       val count = acc.count(g) + extra.count(g)
-      if (slot == 0) sumValue(count, extra.total(g, acc.sum(g)), ungrouped = false) else java.lang.Long.valueOf(count)
+      if (slot == 0) sumValue(count, Escalation.total(acc, extra, g), ungrouped = false) else java.lang.Long.valueOf(count)
     }
   }
 }
@@ -607,10 +616,29 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
     private var any = false
     private var bestLong = 0L
     private var bestDouble = 0.0
+    private var bestHi = 0L
+    private var bestLo = 0L
     override def update(ctx: EvalContext): Unit = {
       val v = ctx.masked(input.eval(ctx))
       if (AggKernels.countValid(v) > 0) {
         v.`type`() match {
+          case VecType.DECIMAL128 =>
+            // The wide lane is scalar (#28): a two-limb compare per valid row.
+            val data = v.data()
+            var i = 0
+            val n = v.length()
+            while (i < n) {
+              if (!v.isNull(i)) {
+                val hi = Decimal128.hi(data, i)
+                val lo = Decimal128.lo(data, i)
+                if (!any) { bestHi = hi; bestLo = lo; any = true }
+                else {
+                  val c = Decimal128.compare(hi, lo, bestHi, bestLo)
+                  if ((isMin && c < 0) || (!isMin && c > 0)) { bestHi = hi; bestLo = lo }
+                }
+              }
+              i += 1
+            }
           case VecType.FLOAT64 =>
             val m = if (isMin) AggKernels.minDouble(v) else AggKernels.maxDouble(v)
             if (!any) bestDouble = m
@@ -634,10 +662,19 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
       else input.vecType match {
         case VecType.FLOAT64 => Array(java.lang.Double.valueOf(bestDouble))
         case VecType.INT32 => Array(java.lang.Integer.valueOf(bestLong.toInt))
+        case VecType.DECIMAL128 => Array(new java.math.BigDecimal(Decimal128.toBigInteger(bestHi, bestLo), scale))
         case _ => Array(java.lang.Long.valueOf(bestLong))
       }
   }
+  /** The wide decimal's scale, for the boxed value the DECIMAL128 buffer column is built from. */
+  private def scale: Int = dataType.asInstanceOf[DecimalType].scale
   override def newGroupedState(): GroupedAggState = input.vecType match {
+    case VecType.DECIMAL128 =>
+      new GroupedAggState {
+        private val acc = new GroupedAccumulators.Decimal128MinMax(isMin)
+        override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
+        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) new java.math.BigDecimal(acc.value(g), scale) else null
+      }
     case VecType.FLOAT64 =>
       new GroupedAggState {
         private val acc = new GroupedAccumulators.DoubleMinMax(isMin)
@@ -779,7 +816,7 @@ object VectorAggregates {
     }
     def ref(i: Int): Either[String, VectorExpr] = {
       val ordinal = bufferOrdinal(i)
-      if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}") else ExpressionCompiler.compile(input(ordinal), input)
+      if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}") else ExpressionCompiler.compileLaneColumn(input(ordinal), input)
     }
     f match {
       case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType == LongType && buffers.length == 2 =>
@@ -808,7 +845,7 @@ object VectorAggregates {
       case m: Max => ref(0).flatMap(numericBuffer(m.dataType)).map(b => MinMaxAgg(b, isMin = false, m.dataType))
       case b: BitAggregate if buffers.length == 1 && integralLane(b.dataType) =>
         ref(0).map(v => BitAgg(v, bitOp(b), b.dataType))
-      case l: Last if buffers.length == 2 && FirstAgg.supports(l.dataType) =>
+      case l: Last if buffers.length == 2 && FirstAgg.supportsWide(l.dataType) =>
         for (last <- ref(0); valueSet <- ref(1)) yield LastAgg(last, l.dataType, l.ignoreNulls, Some(valueSet))
       case l: Last => Left(s"last over ${l.dataType.simpleString} not supported")
       case m: MaxMinBy if buffers.length == 2 && FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(TypeMapping.vecTypeOf(m.orderingExpr.dataType)) =>
@@ -828,7 +865,7 @@ object VectorAggregates {
       case a: Average =>
         if (a.dataType != DoubleType || buffers.length != 2) Left(s"avg producing ${a.dataType.simpleString} not supported")
         else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count, strict)
-      case f: First if buffers.length == 2 && FirstAgg.supports(f.dataType) =>
+      case f: First if buffers.length == 2 && FirstAgg.supportsWide(f.dataType) =>
         for (first <- ref(0); valueSet <- ref(1)) yield FirstMergeAgg(first, valueSet, f.dataType)
       case f: First => Left(s"first over ${f.dataType.simpleString} not supported")
       case m: CentralMomentAgg if buffers.length == m.aggBufferAttributes.length =>
@@ -858,7 +895,7 @@ object VectorAggregates {
     }
 
   private def numericBuffer(dt: DataType)(b: VectorExpr): Either[String, VectorExpr] =
-    if (numeric.contains(b.vecType)) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
+    if (numeric.contains(b.vecType) || b.vecType == VecType.DECIMAL128) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
 
   /** The arguments of a moment statistic as double lanes. */
   private def momentArgs(args: Seq[Expression], input: Seq[Attribute]): Either[String, Seq[VectorExpr]] =
@@ -894,7 +931,7 @@ object VectorAggregates {
       ExpressionCompiler.speculativeDecimalArithmetic(s.child, input) match {
         case Some(speculative) => speculative.map(agg)
         case None =>
-          numericChild(s.child, input).flatMap { child =>
+          numericChild(s.child, input, wide = true).flatMap { child =>
             if (child.vecType == VecType.FLOAT64) Left(s"sum over ${s.child.dataType.simpleString} producing ${s.dataType.simpleString} not supported")
             else Right(agg(child))
           }
@@ -913,7 +950,7 @@ object VectorAggregates {
       c.children match {
         case Seq(Literal(v, _)) if v != null => Right(CountAgg(None))
         case Seq(child) =>
-          ExpressionCompiler.compile(child, input).flatMap {
+          ExpressionCompiler.compileLaneColumn(child, input).flatMap {
             case _: LiteralExpr => Right(CountAgg(None))
             case e => Right(CountAgg(Some(e)))
           }
@@ -931,16 +968,16 @@ object VectorAggregates {
 
     case m: Min if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = true, m.dataType))
     case m: Max if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = false, m.dataType))
-    case m: Min => numericChild(m.child, input).map(child => MinMaxAgg(child, isMin = true, m.dataType))
-    case m: Max => numericChild(m.child, input).map(child => MinMaxAgg(child, isMin = false, m.dataType))
+    case m: Min => numericChild(m.child, input, wide = true).map(child => MinMaxAgg(child, isMin = true, m.dataType))
+    case m: Max => numericChild(m.child, input, wide = true).map(child => MinMaxAgg(child, isMin = false, m.dataType))
     case b: BitAggregate if integralLane(b.dataType) =>
       ExpressionCompiler.compile(b.child, input).flatMap {
         case _: LiteralExpr => Left(s"${b.prettyName} of a literal")
         case e => Right(BitAgg(e, bitOp(b), b.dataType))
       }
     case b: BitAggregate => Left(s"${b.prettyName} over ${b.dataType.simpleString} not supported")
-    case l: Last if FirstAgg.supports(l.dataType) =>
-      ExpressionCompiler.compile(l.child, input).flatMap {
+    case l: Last if FirstAgg.supportsWide(l.dataType) =>
+      ExpressionCompiler.compileLaneColumn(l.child, input).flatMap {
         case _: LiteralExpr => Left("last of a literal")
         case e => Right(LastAgg(e, l.dataType, l.ignoreNulls, None))
       }
@@ -965,7 +1002,7 @@ object VectorAggregates {
         ExpressionCompiler.speculativeDecimalArithmetic(a.child, input) match {
           case Some(speculative) => speculative.map(agg)
           case None =>
-            numericChild(a.child, input).flatMap { child =>
+            numericChild(a.child, input, wide = true).flatMap { child =>
               if (child.vecType == VecType.FLOAT64) Left(s"avg over ${a.child.dataType.simpleString} producing ${a.dataType.simpleString} not supported")
               else Right(agg(child))
             }
@@ -989,8 +1026,8 @@ object VectorAggregates {
     case r: RegrSlope => momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
     case r: RegrIntercept => momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
 
-    case f: First if FirstAgg.supports(f.dataType) =>
-      ExpressionCompiler.compile(f.child, input).flatMap {
+    case f: First if FirstAgg.supportsWide(f.dataType) =>
+      ExpressionCompiler.compileLaneColumn(f.child, input).flatMap {
         case _: LiteralExpr => Left("first of a literal")
         case e => Right(FirstAgg(e, f.dataType, f.ignoreNulls))
       }
@@ -999,10 +1036,11 @@ object VectorAggregates {
     case other => Left(s"unsupported aggregate function ${other.getClass.getSimpleName}: ${other.sql}")
   }
 
-  private def numericChild(child: org.apache.spark.sql.catalyst.expressions.Expression, input: Seq[Attribute]): Either[String, VectorExpr] =
-    ExpressionCompiler.compile(child, input).flatMap {
+  /** A numeric lane operand; `wide` also admits a DECIMAL128 lane (the decimal sum, average, min and max, #259). */
+  private def numericChild(child: org.apache.spark.sql.catalyst.expressions.Expression, input: Seq[Attribute], wide: Boolean = false): Either[String, VectorExpr] =
+    ExpressionCompiler.compileLaneColumn(child, input).flatMap {
       case _: LiteralExpr => Left("aggregate over a literal")
-      case e if !numeric.contains(e.vecType) => Left(s"aggregate over ${child.dataType.simpleString} not supported")
+      case e if !numeric.contains(e.vecType) && !(wide && e.vecType == VecType.DECIMAL128) => Left(s"aggregate over ${child.dataType.simpleString} not supported")
       case e => Right(e)
     }
 

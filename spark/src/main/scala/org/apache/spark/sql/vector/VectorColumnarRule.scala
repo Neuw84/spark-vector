@@ -367,8 +367,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
     // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
     val isFinal = VectorAggregatePlanner.readsExchange(a)
-    // The wide decimal sum and average buffers (Decimal(p > 18)) are the one kind of wide column a merging aggregate reads.
-    val inputReason = if (isFinal) typeReason(a.child, VectorAggregatePlanner.wideBuffers(a)) else columnarInputReason(a.child)
+    // Any lane will do as input (a wide decimal key, input or buffer is a DECIMAL128 lane, #259): the
+    // planner below refuses a column a function or a key cannot read, with the function's own reason.
+    val inputReason = if (isFinal) laneTypeReason(a.child) else laneInputReason(a.child)
     inputReason match {
       case Some(reason) => fallback(original, reason)
       case None =>
@@ -495,6 +496,10 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   private def laneInputReason(plan: SparkPlan): Option[String] =
     if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar")
     else plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
+
+  /** Like [[typeReason]] for an operator that reads any lane type (the aggregate over the DECIMAL128 lane, #259). */
+  private def laneTypeReason(plan: SparkPlan): Option[String] =
+    plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
 
   private def typeReason(plan: SparkPlan, allowed: Set[org.apache.spark.sql.catalyst.expressions.ExprId] = Set.empty): Option[String] =
     plan.output.find(a => !TypeMapping.isSupported(a.dataType) && !allowed.contains(a.exprId)).map { a =>

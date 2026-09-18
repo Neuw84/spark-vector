@@ -82,11 +82,13 @@ that pin it.
   path for a row whose intermediate leaves 128 bits; JMH numbers in `docs/results.md`). The general
   switches still tell the two apart: `TypeMapping.isSupported` (every kernel computes on it) is false
   for wide decimals while `TypeMapping.hasLane` is true; operators that merely move a column (filter
-  compaction, projection pass-through, the sort's keys and payloads) ask `hasLane`, the expression
+  compaction, projection pass-through, the sort's keys and payloads) ask `hasLane`, the hash aggregate
+  reads the lane as grouping keys and as `sum` / `avg` / `min` / `max` / `count` / `first` / `last` inputs and
+  computes arithmetic over wide sums in its result projection (#259, slice 1), the expression
   compiler routes a wide operand to the wide kernels explicitly (`isWideDecimal`), and everything
-  else that reads one (group keys, join keys, aggregate accumulators, the `round` family, `%`) asks
+  else that reads one (join keys and payloads, window keys and frames, the `round` family, `%`) asks
   `isSupported` until #259 flips it. The TPC-H data is still generated with decimals as doubles
-  (`Decimal(12,2) * Decimal(12,2)` is 25 digits) because the aggregates do not accumulate the lane yet.
+  (`Decimal(12,2) * Decimal(12,2)` is 25 digits) until the joins and the window read the lane too.
   Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the adapters +
   `ArrowOutput` + tests at all three vector widths.
 - Decimals ride on INT64 with the scale kept in the Spark type (`DecimalArithExpr`,
@@ -652,7 +654,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 170 kernel tests, 261 Spark tests (233 without the Comet and Iceberg profiles;
+Current counts: 170 kernel tests, 262 Spark tests (234 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
