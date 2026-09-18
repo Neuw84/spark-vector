@@ -158,17 +158,18 @@ public final class WideDecimalCastKernels {
   }
 
   /**
-   * A DECIMAL128 to its string as Spark prints it ({@code Decimal.toString} is {@code BigDecimal.toPlainString}:
-   * plain notation, trailing zeros kept to the scale). Returns a UTF8 lane sharing the input's validity.
+   * A DECIMAL128 to its string as Spark's {@code Cast} prints it: {@code BigDecimal.toPlainString} under ANSI ({@code plain}),
+   * {@code BigDecimal.toString} otherwise (scientific when the adjusted exponent is below -6: a zero at scale 10 is {@code 0E-10}).
    */
-  public static SegmentVectorBuffers toUtf8(Arena arena, VectorBuffers a, int scale, int n) {
+  public static SegmentVectorBuffers toUtf8(Arena arena, VectorBuffers a, int scale, int n, boolean plain) {
     byte[][] strings = new byte[n][];
     int total = 0;
     for (int i = 0; i < n; i++) {
       if (isNull(a, i)) {
         strings[i] = new byte[0];
       } else {
-        strings[i] = new BigDecimal(a.getDecimal128(i), scale).toPlainString().getBytes(StandardCharsets.US_ASCII);
+        BigDecimal d = new BigDecimal(a.getDecimal128(i), scale);
+        strings[i] = (plain ? d.toPlainString() : d.toString()).getBytes(StandardCharsets.US_ASCII);
         total += strings[i].length;
       }
     }

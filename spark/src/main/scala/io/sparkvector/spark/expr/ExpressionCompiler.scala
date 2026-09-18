@@ -232,6 +232,11 @@ object ExpressionCompiler {
     case e: Multiply => arithmetic(ArithOp.MUL, e.left, e.right, e.evalMode, e, input)
     case e: Divide => arithmetic(ArithOp.DIV, e.left, e.right, e.evalMode, e, input)
 
+    case e @ UnaryMinus(child, _) if isWideDecimal(child.dataType) =>
+      operand(child, input).flatMap {
+        case _: LiteralExpr => Left("negation of a literal")
+        case c => Right(WideDecimalUnaryExpr(c, abs = false, e.dataType.asInstanceOf[DecimalType]))
+      }
     case e @ UnaryMinus(child, failOnError) =>
       compile(child, input).flatMap {
         case _: LiteralExpr => Left("negation of a literal")
@@ -417,6 +422,11 @@ object ExpressionCompiler {
     // Per-partition prefix plus a running row number; state lives in the node, per task.
     case _: MonotonicallyIncreasingID => Right(MonotonicIdExpr())
 
+    case e @ Abs(child, _) if isWideDecimal(child.dataType) =>
+      operand(child, input).flatMap {
+        case _: LiteralExpr => Left("abs of a literal")
+        case c => Right(WideDecimalUnaryExpr(c, abs = true, e.dataType.asInstanceOf[DecimalType]))
+      }
     case e @ Abs(child, failOnError) =>
       numericChild(child, input, "abs").map(c => AbsExpr(c, ansi = failOnError && c.vecType != VecType.FLOAT64, e.origin.context))
     case UnaryPositive(child) => compile(child, input)
@@ -893,6 +903,8 @@ object ExpressionCompiler {
   private def decimalCast(c: Cast, input: Seq[Attribute]): Result = {
     val from = c.child.dataType
     val to = c.dataType
+    if (isWideDecimal(from) || isWideDecimal(to)) wideDecimalCast(c, input)
+    else {
     val supportedPair = (from, to) match {
       case (_: DecimalType, _: DecimalType) => true
       case (IntegerType | LongType | DoubleType, _: DecimalType) => true
@@ -905,6 +917,29 @@ object ExpressionCompiler {
     else compile(c.child, input).flatMap {
       case _: LiteralExpr => Left("cast of a literal")
       case child => Right(DecimalCastExpr(child, from, to, c.evalMode == EvalMode.ANSI, c.origin.context))
+    }
+    }
+  }
+
+  /**
+   * A cast with a wide decimal on either side (#258): decimal to decimal at any width, int / long /
+   * date / double to a wide decimal, a wide decimal to double / long / int / string. A string source
+   * is refused (Spark's `Decimal.fromString` rules are the next step), as is `try_cast`.
+   */
+  private def wideDecimalCast(c: Cast, input: Seq[Attribute]): Result = {
+    val from = c.child.dataType
+    val to = c.dataType
+    val supportedPair = (from, to) match {
+      case (_: DecimalType, _: DecimalType) => TypeMapping.hasLane(from) && TypeMapping.hasLane(to)
+      case (IntegerType | LongType | DateType | DoubleType, t: DecimalType) => TypeMapping.hasLane(t)
+      case (f: DecimalType, DoubleType | LongType | IntegerType | StringType) => TypeMapping.hasLane(f)
+      case _ => false
+    }
+    if (!supportedPair) Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
+    else if (c.evalMode == EvalMode.TRY) Left("try_cast not supported")
+    else operand(c.child, input).flatMap {
+      case _: LiteralExpr => Left("cast of a literal")
+      case child => Right(WideDecimalCastExpr(child, from, to, c.evalMode == EvalMode.ANSI, c.origin.context))
     }
   }
 

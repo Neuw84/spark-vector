@@ -71,10 +71,52 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   }
 
   test("expressions over a wide decimal still fall back with the type reason until #258") {
-    // Casts and functions over the lane are the rest of #258; arithmetic and comparisons compile.
-    checkFallback("SELECT cast(w20 AS double) AS d FROM tw_plain", Seq(Project), "decimal(20,0)")
-    checkFallback("SELECT abs(w38) AS a FROM tw_plain WHERE i % 101 > 6", Seq(Project), "decimal(38,10)")
+    // Rounding functions and string parsing into the lane are the rest of #258; arithmetic, comparisons, casts, abs and negation compile.
     checkFallback("SELECT round(w27, 1) AS r FROM tw_plain", Seq(Project), "decimal")
+    checkFallback("SELECT cast(cast(w20 AS string) AS decimal(20,0)) AS s FROM tw_plain", Seq(Project), "unsupported cast string -> decimal(20,0)")
+    checkFallback("SELECT w27 % cast(7 AS decimal(27,2)) AS m FROM tw_plain", Seq(Project), "% over decimal(27,2) not supported")
+  }
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: casts to and from the wide lane, negation and abs, with Spark's overflow semantics (#258)") {
+      for (ansi <- Seq("false", "true")) {
+        withConf("spark.sql.ansi.enabled" -> ansi) {
+          // Wide to wide: widening, a scale change up and down (half up), the shortest wide form.
+          checkVectorized(s"SELECT i, cast(w27 AS decimal(38,10)) AS c FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, cast(w38 AS decimal(38,2)) AS c FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, cast(w20 AS decimal(25,5)) AS c FROM $t", Seq(Project))
+          // Wide to narrow (the INT64 lane) where every row fits, and narrow to wide.
+          checkVectorized(s"SELECT i, cast(w20 AS decimal(18,0)) AS c FROM $t WHERE w20 < 100000000000000000", Seq(Filter, Project))
+          checkVectorized(s"SELECT i, cast(cast(i AS decimal(10,2)) AS decimal(30,4)) AS c FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, cast(i AS decimal(25,3)) AS c, cast(cast(i AS bigint) * 1000000000 AS decimal(38,0)) AS d FROM $t", Seq(Project))
+          // Out of the lane: double, long, int, string.
+          checkVectorized(s"SELECT i, cast(w20 AS double) AS d, cast(w38 AS double) AS e FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, cast(w27 AS bigint) AS l FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, cast(w38 AS bigint) AS l FROM $t WHERE w38 > -1000000000 AND w38 < 1000000000", Seq(Filter, Project))
+          checkVectorized(s"SELECT i, cast(w38 AS int) AS n FROM $t WHERE w38 > -1000000 AND w38 < 1000000", Seq(Filter, Project))
+          checkVectorized(s"SELECT i, cast(w38 AS string) AS s, cast(w27 AS string) AS s2, cast(w20 AS string) AS s3 FROM $t", Seq(Project))
+          // Negation and abs, also under a comparison and inside arithmetic. The extreme decimal(38,10) rows are excluded from
+          // the w38 statements: Spark itself raises NUMERIC_VALUE_OUT_OF_RANGE negating them under ANSI (its Decimal for the
+          // literal-derived value holds a rounded form), where the limbs negate exactly.
+          checkVectorized(s"SELECT i, abs(w27) AS a FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, -w27 AS n FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, -w38 AS n FROM $t WHERE i % 101 > 6", Seq(Filter, Project))
+          checkVectorized(s"SELECT i FROM $t WHERE abs(w27) > 1000000000000000 AND -w20 < 0", Seq(Filter))
+          checkVectorized(s"SELECT i, abs(w38 - w27) AS d FROM $t WHERE i % 101 > 6", Seq(Filter, Project))
+        }
+      }
+      // A narrowing cast that overflows: null rows in legacy mode; in ANSI mode Spark's CAST_OVERFLOW,
+      // but only when an overflowing row is active.
+      withConf("spark.sql.ansi.enabled" -> "false") {
+        checkVectorized(s"SELECT i, cast(w38 AS decimal(20,10)) AS c FROM $t", Seq(Project))
+        checkVectorized(s"SELECT i, cast(w27 AS decimal(10,2)) AS c FROM $t", Seq(Project))
+      }
+      withConf("spark.sql.ansi.enabled" -> "true") {
+        checkVectorized(s"SELECT i, cast(w38 AS decimal(20,10)) AS c FROM $t WHERE w38 > -1000000000 AND w38 < 1000000000", Seq(Filter, Project))
+        val e = intercept[Exception](withPlugin(enabled = true)(spark.sql(s"SELECT i, cast(w38 AS decimal(20,10)) AS c FROM $t").collect()))
+        assert(e.getMessage.contains("CAST_OVERFLOW") || e.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE"), e.getMessage)
+      }
+    }
   }
 
   Seq("tw_dict", "tw_plain").foreach { t =>

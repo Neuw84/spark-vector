@@ -71,8 +71,8 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT i, arr[0] AS a0 FROM nested", Seq(Project), "array element access")
     checkFallback("SELECT i, mp['k'] AS k FROM nested", Seq(Project), "map value access")
     checkFallback("SELECT st, count(*) AS n FROM nested GROUP BY st", Seq(classOf[VectorHashAggregateExec]), "unsupported column type struct")
-    // Arithmetic over the wide lane compiles since #258; a function over it still names the type.
-    checkFallback("SELECT abs(wide) AS w FROM nested", Seq(Project), "unsupported type decimal(38,4) for wide")
+    // Arithmetic, casts and abs over the wide lane compile since #258; a rounding function over it still falls back.
+    checkFallback("SELECT round(wide, 1) AS w FROM nested", Seq(Project), "decimal(38,4)")
   }
 
   test("struct fields are read from the struct vector's children, through chains, with the struct's nulls") {

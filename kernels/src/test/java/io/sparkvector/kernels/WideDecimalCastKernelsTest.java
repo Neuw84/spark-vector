@@ -146,7 +146,8 @@ class WideDecimalCastKernelsTest {
       MemorySegment ints = ArrowLayout.allocateData(arena, VecType.INT32, n);
       MemorySegment intInvalid = ArrowLayout.allocateBitmap(arena, n);
       WideDecimalCastKernels.toInt(wide, scale, n, ints, intInvalid);
-      VectorBuffers strings = WideDecimalCastKernels.toUtf8(arena, wide, scale, n);
+      VectorBuffers strings = WideDecimalCastKernels.toUtf8(arena, wide, scale, n, false);
+      VectorBuffers plain = WideDecimalCastKernels.toUtf8(arena, wide, scale, n, true);
       MemorySegment neg = ArrowLayout.allocateData(arena, VecType.DECIMAL128, n);
       WideDecimalCastKernels.negate(wide, n, neg);
       MemorySegment abs = ArrowLayout.allocateData(arena, VecType.DECIMAL128, n);
@@ -161,7 +162,9 @@ class WideDecimalCastKernelsTest {
         assertEquals(trunc.bitLength() >= 32, Bitmap.isSet(intInvalid, i), "int range at " + i);
         assertEquals(trunc.intValue(), ints.getAtIndex(VectorBuffers.LE_INT, i), "int at " + i);
         int s = strings.offsets().getAtIndex(VectorBuffers.LE_INT, i), e = strings.offsets().getAtIndex(VectorBuffers.LE_INT, i + 1);
-        assertEquals(d.toPlainString(), new String(strings.data().asSlice(s, e - s).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE), StandardCharsets.US_ASCII), "string at " + i);
+        assertEquals(d.toString(), new String(strings.data().asSlice(s, e - s).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE), StandardCharsets.US_ASCII), "string at " + i);
+        int ps = plain.offsets().getAtIndex(VectorBuffers.LE_INT, i), pe = plain.offsets().getAtIndex(VectorBuffers.LE_INT, i + 1);
+        assertEquals(d.toPlainString(), new String(plain.data().asSlice(ps, pe - ps).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE), StandardCharsets.US_ASCII), "plain string at " + i);
         assertEquals(wv[i].negate(), Decimal128.toBigInteger(Decimal128.hi(neg, i), Decimal128.lo(neg, i)), "negate at " + i);
         assertEquals(wv[i].abs(), Decimal128.toBigInteger(Decimal128.hi(abs, i), Decimal128.lo(abs, i)), "abs at " + i);
       }
