@@ -1078,3 +1078,43 @@ suite passes at all three widths. Two things worth re-measuring on AVX-512 befor
 defaults: `VectorMask.fromLong` is a single `kmov` there, so the broadcast-AND-compare mask
 construction chosen for NEON may be the slower option; and the masked-reduction threshold of 8
 groups is a guess from lane count, not a measurement.
+
+## Hybrid planning study (#279)
+
+Running Comet's native operator instead of ours where it is measurably ahead pays the crossing twice
+-- our batch into Comet, Comet's batch back -- so the study starts with that price, measured on its
+own (`CrossingBenchmark`, JMH, in `benchmarks`; the Comet 1.0 jar on the classpath; JDK 25, x86-64,
+one thread). Into Comet is the real path (`CometBatchBridge.convert`: `ArrowCData` export through the
+C Data interface, Comet's `ArrowImporter`, the imported vectors released); back is
+`ColumnVectorAdapters.adapt` through the registered `CometVectorAdapter` over the Comet vectors a
+conversion produced.
+
+### The crossing cost
+
+Microseconds per batch at 8 columns, and nanoseconds per row per column (2 warm-up, 3 measured
+iterations of 1 s; the 4- and 16-column runs scale linearly with the column count and are omitted):
+
+| lane | into Comet, 4096 rows | into Comet, 8192 rows | back, 4096 rows | back, 8192 rows |
+|---|---:|---:|---:|---:|
+| INT64 (no validity) | 23.3 µs (0.71 ns) | 21.1 µs (0.32 ns) | 0.96 µs (0.029 ns) | 1.55 µs (0.024 ns) |
+| INT64, 10 % nulls | 22.8 µs (0.70 ns) | 24.3 µs (0.37 ns) | 1.13 µs (0.034 ns) | 1.93 µs (0.029 ns) |
+| FLOAT64 | 23.7 µs (0.72 ns) | 21.7 µs (0.33 ns) | 0.96 µs (0.029 ns) | 1.65 µs (0.025 ns) |
+| UTF8, 12-40 bytes | 25.7 µs (0.78 ns) | 23.9 µs (0.37 ns) | 1.10 µs (0.034 ns) | 1.94 µs (0.030 ns) |
+| UTF8 dictionary, 1000 values | 796 µs (24.3 ns) | 1359 µs (20.7 ns) | 1.10 µs (0.034 ns) | 2.00 µs (0.030 ns) |
+| decimal(12,2) on the INT64 lane | 97.7 µs (2.98 ns) | 160.5 µs (2.45 ns) | 14.1 µs (0.43 ns) | 32.8 µs (0.50 ns) |
+
+**Reading.** For a fixed-width lane and for plain strings the export is a pointer hand-over: the cost
+is per *column*, about 2.7-3 µs each (the C Data structs, the JNI import, the release), and does not
+grow with the rows -- 4096 and 8192 rows cost the same 21-25 µs for eight columns, which is why the
+per-row figure halves between them. The way back is zero-copy for those lanes: 0.1-0.25 µs per
+column. Two lanes pay per row. A dictionary-encoded string column is decoded on the way into Comet
+(its reader would decode it anyway): 20-25 ns per row per column, the price of a kernel pass, and the
+one crossing that dominates a swap -- TPC-DS's dictionary-heavy dimension columns cross at 8192 rows
+× 8 columns for 1.4 ms, more than most of our operators spend on such a batch. A decimal on the
+INT64 lane is widened to Arrow Decimal128 going in (2.5-3 ns per row per column) and narrowed back
+(0.43-0.5 ns), a copy each way.
+
+The rule the study applies: a swap candidate must beat ours by more than *twice* the crossing of the
+columns it touches -- for fixed-width lanes that is a few microseconds per batch and any real operator
+gap clears it; for dictionary strings it is ~45 ns per row per column, which only a large kernel gap
+clears; for INT64 decimals ~6 ns per row per column.

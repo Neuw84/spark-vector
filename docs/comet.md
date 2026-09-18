@@ -120,6 +120,14 @@ Comet's fallback reasons are read through its `ExtendedExplainInfo` and listed a
 ours, so an operator that one side left to Spark is never mistaken for a comparison. The times exclude
 the wait on children and the crossing between the engines; the crossing is measured on its own.
 
+**The measured crossing cost** (`CrossingBenchmark`, the table in `docs/results.md`, "Hybrid planning
+study"): into Comet, a fixed-width or plain-string column is a pointer hand-over of about 2.7-3 µs per
+column regardless of rows (0.3-0.7 ns per row per column at 4096-8192 rows); back is zero-copy at
+0.1-0.25 µs per column. A dictionary-encoded string column is decoded on the way in, 20-25 ns per row
+per column; an INT64-lane decimal is widened to 128 bits going in (2.5-3 ns per row per column) and
+narrowed back (0.4-0.5 ns). A swap of one operator for Comet's pays this twice, so it must beat ours
+by more than twice the crossing of the columns it touches.
+
 ## Limitations
 
 - Comet's `LargeVarCharVector` (64-bit offsets) is not adapted zero-copy; such columns fall back to
