@@ -378,14 +378,21 @@ that pin it.
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
   4096-row batches through `GatherKernels` (shared with the joins; `-1` indices pad outer joins). There is no spill; that is documented
   and the reason the config key exists.
-- `SortKernels.sortIndices` is an LSD sort over order-preserving unsigned 32-bit key passes, each
-  pass an `Arrays.sort` of `(key, position)` packed into a `long` (position in the low bits makes
-  the pass stable, so passes compose; null rows get a constant value key and a separate null pass).
-  int32/bool: one pass; int64/double: two; strings <= 8 bytes: three (length, then the two halves
-  of the zero-padded big-endian prefix, which is unsigned byte order); longer strings: a rank from
-  a stable merge sort. Doubles use Spark's total order (`-0.0 == 0.0`, NaN greatest, NaN == NaN),
-  strings `UTF8String`'s. It is primitive-array work, not Vector API; a SIMD sort network would be a
-  different kernel behind the same signature.
+- `SortKernels.sortIndices` is an LSD sort over order-preserving unsigned key passes; each pass is a
+  stable LSD *radix* sort of the current positions by a 32- or 64-bit key -- one counting sort per
+  8-bit digit, a digit whose histogram is a single bucket skipped, a pass whose keys are already in
+  order skipped whole -- with the keys carried alongside the positions through every scatter (#285;
+  before it each pass was an `Arrays.sort` of `(key, position)` packed into a `long`). Null rows get
+  a constant value key and a separate null pass. int32/bool: one 32-bit pass; int64/double: one
+  64-bit pass; strings <= 8 bytes: a length pass and a 64-bit pass over the zero-padded big-endian
+  prefix (unsigned byte order); longer strings: a rank from a stable merge sort; decimal128: four
+  32-bit passes. Doubles use Spark's total order (`-0.0 == 0.0`, NaN greatest, NaN == NaN), strings
+  `UTF8String`'s. What is lane-parallel: the key normalisation over the gathered key array (sign
+  flips, the descending inversion, the double total order through masks). What is not: the
+  histograms, the scatters and the gathers through the permutation -- at 1M random 64-bit keys the
+  scatters' random writes cost what the comparison sort did (`SortBenchmark`, docs/results.md); the
+  wins are 32-bit keys, low cardinality, dictionaries, short strings and multi-key sorts, and the
+  scratch is bounded by the run once the sort is chunked (#285 slice 2).
 - Oracle: `reference/SortReference` (stable comparator sort with Spark's rules). `SortKernelsTest`
   compares permutations for every type, direction, null ordering, multi-key combination, and the
   special doubles; `VectorSortSuite` compares against `SortExec` per partition and positionally on
@@ -657,7 +664,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 170 kernel tests, 270 Spark tests (242 without the Comet and Iceberg profiles;
+Current counts: 172 kernel tests, 270 Spark tests (242 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

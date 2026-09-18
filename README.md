@@ -372,10 +372,12 @@ Three more came out of profiling TPC-H rather than microbenchmarks (see
 `SortExec` over a columnar child becomes `VectorSortExec`: every batch of the partition is copied into
 operator-owned native memory (Spark lets the producer reuse a batch once the next one is requested),
 joined into one column per attribute, and a permutation is computed key by key, least significant
-first. Each pass maps the key to an order-preserving unsigned 32-bit value (`int32` and booleans in
-one pass, `int64` and doubles in two, strings of at most 8 bytes in three over their zero-padded
-big-endian prefix, longer strings through a rank from one stable merge sort) and sorts `(key,
-position)` packed into a `long` with `Arrays.sort`, so every pass is stable and the passes compose.
+first. Each pass maps the key to an order-preserving unsigned 32- or 64-bit value (`int32` and
+booleans in one pass, `int64` and doubles in one 64-bit pass, strings of at most 8 bytes in a length
+pass and a 64-bit pass over their zero-padded big-endian prefix, longer strings through a rank from
+one stable merge sort) and radix-sorts the positions by it, one counting sort per 8-bit digit with
+the uniform digits and the already-ordered passes skipped, so every pass is stable and the passes
+compose.
 Nulls take one final pass per key. The output is gathered through the permutation into Arrow vectors
 in batches of 4096 rows. Double ordering is Spark's (`-0.0 = 0.0`, NaN greatest and equal to itself),
 strings compare as unsigned bytes like `UTF8String`.

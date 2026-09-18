@@ -144,6 +144,74 @@ class SortKernelsTest {
   }
 
   @Test
+  void radixPassesMatchTheReferenceOnLargeAndSkewedInputs() {
+    Random rnd = new Random(11);
+    try (Arena arena = Arena.ofConfined()) {
+      int n = 100_003; // an awkward length, several digit passes per key deep
+      boolean[] nulls = TestData.nulls(rnd, n, 0.02);
+      checkAllOrders(TestData.ints(arena, rnd, n, nulls), n, "int32 large");
+      checkAllOrders(TestData.longs(arena, rnd, n, nulls), n, "int64 large");
+      checkAllOrders(TestData.doubles(arena, rnd, n, nulls), n, "float64 large");
+      // Low cardinality: most digits of the key have a single bucket and are skipped; ties keep
+      // their input order (the reference is stable).
+      int[] small = new int[n];
+      long[] smallLong = new long[n];
+      for (int i = 0; i < n; i++) {
+        small[i] = rnd.nextInt(5) - 2;
+        smallLong[i] = (rnd.nextInt(3) - 1) * 4_000_000_000L; // straddles the 32-bit halves
+      }
+      checkAllOrders(ArrowLayout.ofInts(arena, small, nulls), n, "int32 low cardinality");
+      checkAllOrders(ArrowLayout.ofLongs(arena, smallLong, null), n, "int64 low cardinality");
+      // Presorted and reverse inputs, every key equal, and a single distinct value with nulls.
+      int[] sorted = new int[n];
+      int[] reverse = new int[n];
+      int[] constant = new int[n];
+      for (int i = 0; i < n; i++) {
+        sorted[i] = i - n / 2;
+        reverse[i] = n / 2 - i;
+        constant[i] = 42;
+      }
+      checkAllOrders(ArrowLayout.ofInts(arena, sorted, null), n, "int32 presorted");
+      checkAllOrders(ArrowLayout.ofInts(arena, reverse, null), n, "int32 reverse");
+      checkAllOrders(ArrowLayout.ofInts(arena, constant, nulls), n, "int32 constant");
+    }
+  }
+
+  @Test
+  void equalKeysKeepInputOrderAcrossEveryPass() {
+    Random rnd = new Random(13);
+    try (Arena arena = Arena.ofConfined()) {
+      int n = 5000;
+      // Keys drawn from a small set so that every pass sees long runs of ties; the sort must
+      // return them in input order, which is what makes the later (more significant) passes
+      // correct at all.
+      long[] longs = new long[n];
+      double[] doubles = new double[n];
+      String[] strings = new String[n];
+      for (int i = 0; i < n; i++) {
+        longs[i] = (rnd.nextInt(4) - 2) * 3_000_000_000L;
+        doubles[i] = new double[] {-0.0, 0.0, 1.5, Double.NaN, -2.25}[rnd.nextInt(5)];
+        strings[i] = new String[] {"a", "ab", "b", "", "abcdefgh", null}[rnd.nextInt(6)];
+      }
+      VectorBuffers[] keys = {
+        ArrowLayout.ofLongs(arena, longs, null), ArrowLayout.ofDoubles(arena, doubles, null), ArrowLayout.ofStrings(arena, strings)
+      };
+      for (VectorBuffers key : keys) {
+        for (boolean asc : new boolean[] {true, false}) {
+          int[] order = SortKernels.sortIndices(new VectorBuffers[] {key}, new boolean[] {asc}, new boolean[] {true}, n);
+          for (int j = 1; j < n; j++) {
+            int a = order[j - 1];
+            int b = order[j];
+            if (SortReference.compareKey(key, a, b, !asc, true) == 0) {
+              assertTrue(a < b, "ties in input order at " + j + " (" + key.type() + ", asc=" + asc + ")");
+            }
+          }
+        }
+      }
+    }
+  }
+
+  @Test
   void multipleKeysWithMixedDirections() {
     Random rnd = new Random(3);
     try (Arena arena = Arena.ofConfined()) {
