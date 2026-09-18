@@ -16,7 +16,7 @@ import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, HashedRelationBroadcastMode, HashJoin, ShuffledHashJoinExec}
+import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, HashedRelationBroadcastMode, HashJoin, ShuffledHashJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.execution.vector.HashedRelationAccess
 import org.apache.spark.sql.types.{DataType, DecimalType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -969,6 +969,29 @@ object VectorJoinPlanner {
     else {
       val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
       check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = true).map(_ => v)
+    }
+  }
+
+  /**
+   * A sort-merge join as our merge join (#286): Spark's contract kept (clustered on the keys, both
+   * sides sorted by them), every join type Spark's operator supports, skew joins included (the
+   * partitions are already split). Keys and the condition must compile; every output column must
+   * have a lane (the pair gather has no pass-through for a struct yet).
+   */
+  def planMergeJoin(j: SortMergeJoinExec): Either[String, VectorSortMergeJoinExec] = {
+    if (j.leftKeys.isEmpty) Left("join without equi-join keys")
+    else {
+      val typeOk: Either[String, Unit] = j.joinType match {
+        case _: InnerLike | LeftOuter | RightOuter | FullOuter | LeftSemi | LeftAnti | _: ExistenceJoin => Right(())
+        case other => Left(s"join type $other not supported")
+      }
+      typeOk.flatMap { _ =>
+        val keyFailures = j.leftKeys.flatMap(k => compileKey(k, j.left.output).left.toOption) ++ j.rightKeys.flatMap(k => compileKey(k, j.right.output).left.toOption)
+        val laneless = (j.left.output ++ j.right.output).filterNot(a => TypeMapping.hasLane(a.dataType))
+        if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))
+        else if (laneless.nonEmpty) Left(s"unsupported column type ${laneless.head.dataType.simpleString} for ${laneless.head.name}")
+        else j.condition.map(c => compileCondition(c, j.left.output ++ j.right.output).map(_ => ())).getOrElse(Right(()))
+      }.map(_ => VectorSortMergeJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.left, j.right))
     }
   }
 

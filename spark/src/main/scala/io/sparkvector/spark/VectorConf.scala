@@ -28,6 +28,7 @@ object VectorConf {
   val BroadcastNestedLoopJoinEnabled = "spark.vector.exec.broadcastNestedLoopJoin.enabled"
   val ShuffledHashJoinEnabled = "spark.vector.exec.shuffledHashJoin.enabled"
   val SortMergeJoinEnabled = "spark.vector.exec.sortMergeJoin.enabled"
+  val SortMergeJoinMode = "spark.vector.exec.sortMergeJoin.mode"
   val JoinMaxBuildSize = "spark.vector.join.maxBuildSize"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   val StrictFloatingPoint = "spark.vector.exec.strictFloatingPoint"
@@ -84,7 +85,17 @@ object VectorConf {
    * `spark.vector.join.maxBuildSize` (#10). Opt-in: it trades Spark's streaming merge for a per-task
    * hash table, a different memory profile.
    */
-  def sortMergeJoinEnabled(conf: SQLConf): Boolean = bool(conf, SortMergeJoinEnabled, default = false)
+  def sortMergeJoinEnabled(conf: SQLConf): Boolean = sortMergeJoinMode(conf) == "hash"
+  /**
+   * What becomes of SortMergeJoinExec (#286): `off` leaves it to Spark; `hash` re-expresses it as our
+   * shuffled hash join under the statistics rule above (the boolean flag, kept for compatibility,
+   * means `hash`); `merge` plans our order-preserving merge join over the sorted inputs. `auto` (#287)
+   * is not decided yet and reads as `off`.
+   */
+  def sortMergeJoinMode(conf: SQLConf): String = {
+    val explicit = conf.getConfString(SortMergeJoinMode, "").trim.toLowerCase
+    if (explicit.nonEmpty) explicit else if (bool(conf, SortMergeJoinEnabled, default = false)) "hash" else "off"
+  }
   /**
    * Largest build side (bytes, size strings like `512m` accepted) a hash-style join converts for (#86);
    * the joins hold the build side in memory per task. Default: a per-core share of the off-heap

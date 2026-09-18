@@ -443,6 +443,23 @@ that pin it.
   column types for the same reason: left to Spark over columnar children it runs the concatenating
   columnar `UnionExec`. Run the TPC-DS harness (`run-tpcds.sh`, SF1 in scratch, ~5 minutes) after any
   change to an operator's output contract.
+- There is a merge join (#286, section 3.6b): `VectorSortMergeJoinExec` under
+  `spark.vector.exec.sortMergeJoin.mode=merge` (`off` | `hash` -- the rewrite below, what the boolean flag
+  means -- | `merge`; `auto` is #287). Spark's contract is kept (clustered distribution, both children
+  sorted by the keys ascending, the preserved side's ordering out), so the sorts below stay and no
+  pre-pass, build side or statistics are involved: the rule's `merge` case plans it directly
+  (`VectorJoinPlanner.planMergeJoin`: keys and condition compile, every column a lane, any SMJ join
+  type, skew joins included). `VectorSortMergeJoinIterator` streams its first input and buffers the
+  second run by run (`RunKernels.boundaries` over the sorted keys -- the lane-parallel part; a run at a
+  batch edge continues into the next batch while `RunMerge.compareKeys` says the key holds; the run is
+  copied into its own arena with a matched bitmap for the outer types), walks the streamed batch run by
+  run (a copy per batch too -- both copies are the known costs, borrowing from the live batch is the
+  optimisation left), and emits equal runs' cross products in Spark's order -- streamed row, then the
+  buffered rows; under a condition each streamed row's survivors then its pad -- in 8192-pair chunks
+  through `ArrowOutput.gather` (`-1` pads). A right outer join runs the iterator with the sides
+  swapped (Spark streams the preserved side, so its output is in right order) and the gather lays the
+  columns back in left ++ right order. Null keys never match. Tested positionally against Spark
+  (`VectorSortMergeJoinSuite`): the hash join suites compare row sets, this one row order.
 - `SortMergeJoinExec` is re-expressed as `VectorShuffledHashJoinExec` under the opt-in
   `spark.vector.exec.sortMergeJoin.enabled` (#10): `VectorJoinPlanner.sortMergeBuildSide` picks the smaller
   side by `estimatedBuildSize` (both sides must have statistics -- without AQE they do not -- and the
@@ -681,7 +698,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 271 Spark tests (243 without the Comet and Iceberg profiles;
+Current counts: 176 kernel tests, 276 Spark tests (248 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
