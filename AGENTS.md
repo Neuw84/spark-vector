@@ -697,6 +697,15 @@ the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers eit
 
 ## 7. Known gaps
 
+- Iceberg merge-on-read reads (#261): the delete cost is a fixed per-batch price paid inside Iceberg's
+  reader (`buildRowIdMapping`, the per-task position index) by both engines, so our margin over Spark
+  shrinks on deleted tables rather than growing; equality deletes are evaluated row-at-a-time by the
+  reader and are the one shape where `vector` loses the pure-merge probe. The lever would be taking
+  the position-filtered batch and applying the equality-delete set as our own anti-join, which Iceberg
+  1.11's reader does not expose. Q1 under `vector` has shown a transient 20x (two or three consecutive
+  8 s iterations inside one JVM, then recovery; the partial aggregate's kernel time balloons) in two of
+  sixteen JVMs and never under JFR -- a JIT deoptimisation signature to catch with `-XX:+PrintCompilation`.
+
 - Iceberg `MERGE INTO` itself is not accelerated: `MergeRows` and the write are Spark's (#21). The
   project above the target scan (`monotonically_increasing_id()` as `MonotonicIdExpr`, plus the struct
   `_partition` metadata column) is no longer refused for the struct since #19. Reads over the merged

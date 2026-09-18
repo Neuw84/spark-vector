@@ -134,6 +134,16 @@ merge-on-read" section lists, per query, every variant against every configurati
 versus `spark` on the same variant and versus the same configuration on `plain` (what the deletes
 cost that engine), plus the live/physical share. The numbers themselves are #261 (v2) and #262 (v3).
 
+What the v2 study found (`docs/results.md`, "Iceberg merge-on-read, v2"): the deletes cost both
+engines a fixed price per batch that is flat in the delete share -- Iceberg's reader builds the
+position index per task and the `int[] rowIdMapping` per batch before either engine sees a row -- so
+`vector`'s margin over `spark` shrinks on deleted tables (1.38x to 1.0-1.16x on the pure-merge probe,
+4.4x to 3.1-4.0x on Q1) instead of growing; scattered and clustered deletes cost the same; equality
+deletes are evaluated row-at-a-time by the reader and cost 3-5x, the one shape where `vector` loses a
+probe; the mapping-to-bitmap conversion and the validity copy on our side do not register in the
+profiles, and the selection forwarding threshold is not a lever. Comet's native scan, which applies
+the deletes inside the Parquet decoder, was not measured on that host.
+
 Wide decimals (`decimal(p > 18)`) from either reader become a DECIMAL128 lane (#257). Iceberg's
 reader keeps them as a `FixedSizeBinaryVector` of big-endian bytes -- as many per value as the
 precision needs, twelve for `decimal(27,2)` -- which the adapter converts limb by limb (a dictionary
