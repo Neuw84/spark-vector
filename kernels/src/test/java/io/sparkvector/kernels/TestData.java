@@ -39,6 +39,34 @@ final class TestData {
   }
 
   /** Doubles including NaN, infinities and signed zeros to exercise NaN-safe ordering. */
+  /**
+   * Random 128-bit unscaled values: a mix of small values, values straddling the limb boundary,
+   * and the extremes (+-(10^38 - 1), -2^127, Long.MIN_VALUE in either limb).
+   */
+  static SegmentVectorBuffers decimal128s(Arena arena, Random rnd, int n, boolean[] nulls) {
+    java.math.BigInteger[] v = new java.math.BigInteger[n];
+    for (int i = 0; i < n; i++) {
+      v[i] = randomDecimal128(rnd);
+    }
+    return ArrowLayout.ofDecimal128(arena, v, nulls);
+  }
+
+  static final java.math.BigInteger MAX_DECIMAL38 = java.math.BigInteger.TEN.pow(38).subtract(java.math.BigInteger.ONE);
+
+  static java.math.BigInteger randomDecimal128(Random rnd) {
+    switch (rnd.nextInt(12)) {
+      case 0: return MAX_DECIMAL38;
+      case 1: return MAX_DECIMAL38.negate();
+      case 2: return java.math.BigInteger.ONE.shiftLeft(127).negate();
+      case 3: return java.math.BigInteger.valueOf(Long.MIN_VALUE);
+      case 4: return java.math.BigInteger.valueOf(Long.MIN_VALUE).shiftLeft(64);
+      case 5: return java.math.BigInteger.valueOf(Long.MAX_VALUE).add(java.math.BigInteger.ONE);
+      case 6: return java.math.BigInteger.ZERO;
+      case 7: return java.math.BigInteger.valueOf(rnd.nextInt(2000) - 1000);
+      default: return new java.math.BigInteger(rnd.nextInt(127), rnd).multiply(java.math.BigInteger.valueOf(rnd.nextBoolean() ? 1 : -1));
+    }
+  }
+
   static SegmentVectorBuffers doubles(Arena arena, Random rnd, int n, boolean[] nulls) {
     double[] v = new double[n];
     for (int i = 0; i < n; i++) {

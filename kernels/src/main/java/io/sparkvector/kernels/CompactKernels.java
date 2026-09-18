@@ -91,6 +91,7 @@ public final class CompactKernels {
       case INT64 -> compactInt64(in.data(), n, selection, outData);
       case FLOAT64 -> compactFloat64(in.data(), n, selection, outData);
       case BOOL -> compactBits(in.data(), n, selection, outData, outCount);
+      case DECIMAL128 -> compactInt128(in.data(), n, selection, outData);
       default -> throw new IllegalArgumentException("not fixed width: " + type);
     }
     if (in.validity() != null) {
@@ -98,6 +99,33 @@ public final class CompactKernels {
         throw new IllegalArgumentException("input has nulls but no output validity given");
       }
       compactBits(in.validity(), n, selection, outValidity, outCount);
+    }
+  }
+
+  /**
+   * The 16-byte lane has no species: a fully selected word is one bulk copy, anything else walks
+   * the set bits and moves one value (two limbs) per survivor.
+   */
+  static void compactInt128(MemorySegment data, int n, MemorySegment sel, MemorySegment out) {
+    int o = 0;
+    int words = Bitmap.wordsFor(n);
+    for (int w = 0; w < words; w++) {
+      long word = Bitmap.wordAt(sel, w, n);
+      if (word == 0L) {
+        continue;
+      }
+      int base = w << 6;
+      int limit = Math.min(64, n - base);
+      if (word == Bitmap.lowBits(limit)) {
+        MemorySegment.copy(data, (long) base << 4, out, (long) o << 4, (long) limit << 4);
+        o += limit;
+        continue;
+      }
+      while (word != 0L) {
+        int i = base + Long.numberOfTrailingZeros(word);
+        word &= word - 1;
+        Decimal128.copy(data, i, out, o++);
+      }
     }
   }
 

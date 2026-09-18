@@ -391,6 +391,7 @@ public final class ScalarReference {
       case FLOAT64 -> src.getDouble(i);
       case BOOL -> src.getBoolean(i);
       case UTF8 -> src.getString(i);
+      case DECIMAL128 -> src.getDecimal128(i);
     };
   }
 
@@ -577,6 +578,7 @@ public final class ScalarReference {
         case INT64 -> outData.set(VectorBuffers.LE_LONG, (long) o << 3, in.getLong(i));
         case FLOAT64 -> outData.set(VectorBuffers.LE_DOUBLE, (long) o << 3, in.getDouble(i));
         case BOOL -> Bitmap.setTo(outData, o, in.getBoolean(i));
+        case DECIMAL128 -> setDecimal128(outData, o, in.getDecimal128(i));
         default -> throw new IllegalArgumentException("not fixed width: " + in.type());
       }
       if (outValidity != null) {
@@ -713,6 +715,27 @@ public final class ScalarReference {
 
   // ---------------------------------------------------------------- gather
 
+  /**
+   * Writes a 128-bit value through its big-endian two's complement bytes, byte by byte, so the
+   * reference never touches the limb layout the kernels use.
+   */
+  public static void setDecimal128(MemorySegment out, int o, java.math.BigInteger v) {
+    byte[] be = v.toByteArray();
+    long base = (long) o << 4;
+    byte fill = v.signum() < 0 ? (byte) -1 : 0;
+    for (int k = 0; k < 16; k++) {
+      int fromEnd = 15 - k; // byte k of the big-endian 16-byte form counts from the most significant
+      int idx = be.length - 1 - fromEnd;
+      byte b = idx >= 0 ? be[idx] : fill;
+      out.set(java.lang.foreign.ValueLayout.JAVA_BYTE, base + (15 - k), b); // little-endian slot
+    }
+  }
+
+  /** Signed order of two 128-bit values via {@code BigInteger}. */
+  public static int compareDecimal128(VectorBuffers a, int i, VectorBuffers b, int j) {
+    return a.getDecimal128(i).compareTo(b.getDecimal128(j));
+  }
+
   /** {@code out[o] = in[idx[from + o]]}; {@code -1} is a null. */
   public static void gatherFixed(
       VectorBuffers in, int[] idx, int from, int to, MemorySegment outData, MemorySegment outValidity) {
@@ -725,6 +748,7 @@ public final class ScalarReference {
         case INT64 -> outData.set(VectorBuffers.LE_LONG, (long) o << 3, i < 0 ? 0L : in.getLong(i));
         case FLOAT64 -> outData.set(VectorBuffers.LE_DOUBLE, (long) o << 3, i < 0 ? 0.0 : in.getDouble(i));
         case BOOL -> Bitmap.setTo(outData, o, i >= 0 && in.getBoolean(i));
+        case DECIMAL128 -> setDecimal128(outData, o, i < 0 ? java.math.BigInteger.ZERO : in.getDecimal128(i));
         default -> throw new IllegalArgumentException("not fixed width: " + type);
       }
       if (outValidity != null) {

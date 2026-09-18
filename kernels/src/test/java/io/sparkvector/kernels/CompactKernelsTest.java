@@ -53,6 +53,10 @@ class CompactKernelsTest {
             Double.doubleToRawLongBits(actData.get(VectorBuffers.LE_DOUBLE, (long) o << 3)),
             t + " out " + o);
         case BOOL -> assertEquals(Bitmap.isSet(expData, o), Bitmap.isSet(actData, o), "bool out " + o);
+        case DECIMAL128 -> {
+          assertEquals(expData.get(VectorBuffers.LE_LONG, (long) o << 4), actData.get(VectorBuffers.LE_LONG, (long) o << 4), t + " lo out " + o);
+          assertEquals(expData.get(VectorBuffers.LE_LONG, ((long) o << 4) + 8), actData.get(VectorBuffers.LE_LONG, ((long) o << 4) + 8), t + " hi out " + o);
+        }
         default -> throw new IllegalStateException();
       }
     }
@@ -73,6 +77,7 @@ class CompactKernelsTest {
             checkFixed(arena, TestData.ints(arena, rnd, n, nulls), sel);
             checkFixed(arena, TestData.longs(arena, rnd, n, nulls), sel);
             checkFixed(arena, TestData.doubles(arena, rnd, n, nulls), sel);
+            checkFixed(arena, TestData.decimal128s(arena, rnd, n, nulls), sel);
             boolean[] bools = new boolean[n];
             for (int i = 0; i < n; i++) {
               bools[i] = rnd.nextBoolean();
