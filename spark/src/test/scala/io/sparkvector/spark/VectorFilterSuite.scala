@@ -119,10 +119,42 @@ class VectorFilterSuite extends VectorQuerySuite {
     assert(notLike.count() === 20000 - 2000 - 5200) // nulls drop; s3, s13, s23, s43 and s30..s39 minus the null s30 = 13 values
   }
 
+  test("multi-wildcard LIKE as a multi-token matcher (#264): the Q13/Q16 shapes, dictionary columns, NOT LIKE") {
+    // A comment-like column with the TPC-H phrases in several arrangements, and s ('s0'..'s49') is dictionary encoded.
+    spark.range(0, 20000).selectExpr(
+      "cast(id as int) as i",
+      "case when id % 11 = 0 then null " +
+        "     when id % 7 = 0 then concat('the special requests of ', id) " +
+        "     when id % 7 = 1 then concat('requests special ', id) " +
+        "     when id % 7 = 2 then concat('Customer Complaints ', id, ' Complaints') " +
+        "     when id % 7 = 3 then concat('specialrequests', id) " +
+        "     when id % 7 = 4 then concat('special ', id, ' request') " +
+        "     when id % 7 = 5 then concat('日本語 special 本 requests ', id) " +
+        "     else concat('nothing here ', id) end as c")
+      .repartition(2).write.mode("overwrite").parquet(newTempPath("filter/comments"))
+    spark.read.parquet(newTempPath("filter/comments")).createOrReplaceTempView("comments")
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%special%requests%'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c NOT LIKE '%special%requests%'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%Customer%Complaints%'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE 'the%requests%'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%special%request'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE 'requests%special%9'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%日%本%'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%%special%%requests%%'", Seq(Filter))
+    checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%s%s%s%s%'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s LIKE 's%1%'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s LIKE '%1%2%'", Seq(Filter))
+    checkVectorized("SELECT i, s FROM t WHERE s NOT LIKE 's%4%'", Seq(Filter))
+    val q13 = checkVectorized("SELECT i FROM comments WHERE c NOT LIKE '%special%requests%'", Seq(Filter))
+    // nulls drop (id % 11 = 0); the matches are id % 7 in {0, 3, 5} -- 'requests special' and 'special ... request' do not match.
+    val expected = (0 until 20000).count(id => id % 11 != 0 && !Set(0, 3, 5).contains(id % 7))
+    assert(q13.count() === expected)
+  }
+
   test("unsupported expressions fall back with a reason") {
-    // Inner wildcards are left as Like by the optimizer; 's%1' becomes Length(s) >= 2 AND ... which needs Length.
-    checkFallback("SELECT * FROM t WHERE s LIKE 's%1%2'", Seq(Filter), "unsupported expression")
-    checkFallback("SELECT * FROM t WHERE s LIKE 's_'", Seq(Filter), "unsupported expression")
+    checkFallback("SELECT * FROM t WHERE s LIKE 's_'", Seq(Filter), "`_` wildcard")
+    checkFallback("SELECT * FROM t WHERE s LIKE 's%_%2'", Seq(Filter), "`_` wildcard")
+    checkFallback("SELECT * FROM t WHERE s LIKE 's%\\%%2'", Seq(Filter), "escape character")
     checkFallback("SELECT * FROM t WHERE soundex(s) = 'S000'", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE s = reverse(s)", Seq(Filter), "unsupported expression")
     checkFallback("SELECT * FROM t WHERE startswith(s, s)", Seq(Filter), "string pattern is not a literal")
