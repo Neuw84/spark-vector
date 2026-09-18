@@ -76,13 +76,17 @@ that pin it.
   `Decimal(p <= 18)` as the unscaled value), FLOAT64, UTF8, and DECIMAL128 for `Decimal(p > 18)` --
   two little-endian `long` limbs per value (`kernels/Decimal128.java`), Arrow's `Decimal128` layout,
   a lane that deliberately has no SIMD path (#28: the emulated lane-pair variant was rejected). The
-  DECIMAL128 lane is carried (adapted, compacted, gathered, appended, emitted: #257) but no kernel
-  computes on it yet, so `TypeMapping.isSupported` (the kernels compute on it) is false for wide
-  decimals while `TypeMapping.hasLane` is true; operators that merely move a column (filter
-  compaction, projection pass-through, the sort's keys and payloads) ask `hasLane`, everything that reads one asks `isSupported`
-  until #258 (expressions) and #259 (keys, payloads, accumulators) flip it. Decimal result types
-  above 18 digits are still refused, which is why the TPC-H data is still generated with decimals
-  as doubles (`Decimal(12,2) * Decimal(12,2)` is 25 digits).
+  DECIMAL128 lane is carried (adapted, compacted, gathered, appended, emitted: #257) and computed on
+  by the wide-decimal kernels (#258: `CompareKernels` DECIMAL128, `WideDecimalKernels` for `+ - * /`,
+  `WideDecimalCastKernels` for casts, `abs` and negation -- two `long` limbs with an exact `BigInteger`
+  path for a row whose intermediate leaves 128 bits; JMH numbers in `docs/results.md`). The general
+  switches still tell the two apart: `TypeMapping.isSupported` (every kernel computes on it) is false
+  for wide decimals while `TypeMapping.hasLane` is true; operators that merely move a column (filter
+  compaction, projection pass-through, the sort's keys and payloads) ask `hasLane`, the expression
+  compiler routes a wide operand to the wide kernels explicitly (`isWideDecimal`), and everything
+  else that reads one (group keys, join keys, aggregate accumulators, the `round` family, `%`) asks
+  `isSupported` until #259 flips it. The TPC-H data is still generated with decimals as doubles
+  (`Decimal(12,2) * Decimal(12,2)` is 25 digits) because the aggregates do not accumulate the lane yet.
   Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the adapters +
   `ArrowOutput` + tests at all three vector widths.
 - Decimals ride on INT64 with the scale kept in the Spark type (`DecimalArithExpr`,
