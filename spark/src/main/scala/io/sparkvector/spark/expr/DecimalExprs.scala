@@ -486,3 +486,101 @@ final case class SpeculativeDecimalAddExpr(
 
 /** The narrow products as an INT64 lane (overflowing rows invalid) plus the escalated rows (ascending) and their exact products. */
 final class SpeculativeChecked(val lane: VectorBuffers, val rows: Array[Int], val exact: Array[java.math.BigInteger])
+
+/**
+ * Decimal `+ - * /` where an operand or the result is wider than the INT64 lane (#258): the operands
+ * are DECIMAL128 or INT64 lanes (Spark does not cast the operands of an arithmetic to one type) or
+ * literals, the result a DECIMAL128 lane at Spark's result type. The kernels compute exactly and apply
+ * Spark's `toPrecision(p, s, HALF_UP)`; a row that overflows the result precision is null in legacy
+ * mode and an error in ANSI mode, a zero divisor likewise -- for the active rows only, as in
+ * [[DecimalArithExpr]]. Narrow operands with a wide *declared* result keep #26's speculative INT64
+ * path; this node is used only when an input column is itself wide.
+ */
+final case class WideDecimalArithExpr(
+    op: ArithOp,
+    left: VectorExpr,
+    right: VectorExpr,
+    leftType: DecimalType,
+    rightType: DecimalType,
+    dataType: DecimalType,
+    ansi: Boolean,
+    queryContext: QueryContext)
+    extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(left, right)
+
+  private def operand(e: VectorExpr, buffers: VectorBuffers, shift: Int): WideDecimalKernels.Operand = e match {
+    case lit: LiteralExpr =>
+      val unscaled = lit.number match {
+        case b: java.math.BigInteger => b
+        case n => java.math.BigInteger.valueOf(n.longValue())
+      }
+      WideDecimalKernels.Operand.of(unscaled, shift)
+    case _ => WideDecimalKernels.Operand.of(buffers, shift)
+  }
+
+  private def validityOf(e: VectorExpr, buffers: VectorBuffers): MemorySegment = if (buffers == null) null else buffers.validity()
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val n = ctx.numRows
+    val data = ArrowLayout.allocateData(ctx.arena, VecType.DECIMAL128, n)
+    val overflow = ctx.bitmap()
+    val a = left match { case _: LiteralExpr => null; case e => e.eval(ctx) }
+    val b = right match { case _: LiteralExpr => null; case e => e.eval(ctx) }
+    var validity = combined(ctx, validityOf(left, a), validityOf(right, b))
+    val s1 = leftType.scale
+    val s2 = rightType.scale
+    var divisorZero: MemorySegment = null
+    op match {
+      case ArithOp.ADD | ArithOp.SUB =>
+        val working = math.max(s1, s2)
+        WideDecimalKernels.addSub(operand(left, a, working - s1), operand(right, b, working - s2), op == ArithOp.SUB,
+          working, dataType.scale, dataType.precision, n, data, overflow)
+      case ArithOp.MUL =>
+        WideDecimalKernels.mul(operand(left, a, 0), operand(right, b, 0), s1 + s2, dataType.scale, dataType.precision, n, data, overflow)
+      case ArithOp.DIV =>
+        divisorZero = ctx.bitmap()
+        WideDecimalKernels.divide(operand(left, a, 0), s1, operand(right, b, 0), s2, dataType.scale, dataType.precision, n, data, overflow, divisorZero)
+    }
+    if (divisorZero != null) {
+      val (_, zeroCount) = DecimalExprs.affected(ctx, divisorZero, validity)
+      if (zeroCount > 0) {
+        if (ansi) throw org.apache.spark.sql.vector.VectorErrors.divideByZero(queryContext)
+        validity = DecimalExprs.without(ctx, validity, divisorZero)
+      }
+    }
+    val (overflowRows, overflowCount) = DecimalExprs.affected(ctx, overflow, validity)
+    if (overflowCount > 0) {
+      if (ansi) {
+        // Recompute the offending value with Spark's own arithmetic for the error message.
+        val i = DecimalExprs.firstSet(overflowRows, n)
+        val x = Decimal(new java.math.BigDecimal(bigAt(left, a, i), s1))
+        val y = Decimal(new java.math.BigDecimal(bigAt(right, b, i), s2))
+        val v = op match {
+          case ArithOp.ADD => x + y
+          case ArithOp.SUB => x - y
+          case ArithOp.MUL => x * y
+          case ArithOp.DIV => x / y
+        }
+        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(v, dataType.precision, dataType.scale, queryContext)
+      }
+      validity = DecimalExprs.without(ctx, validity, overflow)
+    }
+    SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, n, validity, data)
+  }
+
+  private def bigAt(e: VectorExpr, buffers: VectorBuffers, i: Int): java.math.BigInteger = e match {
+    case lit: LiteralExpr => lit.number match { case bi: java.math.BigInteger => bi; case num => java.math.BigInteger.valueOf(num.longValue()) }
+    case _ if buffers.`type`() == VecType.DECIMAL128 => buffers.getDecimal128(i)
+    case _ => java.math.BigInteger.valueOf(buffers.getLong(i))
+  }
+
+  private def combined(ctx: EvalContext, a: MemorySegment, b: MemorySegment): MemorySegment =
+    if (a == null && b == null) null
+    else if (a == null) b
+    else if (b == null) a
+    else {
+      val v = ctx.bitmap()
+      BitmapKernels.combineValidity(a, b, v, ctx.numRows)
+      v
+    }
+}

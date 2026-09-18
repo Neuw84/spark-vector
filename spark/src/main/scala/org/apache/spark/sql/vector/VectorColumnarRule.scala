@@ -400,8 +400,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   private def projectReason(p: ProjectExec): Option[String] = {
     val failures = p.projectList.filterNot(VectorProjectExec.isPassThrough).flatMap { e =>
       val compiled = ExpressionCompiler.compile(e, p.child.output)
+      // A decimal output wider than 18 digits is a DECIMAL128 lane when its expression compiled (#258).
       val typeCheck =
-        if (TypeMapping.isSupported(e.dataType)) Right(())
+        if (TypeMapping.isSupported(e.dataType) || (e.dataType.isInstanceOf[org.apache.spark.sql.types.DecimalType] && TypeMapping.hasLane(e.dataType))) Right(())
         else Left(s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
       compiled.flatMap(_ => typeCheck).left.toOption.map(r => s"${e.sql}: $r")
     }

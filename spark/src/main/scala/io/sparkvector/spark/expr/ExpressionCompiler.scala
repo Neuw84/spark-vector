@@ -33,16 +33,19 @@ object ExpressionCompiler {
   }
 
   /**
-   * A comparison or IN operand of a wide decimal type: the bare column, or a non-null literal carrying
-   * its unscaled value as two limbs. No kernel computes on the lane yet, so anything else -- an
-   * arithmetic expression, a cast -- keeps its own reason (the rest of #258).
+   * An operand of a wide decimal type (a comparison, an IN, an arithmetic): the bare column, a
+   * non-null literal carrying its unscaled value as two limbs, or an expression that compiles onto the
+   * lane itself (a wide arithmetic); anything else -- a cast, a function -- keeps its own reason.
    */
   private def wideOperand(e: Expression, input: Seq[Attribute]): Result = e match {
     case Literal(null, dt) => Left(s"null literal of ${dt.simpleString}")
     case Literal(v, dt) => Right(LiteralExpr(v, dt))
     case a: AttributeReference => compileLaneColumn(a, input)
-    case other => Left(s"${other.prettyName} over ${other.dataType.simpleString} not supported")
+    case other => compile(other, input)
   }
+
+  /** An arithmetic operand: the wide path for a wide type, [[compile]] for a narrow one. */
+  private def wideArithmeticOperand(e: Expression, input: Seq[Attribute]): Result = operand(e, input)
 
   /** Compiles a comparison / IN operand: the wide-decimal path for wide types, [[compile]] otherwise. */
   private def operand(e: Expression, input: Seq[Attribute]): Result =
@@ -856,6 +859,17 @@ object ExpressionCompiler {
       mode: EvalMode.Value,
       e: Expression,
       input: Seq[Attribute]): Result = (l.dataType, r.dataType, e.dataType) match {
+    case (lt: DecimalType, rt: DecimalType, dt: DecimalType) if isWideDecimal(lt) || isWideDecimal(rt) || isWideDecimal(dt) =>
+      // A wide operand or result (#258): the DECIMAL128 kernels, exact with Spark's toPrecision. The
+      // operands are lanes (wide or narrow) or literals; a wide operand that is itself an expression
+      // compiles recursively through this same path.
+      if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
+      else if (!TypeMapping.hasLane(lt) || !TypeMapping.hasLane(rt) || !TypeMapping.hasLane(dt)) Left(s"decimal wider than ${DecimalType.MAX_PRECISION} digits in ${e.sql}")
+      else for {
+        le <- wideArithmeticOperand(l, input)
+        re <- wideArithmeticOperand(r, input)
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+      } yield WideDecimalArithExpr(op, le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context)
     case (lt: DecimalType, rt: DecimalType, dt: DecimalType) =>
       if (!TypeMapping.isSupported(dt)) Left(s"decimal result ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
       else if (!TypeMapping.isSupported(lt) || !TypeMapping.isSupported(rt)) Left(s"decimal operand wider than ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
