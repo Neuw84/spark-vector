@@ -760,6 +760,24 @@ public final class ScalarReference {
     }
   }
 
+
+  /**
+   * Spark's decimal arithmetic on one row, as BigDecimal: the exact result, then
+   * {@code toPrecision(precision, resultScale, HALF_UP)}. Returns the unscaled result, {@code null} when
+   * it overflows the precision; division by zero throws. Division is Spark's
+   * {@code Decimal./}: {@code divide(divisor, 38, HALF_UP)} first.
+   */
+  public static java.math.BigInteger decimalOp(char op, java.math.BigDecimal a, java.math.BigDecimal b, int resultScale, int precision) {
+    java.math.BigDecimal exact = switch (op) {
+      case '+' -> a.add(b);
+      case '-' -> a.subtract(b);
+      case '*' -> a.multiply(b);
+      case '/' -> a.divide(b, 38, java.math.RoundingMode.HALF_UP);
+      default -> throw new IllegalArgumentException("op " + op);
+    };
+    java.math.BigInteger u = exact.setScale(resultScale, java.math.RoundingMode.HALF_UP).unscaledValue();
+    return u.abs().compareTo(java.math.BigInteger.TEN.pow(precision)) < 0 ? u : null;
+  }
   /** Signed order of two 128-bit values via {@code BigInteger}. */
   public static int compareDecimal128(VectorBuffers a, int i, VectorBuffers b, int j) {
     return a.getDecimal128(i).compareTo(b.getDecimal128(j));

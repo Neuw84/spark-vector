@@ -67,11 +67,12 @@ class VectorProjectSuite extends VectorQuerySuite {
         .map(r => (r.getInt(0), String.valueOf(r.get(1)), String.valueOf(r.get(2)), String.valueOf(r.get(3)), String.valueOf(r.get(4)))).toSeq
     }
     assert(fields.sortBy(_._1) == expected.sortBy(_._1))
-    // Reading into an array, a map or a wide decimal is still refused, with the expression named; so is grouping by the struct.
+    // Reading into an array or a map is still refused, with the expression named; so is grouping by the struct.
     checkFallback("SELECT i, arr[0] AS a0 FROM nested", Seq(Project), "array element access")
     checkFallback("SELECT i, mp['k'] AS k FROM nested", Seq(Project), "map value access")
     checkFallback("SELECT st, count(*) AS n FROM nested GROUP BY st", Seq(classOf[VectorHashAggregateExec]), "unsupported column type struct")
-    checkFallback("SELECT wide + 1 AS w FROM nested", Seq(Project), "18 digits")
+    // Arithmetic over the wide lane compiles since #258; a function over it still names the type.
+    checkFallback("SELECT abs(wide) AS w FROM nested", Seq(Project), "unsupported type decimal(38,4) for wide")
   }
 
   test("struct fields are read from the struct vector's children, through chains, with the struct's nulls") {

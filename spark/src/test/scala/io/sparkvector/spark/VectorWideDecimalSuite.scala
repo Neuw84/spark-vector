@@ -71,11 +71,67 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   }
 
   test("expressions over a wide decimal still fall back with the type reason until #258") {
-    checkFallback("SELECT w38 + 1 AS x FROM tw_dict WHERE i % 101 > 6", Seq(Project), "exceeds 18 digits")
-    // A comparison over a wide *expression*: the arithmetic is not compiled yet, and says so.
-    checkFallback("SELECT i FROM tw_dict WHERE w27 + 1 > 0", Seq(Filter), "add over decimal(28,2) not supported")
+    // Casts and functions over the lane are the rest of #258; arithmetic and comparisons compile.
     checkFallback("SELECT cast(w20 AS double) AS d FROM tw_plain", Seq(Project), "decimal(20,0)")
     checkFallback("SELECT abs(w38) AS a FROM tw_plain WHERE i % 101 > 6", Seq(Project), "decimal(38,10)")
+    checkFallback("SELECT round(w27, 1) AS r FROM tw_plain", Seq(Project), "decimal")
+  }
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: wide decimal + - * / compile on the limbs with Spark's rounding, overflow and division semantics (#258)") {
+      for (ansi <- Seq("false", "true")) {
+        withConf("spark.sql.ansi.enabled" -> ansi) {
+          // Sums and differences: wide with wide at different scales, wide with a literal, wide with a narrow column.
+          checkVectorized(s"SELECT i, w38 + w27 AS s FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, w27 - w20 AS d FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, w38 - 1234567890123.0000000001 AS d FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, 100 + w20 AS s FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, w27 + cast(i AS decimal(10,2)) AS s FROM $t", Seq(Project))
+          // A sum whose exact scale Spark caps: decimal(38,10) + decimal(38,37) rounds half up to the result scale.
+          // A product whose exact scale Spark caps: decimal(38,10) * decimal(27,2) is decimal(38,6), rounded half up.
+          checkVectorized(s"SELECT i, w38 * w27 AS p FROM $t WHERE i % 101 > 6 AND w27 > -100 AND w27 < 100", Seq(Filter, Project))
+          // Products: the exact 128-bit product, and products Spark rounds; a wide result over a wide column and a literal.
+          checkVectorized(s"SELECT i, w27 * w20 AS p FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, w20 * 3 AS p FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, w38 * cast(i % 7 AS decimal(3,1)) AS p FROM $t", Seq(Project))
+          // Division: Spark's divide(38, HALF_UP) then toPrecision; w27 has zero rows (null divisor result in legacy mode).
+          checkVectorized(s"SELECT i, w38 / 3 AS q FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, w20 / w38 AS q FROM $t WHERE i % 101 <> 6", Seq(Filter, Project))
+          checkVectorized(s"SELECT i, w38 / w27 AS q FROM $t WHERE w27 <> 0", Seq(Filter, Project))
+          if (ansi == "false") checkVectorized(s"SELECT i, w38 / w27 AS q FROM $t", Seq(Project))
+          // Arithmetic under a comparison, and nested arithmetic.
+          checkVectorized(s"SELECT i FROM $t WHERE w27 + 1 > 0", Seq(Filter))
+          checkVectorized(s"SELECT i, (w38 + w27) * 2 - w20 AS x FROM $t", Seq(Project))
+        }
+      }
+      // Overflow: w27 * w27 is decimal(38,4) and the extreme rows overflow it -- null in legacy mode, an
+      // error in ANSI mode only when an overflowing row is active.
+      withConf("spark.sql.ansi.enabled" -> "false") {
+        checkVectorized(s"SELECT i, w27 * w27 AS p FROM $t", Seq(Project))
+        checkVectorized(s"SELECT i, w38 * w38 AS p FROM $t", Seq(Project))
+      }
+      withConf("spark.sql.ansi.enabled" -> "true") {
+        checkVectorized(s"SELECT i, w27 * w27 AS p FROM $t WHERE w27 > -1000000 AND w27 < 1000000", Seq(Filter, Project))
+        val e = intercept[Exception](withPlugin(enabled = true)(spark.sql(s"SELECT i, w38 * w38 AS p FROM $t").collect()))
+        assert(e.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE") || e.getMessage.contains("cannot be represented"), e.getMessage)
+        val z = intercept[Exception](withPlugin(enabled = true)(spark.sql(s"SELECT i, w38 / w27 AS q FROM $t").collect()))
+        assert(z.getMessage.contains("DIVIDE_BY_ZERO"), z.getMessage)
+      }
+    }
+  }
+
+  test("narrow operands with a wide declared result keep the speculative INT64 path under sum (#26 precedence)") {
+    import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Multiply, Subtract, Literal}
+    import org.apache.spark.sql.types.{Decimal, DecimalType}
+    val price = AttributeReference("l_extendedprice", DecimalType(15, 2))()
+    val discount = AttributeReference("l_discount", DecimalType(15, 2))()
+    val one = Literal(Decimal(1), DecimalType(1, 0))
+    val product = Multiply(price, Subtract(one, discount))
+    val speculative = io.sparkvector.spark.expr.ExpressionCompiler.speculativeDecimalArithmetic(product, Seq(price, discount))
+    assert(speculative.exists(_.exists(_.isInstanceOf[io.sparkvector.spark.expr.SpeculativeDecimalMulExpr])), speculative.toString)
+    // The same product as a projected value compiles onto the wide lane.
+    val projected = io.sparkvector.spark.expr.ExpressionCompiler.compile(product, Seq(price, discount))
+    assert(projected.exists(_.isInstanceOf[io.sparkvector.spark.expr.WideDecimalArithExpr]), projected.toString)
   }
 
   Seq("tw_dict", "tw_plain").foreach { t =>
@@ -148,7 +204,7 @@ class VectorWideDecimalSortSuite extends VectorQuerySuite {
     checkSorted("SELECT i % 3, w38, w27 FROM tws SORT BY i % 3, w38 DESC NULLS LAST", 2)
   }
 
-  test("a computed expression over a wide decimal is still not a sort key until #258") {
-    checkFallback("SELECT w38, i FROM tws SORT BY w38 * 2", Seq(Sort), "decimal")
+  test("a computed expression over a wide decimal is a sort key since #258") {
+    checkVectorized("SELECT w38, i FROM tws SORT BY w38 * 2", Seq(Sort))
   }
 }
