@@ -197,25 +197,57 @@ object CdcMergeRunner {
           spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.rollback_to_snapshot('${args.table}', ${baseline}L)")
           println(s"[cdc] restored $table to snapshot $baseline")
         }
+        spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.expire_snapshots(table => '${args.table}', " +
+          s"older_than => TIMESTAMP '${java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(60))}', retain_last => 1)").collect()
       } catch { case e: Exception => println(s"[cdc] WARNING: could not restore $table to $baseline: ${e.getMessage}") }
       try {
+        // A rolled-back merge leaves its data and delete files orphaned; at this scale that is
+        // gigabytes per run, and together with the merge's shuffle spill it can fill the disk.
+        // Expiring everything but the current snapshot deletes those files (the baseline's own
+        // files stay: the current snapshot references them). Untimed, like the rollback.
+        // The free space right after start-up: the level each merge's scratch must return to.
+        val freeAtStart = new File("/").getUsableSpace
+        def expireOrphans(): Unit = {
+          try spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.expire_snapshots(table => '${args.table}', " +
+            s"older_than => TIMESTAMP '${java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(60))}', retain_last => 1)").collect()
+          catch { case e: Exception => println(s"[cdc] WARNING: expire_snapshots failed: ${e.getMessage}") }
+          // Shuffle files live until the ContextCleaner sees their dependencies collected, which is
+          // asynchronous: wait for the disk to actually recover (a merge writes 15+ GiB of scratch,
+          // and unreclaimed runs stack up to a full disk -- measured). Untimed, like the rollback.
+          val target = freeAtStart - (4L << 30)
+          val deadline = System.nanoTime() + 180L * 1000 * 1000 * 1000
+          System.gc()
+          while (new File("/").getUsableSpace < target && System.nanoTime() < deadline) {
+            Thread.sleep(3000)
+            System.gc()
+          }
+          println(s"[cdc]   disk free: ${new File("/").getUsableSpace / (1L << 30)} GiB")
+        }
         def rollback(): Unit = {
           spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.rollback_to_snapshot('${args.table}', ${baseline}L)")
           val back = spark.table(table).count()
           require(back == live, s"rollback left $back rows, expected $live")
+          expireOrphans()
         }
+        expireOrphans() // files a previous aborted run may have left behind
         // MERGE executes eagerly inside spark.sql; the returned frame's plan is a CommandResultExec
         // wrapping the executed physical plan of the command (its read side is what the plugin can
-        // accelerate).
-        @volatile var mergePlan: Option[SparkPlan] = None
+        // accelerate). The stats are extracted immediately and the plan dropped: a retained plan
+        // pins the merge's shuffle files through its RDD lineage -- 15+ GiB per merge at this scale.
+        final case class MergeAccel(acceleratedOps: Int, operatorCount: Int, fallbacks: Seq[String], plan: String)
+        @volatile var mergeAccel: Option[MergeAccel] = None
         def mergeOnce(): Double = {
           val start = System.nanoTime()
           val df = spark.sql(MergeSql.format(table))
           val ms = (System.nanoTime() - start) / 1e6
-          mergePlan = Some(df.queryExecution.executedPlan match {
+          val plan = df.queryExecution.executedPlan match {
             case c: org.apache.spark.sql.execution.CommandResultExec => c.commandPhysicalPlan
             case p => p
-          })
+          }
+          val a = PlanAcceleration.fromPlan(plan)
+          mergeAccel = Some(MergeAccel(
+            a.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated), a.operatorCount,
+            a.fallbacks.map { case (n, r) => s"$n: $r" }.distinct, plan.treeString.take(4000)))
           ms
         }
 
@@ -236,15 +268,9 @@ object CdcMergeRunner {
         }
         val mergedRows = times.head._2
         require(times.map(_._2).distinct.size == 1, s"merge row counts diverged: ${times.map(_._2)}")
-        val (accelOps, opCount, fallbacks, planString) = mergePlan match {
-          case Some(p) =>
-            val a = PlanAcceleration.fromPlan(p)
-            (a.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated), a.operatorCount,
-              a.fallbacks.map { case (n, r) => s"$n: $r" }.distinct, p.treeString.take(4000))
-          case None => (0, 0, Seq("merge plan not captured"), "")
-        }
-        emit(Measurement("merge", "merge", times.map(_._1), mergedRows.toInt, checksumOf(spark, table), plan = planString,
-          acceleratedOps = accelOps, operatorCount = opCount, fallbacks = fallbacks,
+        val accel = mergeAccel.getOrElse(MergeAccel(0, 0, Seq("merge plan not captured"), ""))
+        emit(Measurement("merge", "merge", times.map(_._1), mergedRows.toInt, checksumOf(spark, table), plan = accel.plan,
+          acceleratedOps = accel.acceleratedOps, operatorCount = accel.operatorCount, fallbacks = accel.fallbacks,
           mergeSnapshotSummary = times.last._3))
 
         // 3. Reads over the merged state (the last timed merge's), then leave the table as we found it.
