@@ -738,6 +738,19 @@ the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers eit
   machine for the whole run: one that started mid-run moved `spark` Q1 from 1106 to 1451 ms.
 - Update `docs/results.md` tables from the report and keep the earlier phase tables for history.
   Speedups are always relative to plain Spark on the same dataset and session.
+- Per-operator attribution (#279): every results row carries `operatorTimes` -- one entry per plan
+  node that ours or Comet's native engine ran: class, engine, output rows, milliseconds summed over
+  tasks. Ours is the operator's `time` metric (kernel time, nanoseconds in the metric); Comet's is
+  DataFusion's `elapsed_compute` (the operator's own compute, input waits excluded -- the metric's
+  description says milliseconds, the value is nanoseconds: a 21 ms filter reads 21200470) and
+  `output_rows`. Spark's operators have no per-operator time and are absent, so a kind missing under
+  one engine is that engine's fallback, listed beside it: Comet's reasons come from its
+  `ExtendedExplainInfo.getFallbackReasons` (reflection, `Comet: ...` entries in `fallbacks`) when the
+  jar is on the classpath. `--report` prints the operator matrix (ms per kind per attributed
+  configuration, then per query `ours vs theirs (delta)` for the kinds both ran). The two times are
+  not the same clock: ours counts kernel work inside the operator, Comet's counts native compute; both
+  exclude the wait on children, neither is wall clock, and neither includes the crossing between
+  engines, which the crossing-cost benchmark measures on its own.
 - Iceberg merge-on-read (#260): `gen-iceberg-mor.sh <tpch-dir> [namespace]` builds the `lineitem`
   variants (`plain`, `pos_<pct>[_clustered]`, `pos_upd_<pct>`, `eq_<pct>`, `dv_*`) into a local
   Hadoop catalog with Spark alone, and writes `README-<namespace>.md` with live rows, delete files and

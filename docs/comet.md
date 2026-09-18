@@ -109,6 +109,17 @@ Without `-Pcomet` the suites are excluded by their `CometTest` tag and the rest 
 Comet dependency. The Iceberg-over-Comet suite (`CometIcebergSuite`) carries both the `CometTest`
 and the `IcebergTest` tag and runs with `-Pcomet,iceberg`; see [iceberg.md](iceberg.md).
 
+## Per-operator attribution against Comet
+
+The benchmark harness attributes time per operator for both engines (#279): our operators through
+their `time` metric, Comet's native operators through DataFusion's `elapsed_compute` and
+`output_rows` on each `Comet*Exec` node (nanoseconds, whatever the metric's description says). Each
+results row carries the list as `operatorTimes`; `--report` prints an operator matrix -- milliseconds
+per operator kind under each configuration, and per query the kinds both engines ran with the delta.
+Comet's fallback reasons are read through its `ExtendedExplainInfo` and listed as `Comet: ...` beside
+ours, so an operator that one side left to Spark is never mistaken for a comparison. The times exclude
+the wait on children and the crossing between the engines; the crossing is measured on its own.
+
 ## Limitations
 
 - Comet's `LargeVarCharVector` (64-bit offsets) is not adapted zero-copy; such columns fall back to
