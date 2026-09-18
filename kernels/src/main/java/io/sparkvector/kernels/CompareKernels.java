@@ -77,7 +77,59 @@ public final class CompareKernels {
           }
         }
       }
+      case DECIMAL128 -> {
+        // The scalar is the unscaled value as a BigInteger (already at the column's scale).
+        java.math.BigInteger s = (java.math.BigInteger) scalar;
+        d128Scalar(d, n, Decimal128.hiOf(s), Decimal128.loOf(s), op, active, out);
+      }
       default -> throw new IllegalArgumentException("unsupported compare type " + a.type());
+    }
+  }
+
+  /**
+   * DECIMAL128 against a two-limb scalar, a word of 64 rows at a time: the signed order of the high
+   * limbs, then the unsigned order of the low ones ({@link Decimal128#compare}). No species -- the
+   * lane deliberately has no SIMD path (#28); this is the scalar loop the reference also runs.
+   */
+  private static void d128Scalar(
+      MemorySegment d, int n, long hi, long lo, CompareOp op, MemorySegment active, MemorySegment out) {
+    int words = Bitmap.wordsFor(n);
+    for (int w = 0; w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L);
+        continue;
+      }
+      int start = w << 6;
+      int end = Math.min(n, start + 64);
+      long word = 0L;
+      for (int i = start; i < end; i++) {
+        if (op.test(Decimal128.compare(Decimal128.hi(d, i), Decimal128.lo(d, i), hi, lo))) {
+          word |= 1L << (i - start);
+        }
+      }
+      Bitmap.setWord(out, w, n, word);
+    }
+  }
+
+  /** DECIMAL128 against DECIMAL128 at the same scale, row by row over the limbs. */
+  private static void d128(
+      MemorySegment da, MemorySegment db, int n, CompareOp op, MemorySegment active, MemorySegment out) {
+    int words = Bitmap.wordsFor(n);
+    for (int w = 0; w < words; w++) {
+      if (active != null && Bitmap.wordAt(active, w, n) == 0L) {
+        Bitmap.setWord(out, w, n, 0L);
+        continue;
+      }
+      int start = w << 6;
+      int end = Math.min(n, start + 64);
+      long word = 0L;
+      for (int i = start; i < end; i++) {
+        int c = Decimal128.compare(Decimal128.hi(da, i), Decimal128.lo(da, i), Decimal128.hi(db, i), Decimal128.lo(db, i));
+        if (op.test(c)) {
+          word |= 1L << (i - start);
+        }
+      }
+      Bitmap.setWord(out, w, n, word);
     }
   }
 
@@ -118,6 +170,7 @@ public final class CompareKernels {
           case LE, GT -> f64Le(da, db, n, negate, active, out);
         }
       }
+      case DECIMAL128 -> d128(da, db, n, op, active, out);
       default -> throw new IllegalArgumentException("unsupported compare type " + a.type());
     }
   }
