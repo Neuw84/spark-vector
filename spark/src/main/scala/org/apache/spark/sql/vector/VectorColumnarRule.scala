@@ -155,7 +155,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           // Over any child on types alone: Spark plans Window above Sort above an exchange, and without a
           // columnar shuffle that sort is Spark's, so RowToColumnarExec is inserted below us -- the window
           // itself computes, and from here up the chain is columnar again.
-          typeReason(w.child) match {
+          laneTypeReason(w.child) match {
             case Some(reason) => fallback(w, reason)
             case None => VectorWindowPlanner.plan(w).fold(reason => fallback(w, reason), v => v)
           }
@@ -163,7 +163,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         case g: WindowGroupLimitExec if VectorConf.windowEnabled(conf) =>
           // Spark's per-partition top-k under a ranking window: Partial sits over whatever produced the rows
           // (often ours), Final over Spark's sort -- either way the child is accepted on types alone.
-          typeReason(g.child) match {
+          laneTypeReason(g.child) match {
             case Some(reason) => fallback(g, reason)
             case None => VectorWindowGroupLimitPlanner.plan(g).fold(reason => fallback(g, reason), v => v)
           }

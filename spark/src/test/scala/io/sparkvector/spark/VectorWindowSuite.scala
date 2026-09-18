@@ -180,8 +180,9 @@ class VectorWindowSuite extends VectorQuerySuite {
     checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) AS moving FROM t", Seq(Window), "RANGE frames with value offsets")
     checkFallback("SELECT i, stddev(l) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS sd FROM t", Seq(Window), "over a sliding frame not supported")
     checkWindow("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, first(l) OVER (PARTITION BY s ORDER BY i) AS f FROM t")
-    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS dec FROM t", Seq(Window), "over decimals not supported")
-    checkFallback("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total FROM t", Seq(Window), "window aggregate sum over decimals not supported")
+    checkFallback("SELECT i, sum(l) OVER (PARTITION BY s ORDER BY i) AS running, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS dec FROM t", Seq(Window), "over decimals in a sliding frame not supported")
+    // A decimal window aggregate over a whole partition or a running frame runs since #259 (the buffer is the 128-bit lane).
+    checkVectorized("SELECT i, sum(cast(l AS decimal(12,2))) OVER (PARTITION BY s) AS total, avg(cast(l AS decimal(12,2))) OVER (PARTITION BY s ORDER BY i) AS running FROM t", Seq(Window))
     checkFallback("SELECT i, approx_count_distinct(l) OVER (PARTITION BY s) AS n FROM t", Seq(Window), "window aggregate approx_count_distinct:")
     checkWindow("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, sum(l) OVER (PARTITION BY s ORDER BY i) AS running FROM t")
     checkFallback("SELECT i, lag(l) OVER (PARTITION BY s ORDER BY i) AS previous, stddev(l) OVER (PARTITION BY s ORDER BY i) AS sd FROM t", Seq(Window), "running frame for stddev not supported")

@@ -202,6 +202,39 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   }
 
   private val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+  private val Window = classOf[org.apache.spark.sql.vector.VectorWindowExec]
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: window aggregates over wide decimals -- whole partition and running -- and wide window keys (#259)") {
+      for (ansi <- Seq("false", "true")) {
+        withConf("spark.sql.ansi.enabled" -> ansi) {
+          // Whole-partition frames: the aggregate machinery over the lane, one value per partition.
+          checkVectorized(s"SELECT i, sum(w27) OVER (PARTITION BY i % 7) AS s, avg(w27) OVER (PARTITION BY i % 7) AS a FROM $t WHERE i < 4000", Seq(Window))
+          checkVectorized(s"SELECT i, min(w38) OVER (PARTITION BY i % 5) AS lo, max(w38) OVER (PARTITION BY i % 5) AS hi, count(w38) OVER (PARTITION BY i % 5) AS c FROM $t WHERE i < 4000", Seq(Window))
+          // Running frames (q51's shape): the partial buffers combined per row, finalised as the merge would.
+          checkVectorized(s"SELECT i, sum(w27) OVER (PARTITION BY i % 7 ORDER BY i) AS running FROM $t WHERE i < 4000", Seq(Window))
+          checkVectorized(s"SELECT i, avg(w27) OVER (PARTITION BY i % 7 ORDER BY i) AS running_avg, count(w27) OVER (PARTITION BY i % 7 ORDER BY i) AS c FROM $t WHERE i < 4000", Seq(Window))
+          checkVectorized(s"SELECT i, sum(w38) OVER (PARTITION BY i % 7 ORDER BY i) AS running, min(w38) OVER (PARTITION BY i % 7 ORDER BY i) AS lo FROM $t WHERE i < 4000 AND i % 101 > 6", Seq(Window))
+          // Wide partition and order keys: the rank family and offsets over the lane, every null ordering.
+          for (order <- Seq("ASC NULLS FIRST", "ASC NULLS LAST", "DESC NULLS FIRST", "DESC NULLS LAST")) {
+            checkVectorized(s"SELECT i, row_number() OVER (ORDER BY w38 $order, i) AS rn, rank() OVER (ORDER BY w27 $order, i) AS r FROM $t WHERE i < 3000", Seq(Window))
+          }
+          checkVectorized(s"SELECT i, lag(w38, 1) OVER (ORDER BY i) AS prev, lead(w27, 2) OVER (ORDER BY i) AS nxt FROM $t WHERE i < 3000", Seq(Window))
+          checkVectorized(s"SELECT i, count(*) OVER (PARTITION BY w27) AS c, sum(i) OVER (PARTITION BY w27 ORDER BY i) AS s FROM $t WHERE i < 3000", Seq(Window))
+        }
+      }
+      // A running sum past the buffer precision: null from that row on in legacy mode, ANSI raises.
+      withConf("spark.sql.ansi.enabled" -> "false") {
+        checkVectorized(s"SELECT i, sum(cast(cast(w38 AS decimal(38,0)) * 1000000000 AS decimal(38,0))) OVER (ORDER BY i) AS s FROM $t WHERE i % 101 = 1 AND i < 3000", Seq(Window))
+      }
+      withConf("spark.sql.ansi.enabled" -> "true") {
+        val e = intercept[Exception](withPlugin(enabled = true)(spark.sql(s"SELECT i, sum(cast(cast(w38 AS decimal(38,0)) * 1000000000 AS decimal(38,0))) OVER (ORDER BY i) AS s FROM $t WHERE i % 101 = 1 AND i < 3000").collect()))
+        assert(e.getMessage.contains("ARITHMETIC_OVERFLOW") || e.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE"), e.getMessage)
+      }
+      // Sliding ROWS frames over decimals stay refused, with a reason naming the frame.
+      checkFallback(s"SELECT i, sum(w27) OVER (ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s FROM $t WHERE i < 2000", Seq(Window), "sliding frame")
+    }
+  }
   private val BHJ = classOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec]
   private val SHJ = classOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]
 

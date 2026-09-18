@@ -93,7 +93,7 @@ case class VectorWindowExec(
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
   override def outputPartitioning: Partitioning = child.outputPartitioning
 
-  private def compileKey(e: Expression): VectorExpr = ExpressionCompiler.compile(e, child.output) match {
+  private def compileKey(e: Expression): VectorExpr = ExpressionCompiler.compileLaneColumn(e, child.output) match {
     case Right(v) => v
     case Left(reason) => throw new IllegalStateException(s"cannot vectorize window key ${e.sql}: $reason")
   }
@@ -116,8 +116,12 @@ case class VectorWindowExec(
   @transient private lazy val combiners: Array[Array[VectorWindowPlanner.Combine]] =
     if (frame == VectorWindowPlanner.WholePartition) null
     else aggregates.map(a => VectorWindowPlanner.prefixCombiners(a).getOrElse(throw new IllegalStateException(s"no running frame for ${a.sql}"))).toArray
+  @transient private lazy val finalizers: Array[Array[Any] => Array[Any]] =
+    if (combiners == null) null else aggregates.map(a => VectorWindowPlanner.prefixFinalizer(a).getOrElse(identity[Array[Any]] _)).toArray
   @transient private lazy val aggFunctions: Array[VectorAggFunction] = aggregates.map { a =>
-    VectorAggregates.compile(a, child.output) match {
+    // A running decimal sum or average runs in its partial form; the prefix pass finalises per row (#259).
+    val compiled = if (combiners != null && VectorWindowPlanner.runsPartial(a)) a.copy(mode = org.apache.spark.sql.catalyst.expressions.aggregate.Partial) else a
+    VectorAggregates.compile(compiled, child.output) match {
       case Right(f) => f
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize window aggregate ${a.sql}: $reason")
     }
@@ -142,9 +146,17 @@ case class VectorWindowExec(
       val ok = orderKeys
       val fr = frame
       val cb = combiners
-      val bufferAttrs = VectorAggregatePlanner.bufferAttributes(Nil, aggregates).map(a => (a.name, a.dataType)).toArray
+      val fz = finalizers
+      // The buffer columns carry the functions' emitted types: a Complete-mode decimal average emits its result type in slot 0 (#259).
+      val bufferAttrs = aggregates.zip(aggs).flatMap { case (a, f) =>
+        val declared = a.aggregateFunction.aggBufferAttributes
+        val types = f.emittedTypes(declared.map(_.dataType))
+        // A running decimal sum or average is finalised per row into slot 0, in the result type.
+        val emitted = if (cb != null && VectorWindowPlanner.runsPartial(a)) a.dataType +: types.tail else types
+        declared.map(_.name).zip(emitted)
+      }.toArray
       child.executeColumnar().mapPartitionsInternal { iter =>
-        new VectorWindowAggregateIterator(iter, pk, ok, fr, cb, aggs, layout, bufferAttrs, results, childAttrs, windowAttrs, m)
+        new VectorWindowAggregateIterator(iter, pk, ok, fr, cb, fz, aggs, layout, bufferAttrs, results, childAttrs, windowAttrs, m)
       }
     } else if (offsetMode) {
       val ok = orderKeys
@@ -276,7 +288,7 @@ object VectorWindowPlanner {
     if (a.filter.nonEmpty) return Left(s"window aggregate $name with FILTER not supported")
     if (a.mode != Complete) return Left(s"window aggregate $name in mode ${a.mode} not supported")
     if (a.dataType.isInstanceOf[DecimalType] || a.aggregateFunction.children.exists(_.dataType.isInstanceOf[DecimalType]))
-      return Left(s"window aggregate $name over decimals not supported (its buffer is a wide decimal)")
+      return Left(s"window aggregate $name over decimals in a sliding frame not supported (the sliding kernels are long and double)")
     val bounds: Either[String, (Int, Int)] = frame match {
       case SpecifiedWindowFrame(RowFrame, lower, upper) =>
         (frameBound(lower, upper = false), frameBound(upper, upper = true)) match {
@@ -327,7 +339,7 @@ object VectorWindowPlanner {
     case a: AttributeReference =>
       val i = output.indexWhere(_.exprId == a.exprId)
       if (i < 0) Left(s"input ${a.sql} is not a column of the child")
-      else if (!TypeMapping.isSupported(a.dataType)) Left(s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
+      else if (!TypeMapping.hasLane(a.dataType)) Left(s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
       else Right(i)
     case other => Left(s"input ${other.sql} is not a column (Spark projects complex inputs below the window)")
   }
@@ -409,12 +421,61 @@ object VectorWindowPlanner {
     case s: Sum if s.evalContext.evalMode == EvalMode.TRY => Left("running try_sum not supported")
     case s: Sum if s.dataType == LongType => Right(Array(addLong(s.evalContext.evalMode == EvalMode.ANSI, s.origin.context)))
     case s: Sum if s.dataType == DoubleType => Right(Array(addDouble))
+    // A decimal sum's partial buffer is (exact total or null past the buffer precision, isEmpty): the total is
+    // added exactly and poisons once it overflows, as Spark's buffer does, the emptiness is an AND (#259).
+    case s: Sum if s.dataType.isInstanceOf[SparkDecimalType] => Right(Array(addDecimal(s.dataType.asInstanceOf[SparkDecimalType]), andEmpty))
     case _: Count => Right(Array(addLong(checked = false, null)))
     case av: Average if av.dataType == DoubleType => Right(Array(addDouble, addLong(checked = false, null)))
+    case av: Average if av.child.dataType.isInstanceOf[SparkDecimalType] =>
+      Right(Array(addDecimal(av.aggBufferAttributes.head.dataType.asInstanceOf[SparkDecimalType]), addLong(checked = false, null)))
     case _: Min => Right(Array(extreme(isMin = true)))
     case _: Max => Right(Array(extreme(isMin = false)))
     case other => Left(s"running frame for ${other.prettyName} not supported (sum, avg, count, min and max are)")
   }
+
+  /** `(total, total) -> total`: exact `BigDecimal` addition, null (overflowed) once the total leaves the buffer precision or either side is null. */
+  private def addDecimal(bufferType: SparkDecimalType): Combine = {
+    val limit = java.math.BigInteger.TEN.pow(bufferType.precision)
+    (p, c) =>
+      if (p == null || c == null) null
+      else {
+        val r = p.asInstanceOf[java.math.BigDecimal].add(c.asInstanceOf[java.math.BigDecimal])
+        if (r.unscaledValue().abs().compareTo(limit) >= 0) null else r
+      }
+  }
+  private val andEmpty: Combine = (p, c) => java.lang.Boolean.valueOf(p.asInstanceOf[java.lang.Boolean] && c.asInstanceOf[java.lang.Boolean])
+
+  /**
+   * The decimal aggregates run a running frame in their *partial* form (so the prefix can add exact
+   * totals); this turns the combined slots of one row into the result the merge would emit --
+   * Spark's `If(isEmpty, null, CheckOverflowInSum(sum))` for a sum (an overflowed total is null in
+   * legacy mode, `ARITHMETIC_OVERFLOW` under ANSI), `DecimalAvgResult` for an average -- in slot 0,
+   * which the result projection forwards.
+   */
+  def prefixFinalizer(a: AggregateExpression): Option[Array[Any] => Array[Any]] = a.aggregateFunction match {
+    case s: Sum if s.dataType.isInstanceOf[SparkDecimalType] =>
+      val ansi = s.evalContext.evalMode == EvalMode.ANSI
+      val context = s.origin.context
+      Some { slots =>
+        val out = slots.clone()
+        out(0) =
+          if (slots(1).asInstanceOf[java.lang.Boolean]) null
+          else if (slots(0) == null) { if (ansi) throw VectorErrors.overflowInSumOfDecimal(context) else null }
+          else slots(0)
+        out
+      }
+    case av: Average if av.child.dataType.isInstanceOf[SparkDecimalType] =>
+      val result = io.sparkvector.spark.agg.DecimalAvgResult(av)
+      Some { slots =>
+        val out = slots.clone()
+        out(0) = result.value(slots(0).asInstanceOf[java.math.BigDecimal], slots(1).asInstanceOf[java.lang.Long].longValue())
+        out
+      }
+    case _ => None
+  }
+
+  /** Whether the running frame needs the aggregate's partial buffer rather than its finalised form. */
+  def runsPartial(a: AggregateExpression): Boolean = prefixFinalizer(a).isDefined
 
   /** Why a window aggregate is not computed: the frame, or the function itself. */
   private def aggregateReason(e: NamedExpression, input: Seq[Attribute]): Option[String] = e match {
@@ -422,10 +483,10 @@ object VectorWindowPlanner {
     case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) =>
       frameKind(frame) match {
         case Some(kind) =>
-          // A decimal sum's buffer is Spark's Decimal(p + 10): the 128-bit lane (#28) before this can gather it.
-          if (a.dataType.isInstanceOf[DecimalType] || a.aggregateFunction.children.exists(_.dataType.isInstanceOf[DecimalType]))
-            Some(s"window aggregate ${a.aggregateFunction.prettyName} over decimals not supported (its buffer is a wide decimal)")
-          else VectorAggregates.compile(a, input).left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r")
+          // Decimal aggregates run on the aggregate machinery (the 128-bit accumulators, #259): a running frame
+          // takes the partial buffer and finalises per row (prefixFinalizer), a whole partition the final form.
+          VectorAggregates.compile(if (kind != WholePartition && runsPartial(a)) a.copy(mode = org.apache.spark.sql.catalyst.expressions.aggregate.Partial) else a, input)
+            .left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r")
             .orElse(if (kind == WholePartition) None else prefixCombiners(a).left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r"))
         case None => frame match {
           case SpecifiedWindowFrame(RowFrame, lower, upper) if frameBound(lower, upper = false).isDefined && frameBound(upper, upper = true).isDefined =>
@@ -440,8 +501,8 @@ object VectorWindowPlanner {
     val keys = w.partitionSpec ++ w.orderSpec.map(_.child)
     val keyFailures = keys.flatMap { k =>
       if (k.dataType == DoubleType) Some(s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)")
-      else if (!TypeMapping.isSupported(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
-      else ExpressionCompiler.compile(k, w.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
+      else if (!TypeMapping.hasLane(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
+      else ExpressionCompiler.compileLaneColumn(k, w.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
     }
     aggregateWindows(w.windowExpression) match {
       case Some((aggs, _)) =>
@@ -606,6 +667,8 @@ private[vector] class VectorWindowAggregateIterator(
     orderKeys: Array[VectorExpr],
     frame: Int,
     combiners: Array[Array[VectorWindowPlanner.Combine]],
+    /** Per aggregate, the combined slots of a row turned into the emitted form (a decimal sum or average, #259); identity otherwise. */
+    finalizers: Array[Array[Any] => Array[Any]],
     aggs: Array[VectorAggFunction],
     layout: Array[OutputSlot],
     bufferAttrs: Array[(String, DataType)],
@@ -629,6 +692,7 @@ private[vector] class VectorWindowAggregateIterator(
   private val partitionStarts = mutable.BitSet.empty
   private var prefixDone = 0
   private var lastPrefix: Array[Array[Any]] = _
+  private var lastEmitted: Array[Array[Any]] = _
   private val held = mutable.Queue.empty[Held]
   private val ready = mutable.Queue.empty[ColumnarBatch]
   private var idScratch = new Array[Int](0)
@@ -736,7 +800,7 @@ private[vector] class VectorWindowAggregateIterator(
     var g = from
     while (g < to) {
       if (g == prefixDone - 1) {
-        out(g - from) = lastPrefix
+        out(g - from) = lastEmitted
       } else {
         require(g == prefixDone, s"running frame groups released out of order: $g after $prefixDone")
         val value = new Array[Array[Any]](aggs.length)
@@ -753,8 +817,10 @@ private[vector] class VectorWindowAggregateIterator(
           a += 1
         }
         lastPrefix = value
+        val emitted = if (finalizers == null) value else { val e = value.clone(); var i = 0; while (i < e.length) { e(i) = finalizers(i)(value(i)); i += 1 }; e }
+        lastEmitted = emitted
         prefixDone = g + 1
-        out(g - from) = value
+        out(g - from) = emitted
       }
       g += 1
     }
@@ -827,7 +893,7 @@ case class VectorWindowGroupLimitExec(
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
   override def outputPartitioning: Partitioning = child.outputPartitioning
 
-  private def compileKey(e: Expression): VectorExpr = ExpressionCompiler.compile(e, child.output) match {
+  private def compileKey(e: Expression): VectorExpr = ExpressionCompiler.compileLaneColumn(e, child.output) match {
     case Right(v) => v
     case Left(reason) => throw new IllegalStateException(s"cannot vectorize window group limit key ${e.sql}: $reason")
   }
@@ -868,8 +934,8 @@ object VectorWindowGroupLimitPlanner {
         val keys = g.partitionSpec ++ g.orderSpec.map(_.child)
         val keyFailures = keys.flatMap { k =>
           if (k.dataType == DoubleType) Some(s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)")
-          else if (!TypeMapping.isSupported(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
-          else ExpressionCompiler.compile(k, g.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
+          else if (!TypeMapping.hasLane(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
+          else ExpressionCompiler.compileLaneColumn(k, g.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
         }
         keyFailures.headOption.toLeft(VectorWindowGroupLimitExec(g.partitionSpec, g.orderSpec, g.rankLikeFunction, g.limit, g.mode, g.child))
     }
@@ -1077,6 +1143,7 @@ private[vector] class VectorWindowOffsetIterator(
       case DoubleType => java.lang.Double.valueOf(col.getDouble(r))
       case BooleanType => java.lang.Boolean.valueOf(col.getBoolean(r))
       case StringType => col.getUTF8String(r).clone()
+      case d: SparkDecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION => col.getDecimal(r, d.precision, d.scale).toJavaBigDecimal // a wide value, boxed as the DECIMAL128 column builder reads it (#259)
       case d: SparkDecimalType => java.lang.Long.valueOf(col.getDecimal(r, d.precision, d.scale).toUnscaledLong)
       case other => throw new IllegalStateException(s"offset window over $other")
     }

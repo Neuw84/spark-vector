@@ -145,6 +145,8 @@ object FirstAgg {
     case VecType.FLOAT64 => java.lang.Double.valueOf(v.data().getAtIndex(VectorBuffers.LE_DOUBLE, i))
     case VecType.BOOL => java.lang.Boolean.valueOf(Bitmap.isSet(v.data(), i))
     case VecType.UTF8 => org.apache.spark.unsafe.types.UTF8String.fromBytes(v.getUtf8Bytes(i))
+    // A wide decimal as its unscaled BigInteger: equality and order only (the window's key changes, #259); the scaled form is box(v, i, dt).
+    case VecType.DECIMAL128 => Decimal128.toBigInteger(Decimal128.hi(v.data(), i), Decimal128.lo(v.data(), i))
     case t => throw new IllegalStateException(s"first over $t")
   }
 }
