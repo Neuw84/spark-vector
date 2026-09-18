@@ -64,9 +64,10 @@ case class VectorTakeOrderedAndProjectExec(
     val childAttrs = child.output.map(a => (a.name, a.dataType)).toArray
     val childOutput = child.output
     val n = limit
+    val runRows = io.sparkvector.spark.VectorConf.sortRunRows(conf)
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter =>
-      VectorRowStages.toUnsafeRows(new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n), childOutput)
+      VectorRowStages.toUnsafeRows(new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n, runRows), childOutput)
     }
   }
 

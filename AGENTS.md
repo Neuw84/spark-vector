@@ -276,6 +276,17 @@ that pin it.
   of our operators for a local `SORT BY`). Over Spark's row shuffle the rule leaves `SortExec` with
   the reason "child ... is not columnar": converting rows to columns to sort them gains nothing.
   `spark.vector.exec.sort.enabled` turns it off.
+- The partition is sorted in runs (#285): every `spark.vector.sort.runRows` rows (default 1M; the
+  issue names it `sparkvector.sort.runRows`) the iterator seals the builders into a run -- its
+  columns, a dictionary string column decoded once, its keys and the permutation -- so the sort's
+  JVM scratch is bounded by the run, not the partition. One run emits through its permutation as
+  before; several are k-way merged by `kernels/RunMerge` (a binary heap over one cursor per run;
+  fixed-width keys compared through per-run normalised `long[]` arrays in sorted order, strings and
+  decimals through the columns; ties by run index then position, so the merge is stable) and
+  gathered run by run through `ArrowOutput.gatherRuns`. The merge costs ~30 ns/row on top of the
+  runs' sorts at 10M random longs (`SortBenchmark.runs8`: 949 ms against 674 ms for one sort), so
+  runs are a memory bound and the shape #85's spill plugs into, not a speed-up; a loser tree would
+  halve the compares.
 - `VectorTakeOrderedAndProjectExec` replaces `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT n`)
   over a columnar child. Per partition it is the sort iterator with a `limit` (the partition is
   still fully sorted, only the first `n` rows are gathered); those at most `n` rows per partition
@@ -664,7 +675,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 172 kernel tests, 270 Spark tests (242 without the Comet and Iceberg profiles;
+Current counts: 174 kernel tests, 271 Spark tests (243 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

@@ -65,6 +65,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
 | `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (in memory, no spill) |
+| `spark.vector.sort.runRows` | rows per sorted run (default 1048576): the sort orders each run as the partition arrives and k-way merges the runs on output, bounding its scratch to the run (#285) |
 | `spark.vector.exec.takeOrdered.enabled` | convert `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT`) over a columnar child; the per-partition top-N is columnar, the final merge of at most `limit` rows per partition goes through Spark's single-partition shuffle |
 | `spark.vector.exec.limit.enabled` | convert `LocalLimitExec` / `GlobalLimitExec` / `CollectLimitExec` over a columnar child (no offset); batches pass through until the boundary, the collect limit's final take goes through Spark's single-partition shuffle |
 | `spark.vector.exec.union.enabled` | convert `UnionExec` when at least one child is columnar (row children go through Spark's `RowToColumnarExec`); keep it on with Spark 4.1.3, whose own columnar union concatenates co-partitioned children it reports as partition-aligned |
@@ -378,7 +379,9 @@ pass and a 64-bit pass over their zero-padded big-endian prefix, longer strings 
 one stable merge sort) and radix-sorts the positions by it, one counting sort per 8-bit digit with
 the uniform digits and the already-ordered passes skipped, so every pass is stable and the passes
 compose.
-Nulls take one final pass per key. The output is gathered through the permutation into Arrow vectors
+Nulls take one final pass per key. The partition is sorted in runs of `spark.vector.sort.runRows`
+rows (default 1M) sealed as it arrives and k-way merged on output, ties by run then position, so the
+sort's scratch is bounded by the run (#285). The output is gathered through the permutation into Arrow vectors
 in batches of 4096 rows. Double ordering is Spark's (`-0.0 = 0.0`, NaN greatest and equal to itself),
 strings compare as unsigned bytes like `UTF8String`.
 

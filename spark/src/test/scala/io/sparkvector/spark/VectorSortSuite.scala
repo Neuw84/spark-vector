@@ -101,6 +101,30 @@ class VectorSortSuite extends VectorQuerySuite {
     }
   }
 
+  test("sorted runs merged: hundred-row runs over a 100k-row partition, every key type, ties stable") {
+    // One partition of 100k rows: with spark.vector.sort.runRows=100 the sort seals a thousand runs
+    // and the output is the k-way merge of them; the same statements with one run are the tests above.
+    val path = newTempPath("sort/tbig")
+    TestTables.mixedDataFrame(spark, 100000).coalesce(1).write.mode("overwrite").parquet(path)
+    spark.read.parquet(path).createOrReplaceTempView("tbig")
+    withConf(VectorConf.SortRunRows -> "100") {
+      checkSorted("SELECT i, l FROM tbig SORT BY i DESC", 1)
+      checkSorted("SELECT l, i FROM tbig SORT BY l NULLS FIRST", 1)
+      checkSorted("SELECT d, i FROM tbig SORT BY d DESC NULLS LAST", 1) // NaN, infinities, nulls across runs
+      checkSorted("SELECT dt, i FROM tbig SORT BY dt", 1)
+      checkSorted("SELECT b, i FROM tbig SORT BY b DESC", 1)
+      checkSorted("SELECT s, i FROM tbig SORT BY s NULLS LAST", 1) // dictionary strings, decoded once per run
+      checkSorted("SELECT d2, s, i FROM tbig SORT BY d2 DESC, s, i", 3) // ties on d2 and s cross every run
+      // Stability: rows equal on every key keep their input order across runs (i is the input order).
+      val ties = withPlugin(true) {
+        spark.sql("SELECT d2, i FROM tbig SORT BY d2").rdd.glom().collect().head.map(r => (r.getDouble(0), r.getInt(1)))
+      }
+      ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) => if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2") }
+      // A limit above a merge emits the head of the merged order.
+      checkVectorized("SELECT i, l FROM tbig SORT BY l DESC LIMIT 250", Seq(Sort))
+    }
+  }
+
   test("sort can be disabled") {
     withConf(VectorConf.SortEnabled -> "false") {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM t SORT BY i"); d.collect(); d }

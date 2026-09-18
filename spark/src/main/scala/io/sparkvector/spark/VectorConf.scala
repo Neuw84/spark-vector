@@ -14,6 +14,7 @@ object VectorConf {
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
   val SortEnabled = "spark.vector.exec.sort.enabled"
+  val SortRunRows = "spark.vector.sort.runRows"
   val TakeOrderedEnabled = "spark.vector.exec.takeOrdered.enabled"
   val LimitEnabled = "spark.vector.exec.limit.enabled"
   val UnionEnabled = "spark.vector.exec.union.enabled"
@@ -47,6 +48,13 @@ object VectorConf {
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   /** Convert SortExec over a columnar child (in-memory, no spill). */
   def sortEnabled(conf: SQLConf): Boolean = bool(conf, SortEnabled, default = true)
+  /**
+   * Rows per sorted run: the sort orders each run of this many rows as the partition arrives and
+   * merges the runs on output (one run is one sort over the whole partition, #285). Bounds the
+   * sort's JVM scratch to the run rather than the partition.
+   */
+  def sortRunRows(conf: SQLConf): Int =
+    scala.util.Try(conf.getConfString(SortRunRows, "").trim.toInt).toOption.filter(_ > 0).getOrElse(1 << 20)
   /** Convert TakeOrderedAndProjectExec (ORDER BY ... LIMIT) over a columnar child. */
   def takeOrderedEnabled(conf: SQLConf): Boolean = bool(conf, TakeOrderedEnabled, default = true)
   /** Convert LocalLimitExec / GlobalLimitExec / CollectLimitExec over a columnar child. */

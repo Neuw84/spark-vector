@@ -2,7 +2,10 @@ package org.apache.spark.sql.vector
 
 import java.lang.foreign.Arena
 
-import io.sparkvector.kernels.{ColumnBuilder, SortKernels, VectorBuffers}
+import scala.collection.mutable.ArrayBuffer
+
+import io.sparkvector.kernels.{ColumnBuilder, RunMerge, SortKernels, VecType, VectorBuffers}
+import io.sparkvector.spark.VectorConf
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.{ArrowOutput, VectorAllocators}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
@@ -20,9 +23,13 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  *
  * A blocking operator: every batch of the partition is appended to one [[ColumnBuilder]] per
  * output attribute and per computed key (Spark's columnar contract lets the producer reuse a batch
- * as soon as the next one is requested), a permutation is computed by [[SortKernels.sortIndices]]
- * and the output is gathered through it in batches of 4096 rows into Arrow vectors. Sort keys that are plain column references reuse the output
- * column rather than being copied twice.
+ * as soon as the next one is requested). Every `spark.vector.sort.runRows` rows the builders are
+ * sealed into a run -- its columns and the permutation [[SortKernels.sortIndices]] computed over
+ * them -- so the sort's scratch is bounded by the run, not the partition. One run emits its rows
+ * through the permutation; several are k-way merged by [[RunMerge]] in the same total order, ties by
+ * run then position (stable), and gathered run by run. Output batches are 4096 rows of Arrow
+ * vectors; a dictionary-encoded string column is decoded once when its run is sealed (#285). Sort
+ * keys that are plain column references reuse the output column rather than being copied twice.
  *
  * Same distribution contract as SortExec: a global sort requires the range partitioning the
  * exchange below already provides, a local sort accepts anything. The operator is only planned
@@ -55,8 +62,9 @@ case class VectorSortExec(sortOrder: Seq[SortOrder], global: Boolean, child: Spa
     val nullsFirst = sortOrder.map(_.nullOrdering == NullsFirst).toArray
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
     val m = vectorMetrics
+    val runRows = VectorConf.sortRunRows(conf)
     child.executeColumnar().mapPartitionsInternal { iter =>
-      new VectorSortIterator(iter, keys, ascending, nullsFirst, outputAttrs, m)
+      new VectorSortIterator(iter, keys, ascending, nullsFirst, outputAttrs, m, runRows = runRows)
     }
   }
 
@@ -71,7 +79,10 @@ case class VectorSortExec(sortOrder: Seq[SortOrder], global: Boolean, child: Spa
   }
 }
 
-/** Drains the partition, sorts it, then emits the rows in order -- at most `limit` of them. */
+/**
+ * Drains the partition into sorted runs of `runRows` rows, then emits the rows in order -- at most
+ * `limit` of them -- merging the runs when there are several.
+ */
 private[vector] class VectorSortIterator(
     input: Iterator[ColumnarBatch],
     keyExprs: Array[VectorExpr],
@@ -79,9 +90,15 @@ private[vector] class VectorSortIterator(
     nullsFirst: Array[Boolean],
     outputAttrs: Array[(String, DataType)],
     metrics: VectorMetrics,
-    limit: Int = Int.MaxValue)
+    limit: Int = Int.MaxValue,
+    runRows: Int = 1 << 20)
     extends Iterator[ColumnarBatch]
     with AutoCloseable {
+
+  /** A sealed run: its output columns, its key columns and the permutation that orders it. */
+  private final class Run(val columns: Array[VectorBuffers], val keys: Array[VectorBuffers], val rows: Int) {
+    val permutation: Array[Int] = SortKernels.sortIndices(keys, ascending, nullsFirst, rows)
+  }
 
   private val OutputBatchSize = 4096
 
@@ -98,8 +115,14 @@ private[vector] class VectorSortIterator(
   private val computedKeys: Array[Int] = keyColumn.indices.filter(keyColumn(_) < 0).toArray
 
   private var sorted = false
+  private val runs = ArrayBuffer.empty[Run]
+  /** One run: its columns and permutation. Several: the merge, and every output column's run columns. */
   private var columns: Array[VectorBuffers] = _
   private var permutation: Array[Int] = _
+  private var merge: RunMerge = _
+  private var runColumns: Array[Array[VectorBuffers]] = _
+  private var runOf: Array[Int] = _
+  private var rowOf: Array[Int] = _
   private var total = 0
   private var emitted = 0
   private var current: ColumnarBatch = _
@@ -112,6 +135,31 @@ private[vector] class VectorSortIterator(
     sorted = true
     var columnBuilders: Array[ColumnBuilder] = null
     var keyBuilders: Array[ColumnBuilder] = null
+    var runTotal = 0
+
+    /** Seals the builders into a run: plain string columns (a dictionary decoded once), the keys, the permutation. */
+    def seal(): Unit = {
+      if (runTotal > 0) {
+        val cols = columnBuilders.map(_.view()).map { v =>
+          if (v.`type`() == VecType.UTF8 && v.isDictionaryEncoded) ArrowOutput.decodeDictionary(v, arena) else v
+        }
+        val computed = keyBuilders.map(_.view())
+        val keys = new Array[VectorBuffers](keyExprs.length)
+        var computedIdx = 0
+        var k = 0
+        while (k < keys.length) {
+          if (keyColumn(k) >= 0) keys(k) = cols(keyColumn(k))
+          else { keys(k) = computed(computedIdx); computedIdx += 1 }
+          k += 1
+        }
+        runs += new Run(cols, keys, runTotal)
+        total += runTotal
+      }
+      columnBuilders = null
+      keyBuilders = null
+      runTotal = 0
+    }
+
     while (input.hasNext) {
       val batch = input.next()
       if (batch.numRows() > 0) {
@@ -121,8 +169,9 @@ private[vector] class VectorSortIterator(
             val count = ctx.selectedCount
             if (count > 0) {
               if (columnBuilders == null) {
-                columnBuilders = Array.tabulate(numColumns)(c => new ColumnBuilder(arena, ctx.input(c).`type`(), count))
-                keyBuilders = Array.tabulate(computedKeys.length)(k => new ColumnBuilder(arena, keyExprs(computedKeys(k)).vecType, count))
+                val expected = math.max(math.min(runRows, count), 1)
+                columnBuilders = Array.tabulate(numColumns)(c => new ColumnBuilder(arena, ctx.input(c).`type`(), expected))
+                keyBuilders = Array.tabulate(computedKeys.length)(k => new ColumnBuilder(arena, keyExprs(computedKeys(k)).vecType, expected))
               }
               var c = 0
               while (c < numColumns) {
@@ -134,28 +183,26 @@ private[vector] class VectorSortIterator(
                 keyBuilders(k).append(keyExprs(computedKeys(k)).eval(ctx), ctx.selection, count)
                 k += 1
               }
-              total += count
+              runTotal += count
+              if (runTotal >= runRows) seal()
             }
           }
         }
       }
     }
     metrics.timed {
-      if (total > 0) {
-        columns = columnBuilders.map(_.view())
-        val computed = keyBuilders.map(_.view())
-        val keys = new Array[VectorBuffers](keyExprs.length)
-        var computedIdx = 0
-        var k = 0
-        while (k < keys.length) {
-          if (keyColumn(k) >= 0) keys(k) = columns(keyColumn(k))
-          else { keys(k) = computed(computedIdx); computedIdx += 1 }
-          k += 1
-        }
-        permutation = SortKernels.sortIndices(keys, ascending, nullsFirst, total)
-        // A top-N emits only the head of the permutation (the whole partition was still sorted).
-        total = math.min(total, limit)
+      seal()
+      if (runs.length == 1) {
+        columns = runs.head.columns
+        permutation = runs.head.permutation
+      } else if (runs.length > 1) {
+        merge = new RunMerge(runs.map(_.keys).toArray, runs.map(_.permutation).toArray, runs.map(_.rows).toArray, ascending, nullsFirst)
+        runColumns = Array.tabulate(numColumns)(c => runs.map(_.columns(c)).toArray)
+        runOf = new Array[Int](OutputBatchSize)
+        rowOf = new Array[Int](OutputBatchSize)
       }
+      // A top-N emits only the head of the order (every run was still sorted whole).
+      total = math.min(total, limit)
     }
   }
 
@@ -172,11 +219,22 @@ private[vector] class VectorSortIterator(
     val count = to - from
     val out = new Array[ColumnVector](numColumns)
     metrics.timed {
-      var c = 0
-      while (c < numColumns) {
-        val (name, dt) = outputAttrs(c)
-        out(c) = ArrowOutput.gather(name, dt, columns(c), permutation, from, to, allocator)
-        c += 1
+      if (merge == null) {
+        var c = 0
+        while (c < numColumns) {
+          val (name, dt) = outputAttrs(c)
+          out(c) = ArrowOutput.gather(name, dt, columns(c), permutation, from, to, allocator)
+          c += 1
+        }
+      } else {
+        val n = merge.next(runOf, rowOf, count)
+        assert(n == count, s"merge emitted $n rows, expected $count")
+        var c = 0
+        while (c < numColumns) {
+          val (name, dt) = outputAttrs(c)
+          out(c) = ArrowOutput.gatherRuns(name, dt, runColumns(c), runOf, rowOf, count, allocator)
+          c += 1
+        }
       }
     }
     emitted = to
@@ -196,6 +254,9 @@ private[vector] class VectorSortIterator(
       releaseCurrent()
       columns = null
       permutation = null
+      merge = null
+      runColumns = null
+      runs.clear()
       arena.close()
       allocator.close()
     }
