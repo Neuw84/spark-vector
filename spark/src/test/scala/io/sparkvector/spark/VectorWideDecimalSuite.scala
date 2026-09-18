@@ -77,3 +77,52 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
     checkFallback("SELECT abs(w38) AS a FROM tw_plain WHERE i % 101 > 6", Seq(Project), "decimal(38,10)")
   }
 }
+
+/** Sorting over the lane: the four-pass two-limb key order equals Spark's in every partition. */
+class VectorWideDecimalSortSuite extends VectorQuerySuite {
+  private val Sort = classOf[org.apache.spark.sql.vector.VectorSortExec]
+
+  override protected def beforeAll(): Unit = {
+    super.beforeAll()
+    spark.range(0, 20000).selectExpr(
+      "cast(id as int) as i",
+      "case when id % 101 = 1 then cast('9999999999999999999999999999.9999999999' as decimal(38,10)) " +
+        "     when id % 101 = 2 then cast('-9999999999999999999999999999.9999999999' as decimal(38,10)) " +
+        "     when id % 101 = 3 then cast('922337203.6854775807' as decimal(38,10)) " +
+        "     when id % 101 = 4 then cast('-922337203.6854775808' as decimal(38,10)) " +
+        "     when id % 101 = 5 then cast('922337203.6854775808' as decimal(38,10)) " +
+        "     when id % 13 = 0 then null " +
+        "     else cast(cast((id % 4000) - 2000 as decimal(38,10)) * cast('1234567890123.0000000001' as decimal(38,10)) as decimal(38,10)) end as w38",
+      "case when id % 17 = 0 then null else cast(cast((id % 40) - 20 as decimal(27,2)) * cast('1000000000000000.25' as decimal(27,2)) as decimal(27,2)) end as w27")
+      .repartition(3).write.mode("overwrite").parquet(newTempPath("wide/sort"))
+    spark.read.parquet(newTempPath("wide/sort")).createOrReplaceTempView("tws")
+  }
+
+  private def keySequences(sql: String, numKeys: Int, enabled: Boolean): Seq[Seq[Seq[Any]]] =
+    withPlugin(enabled) {
+      spark.sql(sql).rdd.glom().collect().toSeq.map(_.toSeq.map(r => (0 until numKeys).map(c => r.get(c))))
+    }
+
+  private def checkSorted(sql: String, numKeys: Int): Unit = {
+    checkVectorized(sql, Seq(Sort))
+    val expected = keySequences(sql, numKeys, enabled = false)
+    val actual = keySequences(sql, numKeys, enabled = true)
+    assert(actual.length === expected.length, s"partition count for: $sql")
+    expected.zip(actual).zipWithIndex.foreach { case ((e, a), p) => assert(a === e, s"key order differs in partition $p for: $sql") }
+  }
+
+  test("a wide decimal sort key in every direction and null order, with wide payload columns") {
+    checkSorted("SELECT w38, i, w27 FROM tws SORT BY w38", 1)
+    checkSorted("SELECT w38, i FROM tws SORT BY w38 DESC", 1)
+    checkSorted("SELECT w38, i FROM tws SORT BY w38 ASC NULLS FIRST", 1)
+    checkSorted("SELECT w38, i FROM tws SORT BY w38 DESC NULLS LAST", 1)
+    checkSorted("SELECT w27, w38, i FROM tws SORT BY w27 DESC NULLS FIRST", 1)
+    // Wide payloads gathered under an int key; a wide second key deciding ties of a coarse first key.
+    checkSorted("SELECT i, w38, w27 FROM tws SORT BY i DESC", 1)
+    checkSorted("SELECT i % 3, w38, w27 FROM tws SORT BY i % 3, w38 DESC NULLS LAST", 2)
+  }
+
+  test("a computed expression over a wide decimal is still not a sort key until #258") {
+    checkFallback("SELECT w38, i FROM tws SORT BY w38 * 2", Seq(Sort), "decimal")
+  }
+}

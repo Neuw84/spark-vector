@@ -158,8 +158,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
         case s: SortExec if VectorConf.sortEnabled(conf) =>
           // Only over a columnar child: a sort above Spark's row shuffle would need a
-          // RowToColumnarExec first and gain nothing over Spark's own sort.
-          columnarInputReason(s.child) match {
+          // RowToColumnarExec first and gain nothing over Spark's own sort. The sort only moves
+          // its columns (append, order, gather), so a DECIMAL128 lane is as good as any (#257).
+          laneInputReason(s.child) match {
             case Some(reason) => fallback(s, reason)
             case None =>
               VectorSortPlanner.plan(s) match {
@@ -477,6 +478,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       markSortMergeJoins(child, required || passes, maxBuildSize, memo)
     }
   }
+
+  /** Like [[columnarInputReason]] for an operator that only moves columns: any lane type will do. */
+  private def laneInputReason(plan: SparkPlan): Option[String] =
+    if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar")
+    else plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
 
   private def typeReason(plan: SparkPlan, allowed: Set[org.apache.spark.sql.catalyst.expressions.ExprId] = Set.empty): Option[String] =
     plan.output.find(a => !TypeMapping.isSupported(a.dataType) && !allowed.contains(a.exprId)).map { a =>
