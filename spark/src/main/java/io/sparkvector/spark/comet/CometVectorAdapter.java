@@ -115,10 +115,16 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
         return adaptDictionary(cv, numRows, type);
       }
       Object vector = getValueVector.invoke(cv);
-      if (cv.dataType() instanceof org.apache.spark.sql.types.DecimalType
-          && !vector.getClass().getName().endsWith(".BigIntVector")) {
-        // Comet's 128-bit decimals (and 32-bit ones): let the copy path read them via getDecimal.
-        return null;
+      if (cv.dataType() instanceof org.apache.spark.sql.types.DecimalType) {
+        String vectorClass = vector.getClass().getName();
+        boolean narrowLongs = type == VecType.INT64 && vectorClass.endsWith(".BigIntVector");
+        // Comet's 128-bit decimals are Arrow Decimal128 (16 little-endian bytes per value): the
+        // DECIMAL128 lane's own layout, wrapped in place (#257). 32-bit decimals (p <= 9 in an
+        // IntVector) still take the copy path, which widens them to the INT64 lane via getDecimal.
+        boolean wide = type == VecType.DECIMAL128 && vectorClass.endsWith(".DecimalVector");
+        if (!narrowLongs && !wide) {
+          return null;
+        }
       }
       return wrap(vector, numRows, type);
     } catch (ReflectiveOperationException e) {
