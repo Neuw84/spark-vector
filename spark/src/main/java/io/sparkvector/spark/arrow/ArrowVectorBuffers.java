@@ -61,6 +61,10 @@ public final class ArrowVectorBuffers implements VectorBuffers {
     if (v instanceof BitVector) {
       return VecType.BOOL;
     }
+    if (v instanceof org.apache.arrow.vector.DecimalVector) {
+      // Arrow Decimal128: 16-byte little-endian values, our DECIMAL128 layout as is.
+      return VecType.DECIMAL128;
+    }
     if (v instanceof VarCharVector) {
       return VecType.UTF8;
     }

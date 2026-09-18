@@ -71,9 +71,16 @@ that pin it.
   (`checkFallback(..., reasonContains = ...)`), the UI shows it, and
   `spark.vector.explainFallback.enabled` prints it with `EXPLAIN`.
 - Supported types are exactly `VecType`: BOOL, INT32 (also DateType), INT64 (also TimestampType and
-  `Decimal(p <= 18)` as the unscaled value), FLOAT64, UTF8. Decimals above 18 digits are not
-  supported, and neither is any decimal result type above 18 digits, which is why the TPC-H data
-  is still generated with decimals as doubles (`Decimal(12,2) * Decimal(12,2)` is 25 digits).
+  `Decimal(p <= 18)` as the unscaled value), FLOAT64, UTF8, and DECIMAL128 for `Decimal(p > 18)` --
+  two little-endian `long` limbs per value (`kernels/Decimal128.java`), Arrow's `Decimal128` layout,
+  a lane that deliberately has no SIMD path (#28: the emulated lane-pair variant was rejected). The
+  DECIMAL128 lane is carried (adapted, compacted, gathered, appended, emitted: #257) but no kernel
+  computes on it yet, so `TypeMapping.isSupported` (the kernels compute on it) is false for wide
+  decimals while `TypeMapping.hasLane` is true; operators that merely move a column (filter
+  compaction, projection pass-through) ask `hasLane`, everything that reads one asks `isSupported`
+  until #258 (expressions) and #259 (keys, payloads, accumulators) flip it. Decimal result types
+  above 18 digits are still refused, which is why the TPC-H data is still generated with decimals
+  as doubles (`Decimal(12,2) * Decimal(12,2)` is 25 digits).
   Adding a type means: `VecType` + `TypeMapping` + every kernel switch + the adapters +
   `ArrowOutput` + tests at all three vector widths.
 - Decimals ride on INT64 with the scale kept in the Spark type (`DecimalArithExpr`,

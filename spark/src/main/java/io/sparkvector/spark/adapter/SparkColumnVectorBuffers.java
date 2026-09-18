@@ -2,6 +2,7 @@ package io.sparkvector.spark.adapter;
 
 import io.sparkvector.kernels.ArrowLayout;
 import io.sparkvector.kernels.Bitmap;
+import io.sparkvector.kernels.Decimal128;
 import io.sparkvector.kernels.SegmentVectorBuffers;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
@@ -54,6 +55,13 @@ public final class SparkColumnVectorBuffers {
 
   public static long wrappedOffHeapColumns() {
     return WRAPPED_OFFHEAP_COLUMNS.sum();
+  }
+
+  /** Test-visible counter: wide decimal columns converted into DECIMAL128 lanes. */
+  private static final java.util.concurrent.atomic.LongAdder WIDE_DECIMAL_COLUMNS = new java.util.concurrent.atomic.LongAdder();
+
+  public static long wideDecimalColumns() {
+    return WIDE_DECIMAL_COLUMNS.sum();
   }
 
   public static VectorBuffers copy(ColumnVector cv, int numRows, Arena arena) {
@@ -134,6 +142,9 @@ public final class SparkColumnVectorBuffers {
    */
   private static VectorBuffers copyDecimal(
       ColumnVector cv, DecimalType dec, int numRows, Arena arena, MemorySegment validity) {
+    if (dec.precision() > TypeMapping.MAX_DECIMAL_PRECISION) {
+      return copyWideDecimal(cv, dec, numRows, arena, validity);
+    }
     MemorySegment data = ArrowLayout.allocateData(arena, VecType.INT64, numRows);
     if (cv instanceof WritableColumnVector) {
       if (dec.precision() <= Decimal.MAX_INT_DIGITS()) {
@@ -153,6 +164,35 @@ public final class SparkColumnVectorBuffers {
       }
     }
     return SegmentVectorBuffers.fixedWidth(VecType.INT64, numRows, validity, data);
+  }
+
+  /**
+   * Decimals of 19 to 38 digits become a DECIMAL128 lane. Spark's writable vectors keep them as
+   * big-endian two's complement byte strings ({@code getBinary}, which also resolves the Parquet
+   * reader's dictionary), so each row is two sign-extended limbs without a {@code BigDecimal} on
+   * the way; a foreign vector is read through {@code getDecimal}.
+   */
+  private static VectorBuffers copyWideDecimal(
+      ColumnVector cv, DecimalType dec, int numRows, Arena arena, MemorySegment validity) {
+    MemorySegment data = ArrowLayout.allocateData(arena, VecType.DECIMAL128, numRows);
+    WIDE_DECIMAL_COLUMNS.increment();
+    boolean writable = cv instanceof WritableColumnVector;
+    for (int i = 0; i < numRows; i++) {
+      if (validity != null && !Bitmap.isSet(validity, i)) {
+        continue;
+      }
+      if (writable) {
+        byte[] be = cv.getBinary(i);
+        Decimal128.set(data, i, Decimal128.hiFromBigEndian(be, 0, be.length), Decimal128.loFromBigEndian(be, 0, be.length));
+      } else {
+        Decimal d = cv.getDecimal(i, dec.precision(), dec.scale());
+        if (d != null) {
+          java.math.BigInteger unscaled = d.toJavaBigDecimal().unscaledValue();
+          Decimal128.set(data, i, Decimal128.hiOf(unscaled), Decimal128.loOf(unscaled));
+        }
+      }
+    }
+    return SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, numRows, validity, data);
   }
 
   private static MemorySegment copyValidity(ColumnVector cv, int numRows, Arena arena) {
