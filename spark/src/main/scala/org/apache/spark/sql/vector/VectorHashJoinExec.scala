@@ -66,6 +66,9 @@ trait VectorHashJoinLike extends VectorBinaryExec {
   @transient protected lazy val compiledCondition: Option[VectorExpr] =
     condition.map(c => VectorJoinPlanner.compileCondition(c, joinedOutput).fold(r => throw new IllegalStateException(s"cannot vectorize join condition: $r"), identity))
 
+  /** Spark's plan for `NOT IN (subquery)` over nullable keys; only the broadcast join carries it. */
+  def isNullAwareAntiJoin: Boolean = false
+
   protected def joinSpec: JoinSpec = JoinSpec(
     joinType,
     buildIsLeft = buildSide == BuildLeft,
@@ -75,7 +78,8 @@ trait VectorHashJoinLike extends VectorBinaryExec {
     output.map(a => (a.name, a.dataType)).toArray,
     joinedOutput.map(a => (a.name, a.dataType)).toArray,
     buildPlan.output.map(_.dataType).toArray,
-    streamedPlan.output.length)
+    streamedPlan.output.length,
+    dropNullStreamedKeys = isNullAwareAntiJoin)
 
   override def verboseStringWithOperatorId(): String = {
     s"""$formattedNodeName
@@ -100,7 +104,13 @@ final case class JoinSpec(
     /** Always left ++ right: the row the condition is evaluated on. */
     joinedAttrs: Array[(String, DataType)],
     buildTypes: Array[DataType],
-    streamedWidth: Int)
+    streamedWidth: Int,
+    /**
+     * A null-aware anti join with a non-empty, null-free build side: a streamed row whose key is
+     * null is dropped like a matched one (`x NOT IN (...)` is unknown, never true, for a null `x`).
+     * The two other regimes of the null-aware join never reach the probe (see the broadcast exec).
+     */
+    dropNullStreamedKeys: Boolean = false)
 
 /**
  * Columnar replacement for BroadcastHashJoinExec. The build side is Spark's own broadcast
@@ -114,12 +124,15 @@ case class VectorBroadcastHashJoinExec(
     buildSide: BuildSide,
     condition: Option[Expression],
     left: SparkPlan,
-    right: SparkPlan)
+    right: SparkPlan,
+    override val isNullAwareAntiJoin: Boolean = false)
     extends VectorHashJoinLike {
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val boundKeys = BindReferences.bindReferences(HashJoin.rewriteKeyExpr(buildKeys), buildPlan.output)
-    val mode = HashedRelationBroadcastMode(boundKeys, isNullAware = false)
+    // The same mode as Spark's operator, so the exchange already in the plan is the one required: a
+    // null-aware relation is one of two singletons when the build side is empty or holds a null key.
+    val mode = HashedRelationBroadcastMode(boundKeys, isNullAware = isNullAwareAntiJoin)
     buildSide match {
       case BuildLeft => BroadcastDistribution(mode) :: UnspecifiedDistribution :: Nil
       case BuildRight => UnspecifiedDistribution :: BroadcastDistribution(mode) :: Nil
@@ -138,10 +151,17 @@ case class VectorBroadcastHashJoinExec(
     val m = vectorMetrics
     val relation = buildPlan.executeBroadcast[Any]()
     streamedPlan.executeColumnar().mapPartitionsInternal { iter =>
-      // The relation object stays referenced by this closure for the task's lifetime, which keeps
-      // the shared table (keyed on it) alive; see BuildTable.sharedFromRelation.
-      val build = BuildTable.sharedFromRelation(relation.value.asInstanceOf[AnyRef], spec)
-      new VectorHashJoinIterator(iter, build, spec, m)
+      // A null-aware anti join whose build side held a null key keeps nothing: `x NOT IN (..., NULL)`
+      // is never true. Spark marks that relation with a singleton that has no rows to read.
+      if (isNullAwareAntiJoin && HashedRelationAccess.allNullKeys(relation.value)) Iterator.empty
+      else {
+        // The relation object stays referenced by this closure for the task's lifetime, which keeps
+        // the shared table (keyed on it) alive; see BuildTable.sharedFromRelation. An empty
+        // null-aware relation is the other singleton: the anti join over an empty table keeps every
+        // streamed row, null keys included, which is that regime's answer.
+        val build = BuildTable.sharedFromRelation(relation.value.asInstanceOf[AnyRef], spec)
+        new VectorHashJoinIterator(iter, build, spec, m)
+      }
     }
   }
 
@@ -454,12 +474,20 @@ private[vector] class VectorHashJoinIterator(
   private var rowMatched = new Array[Boolean](0)
   private var idScratch = new Array[Int](0)
   private var hashScratch = new Array[Int](0)
+  /** The streamed rows of the current batch whose keys are all non-null (null when every key is). */
+  private var nonNullKeys: MemorySegment = _
 
   private val numBuildCols = spec.buildTypes.length
   private val streamedWidth = spec.streamedWidth
   /** No keys: a nested loop join, every build row is a candidate of every streamed row. */
   private val nestedLoop = spec.streamedKeys.isEmpty
   private val isSemiOrAnti = spec.joinType == LeftSemi || spec.joinType == LeftAnti
+  /**
+   * The null-aware anti join's middle regime: the build side has rows and none has a null key (a
+   * null key there is a singleton relation that never reaches this iterator), so a streamed row with
+   * a null key is dropped like a matched one. Over an empty build side every streamed row is kept.
+   */
+  private val dropNullKeys = spec.dropNullStreamedKeys && build.numRows > 0
   /** `ExistenceJoin`: the semi join's probe, emitting every streamed row plus a match boolean. */
   private val isExistence = spec.joinType.isInstanceOf[ExistenceJoin]
   private val isFullOuter = spec.joinType == FullOuter
@@ -498,6 +526,7 @@ private[vector] class VectorHashJoinIterator(
       if (!nestedLoop) {
         val keys = spec.streamedKeys.map(_.eval(ctx))
         val candidates = BuildTable.nonNullKeys(ctx, keys)
+        nonNullKeys = candidates
         if (idScratch.length < n) { idScratch = new Array[Int](n); hashScratch = new Array[Int](n) }
         if (build.numRows > 0) build.table.lookup(keys, n, idScratch, candidates, hashScratch)
         else java.util.Arrays.fill(idScratch, 0, n, -1)
@@ -513,6 +542,7 @@ private[vector] class VectorHashJoinIterator(
           if (isExistence) emitExistence(ctx, i => rowMatched(i))
           else if (isSemiOrAnti) emitSemiAnti(ctx, i => rowMatched(i))
         case _ if isExistence => emitExistence(ctx, i => firstCandidate(i) >= 0)
+        case _ if isSemiOrAnti && dropNullKeys => emitSemiAnti(ctx, i => firstCandidate(i) >= 0 || nullKeyAt(i))
         case _ if isSemiOrAnti => emitSemiAnti(ctx, i => firstCandidate(i) >= 0)
         case _ =>
           var from = 0
@@ -522,6 +552,9 @@ private[vector] class VectorHashJoinIterator(
   }
 
   private def selected(ctx: EvalContext, i: Int): Boolean = ctx.selection == null || Bitmap.isSet(ctx.selection, i)
+
+  /** Whether a key of streamed row `i` is null (`nonNullKeys` folds the selection in; `null` means none is). */
+  private def nullKeyAt(i: Int): Boolean = nonNullKeys != null && !Bitmap.isSet(nonNullKeys, i)
 
   /** First candidate build row of streamed row `i`, -1 for none. */
   private def firstCandidate(i: Int): Int =
@@ -856,13 +889,17 @@ object VectorJoinPlanner {
   }
 
   def plan(j: BroadcastHashJoinExec): Either[String, VectorBroadcastHashJoinExec] = {
-    if (j.isNullAwareAntiJoin) Left("null-aware anti join not supported")
+    // Spark plans the null-aware anti join (`NOT IN (subquery)` over nullable keys) as a single-key
+    // left anti join with the right side broadcast and no condition (ExtractSingleColumnNullAwareAntiJoin);
+    // anything else under the flag is not a shape whose semantics we know.
+    if (j.isNullAwareAntiJoin && (j.joinType != LeftAnti || j.buildSide != BuildRight || j.leftKeys.length != 1 || j.condition.isDefined))
+      Left("null-aware anti join that is not a single-key, condition-free left anti join with the right side broadcast")
     // Spark never broadcasts a full outer join (JoinSelection.canBuildBroadcastLeft / Right exclude
     // it): the build side is shared by every task, so the trailing pass over unmatched build rows
     // would emit them once per task. Refused with a reason rather than assumed away.
     else if (j.joinType == FullOuter) Left("full outer join over a broadcast not supported (Spark plans it as a shuffled join)")
     else {
-      val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
+      val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, j.isNullAwareAntiJoin)
       check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
     }
   }

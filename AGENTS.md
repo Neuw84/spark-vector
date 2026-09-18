@@ -444,7 +444,7 @@ that pin it.
   would duplicate the unmatched build rows; the broadcast planner refuses it with a reason) keeps a
   per-build-row matched flag and emits the unmatched build rows, streamed side
   null (`ArrowOutput.nulls`), after the input is exhausted; build rows with a null key are never in
-  the table and so always come out there. Refused with a reason: existence, null-aware anti, skew
+  the table and so always come out there. A null-aware anti join (`NOT IN` over nullable columns) is the broadcast path plus two singleton relations (empty: keep all; a null build key: keep none) and, otherwise, the null-key streamed rows dropped. Refused with a reason: skew
   joins, double keys (Spark normalises NaN/-0.0 before comparing, the key table compares bits).
   Sort-merge joins are not converted.
 - Both joins are `VectorBinaryExec`; `VectorPlan` is the base the rule, selection marking, Comet
@@ -646,7 +646,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 166 kernel tests, 247 Spark tests (219 without the Comet and Iceberg profiles;
+Current counts: 166 kernel tests, 248 Spark tests (220 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

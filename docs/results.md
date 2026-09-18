@@ -487,6 +487,12 @@ one run) Q13 is at 8/13 accelerated operators with the global sort (by design) a
 reason, and Q16's list no longer mentions `Like` -- what is left there is the null-aware anti join
 (#265), whose `child ... is not columnar` cascade still takes the joins, projection and aggregate above it.
 
+**Update (#265, null-aware anti join).** With `ps_suppkey NOT IN (SELECT s_suppkey ...)` compiled --
+Spark's single-key null-aware anti join over a broadcast, the two singleton relations (empty build:
+keep all; a null build key: keep none) and, otherwise, the null-key streamed rows dropped -- Q16 goes
+from 7 to 11 of 17 operators on our side (SF1 decimals, `vector`, one run), and like Q13 its only
+remaining reason is the global sort. Neither query has an expression or join reason left.
+
 ## Q6 revisited: the copy is a dictionary decode (#14)
 
 The Q6 analysis above blames two costs, and #61 built a lever for the first one: with

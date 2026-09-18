@@ -1,6 +1,7 @@
 package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
 import org.apache.spark.sql.vector.{VectorBroadcastHashJoinExec, VectorBroadcastNestedLoopJoinExec, VectorFilterExec, VectorHashAggregateExec, VectorJoinPlanner, VectorShuffledHashJoinExec}
 
@@ -152,6 +153,41 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkFallback("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND soundex(tk.s) = 'X000'", Seq(BHJ), "unsupported expression")
     // A simplified LIKE (StartsWith) in the condition is compiled.
     checkVectorized("SELECT tk.i, dim.name FROM tk LEFT JOIN dim ON tk.i50 = dim.di AND tk.s LIKE 'x%'", Seq(BHJ))
+  }
+
+  test("null-aware anti join (NOT IN over nullable columns): the four regimes (#265)") {
+    def nullAware(df: DataFrame): Seq[VectorBroadcastHashJoinExec] =
+      nodesOf[VectorBroadcastHashJoinExec](df).filter(_.isNullAwareAntiJoin)
+    // Plain regime: a null-free, non-empty build side. tk.l is null at id % 7 = 3 and those rows
+    // must go (NULL NOT IN (...) is unknown); the others drop on a match as in a plain anti join.
+    // dim.dl has nulls, so the subquery filters them and Spark keeps the null-aware shape only for
+    // the streamed side's nullability.
+    val plain = checkVectorized("SELECT i, l FROM tk WHERE l NOT IN (SELECT dl FROM dim WHERE dl IS NOT NULL)", Seq(BHJ))
+    assert(nullAware(plain).nonEmpty, "expected the null-aware anti join to be ours\n" + finalPlan(plain).treeString)
+    assert(plain.collect().forall(!_.isNullAt(1)), "a streamed row with a null key must be dropped")
+    // Long and string keys, a null-free build that is nullable only by schema, the q16 shape (a
+    // multi-wildcard LIKE inside the subquery) and an aggregate over the result.
+    checkVectorized("SELECT i, s FROM tk WHERE s NOT IN (SELECT ds FROM dim WHERE name LIKE 'name%1%')", Seq(BHJ))
+    checkVectorized("SELECT i FROM tk WHERE i50 NOT IN (SELECT di FROM dim WHERE weight > 40)", Seq(BHJ))
+    checkVectorized("SELECT count(*), count(l) FROM tk WHERE l NOT IN (SELECT dl FROM dim WHERE dl IS NOT NULL)", Seq(BHJ, classOf[VectorHashAggregateExec]))
+    // The two singleton regimes. Adaptive execution short-circuits them before any join runs (an
+    // empty build side becomes the streamed side, a build side with a null key an empty relation),
+    // so the operator itself is exercised with it off; with it on only the results are compared.
+    Seq(true, false).foreach { aqe =>
+      withConf("spark.sql.adaptive.enabled" -> aqe.toString) {
+        val ops = if (aqe) Seq() else Seq(BHJ)
+        // Build side holding a null key: NOT IN is never true, no row survives -- null keys or not.
+        val allNull = checkVectorized("SELECT i, l FROM tk WHERE l NOT IN (SELECT dl FROM dim)", ops)
+        assert(allNull.collect().isEmpty)
+        if (!aqe) assert(nullAware(allNull).nonEmpty, finalPlan(allNull).treeString)
+        // Empty build side: every streamed row is kept, the null keys too.
+        val empty = checkVectorized("SELECT i, l FROM tk WHERE l NOT IN (SELECT dl FROM dim WHERE dl > 1000000)", ops)
+        assert(empty.collect().length === spark.table("tk").count())
+        if (!aqe) assert(nullAware(empty).nonEmpty, finalPlan(empty).treeString)
+        // And the plain regime with adaptive execution off, for completeness.
+        checkVectorized("SELECT i, s FROM tk WHERE s NOT IN (SELECT ds FROM dim WHERE di < 10)", Seq(BHJ))
+      }
+    }
   }
 
   test("shuffled hash join over Spark's row shuffle on both sides") {
