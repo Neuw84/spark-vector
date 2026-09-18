@@ -451,12 +451,18 @@ that pin it.
   (`VectorJoinPlanner.planMergeJoin`: keys and condition compile, every column a lane, any SMJ join
   type, skew joins included). `VectorSortMergeJoinIterator` streams its first input and buffers the
   second run by run (`RunKernels.boundaries` over the sorted keys -- the lane-parallel part; a run at a
-  batch edge continues into the next batch while `RunMerge.compareKeys` says the key holds; the run is
-  copied into its own arena with a matched bitmap for the outer types), walks the streamed batch run by
-  run (a copy per batch too -- both copies are the known costs, borrowing from the live batch is the
-  optimisation left), and emits equal runs' cross products in Spark's order -- streamed row, then the
-  buffered rows; under a condition each streamed row's survivors then its pad -- in 8192-pair chunks
-  through `ArrowOutput.gather` (`-1` pads). A right outer join runs the iterator with the sides
+  batch edge continues into the next batch while `RunMerge.compareKeys` says the key holds; a run
+  inside one batch borrows the batch's copy, a run at the edge is copied into its own *confined* arena --
+  a shared arena's close is a handshake with every thread, and paid per run it made q17 a hundred
+  times slower; the matched bitmap of an outer type is allocated on the first match), walks the
+  streamed batch run by run (one copy per batch), and emits equal runs' cross products in Spark's order
+  -- streamed row, then the buffered rows; under a condition each streamed row's survivors then its pad
+  -- in 8192-pair chunks through `ArrowOutput.gather` (`-1` pads). Single rows (pads, right-only rows,
+  a condition's survivors) go through an ordered 8192-row buffer flushed when full, before a direct
+  chunk gather and before a source they reference is released -- a full outer join over unique keys
+  emitted one Arrow batch per row without it (q51 3.9 s -> 1.1 s). The shape that stays slow is a merge
+  where every row of both large sides is its own run (q97: 8x the hash rewrite); the remedy is a
+  per-batch cursor without a run object. Readings in docs/results.md. A right outer join runs the iterator with the sides
   swapped (Spark streams the preserved side, so its output is in right order) and the gather lays the
   columns back in left ++ right order. Null keys never match. Tested positionally against Spark
   (`VectorSortMergeJoinSuite`): the hash join suites compare row sets, this one row order.
@@ -698,7 +704,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 276 Spark tests (248 without the Comet and Iceberg profiles;
+Current counts: 176 kernel tests, 277 Spark tests (249 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

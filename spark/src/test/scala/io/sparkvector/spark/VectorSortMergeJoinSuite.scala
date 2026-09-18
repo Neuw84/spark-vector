@@ -121,6 +121,23 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     checkOrdered("SELECT a.v, b.w FROM (SELECT pmod(v, 1) AS k, v FROM a WHERE v < 2000) a JOIN (SELECT pmod(w, 1) AS k, w FROM b WHERE w < 800) b ON a.k = b.k")
   }
 
+  test("a parent relying on the join's ordering converts: a window on the key, a same-key chain") {
+    withConf(merge: _*) {
+      // The window's partition is the join key: it needs the join's ordering and gets it, no sort between.
+      val w = checkVectorized(
+        "SELECT a.ki, a.v, b.w, row_number() OVER (PARTITION BY a.ki ORDER BY a.ki) AS rn FROM a JOIN b ON a.ki = b.ki",
+        Seq(SMJ, classOf[org.apache.spark.sql.vector.VectorWindowExec]))
+      assert(nodesOf[org.apache.spark.sql.execution.SortExec](w).forall(s => !s.child.isInstanceOf[VectorSortMergeJoinExec]), "a sort was placed over the merge join")
+      assert(nodesOf[org.apache.spark.sql.vector.VectorSortExec](w).forall(s => !s.child.isInstanceOf[VectorSortMergeJoinExec]), "our sort was placed over the merge join")
+      // A chain on the same key: the second join reads the first's ordering.
+      val c = checkVectorized(
+        "SELECT a.v, b.w, c.w AS w2 FROM a JOIN b ON a.ki = b.ki JOIN (SELECT ki, w FROM b WHERE w % 2 = 0) c ON a.ki = c.ki",
+        Seq(SMJ))
+      assert(nodesOf[VectorSortMergeJoinExec](c).length === 2, "both joins of the chain")
+      assert(nodesOf[SortMergeJoinExec](c).isEmpty)
+    }
+  }
+
   test("the mode switch: off leaves Spark's join, hash takes the rewrite, a struct column falls back") {
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinMode -> "off") {
       val df = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq())
