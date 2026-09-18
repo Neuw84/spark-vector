@@ -87,14 +87,16 @@ object VectorConf {
    */
   def sortMergeJoinEnabled(conf: SQLConf): Boolean = sortMergeJoinMode(conf) == "hash"
   /**
-   * What becomes of SortMergeJoinExec (#286): `off` leaves it to Spark; `hash` re-expresses it as our
-   * shuffled hash join under the statistics rule above (the boolean flag, kept for compatibility,
-   * means `hash`); `merge` plans our order-preserving merge join over the sorted inputs. `auto` (#287)
-   * is not decided yet and reads as `off`.
+   * What becomes of SortMergeJoinExec (#286, #287): `off` leaves it to Spark; `hash` re-expresses it as
+   * our shuffled hash join under the statistics rule above; `merge` plans our order-preserving merge
+   * join over the sorted inputs; `auto` decides per join -- the merge join where a parent relies on the
+   * ordering, where the row order can reach a limit or a sort without an exchange in between, or where
+   * the hash rewrite is not allowed (no statistics, both sides large, a skew join), the hash rewrite
+   * where a side's statistics fit the budget. The boolean flag is an alias: `true` reads as `auto`.
    */
   def sortMergeJoinMode(conf: SQLConf): String = {
     val explicit = conf.getConfString(SortMergeJoinMode, "").trim.toLowerCase
-    if (explicit.nonEmpty) explicit else if (bool(conf, SortMergeJoinEnabled, default = false)) "hash" else "off"
+    if (explicit.nonEmpty) explicit else if (bool(conf, SortMergeJoinEnabled, default = false)) "auto" else "off"
   }
   /**
    * Largest build side (bytes, size strings like `512m` accepted) a hash-style join converts for (#86);

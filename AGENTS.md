@@ -444,8 +444,21 @@ that pin it.
   columnar `UnionExec`. Run the TPC-DS harness (`run-tpcds.sh`, SF1 in scratch, ~5 minutes) after any
   change to an operator's output contract.
 - There is a merge join (#286, section 3.6b): `VectorSortMergeJoinExec` under
-  `spark.vector.exec.sortMergeJoin.mode=merge` (`off` | `hash` -- the rewrite below, what the boolean flag
-  means -- | `merge`; `auto` is #287). Spark's contract is kept (clustered distribution, both children
+  `spark.vector.exec.sortMergeJoin.mode=merge`, or under `auto` (#287) where the pre-pass chooses it. The
+  modes: `off` | `hash` (the rewrite below) | `merge` | `auto`; the boolean flag reads as `auto`; the
+  default is `off` (the flip to `auto` is the maintainer's: the issue conditions it on the golden files
+  under `auto`, on memory accounted through #12 and on SF10 not being slower than `hash`). The `auto`
+  rule, in `markSortMergeJoins`: a join whose ordering a parent relies on (`orderingNeeded`) takes the
+  merge join; so does one whose row order is *visible* -- below a `LocalLimit` / `GlobalLimit` /
+  `CollectLimit` / `TakeOrderedAndProject` / `Sort`, or a range-partitioned exchange (a global sort's,
+  which is all a stage sees of the sort above it under AQE), until an aggregate or another exchange ends
+  it -- because the hash rewrite's tie order shows there (the three golden files); otherwise the hash
+  rewrite when `sortMergeEligibility` finds a side whose statistics fit the budget, the merge join when
+  it does not (no statistics, both sides large, a skew join). The choice is the `SortMergeChoice` tag,
+  its reason the `SortMergeWhy` tag both operators print (`Sort-merge join as hash join: right side fits
+  spark.vector.join.maxBuildSize by statistics` / `as merge join: the row order reaches a limit or a
+  sort` / `ordering relied on by the parent` / `no size statistics ...`). A hash join below a merge join
+  (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). Spark's contract is kept (clustered distribution, both children
   sorted by the keys ascending, the preserved side's ordering out), so the sorts below stay and no
   pre-pass, build side or statistics are involved: the rule's `merge` case plans it directly
   (`VectorJoinPlanner.planMergeJoin`: keys and condition compile, every column a lane, any SMJ join
@@ -704,7 +717,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 277 Spark tests (249 without the Comet and Iceberg profiles;
+Current counts: 176 kernel tests, 278 Spark tests (250 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

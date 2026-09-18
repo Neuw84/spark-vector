@@ -11,12 +11,12 @@ import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
 import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GenerateExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
-import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.execution.window.{WindowExec, WindowGroupLimitExec}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
-import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
+import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
 
 object VectorExecRule {
@@ -26,6 +26,16 @@ object VectorExecRule {
    */
   val SortMergeDecision: TreeNodeTag[Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]] =
     TreeNodeTag("io.sparkvector.sortMergeJoin.decision")
+
+  /**
+   * Under `auto`, what a sort-merge join becomes and why (#287): `Left(why)` the merge join, `Right((side, why))`
+   * the hash rewrite building `side`. The reason is printed on the operator so the plan shows the decision.
+   */
+  val SortMergeChoice: TreeNodeTag[Either[String, (org.apache.spark.sql.catalyst.optimizer.BuildSide, String)]] =
+    TreeNodeTag("io.sparkvector.sortMergeJoin.choice")
+
+  /** The decision's reason, carried onto the operator the join became. */
+  val SortMergeWhy: TreeNodeTag[String] = TreeNodeTag("io.sparkvector.sortMergeJoin.why")
 }
 
 /** Tags and helpers for explaining why an operator was left to Spark. */
@@ -58,8 +68,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     if (!VectorConf.isEnabled(conf)) {
       plan
     } else {
-      if (VectorConf.sortMergeJoinEnabled(conf)) {
-        markSortMergeJoins(plan, orderingNeeded = false, maxBuildSize, new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]])
+      val sortMergeMode = VectorConf.sortMergeJoinMode(conf)
+      if (sortMergeMode == "hash" || sortMergeMode == "auto") {
+        markSortMergeJoins(plan, orderingNeeded = false, orderVisible = false, sortMergeMode == "auto", maxBuildSize, new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]])
       }
       val converted = plan.transformUp {
         case f @ FilterExec(condition, child) if VectorConf.filterEnabled(conf) =>
@@ -239,6 +250,36 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           VectorJoinPlanner.planMergeJoin(j) match {
             case Right(v) => v
             case Left(reason) => fallback(j, reason)
+          }
+
+        case j: SortMergeJoinExec if VectorConf.sortMergeJoinMode(conf) == "auto" =>
+          // The pre-pass chose (#287): the merge join where a parent relies on the join's ordering, where
+          // the order can reach a LIMIT or a sort without an exchange in between (the hash rewrite's tie
+          // order would show), or where the hash rewrite is not allowed (no statistics, both sides large,
+          // a skew join); the hash rewrite where a side's statistics fit the budget. Either operator
+          // carries the reason.
+          j.getTagValue(VectorExecRule.SortMergeChoice) match {
+            case Some(Right((buildSide, why))) =>
+              val (left, right) = sortMergeInputs(j)
+              val (buildPlan, streamedPlan) = if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
+              streamedInputReason(streamedPlan).orElse(laneExchangeInputReason(buildPlan)) match {
+                case None =>
+                  val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
+                  v.setTagValue(VectorExecRule.SortMergeWhy, why)
+                  v
+                case Some(reason) => fallback(resorted(j), reason)
+              }
+            case Some(Left(why)) =>
+              VectorJoinPlanner.planMergeJoin(j) match {
+                case Right(v) =>
+                  // The mixed case: a hash join below (its sorts stripped) no longer offers the ordering this
+                  // merge join requires, so a sort comes back over that child.
+                  val fixed = resortedMerge(v)
+                  fixed.setTagValue(VectorExecRule.SortMergeWhy, why)
+                  fixed
+                case Left(reason) => fallback(resorted(j), reason)
+              }
+            case None => fallback(resorted(j), "sort-merge join not examined by the pre-pass")
           }
 
         case j: SortMergeJoinExec if VectorConf.sortMergeJoinEnabled(conf) =>
@@ -512,20 +553,55 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * on the same key is free to convert too; one that stays requires its children sorted, and a merge
    * join among them then stays as well. The decisions ride along the copies transformUp makes.
    */
-  private def markSortMergeJoins(plan: SparkPlan, orderingNeeded: Boolean, maxBuildSize: Long, memo: SortMergeMemo): Unit = {
+  private def markSortMergeJoins(plan: SparkPlan, orderingNeeded: Boolean, orderVisible: Boolean, auto: Boolean, maxBuildSize: Long, memo: SortMergeMemo): Unit = {
+    // Order visibility (#287): below a limit, a take-ordered, a sort, or a range-partitioned exchange (a
+    // global sort's), a join's row order can show -- ties under ORDER BY, the rows a LIMIT picks -- and
+    // the hash rewrite's order differs from Spark's. An aggregate or any other exchange ends it.
+    val visibleHere = orderVisible || (plan match {
+      case _: LocalLimitExec | _: GlobalLimitExec | _: CollectLimitExec | _: TakeOrderedAndProjectExec | _: SortExec => true
+      case e: ShuffleExchangeExec => e.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
+      case _ => false
+    })
     val converts = plan match {
       case j: SortMergeJoinExec =>
-        val decision = if (orderingNeeded) Left("output ordering required by the parent operator") else sortMergeEligibility(j, maxBuildSize, memo)
+        val eligibility = sortMergeEligibility(j, maxBuildSize, memo)
+        val decision = if (orderingNeeded) Left("output ordering required by the parent operator") else eligibility
         j.setTagValue(VectorExecRule.SortMergeDecision, decision)
-        decision.isRight
+        if (auto) {
+          val choice: Either[String, (org.apache.spark.sql.catalyst.optimizer.BuildSide, String)] =
+            if (orderingNeeded) Left("as merge join: ordering relied on by the parent")
+            else if (visibleHere) Left("as merge join: the row order reaches a limit or a sort")
+            else eligibility match {
+              case Right(side) => Right((side, s"as hash join: ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"} side fits ${VectorConf.JoinMaxBuildSize} by statistics"))
+              case Left(reason) => Left(s"as merge join: $reason")
+            }
+          j.setTagValue(VectorExecRule.SortMergeChoice, choice)
+          choice.isRight
+        } else decision.isRight
       case _ => false
     }
+    val childVisible = visibleHere && (plan match {
+      case _: HashAggregateExec | _: SortAggregateExec | _: ObjectHashAggregateExec => false
+      case e: ShuffleExchangeExec => e.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
+      case _: BroadcastExchangeExec => false
+      case _ => true
+    })
     plan.children.zipWithIndex.foreach { case (child, i) =>
       val required = !converts && plan.requiredChildOrdering(i).nonEmpty
       val passes = orderingNeeded && plan.outputOrdering.nonEmpty &&
         org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, plan.outputOrdering)
-      markSortMergeJoins(child, required || passes, maxBuildSize, memo)
+      markSortMergeJoins(child, required || passes, childVisible, auto, maxBuildSize, memo)
     }
+  }
+
+  /** A merge join of ours whose child lost its ordering (a hash join below, sorts stripped) gets the sort back. */
+  private def resortedMerge(v: VectorSortMergeJoinExec): VectorSortMergeJoinExec = {
+    def fix(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan =
+      if (org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, required) || !child.supportsColumnar) child
+      else VectorSortExec(required, global = false, child)
+    val left = fix(v.left, v.requiredChildOrdering.head)
+    val right = fix(v.right, v.requiredChildOrdering(1))
+    if ((left eq v.left) && (right eq v.right)) v else v.copy(left = left, right = right)
   }
 
   /** Like [[columnarInputReason]] for an operator that only moves columns: any lane type will do. */

@@ -123,6 +123,7 @@ case class VectorSortMergeJoinExec(
        |Join type: $joinType
        |Condition: ${condition.map(_.sql).getOrElse("None")}
        |Output: ${output.map(_.name).mkString(", ")}
+       |${getTagValue(VectorExecRule.SortMergeWhy).map(w => s"Sort-merge join $w").getOrElse("")}
        |""".stripMargin
   }
 }
