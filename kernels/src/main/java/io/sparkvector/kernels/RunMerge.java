@@ -10,7 +10,7 @@ import java.lang.foreign.ValueLayout;
  * total order of the keys -- the same order the sort kernel produces, ties broken by run index
  * then position, so the merge is stable across runs the way the sort is within one.
  *
- * <p>The merge is a binary heap over the runs' cursors: one compare-and-sift per output row,
+ * <p>The merge is a loser tree over the runs' cursors: one compare per level per output row,
  * scalar. The key comparison reads the runs' key columns row by row ({@link #compareKeys}) with
  * Spark's rules -- doubles in Spark's total order, strings as unsigned bytes, nulls first or last
  * per key. The output gathers ({@link #gatherFixed}, {@link #gatherUtf8}) then copy each output
@@ -32,8 +32,6 @@ public final class RunMerge {
    */
   private final long[][][] norm;
   private final boolean[][][] nullAt;
-  private final int[] heap;
-  private int heapSize;
 
   /**
    * @param keys the key columns of every run, {@code keys[run][key]}
@@ -59,16 +57,41 @@ public final class RunMerge {
         }
       }
     }
-    this.heap = new int[rows.length];
+    this.tree = new int[Math.max(rows.length, 1)];
+    this.seen = new boolean[tree.length];
+    java.util.Arrays.fill(tree, -1);
+    // Leaves in order: a winner parks at the first empty node until its sibling subtree arrives,
+    // so after the last leaf every internal node holds a loser and the root the winner.
     for (int r = 0; r < rows.length; r++) {
-      if (rows[r] > 0) {
-        heap[heapSize++] = r;
+      int w = rows[r] > 0 ? r : -1;
+      boolean parked = false;
+      for (int i = (rows.length + r) >>> 1; i > 0; i >>>= 1) {
+        if (tree[i] == -1 && !seen[i]) {
+          tree[i] = w;
+          seen[i] = true;
+          parked = true;
+          break;
+        }
+        int other = tree[i];
+        if (lessTree(other, w)) {
+          tree[i] = w;
+          w = other;
+        }
+      }
+      if (!parked) {
+        tree[0] = w;
       }
     }
-    for (int i = (heapSize >>> 1) - 1; i >= 0; i--) {
-      siftDown(i);
+    boolean single = ascending.length == 1;
+    boolean fixed = single;
+    for (int r = 0; r < rows.length && fixed; r++) {
+      fixed = rows[r] == 0 || norm[r][0] != null;
     }
+    this.wideKey = fixed && rows.length > 1;
   }
+
+  /** Internal nodes that already hold a parked winner or a loser during construction. */
+  private final boolean[] seen;
 
   /** Builds the sorted-order key array of run {@code r}'s key {@code k} when the type allows it. */
   private void normalise(int r, int k) {
@@ -122,7 +145,7 @@ public final class RunMerge {
 
   /** Rows left to emit. */
   public boolean hasNext() {
-    return heapSize > 0;
+    return tree[0] >= 0;
   }
 
   /**
@@ -131,37 +154,100 @@ public final class RunMerge {
    */
   public int next(int[] runOf, int[] rowOf, int max) {
     int o = 0;
-    while (o < max && heapSize > 0) {
-      int r = heap[0];
-      runOf[o] = r;
-      rowOf[o] = perm[r][pos[r]];
-      o++;
-      if (++pos[r] == rows[r]) {
-        heap[0] = heap[--heapSize];
+    while (o < max && tree[0] >= 0) {
+      int w = tree[0];
+      int[] p = perm[w];
+      int at = pos[w];
+      int block = 1;
+      // The widened leaf: rows of the winner still below the runner-up's key leave in one block,
+      // without a replay each. Tried when the last block was wide or every 64th row; a block
+      // needs a single fixed-width key and a non-null runner-up (#285).
+      if (wideKey && (lastBlock > 1 || (emitted & 63) == 0)) {
+        block = blockLength(w, max - o);
       }
-      if (heapSize > 0) {
-        siftDown(0);
+      lastBlock = block;
+      emitted += block;
+      for (int j = 0; j < block; j++) {
+        runOf[o] = w;
+        rowOf[o] = p[at + j];
+        o++;
       }
+      pos[w] = at + block;
+      replay(w, pos[w] < rows[w] ? w : -1);
     }
     return o;
   }
 
-  private void siftDown(int i) {
-    int r = heap[i];
-    int half = heapSize >>> 1;
-    while (i < half) {
-      int child = (i << 1) + 1;
-      int right = child + 1;
-      if (right < heapSize && less(heap[right], heap[child])) {
-        child = right;
+  private final int[] tree; // losers per internal node, tree[0] the winner; -1 an exhausted run
+  private final boolean wideKey;
+  private int lastBlock = 1;
+  private long emitted;
+
+  /**
+   * Rows of run {@code w}, from its cursor, that precede the runner-up's current row: those with a
+   * key below the runner-up's, plus the equal ones when {@code w} is the lower run (the tie rule).
+   * At least one, at most {@code limit}.
+   */
+  private int blockLength(int w, int limit) {
+    int k = rows.length;
+    int best = -1;
+    for (int i = (k + w) >>> 1; i > 0; i >>>= 1) {
+      int c = tree[i];
+      if (c >= 0 && (best < 0 || less(c, best))) {
+        best = c;
       }
-      if (!less(heap[child], r)) {
-        break;
-      }
-      heap[i] = heap[child];
-      i = child;
     }
-    heap[i] = r;
+    int end = Math.min(rows[w], pos[w] + limit);
+    if (best < 0) {
+      return end - pos[w]; // the only run left
+    }
+    boolean[] zb = nullAt[best][0];
+    if (zb != null && zb[pos[best]]) {
+      return 1;
+    }
+    if (nullAt[w][0] != null) {
+      return 1; // null rows in the winner would break the search's monotonicity; one row at a time
+    }
+    long key2 = norm[best][0][pos[best]];
+    long[] kw = norm[w][0];
+    boolean equalToo = w < best;
+    int lo = pos[w] + 1;
+    int hi = end;
+    while (lo < hi) {
+      int mid = (lo + hi) >>> 1;
+      int c = Long.compareUnsigned(kw[mid], key2);
+      if (c < 0 || (c == 0 && equalToo)) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo - pos[w];
+  }
+
+  /** Replays leaf {@code leaf} (its run now {@code run}, or -1 when exhausted) up to the root. */
+  private void replay(int leaf, int run) {
+    int k = rows.length;
+    int w = run;
+    for (int i = (k + leaf) >>> 1; i > 0; i >>>= 1) {
+      int other = tree[i];
+      if (lessTree(other, w)) {
+        tree[i] = w;
+        w = other;
+      }
+    }
+    tree[0] = w;
+  }
+
+  /** {@link #less} with -1 as an exhausted run that never wins. */
+  private boolean lessTree(int a, int b) {
+    if (a < 0) {
+      return false;
+    }
+    if (b < 0) {
+      return true;
+    }
+    return less(a, b);
   }
 
   /** Whether run {@code a}'s current row sorts before run {@code b}'s (ties: the lower run first). */

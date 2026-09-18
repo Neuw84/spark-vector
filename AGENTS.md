@@ -280,13 +280,19 @@ that pin it.
   issue names it `sparkvector.sort.runRows`) the iterator seals the builders into a run -- its
   columns, a dictionary string column decoded once, its keys and the permutation -- so the sort's
   JVM scratch is bounded by the run, not the partition. One run emits through its permutation as
-  before; several are k-way merged by `kernels/RunMerge` (a binary heap over one cursor per run;
-  fixed-width keys compared through per-run normalised `long[]` arrays in sorted order, strings and
-  decimals through the columns; ties by run index then position, so the merge is stable) and
-  gathered run by run through `ArrowOutput.gatherRuns`. The merge costs ~30 ns/row on top of the
-  runs' sorts at 10M random longs (`SortBenchmark.runs8`: 949 ms against 674 ms for one sort), so
-  runs are a memory bound and the shape #85's spill plugs into, not a speed-up; a loser tree would
-  halve the compares.
+  before; several are k-way merged by `kernels/RunMerge` (a loser tree over one cursor per run, one
+  compare per level per row; fixed-width keys compared through per-run normalised `long[]` arrays in
+  sorted order, strings and decimals through the columns; ties by run index then position, so the
+  merge is stable) and gathered run by run through `ArrowOutput.gatherRuns`. The widened leaf: after
+  a winner is chosen, a binary search over its normalised keys finds how many of its next rows still
+  precede the runner-up's (equal ones too when the tie rule favours it) and they leave as one block
+  without a replay each -- tried after a wide block or every 64th row, single fixed-width key, no
+  nulls in the winner. Under a limit each run keeps only its first `n` rows for the merge (top-N by
+  run). Measured (`SortBenchmark.runs8`, eight runs and the merge against one sort, INT64, 10M rows):
+  random 1010 vs 685 ms (the merge costs ~30 ns/row and the loser tree did not beat the heap, so
+  the cost is not the compares), presorted 98 vs 112 ms and low cardinality 258 vs 322 ms (the
+  blocks). Runs are the memory bound and the shape #85's spill plugs into; on random keys they cost
+  time, on ordered or repetitive keys they save it.
 - `VectorTakeOrderedAndProjectExec` replaces `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT n`)
   over a columnar child. Per partition it is the sort iterator with a `limit` (the partition is
   still fully sorted, only the first `n` rows are gathered); those at most `n` rows per partition

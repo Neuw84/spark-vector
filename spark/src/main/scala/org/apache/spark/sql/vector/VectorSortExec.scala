@@ -95,9 +95,14 @@ private[vector] class VectorSortIterator(
     extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
-  /** A sealed run: its output columns, its key columns and the permutation that orders it. */
+  /**
+   * A sealed run: its output columns, its key columns and the permutation that orders it. Under a
+   * limit only the first `limit` rows of the order can ever be emitted, so that is all the merge
+   * walks (`kept`): a top-N over a large partition costs the merge n rows per run, not the partition.
+   */
   private final class Run(val columns: Array[VectorBuffers], val keys: Array[VectorBuffers], val rows: Int) {
     val permutation: Array[Int] = SortKernels.sortIndices(keys, ascending, nullsFirst, rows)
+    val kept: Int = math.min(rows, limit)
   }
 
   private val OutputBatchSize = 4096
@@ -196,7 +201,7 @@ private[vector] class VectorSortIterator(
         columns = runs.head.columns
         permutation = runs.head.permutation
       } else if (runs.length > 1) {
-        merge = new RunMerge(runs.map(_.keys).toArray, runs.map(_.permutation).toArray, runs.map(_.rows).toArray, ascending, nullsFirst)
+        merge = new RunMerge(runs.map(_.keys).toArray, runs.map(_.permutation).toArray, runs.map(_.kept).toArray, ascending, nullsFirst)
         runColumns = Array.tabulate(numColumns)(c => runs.map(_.columns(c)).toArray)
         runOf = new Array[Int](OutputBatchSize)
         rowOf = new Array[Int](OutputBatchSize)

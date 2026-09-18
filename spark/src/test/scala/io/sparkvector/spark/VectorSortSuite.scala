@@ -122,6 +122,9 @@ class VectorSortSuite extends VectorQuerySuite {
       ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) => if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2") }
       // A limit above a merge emits the head of the merged order.
       checkVectorized("SELECT i, l FROM tbig SORT BY l DESC LIMIT 250", Seq(Sort))
+      // A top-N over the runs: each run contributes at most n rows to the merge.
+      checkVectorized("SELECT i, l, s FROM tbig ORDER BY l DESC NULLS LAST, i LIMIT 50", Seq(classOf[VectorTakeOrderedAndProjectExec]))
+      checkVectorized("SELECT i, d FROM tbig ORDER BY d, i LIMIT 7", Seq(classOf[VectorTakeOrderedAndProjectExec])) // d is null for i % 11 = 0: i breaks the ties
     }
   }
 
