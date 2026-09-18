@@ -479,6 +479,14 @@ query where `vector` is markedly slower than Spark (0.53x) while still accelerat
 operators -- worth a profile before #27 lands, since it is the shape that will run more of our code
 afterwards.
 
+**Update (#264, multi-wildcard `LIKE`).** `o_comment NOT LIKE '%special%requests%'` (Q13) and
+`s_comment LIKE '%Customer%Complaints%'` (Q16) were the last expression reasons on TPC-H: `Like` with
+several wildcards is left alone by `LikeSimplification` and fell back as `unsupported expression Like`,
+taking the projection above it. As a multi-token matcher both compile: at SF1 (decimals, `vector`,
+one run) Q13 is at 8/13 accelerated operators with the global sort (by design) as its only remaining
+reason, and Q16's list no longer mentions `Like` -- what is left there is the null-aware anti join
+(#265), whose `child ... is not columnar` cascade still takes the joins, projection and aggregate above it.
+
 ## Q6 revisited: the copy is a dictionary decode (#14)
 
 The Q6 analysis above blames two costs, and #61 built a lever for the first one: with
