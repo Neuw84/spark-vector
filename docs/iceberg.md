@@ -144,6 +144,18 @@ probe; the mapping-to-bitmap conversion and the validity copy on our side do not
 profiles, and the selection forwarding threshold is not a lever. Comet's native scan, which applies
 the deletes inside the Parquet decoder, was not measured on that host.
 
+v3 tables (deletion vectors, `docs/results.md` "v3: deletion vectors"): Comet 1.0 does not read them
+natively, so on v3 every configuration goes through Iceberg's JVM reader and the adapter path above is
+the accelerated path a user has. Deletion vectors are the cheaper encoding for both engines -- one
+roaring bitmap per data file deserialised once, against the per-task index v2 builds from its delete
+rows: the merge price over `plain` is about +15 ms per full-scan probe for Spark and +17-22 ms for us at
+SF1, against +21-23 and +32-40 for v2 position deletes. Our margin over Spark is 1.1-1.2x on the
+pure-merge probes and 3-4x on Q1, flat in the delete share. The cost that remains is the `int[]`
+mapping Iceberg's `ColumnarBatchReader` builds per batch from the bitmap (19 % of the probe for us,
+15 % for Spark); the adapter converts it back to a bitmap for 1.5 %. Skipping the middle step needs the
+reader to hand out the index and the batch offset instead of wrapping the vectors -- an Iceberg-side
+option, not something our operators can do alone.
+
 Wide decimals (`decimal(p > 18)`) from either reader become a DECIMAL128 lane (#257). Iceberg's
 reader keeps them as a `FixedSizeBinaryVector` of big-endian bytes -- as many per value as the
 precision needs, twelve for `decimal(27,2)` -- which the adapter converts limb by limb (a dictionary

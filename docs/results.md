@@ -493,7 +493,7 @@ keep all; a null build key: keep none) and, otherwise, the null-key streamed row
 from 7 to 11 of 17 operators on our side (SF1 decimals, `vector`, one run), and like Q13 its only
 remaining reason is the global sort. Neither query has an expression or join reason left.
 
-## Iceberg merge-on-read, v2: positional and equality deletes (#260 harness, #261 study)
+## Iceberg merge-on-read: v2 positional and equality deletes, v3 deletion vectors (#260 harness, #261, #262)
 
 The local harness (`gen-iceberg-mor.sh`, `run-tpch.sh --iceberg ... --variant ...`, `docs/iceberg.md`)
 builds `lineitem` variants with the delete shapes a lakehouse table carries between compactions and
@@ -588,6 +588,70 @@ with the aggregate at 1.0 s. The signature -- growth across iterations inside on
 -- is a JIT deoptimisation storm in the aggregate rather than an algorithmic cost of the delete
 layout (the harness's first write-up read it as the latter; this run corrects it). It is worth
 catching with `-XX:+PrintCompilation` on a run that shows it; it is listed in AGENTS.md section 7.
+
+### v3: deletion vectors (#262)
+
+The same protocol over the v3 tables -- the `pos_*` mutation scripts encoded as deletion vectors in
+Puffin files, one roaring bitmap per data file -- in one session with its own `plain` run (5 warm-up,
+10 measured iterations, quiet host). 40 cells, identical checksums between `spark` and `vector`, and
+every `dv_*` checksum equals the `pos_*` twin of the same mutation: same rows, different encoding. On
+Comet 1.0 every configuration reads v3 through Iceberg's JVM reader (`BatchScanExec`), so this is the
+case where a JVM columnar merge is the only accelerated path a user has; the Comet configurations were
+not run on this host.
+
+| variant | live % | probe-count spark | probe-count vector | probe-sum spark | probe-sum vector | probe-group spark | probe-group vector | q6 spark | q6 vector | q1 spark | q1 vector |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `plain` | 100 | 38 | 40 | 98 | 79 (1.23x) | 146 | 94 (1.55x) | 132 | 170 (0.78x) | 1656 | 380 (4.35x) |
+| `dv_2` | 98 | 91 | 95 | 127 (0.77) | 112 (0.71, 1.14x) | 173 (0.85) | 132 (0.72, 1.31x) | 183 | 186 (0.99x) | 1595 | 406 (3.93x) |
+| `dv_10` | 90 | 68 | 77 | 113 (0.87) | 101 (0.78, 1.12x) | 160 (0.91) | 121 (0.78, 1.31x) | 158 | 206 (0.76x) | 1517 | 419 (3.62x) |
+| `dv_30` | 70 | 79 | 83 | 113 (0.86) | 96 (0.83, 1.18x) | 152 (0.96) | 120 (0.78, 1.26x) | 168 | 199 (0.85x) | 1223 | 391 (3.13x) |
+| `dv_10_clustered` | 92 | 86 | 76 | 113 (0.87) | 102 (0.77, 1.10x) | 155 (0.94) | 127 (0.74, 1.22x) | 168 | 184 (0.91x) | 1535 | 424 (3.62x) |
+| `dv_30_clustered` | 71 | 85 | 80 | 108 (0.90) | 95 (0.84, 1.14x) | 152 (0.96) | 118 (0.80, 1.28x) | 157 | 218 (0.72x) | 1225 | 411 (2.98x) |
+| `dv_upd_1` | 88 | 114 | 110 | 137 (0.71) | 112 (0.71, 1.23x) | 176 (0.83) | 132 (0.72, 1.34x) | 174 | 194 (0.90x) | 1676 | 413 (4.06x) |
+| `dv_upd_5` | 84 | 121 | 115 | 142 (0.69) | 126 (0.63, 1.13x) | 198 (0.74) | 145 (0.65, 1.37x) | 193 | 206 (0.94x) | 1808 | 439 (4.12x) |
+
+**Deletion vectors are the cheaper encoding, for both engines.** Against the v2 cells of the same
+mutation (previous table, same host and protocol): the pure-merge probe costs `spark` 113 ms on `dv_10`
+against 125 on `pos_10` and `vector` 101 against 108; `probe-count`, which is nothing but the merge,
+68-79 ms on `dv_*` against 99-101 on `pos_*` for `spark` and 77-83 against 93-96 for `vector`. The
+delete price over `plain` is +15 ms for `spark` and +17-22 ms for `vector` on the probe, where the v2
+position-delete files cost +21-23 and +32-40. What disappears is the per-task index construction:
+in the v2 profile `Deletes.toPositionIndexes` and the path hashing under it were a third of the
+Iceberg samples; on v3 they are gone and `RoaringPositionBitmap.contains` takes their place at a
+fraction of the cost -- one blob per data file, deserialised once, against thousands of delete rows
+to sort into an index. The update/merge shape (`dv_upd_*`: 18 data files, several snapshots, the
+one v3 is meant for) pays the same as its v2 twin within noise, since its extra cost is the small
+files, not the deletes.
+
+**The ratio looks like v2's, as the hypothesis said; the margin does not grow, as v2 found.**
+`vector` over `spark`: 1.10-1.23x on `probe-sum`, 1.22-1.37x on `probe-group`, 3.0-4.1x on Q1 --
+flat in the delete share and a little under the `plain` ratios of the same session (1.23x, 1.55x,
+4.35x), the fixed-price effect of the v2 write-up in a smaller dose. Q6 is again slower under `vector`
+on every variant, `plain` included this session (0.72-0.99x): the selection-over-selection compaction.
+
+**Where the DV cost goes, and the candidate optimisation.** JFR on `probe-sum` over `dv_30`, 10
+iterations, both engines: `ColumnarBatchUtil.buildRowIdMapping` is the top method for both -- 19.0 %
+of `vector`'s 621 samples and 15.0 % of `spark`'s 713 -- with `RoaringPositionBitmap.contains` and
+`DeleteFilter.incrementDeleteCount` under it; the Puffin read itself does not register (it is once per
+file). On our side `selectionFromIndices` is 1.45 % (9 samples) and `validityFromNullBytes` absent.
+The mapping construction is therefore clearly visible, which is the issue's condition for the direct
+bitmap path (build our selection from the `PositionDeleteIndex` and the batch's starting position,
+skipping the `int[]`). But the `int[]` is built inside Iceberg's `ColumnarBatchReader` before the batch
+reaches either engine: a direct path on our side removes our 1.5 %, not the 19 %, unless Iceberg's
+reader can be told to hand out the index and the row offset instead of wrapping the vectors. That is
+an Iceberg-side option (a reader flag, or the `_deleted` metadata-column path with the wrapping
+skipped), worth proposing upstream with these numbers; nothing in our operators buys it. The
+pipeline stays bitmap -> `int[]` -> bitmap with the middle step Iceberg's and the middle step the
+expensive one.
+
+**The Q1 transient, third and fourth sightings.** Both `dv_upd_*` variants showed it in this run, on
+the first iterations after five warm-ups (`dv_upd_1`: 8954, 9323, 3262 then 430 ms; `dv_upd_5`: 8364,
+8473, 8384, 1731 then 380-440 ms), and it again refused to appear under JFR (10 iterations at 441 ms)
+or under `-Xlog:deoptimization=debug` (395 ms median, an ordinary 648-line log). Four of the five
+sightings are on the update/merge shape -- 18 data files, two of them small ones from the UPDATE and
+the MERGE -- which is the one pattern in it; the recovery inside the same JVM says the code recompiles
+its way out. It is in AGENTS.md section 7 with the recipe to catch it: run the sweep command (not the
+profiler) with `-XX:+PrintCompilation` and keep the output of a JVM that shows the 8 s iterations.
 
 ## Q6 revisited: the copy is a dictionary decode (#14)
 

@@ -704,7 +704,7 @@ the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers eit
   the position-filtered batch and applying the equality-delete set as our own anti-join, which Iceberg
   1.11's reader does not expose. Q1 under `vector` has shown a transient 20x (two or three consecutive
   8 s iterations inside one JVM, then recovery; the partial aggregate's kernel time balloons) in two of
-  sixteen JVMs and never under JFR -- a JIT deoptimisation signature to catch with `-XX:+PrintCompilation`.
+  sixteen JVMs of the v2 run and two more in the v3 run (four of five on the update/merge shape: 18 data files, two small), never under JFR or `-Xlog:deoptimization` -- a JIT signature; catch it by running the sweep command itself with `-XX:+PrintCompilation` and keeping the output of a JVM that shows the 8 s iterations. On v3 the delete cost is `buildRowIdMapping` inside Iceberg's reader (19 % of the pure-merge probe for us, 15 % for Spark); a direct bitmap from the deletion vector would need the reader to hand out the index instead of wrapping the vectors -- an upstream option, not an operator change.
 
 - Iceberg `MERGE INTO` itself is not accelerated: `MergeRows` and the write are Spark's (#21). The
   project above the target scan (`monotonically_increasing_id()` as `MonotonicIdExpr`, plus the struct
