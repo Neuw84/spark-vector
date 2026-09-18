@@ -35,7 +35,7 @@ public final class SortReference {
     return out;
   }
 
-  static int compareKey(VectorBuffers k, int a, int b, boolean desc, boolean nullsFirst) {
+  public static int compareKey(VectorBuffers k, int a, int b, boolean desc, boolean nullsFirst) {
     boolean na = k.isNull(a);
     boolean nb = k.isNull(b);
     if (na && nb) {

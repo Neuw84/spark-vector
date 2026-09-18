@@ -2,36 +2,52 @@ package io.sparkvector.kernels;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.util.Arrays;
+import java.nio.ByteOrder;
+import jdk.incubator.vector.DoubleVector;
+import jdk.incubator.vector.IntVector;
+import jdk.incubator.vector.LongVector;
+import jdk.incubator.vector.VectorMask;
+import jdk.incubator.vector.VectorOperators;
+import jdk.incubator.vector.VectorSpecies;
 
 /**
  * Columnar sort: a permutation of row indices ordered by one or more key columns; {@link
  * GatherKernels} applies it to the output columns.
  *
- * <p>The sort is least-significant-key-first over order-preserving 32-bit key passes. Each pass
- * packs {@code (key, current position)} into a {@code long} and sorts the array with {@link
- * Arrays#sort(long[])}: the position in the low bits makes every pass stable, so processing keys
- * from the last to the first yields the lexicographic order. Values are mapped to unsigned 32-bit
- * keys that compare like the value does:
+ * <p>The sort is least-significant-key-first over order-preserving unsigned key passes. Each pass
+ * is a stable LSD radix sort of the current positions by a 32- or 64-bit key: one counting sort per
+ * 8-bit digit (four or eight), each O(n), a digit whose histogram has a single bucket skipped (the
+ * high digits of small ints, dates and dense ranks, most of the time) and a pass whose keys are
+ * already in order skipped whole (presorted and constant inputs). Processing keys from the last to
+ * the first yields the lexicographic order. Values are mapped to unsigned keys that compare like
+ * the value does:
  *
  * <ul>
- *   <li>int32 and booleans: one pass;
- *   <li>int64 and doubles: two passes (low then high half) over the sign-normalised bits, doubles
- *       first put into total order the way Spark compares them ({@code -0.0 == 0.0}, NaN above
- *       everything, NaN equal to NaN);
- *   <li>UTF8: strings up to 8 bytes long take three passes (length, then the two halves of the
- *       zero-padded big-endian prefix, which orders bytes unsigned like Spark's {@code
- *       UTF8String}); longer strings are ranked once by a stable merge sort with a byte
- *       comparator and the rank takes one pass;
+ *   <li>int32 and booleans: one 32-bit pass;
+ *   <li>int64 and doubles: one 64-bit pass over the sign-normalised bits, doubles first put into
+ *       total order the way Spark compares them ({@code -0.0 == 0.0}, NaN above everything, NaN
+ *       equal to NaN);
+ *   <li>UTF8: strings up to 8 bytes long take a length pass and a 64-bit pass over the zero-padded
+ *       big-endian prefix (which orders bytes unsigned like Spark's {@code UTF8String}); longer
+ *       strings are ranked once by a stable merge sort with a byte comparator and the rank takes
+ *       one pass;
+ *   <li>decimal128: four 32-bit passes over the two limbs;
  *   <li>nulls: one final pass per key on the null flag, placing them first or last.
  * </ul>
  *
- * <p>Descending order inverts the key bits. Everything is primitive-array work the JIT
- * vectorises where it can; the Vector API has no sort primitive and this is not one.
+ * <p>Descending order inverts the key bits. The Vector API has no sort primitive: the lanes work
+ * on the key normalisation (sign flips, the double total order, the descending inversion, all
+ * over the gathered key array); the histograms and the scatter are scalar, as is the gather of
+ * the keys through the current permutation. Scratch is two {@code int[n]} position buffers, a key
+ * buffer of each width and one {@code int[n]} output buffer, allocated once per sort (#285).
  */
 public final class SortKernels {
 
   private SortKernels() {}
+
+  private static final VectorSpecies<Integer> I = Species.I;
+  private static final VectorSpecies<Long> L = Species.L;
+  private static final VectorSpecies<Double> D = Species.D;
 
   /**
    * Row indices of the {@code n}-row columns in sorted order. {@code keys[c]} is compared in the
@@ -46,8 +62,8 @@ public final class SortKernels {
     if (n < 2) {
       return order;
     }
-    long[] packed = new long[n];
-    int[] keyScratch = new int[n];
+    Passes p = new Passes(n);
+    int[] key = p.key;
     for (int c = keys.length - 1; c >= 0; c--) {
       VectorBuffers k = keys[c];
       boolean desc = !ascending[c];
@@ -56,31 +72,42 @@ public final class SortKernels {
         // order (the reference sort is stable and so must this be); the null pass below then moves
         // them to the front or the back as a block.
         case INT32 -> {
-          for (int i = 0; i < n; i++) {
-            int row = order[i];
-            keyScratch[i] = k.isNull(row) ? 0 : flip(k.getInt(row) ^ Integer.MIN_VALUE, desc);
+          int[] values = new int[n];
+          MemorySegment.copy(k.data(), VectorBuffers.LE_INT, 0, values, 0, n);
+          long[] valid = validityWords(k, n);
+          if (valid == null) {
+            for (int i = 0; i < n; i++) {
+              key[i] = values[order[i]];
+            }
+          } else {
+            for (int i = 0; i < n; i++) {
+              int row = order[i];
+              key[i] = isNull(valid, row) ? Integer.MIN_VALUE : values[row];
+            }
           }
-          order = pass(order, keyScratch, packed, n);
+          normalise32(key, desc, n);
+          order = p.pass(order);
         }
         case BOOL -> {
           for (int i = 0; i < n; i++) {
             int row = order[i];
-            keyScratch[i] = k.isNull(row) ? 0 : flip(k.getBoolean(row) ? 1 : 0, desc);
+            key[i] = k.isNull(row) ? 0 : flip(k.getBoolean(row) ? 1 : 0, desc);
           }
-          order = pass(order, keyScratch, packed, n);
+          order = p.pass(order);
         }
-        case INT64 -> order = passes64(order, k, false, desc, packed, keyScratch, n);
-        case FLOAT64 -> order = passes64(order, k, true, desc, packed, keyScratch, n);
-        case UTF8 -> order = passesUtf8(order, k, desc, packed, keyScratch, n);
-        case DECIMAL128 -> order = passes128(order, k, desc, packed, keyScratch, n);
+        case INT64 -> order = passes64(order, k, false, desc, p, n);
+        case FLOAT64 -> order = passes64(order, k, true, desc, p, n);
+        case UTF8 -> order = passesUtf8(order, k, desc, p, n);
+        case DECIMAL128 -> order = passes128(order, k, desc, p, n);
         default -> throw new IllegalArgumentException("unsupported sort key type " + k.type());
       }
       if (k.hasNulls()) {
         int nullKey = nullsFirst[c] ? 0 : 1;
+        long[] valid = validityWords(k, n);
         for (int i = 0; i < n; i++) {
-          keyScratch[i] = k.isNull(order[i]) ? nullKey : 1 - nullKey;
+          key[i] = isNull(valid, order[i]) ? nullKey : 1 - nullKey;
         }
-        order = pass(order, keyScratch, packed, n);
+        order = p.pass(order);
       }
     }
     return order;
@@ -90,45 +117,314 @@ public final class SortKernels {
     return desc ? ~key : key;
   }
 
-  /**
-   * One stable pass: reorders {@code order} by the unsigned 32-bit {@code keys} (given in the
-   * current order), ties keeping their current relative position.
-   */
-  private static int[] pass(int[] order, int[] keys, long[] packed, int n) {
-    for (int i = 0; i < n; i++) {
-      // Unsigned key into signed long order: flip the top bit. Position in the low 32 bits.
-      packed[i] = ((long) (keys[i] ^ Integer.MIN_VALUE) << 32) | (i & 0xFFFFFFFFL);
+  /** The validity bitmap as words (a set bit is a valid row), or null when every row is valid. */
+  private static long[] validityWords(VectorBuffers k, int n) {
+    MemorySegment v = k.validity();
+    if (v == null) {
+      return null;
     }
-    Arrays.sort(packed, 0, n);
-    int[] next = new int[n];
-    for (int j = 0; j < n; j++) {
-      next[j] = order[(int) packed[j]];
-    }
-    return next;
+    long[] words = new long[(n + 63) >>> 6];
+    long bytes = Math.min(v.byteSize(), (long) words.length << 3);
+    MemorySegment.copy(v, ValueLayout.JAVA_BYTE, 0, MemorySegment.ofArray(words), ValueLayout.JAVA_BYTE, 0, bytes);
+    return words;
   }
 
-  /** Two passes over the sign-normalised 64-bit value: low half first, then high half. */
-  private static int[] passes64(
-      int[] order, VectorBuffers k, boolean isDouble, boolean desc, long[] packed, int[] keyScratch, int n) {
-    long[] normalised = new long[n];
-    for (int i = 0; i < n; i++) {
-      int row = order[i];
-      if (k.isNull(row)) {
-        normalised[i] = 0L;
-        continue;
+  private static boolean isNull(long[] valid, int row) {
+    return valid != null && (valid[row >>> 6] & (1L << row)) == 0;
+  }
+
+  /**
+   * The scratch of one sort and the stable pass over it. After {@link #pass} {@code src[j]} is
+   * the position, before the pass, of the row now at {@code j}: callers carry the other halves of
+   * a multi-pass key along through it.
+   */
+  static final class Passes {
+    private static final int DIGITS = 4;
+    private static final int DIGITS64 = 8;
+
+    final int[] key;
+    int[] src;
+    private int[] posA;
+    private int[] posB;
+    private int[] keyB;
+    private long[] key64B;
+    private int[] out;
+    private final int[][] count = new int[DIGITS64][256];
+    private final int n;
+
+    Passes(int n) {
+      this.n = n;
+      key = new int[n];
+      posA = new int[n];
+      posB = new int[n];
+      keyB = new int[n];
+      out = new int[n];
+      src = posA;
+    }
+
+    /**
+     * One stable pass: reorders {@code order} by the unsigned 32-bit {@code key} (given in the
+     * current order), ties keeping their current relative position. Returns the new order, whose
+     * array is one of the pass's buffers; the argument becomes a buffer of the pass.
+     */
+    int[] pass(int[] order) {
+      int[] k = key;
+      boolean sorted = true;
+      for (int i = 1; i < n && sorted; i++) {
+        sorted = Integer.compareUnsigned(k[i - 1], k[i]) <= 0;
       }
-      long v = isDouble ? doubleKey(k.getDouble(row)) : (k.getLong(row) ^ Long.MIN_VALUE);
-      normalised[i] = desc ? ~v : v;
+      if (sorted) {
+        return identity(order); // already in order (equal keys included): the pass is a no-op
+      }
+      for (int d = 0; d < DIGITS; d++) {
+        java.util.Arrays.fill(count[d], 0);
+      }
+      for (int i = 0; i < n; i++) {
+        int v = k[i];
+        count[0][v & 0xFF]++;
+        count[1][(v >>> 8) & 0xFF]++;
+        count[2][(v >>> 16) & 0xFF]++;
+        count[3][v >>> 24]++;
+      }
+      boolean first = true;
+      int[] a = posA;
+      int[] b = posB;
+      // The keys travel with the positions through every scatter, so each digit reads its keys
+      // sequentially; only the scatter's writes are out of order.
+      int[] ka = k;
+      int[] kb = keyB;
+      for (int d = 0; d < DIGITS; d++) {
+        int[] c = count[d];
+        if (singleBucket(c)) {
+          continue;
+        }
+        prefixSums(c);
+        int shift = d << 3;
+        if (first) {
+          for (int i = 0; i < n; i++) {
+            int kv = k[i];
+            int dst = c[(kv >>> shift) & 0xFF]++;
+            b[dst] = i;
+            kb[dst] = kv;
+          }
+          first = false;
+        } else {
+          for (int i = 0; i < n; i++) {
+            int kv = ka[i];
+            int dst = c[(kv >>> shift) & 0xFF]++;
+            b[dst] = a[i];
+            kb[dst] = kv;
+          }
+        }
+        int[] t = a;
+        a = b;
+        b = t;
+        int[] kt = ka;
+        ka = kb;
+        kb = kt; // the key array itself is scratch from the second digit on: callers refill it per pass
+      }
+      return finish(order, a, b);
     }
-    for (int i = 0; i < n; i++) {
-      keyScratch[i] = (int) normalised[i];
+
+    /**
+     * One stable pass by an unsigned 64-bit key: eight digits over the long directly, so a 64-bit
+     * value needs no carrying of its high half through a first pass's permutation. {@code key64}
+     * is scratch afterwards.
+     */
+    int[] pass64(int[] order, long[] key64) {
+      boolean sorted = true;
+      for (int i = 1; i < n && sorted; i++) {
+        sorted = Long.compareUnsigned(key64[i - 1], key64[i]) <= 0;
+      }
+      if (sorted) {
+        return identity(order);
+      }
+      for (int d = 0; d < DIGITS64; d++) {
+        java.util.Arrays.fill(count[d], 0);
+      }
+      for (int i = 0; i < n; i++) {
+        long v = key64[i];
+        for (int d = 0; d < DIGITS64; d++) {
+          count[d][(int) ((v >>> (d << 3)) & 0xFF)]++;
+        }
+      }
+      if (key64B == null) {
+        key64B = new long[n];
+      }
+      boolean first = true;
+      int[] a = posA;
+      int[] b = posB;
+      long[] ka = key64;
+      long[] kb = key64B;
+      for (int d = 0; d < DIGITS64; d++) {
+        int[] c = count[d];
+        if (singleBucket(c)) {
+          continue;
+        }
+        prefixSums(c);
+        int shift = d << 3;
+        if (first) {
+          for (int i = 0; i < n; i++) {
+            long kv = key64[i];
+            int dst = c[(int) ((kv >>> shift) & 0xFF)]++;
+            b[dst] = i;
+            kb[dst] = kv;
+          }
+          first = false;
+        } else {
+          for (int i = 0; i < n; i++) {
+            long kv = ka[i];
+            int dst = c[(int) ((kv >>> shift) & 0xFF)]++;
+            b[dst] = a[i];
+            kb[dst] = kv;
+          }
+        }
+        int[] t = a;
+        a = b;
+        b = t;
+        long[] kt = ka;
+        ka = kb;
+        kb = kt;
+      }
+      return finish(order, a, b);
     }
-    int[] afterLow = pass(order, keyScratch, packed, n);
-    // The low pass permuted the rows; carry the high halves along through the same permutation.
-    for (int j = 0; j < n; j++) {
-      keyScratch[j] = (int) (normalised[(int) packed[j]] >>> 32);
+
+    private int[] identity(int[] order) {
+      int[] a = posA;
+      for (int i = 0; i < n; i++) {
+        a[i] = i;
+      }
+      src = a;
+      return order;
     }
-    return pass(afterLow, keyScratch, packed, n);
+
+    private int[] finish(int[] order, int[] a, int[] b) {
+      posA = a;
+      posB = b;
+      src = a;
+      int[] next = out;
+      for (int j = 0; j < n; j++) {
+        next[j] = order[a[j]];
+      }
+      out = order;
+      return next;
+    }
+
+    private static void prefixSums(int[] c) {
+      int sum = 0;
+      for (int bucket = 0; bucket < c.length; bucket++) {
+        int t = c[bucket];
+        c[bucket] = sum;
+        sum += t;
+      }
+    }
+
+    private boolean singleBucket(int[] c) {
+      for (int bucket = 0; bucket < c.length; bucket++) {
+        if (c[bucket] == n) {
+          return true;
+        }
+        if (c[bucket] != 0) {
+          return false;
+        }
+      }
+      return false;
+    }
+  }
+
+  /** Sign-normalises the gathered int32 keys (null rows hold MIN_VALUE, so they map to 0). */
+  private static void normalise32(int[] key, boolean desc, int n) {
+    int i = 0;
+    int bound = I.loopBound(n);
+    IntVector min = IntVector.broadcast(I, Integer.MIN_VALUE);
+    for (; i < bound; i += I.length()) {
+      IntVector v = IntVector.fromArray(I, key, i).lanewise(VectorOperators.XOR, min);
+      if (desc) {
+        v = v.lanewise(VectorOperators.NOT);
+      }
+      v.intoArray(key, i);
+    }
+    for (; i < n; i++) {
+      key[i] = flip(key[i] ^ Integer.MIN_VALUE, desc);
+    }
+  }
+
+  /**
+   * Sign-normalises gathered int64 keys in place: {@code v ^ MIN_VALUE}, inverted when
+   * descending. Null rows must hold {@code MIN_VALUE} so that they map to the constant 0.
+   */
+  private static void normalise64(long[] key, boolean desc, int n) {
+    int i = 0;
+    int bound = L.loopBound(n);
+    LongVector min = LongVector.broadcast(L, Long.MIN_VALUE);
+    for (; i < bound; i += L.length()) {
+      LongVector v = LongVector.fromArray(L, key, i).lanewise(VectorOperators.XOR, min);
+      if (desc) {
+        v = v.lanewise(VectorOperators.NOT);
+      }
+      v.intoArray(key, i);
+    }
+    for (; i < n; i++) {
+      long v = key[i] ^ Long.MIN_VALUE;
+      key[i] = desc ? ~v : v;
+    }
+  }
+
+  /**
+   * Maps gathered doubles (as raw bits in {@code key}) to Spark's total order in place; see {@link
+   * #doubleKey}. Null rows must hold the bits of {@code -0.0}, which fold to 0.0 and then to the
+   * constant key of a positive zero -- the same constant for every null row.
+   */
+  private static void normaliseDouble(long[] key, boolean desc, int n) {
+    int i = 0;
+    int bound = L.loopBound(n);
+    LongVector min = LongVector.broadcast(L, Long.MIN_VALUE);
+    LongVector nan = LongVector.broadcast(L, Double.doubleToLongBits(Double.NaN));
+    DoubleVector zero = DoubleVector.zero(D);
+    for (; i < bound; i += L.length()) {
+      LongVector bits = LongVector.fromArray(L, key, i);
+      DoubleVector d = bits.reinterpretAsDoubles();
+      VectorMask<Double> isZero = d.compare(VectorOperators.EQ, zero); // -0.0 == 0.0
+      VectorMask<Long> isNaN = d.compare(VectorOperators.NE, d).cast(L);
+      bits = d.blend(zero, isZero).reinterpretAsLongs().blend(nan, isNaN);
+      VectorMask<Long> negative = bits.compare(VectorOperators.LT, 0L);
+      LongVector v = bits.lanewise(VectorOperators.XOR, min).blend(bits.lanewise(VectorOperators.NOT), negative);
+      if (desc) {
+        v = v.lanewise(VectorOperators.NOT);
+      }
+      v.intoArray(key, i);
+    }
+    for (; i < n; i++) {
+      long v = doubleKey(Double.longBitsToDouble(key[i]));
+      key[i] = desc ? ~v : v;
+    }
+  }
+
+  /** One 64-bit pass over the sign-normalised value. */
+  private static int[] passes64(int[] order, VectorBuffers k, boolean isDouble, boolean desc, Passes p, int n) {
+    // The column's 64-bit words in row order (a double's raw bits read as a long), then gathered
+    // through the current permutation from the array rather than through the segment per row.
+    long[] values = new long[n];
+    MemorySegment.copy(k.data(), VectorBuffers.LE_LONG, 0, values, 0, n);
+    long[] valid = validityWords(k, n);
+    long[] normalised = new long[n];
+    long nullBits = isDouble ? Double.doubleToRawLongBits(-0.0) : Long.MIN_VALUE;
+    if (valid == null) {
+      for (int i = 0; i < n; i++) {
+        normalised[i] = values[order[i]];
+      }
+    } else {
+      for (int i = 0; i < n; i++) {
+        int row = order[i];
+        normalised[i] = isNull(valid, row) ? nullBits : values[row];
+      }
+    }
+    if (isDouble) {
+      normaliseDouble(normalised, desc, n);
+    } else {
+      normalise64(normalised, desc, n);
+    }
+    return p.pass64(order, normalised);
   }
 
   /**
@@ -136,8 +432,7 @@ public final class SortKernels {
    * sign-normalised like an int64; low limb halves first, then the high limb's. Between passes the
    * limb arrays follow the permutation the pass produced.
    */
-  private static int[] passes128(
-      int[] order, VectorBuffers k, boolean desc, long[] packed, int[] keyScratch, int n) {
+  private static int[] passes128(int[] order, VectorBuffers k, boolean desc, Passes p, int n) {
     long[] lo = new long[n];
     long[] hi = new long[n];
     MemorySegment data = k.data();
@@ -151,29 +446,33 @@ public final class SortKernels {
       lo[i] = desc ? ~l : l;
       hi[i] = desc ? ~h : h;
     }
+    int[] key = p.key;
     for (int i = 0; i < n; i++) {
-      keyScratch[i] = (int) lo[i];
+      key[i] = (int) lo[i];
     }
-    order = pass(order, keyScratch, packed, n);
+    order = p.pass(order);
     long[] lo2 = new long[n];
     long[] hi2 = new long[n];
+    int[] src = p.src;
     for (int j = 0; j < n; j++) {
-      int from = (int) packed[j];
+      int from = src[j];
       lo2[j] = lo[from];
       hi2[j] = hi[from];
-      keyScratch[j] = (int) (lo[from] >>> 32);
+      key[j] = (int) (lo[from] >>> 32);
     }
-    order = pass(order, keyScratch, packed, n);
+    order = p.pass(order);
+    src = p.src;
     for (int j = 0; j < n; j++) {
-      int from = (int) packed[j];
+      int from = src[j];
       hi[j] = hi2[from];
-      keyScratch[j] = (int) hi2[from];
+      key[j] = (int) hi2[from];
     }
-    order = pass(order, keyScratch, packed, n);
+    order = p.pass(order);
+    src = p.src;
     for (int j = 0; j < n; j++) {
-      keyScratch[j] = (int) (hi[(int) packed[j]] >>> 32);
+      key[j] = (int) (hi[src[j]] >>> 32);
     }
-    return pass(order, keyScratch, packed, n);
+    return p.pass(order);
   }
 
   /**
@@ -191,53 +490,58 @@ public final class SortKernels {
   }
 
   private static final int SHORT_STRING = 8;
+  private static final ValueLayout.OfLong BE_LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
 
-  private static int[] passesUtf8(int[] order, VectorBuffers k, boolean desc, long[] packed, int[] keyScratch, int n) {
+  private static int[] passesUtf8(int[] order, VectorBuffers k, boolean desc, Passes p, int n) {
     if (maxLength(k) <= SHORT_STRING) {
-      return shortStringPasses(order, k, desc, packed, keyScratch, n);
+      return shortStringPasses(order, k, desc, p, n);
     }
     int[] rank = ranks(k, n);
+    int[] key = p.key;
     for (int i = 0; i < n; i++) {
-      keyScratch[i] = flip(rank[order[i]], desc);
+      key[i] = flip(rank[order[i]], desc);
     }
-    return pass(order, keyScratch, packed, n);
+    return p.pass(order);
   }
 
-  /** Length pass, then the two halves of the zero-padded 8-byte prefix as unsigned keys. */
-  private static int[] shortStringPasses(
-      int[] order, VectorBuffers k, boolean desc, long[] packed, int[] keyScratch, int n) {
+  /** Length pass, then one 64-bit pass over the zero-padded big-endian 8-byte prefix. */
+  private static int[] shortStringPasses(int[] order, VectorBuffers k, boolean desc, Passes p, int n) {
     long[] prefix = new long[n];
-    int[] len = new int[n];
+    int[] key = p.key;
+    VectorBuffers values = k.isDictionaryEncoded() ? k.dictionary() : k;
+    MemorySegment off = values.offsets();
+    MemorySegment data = values.data();
     for (int i = 0; i < n; i++) {
       int row = order[i];
       if (k.isNull(row)) {
         prefix[i] = 0L;
-        len[i] = 0;
+        key[i] = 0;
       } else {
-        byte[] b = k.getUtf8Bytes(row);
-        long p = 0L;
-        for (int j = 0; j < b.length; j++) {
-          p |= (b[j] & 0xFFL) << (56 - 8 * j);
+        int v = k.isDictionaryEncoded() ? k.getInt(row) : row;
+        int start = off.get(VectorBuffers.LE_INT, (long) v << 2);
+        int len = off.get(VectorBuffers.LE_INT, (long) (v + 1) << 2) - start;
+        long pre;
+        if (len == SHORT_STRING) {
+          pre = data.get(BE_LONG, start);
+        } else {
+          pre = 0L;
+          for (int j = 0; j < len; j++) {
+            pre |= (data.get(ValueLayout.JAVA_BYTE, start + j) & 0xFFL) << (56 - 8 * j);
+          }
         }
-        prefix[i] = desc ? ~p : p;
-        len[i] = flip(b.length, desc);
+        prefix[i] = desc ? ~pre : pre;
+        key[i] = flip(len, desc);
       }
     }
     // Least significant first: among equal prefixes the shorter string is a prefix of the longer
     // and sorts first.
-    int[] afterLen = pass(order, len, packed, n);
+    int[] afterLen = p.pass(order);
     long[] carried = new long[n];
+    int[] src = p.src;
     for (int j = 0; j < n; j++) {
-      carried[j] = prefix[(int) packed[j]];
+      carried[j] = prefix[src[j]];
     }
-    for (int j = 0; j < n; j++) {
-      keyScratch[j] = (int) carried[j];
-    }
-    int[] afterLow = pass(afterLen, keyScratch, packed, n);
-    for (int j = 0; j < n; j++) {
-      keyScratch[j] = (int) (carried[(int) packed[j]] >>> 32);
-    }
-    return pass(afterLow, keyScratch, packed, n);
+    return p.pass64(afterLen, carried);
   }
 
   private static int maxLength(VectorBuffers k) {
