@@ -60,7 +60,8 @@ class GatherSortKernelsTest {
         boolean[] nulls = TestData.nulls(rnd, n, 0.2);
         VectorBuffers[] cols = {
           TestData.ints(arena, rnd, n, nulls), TestData.longs(arena, rnd, n, nulls), TestData.doubles(arena, rnd, n, nulls),
-          ArrowLayout.ofBooleans(arena, booleans(rnd, n), nulls), dictionary(arena, strings(arena, rnd, n, 0.2))
+          ArrowLayout.ofBooleans(arena, booleans(rnd, n), nulls), dictionary(arena, strings(arena, rnd, n, 0.2)),
+          TestData.decimal128s(arena, rnd, n, nulls)
         };
         int count = rnd.nextInt(2 * n + 2);
         int[] idx = randomIndices(rnd, count + 5, n, true);
@@ -83,6 +84,10 @@ class GatherSortKernelsTest {
               case INT32 -> assertEquals(exp.get(VectorBuffers.LE_INT, (long) o << 2), act.get(VectorBuffers.LE_INT, (long) o << 2));
               case INT64, FLOAT64 -> assertEquals(exp.get(VectorBuffers.LE_LONG, (long) o << 3), act.get(VectorBuffers.LE_LONG, (long) o << 3));
               case BOOL -> assertEquals(Bitmap.isSet(exp, o), Bitmap.isSet(act, o));
+              case DECIMAL128 -> {
+                assertEquals(exp.get(VectorBuffers.LE_LONG, (long) o << 4), act.get(VectorBuffers.LE_LONG, (long) o << 4), "lo @" + o);
+                assertEquals(exp.get(VectorBuffers.LE_LONG, ((long) o << 4) + 8), act.get(VectorBuffers.LE_LONG, ((long) o << 4) + 8), "hi @" + o);
+              }
               default -> throw new IllegalStateException();
             }
           }
@@ -188,6 +193,7 @@ class GatherSortKernelsTest {
             case FLOAT64 -> TestData.doubles(arena, rnd, n, nulls);
             case BOOL -> ArrowLayout.ofBooleans(arena, booleans(rnd, n), nulls);
             case UTF8 -> batch % 2 == 0 ? strings(arena, rnd, n, 0.2) : dictionary(arena, strings(arena, rnd, n, 0.2));
+            case DECIMAL128 -> TestData.decimal128s(arena, rnd, n, nulls);
           };
           MemorySegment selection = batch % 4 == 1 ? null : TestData.randomBitmap(arena, rnd, n);
           int count = selection == null ? n : Bitmap.popcount(selection, n);
@@ -218,6 +224,7 @@ class GatherSortKernelsTest {
       case FLOAT64 -> Double.doubleToLongBits(v.getDouble(i));
       case BOOL -> v.getBoolean(i);
       case UTF8 -> v.getString(i);
+      case DECIMAL128 -> v.getDecimal128(i);
     };
   }
 

@@ -40,6 +40,17 @@ public final class GatherKernels {
         }
       }
       case BOOL -> gatherBits(data, idx, from, to, outData, false);
+      case DECIMAL128 -> {
+        // Two limbs per value; a padded (-1) index leaves the slot zero like the other lanes.
+        for (int o = 0; o < count; o++) {
+          int i = idx[from + o];
+          if (i < 0) {
+            Decimal128.set(outData, o, 0L, 0L);
+          } else {
+            Decimal128.copy(data, i, outData, o);
+          }
+        }
+      }
       default -> throw new IllegalArgumentException("not fixed width: " + type);
     }
     if (outValidity != null) {

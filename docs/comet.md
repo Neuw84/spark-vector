@@ -75,7 +75,10 @@ shuffle output is columnar. It follows Comet's own switch
 (`spark.comet.shuffle.native.partitioning.range.enabled`, default on) and can be turned off alone
 with `spark.vector.comet.shuffle.range.enabled=false`. Comet's sampling pass never closes the
 vectors it imports, so the bridge releases whatever is still outstanding when the task completes.
-Decimals cross the bridge widened to Arrow's 128-bit decimal layout.
+Decimals cross the bridge widened to Arrow's 128-bit decimal layout. In the other direction a wide
+decimal column (`decimal(p > 18)`) of a Comet batch is read through `getDecimal` into a DECIMAL128 lane
+today; Comet's `Decimal128Vector` is already Arrow `Decimal128`, so the zero-copy wrap is the next
+step of #257.
 
 ## Comet on macOS (Apple Silicon)
 

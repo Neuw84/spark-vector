@@ -66,8 +66,8 @@ public final class ArrowOutput {
       return new BigIntVector(name, allocator); // unscaled values; see VectorDecimalColumnVector
     }
     if (dt instanceof DecimalType d) {
-      // A wide decimal (a sum buffer of p > 18): Arrow's 128-bit vector, which Spark's own
-      // ArrowColumnVector reads through getDecimal. Never a lane type; only aggregation buffers.
+      // A wide decimal (p > 18): Arrow's 128-bit vector over the DECIMAL128 lane's own layout, which
+      // Spark's ArrowColumnVector reads through getDecimal (a BigDecimal per row; accepted, #257).
       return new DecimalVector(name, allocator, d.precision(), d.scale());
     }
     throw new UnsupportedOperationException("unsupported output type " + dt);

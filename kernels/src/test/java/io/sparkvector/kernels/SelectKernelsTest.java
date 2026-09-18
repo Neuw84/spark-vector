@@ -23,6 +23,7 @@ class SelectKernelsTest {
       case FLOAT64 -> v.getDouble(i);
       case BOOL -> v.getBoolean(i);
       case UTF8 -> v.getString(i);
+      case DECIMAL128 -> v.getDecimal128(i);
     };
   }
 

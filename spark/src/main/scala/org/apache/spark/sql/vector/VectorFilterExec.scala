@@ -74,7 +74,7 @@ private[vector] class VectorFilterIterator(
         while (c < columns.length) {
           val (name, dt) = outputAttrs(c)
           columns(c) =
-            if (TypeMapping.isSupported(dt)) ArrowOutput.compact(name, dt, ctx.input(c), selection, count, allocator)
+            if (TypeMapping.hasLane(dt)) ArrowOutput.compact(name, dt, ctx.input(c), selection, count, allocator)
             else {
               if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(selection, ctx.numRows, count)
               RemappedColumnVector.of(ctx.column(c), foreignRows)

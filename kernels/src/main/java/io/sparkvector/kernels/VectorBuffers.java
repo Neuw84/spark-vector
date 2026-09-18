@@ -85,6 +85,12 @@ public interface VectorBuffers {
     return Bitmap.isSet(data(), i);
   }
 
+  /** The 128-bit unscaled value of element {@code i} of a DECIMAL128 lane. */
+  default java.math.BigInteger getDecimal128(int i) {
+    MemorySegment d = data();
+    return Decimal128.toBigInteger(Decimal128.hi(d, i), Decimal128.lo(d, i));
+  }
+
   /** Copies out the UTF-8 bytes of element {@code i}, resolving dictionary encoding. */
   default byte[] getUtf8Bytes(int i) {
     VectorBuffers dict = dictionary();

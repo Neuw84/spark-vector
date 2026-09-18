@@ -128,7 +128,7 @@ private[vector] class VectorProjectIterator(
         while (c < columns.length) {
           val (name, dt) = outputAttrs(c)
           columns(c) = exprs(c) match {
-            case ColumnRef(ordinal, _) if compactTo != null && !TypeMapping.isSupported(dt) =>
+            case ColumnRef(ordinal, _) if compactTo != null && !TypeMapping.hasLane(dt) =>
               if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(compactTo, ctx.numRows, outRows)
               RemappedColumnVector.of(ctx.column(ordinal), foreignRows)
             case NestedColumnRef(ordinal, path, _) =>

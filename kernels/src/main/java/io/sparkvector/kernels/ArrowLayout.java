@@ -130,6 +130,20 @@ public final class ArrowLayout {
         VecType.FLOAT64, values.length, validityFrom(arena, nulls, values.length), data);
   }
 
+  /** DECIMAL128 column from unscaled values; each must fit in 128 bits. */
+  public static SegmentVectorBuffers ofDecimal128(Arena arena, java.math.BigInteger[] values, boolean[] nulls) {
+    MemorySegment data = allocateData(arena, VecType.DECIMAL128, values.length);
+    for (int i = 0; i < values.length; i++) {
+      java.math.BigInteger v = values[i] == null ? java.math.BigInteger.ZERO : values[i];
+      if (v.bitLength() > 127) {
+        throw new IllegalArgumentException("does not fit in 128 bits: " + v);
+      }
+      Decimal128.set(data, i, Decimal128.hiOf(v), Decimal128.loOf(v));
+    }
+    return SegmentVectorBuffers.fixedWidth(
+        VecType.DECIMAL128, values.length, validityFrom(arena, nulls, values.length), data);
+  }
+
   public static SegmentVectorBuffers ofBooleans(Arena arena, boolean[] values, boolean[] nulls) {
     MemorySegment data = allocateBitmap(arena, values.length);
     for (int i = 0; i < values.length; i++) {
