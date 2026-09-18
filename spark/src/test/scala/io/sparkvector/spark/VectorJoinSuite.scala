@@ -285,7 +285,7 @@ class VectorJoinSuite extends VectorQuerySuite {
   private val SortMerge = Seq(
     "spark.sql.autoBroadcastJoinThreshold" -> "-1",
     "spark.sql.join.preferSortMergeJoin" -> "true",
-    "spark.vector.exec.sortMergeJoin.enabled" -> "true")
+    "spark.vector.exec.sortMergeJoin.mode" -> "hash") // the rewrite itself; the boolean flag reads as `auto` since #287
 
   private def checkSortMerge(sql: String, extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil): org.apache.spark.sql.DataFrame = {
     // Spark plans the sort-merge join for this query, and re-expressed as our hash join neither the join nor

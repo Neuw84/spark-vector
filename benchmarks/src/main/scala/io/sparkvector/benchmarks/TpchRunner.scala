@@ -81,7 +81,7 @@ object TpchRunner {
   val VectorFast: Map[String, String] = Map(
     "spark.plugins" -> "io.sparkvector.spark.VectorPlugin",
     "spark.vector.exec.strictFloatingPoint" -> "false",
-    "spark.vector.exec.sortMergeJoin.enabled" -> "true")
+    "spark.vector.exec.sortMergeJoin.mode" -> "auto") // #287: the merge join where the order can show or statistics are missing, the hash rewrite otherwise
 
   /** Spark configurations under comparison. Comet configs need the Comet jar on the classpath. */
   val Configs: Map[String, Map[String, String]] = Map(

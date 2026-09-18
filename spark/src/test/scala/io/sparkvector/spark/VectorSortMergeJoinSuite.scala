@@ -138,6 +138,37 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     }
   }
 
+  test("auto: the hash rewrite where a side's statistics fit, the merge join where the order can show or statistics are missing") {
+    val auto = Seq("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "true", VectorConf.SortMergeJoinMode -> "auto")
+    def why(df: org.apache.spark.sql.DataFrame): String =
+      (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](df)).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
+    withConf(auto: _*) {
+      // A small side with AQE statistics: the hash rewrite, the reason names the side and the budget.
+      val h = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
+      assert(why(h).contains("as hash join"), why(h))
+      // A LIMIT directly above: the rows it picks would differ under the hash rewrite, so the merge join.
+      val l = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20", Seq(SMJ))
+      assert(why(l).contains("reaches a limit or a sort"), why(l))
+      // A global ORDER BY above (a range-partitioned exchange): ties would show, so the merge join.
+      val o = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki ORDER BY a.ki", Seq(SMJ))
+      assert(why(o).contains("reaches a limit or a sort"), why(o))
+      // A parent relying on the ordering: the merge join.
+      val w = checkVectorized("SELECT a.ki, a.v, row_number() OVER (PARTITION BY a.ki ORDER BY a.ki) AS rn FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
+      assert(why(w).contains("as merge join"), why(w)) // relied on by the parent, or through the sort Spark placed for the window
+      // An aggregate above ends the visibility: the join's order cannot show through a GROUP BY.
+      checkVectorized("SELECT a.ki, count(*) AS n FROM a JOIN b ON a.ki = b.ki GROUP BY a.ki ORDER BY a.ki", Seq(classOf[VectorShuffledHashJoinExec]))
+    }
+    // No statistics (adaptive execution off): the hash rewrite is not allowed, the merge join takes it.
+    withConf((auto :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
+      val m = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
+      assert(why(m).contains("as merge join: no size statistics"), why(m))
+    }
+    // The boolean flag reads as auto.
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinEnabled -> "true") {
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20", Seq(SMJ))
+    }
+  }
+
   test("the mode switch: off leaves Spark's join, hash takes the rewrite, a struct column falls back") {
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinMode -> "off") {
       val df = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq())

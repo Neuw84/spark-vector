@@ -88,6 +88,7 @@ trait VectorHashJoinLike extends VectorBinaryExec {
        |Join type: $joinType, build $buildSide
        |Condition: ${condition.map(_.sql).getOrElse("none")}
        |Output: ${output.map(_.name).mkString(", ")}
+       |${getTagValue(VectorExecRule.SortMergeWhy).map(w => s"Sort-merge join $w").getOrElse("")}
        |""".stripMargin
   }
 }
