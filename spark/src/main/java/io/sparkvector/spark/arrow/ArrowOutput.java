@@ -4,6 +4,7 @@ import io.sparkvector.kernels.Bitmap;
 import io.sparkvector.kernels.BitmapKernels;
 import io.sparkvector.kernels.CompactKernels;
 import io.sparkvector.kernels.GatherKernels;
+import io.sparkvector.kernels.RunMerge;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
 import io.sparkvector.spark.adapter.TypeMapping;
@@ -294,6 +295,35 @@ public final class ArrowOutput {
     ArrowVectorBuffers out = allocateFixed(name, dt, count, allocator);
     GatherKernels.gatherFixed(in, idx, from, to, out.data(), nulls ? out.validity() : null);
     return finish(out, count, !nulls);
+  }
+
+  /**
+   * Gathers {@code count} rows from several sorted runs into a new Arrow vector: output row {@code o}
+   * is row {@code rowOf[o]} of {@code runs[runOf[o]]} (the sort's k-way merge, #285). UTF8 runs must
+   * be plain: the sort decodes a dictionary once when it seals the run.
+   */
+  public static ColumnVector gatherRuns(
+      String name, DataType dt, VectorBuffers[] runs, int[] runOf, int[] rowOf, int count, BufferAllocator allocator) {
+    boolean nulls = false;
+    for (VectorBuffers run : runs) {
+      nulls |= run.hasNulls();
+    }
+    if (runs[0].type() == VecType.UTF8) {
+      long bytes = RunMerge.gatherUtf8Bytes(runs, runOf, rowOf, count);
+      ArrowVectorBuffers out = allocateUtf8(name, count, bytes, allocator);
+      RunMerge.gatherUtf8(runs, runOf, rowOf, count, out.offsets(), out.data(), nulls ? out.validity() : null);
+      return finish(out, count, !nulls);
+    }
+    ArrowVectorBuffers out = allocateFixed(name, dt, count, allocator);
+    RunMerge.gatherFixed(runs, runOf, rowOf, count, out.data(), nulls ? out.validity() : null);
+    return finish(out, count, !nulls);
+  }
+
+  /** A plain UTF8 copy of a dictionary-encoded column in the given arena (the sort decodes a run once, #285). */
+  public static VectorBuffers decodeDictionary(VectorBuffers in, java.lang.foreign.Arena arena) {
+    io.sparkvector.kernels.ColumnBuilder b = new io.sparkvector.kernels.ColumnBuilder(arena, VecType.UTF8, in.length());
+    b.append(in);
+    return b.view();
   }
 
   /** A plain UTF8 view of a dictionary-encoded column, built in a temporary arena-free copy. */

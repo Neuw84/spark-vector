@@ -1,6 +1,7 @@
 package io.sparkvector.benchmarks;
 
 import io.sparkvector.kernels.ArrowLayout;
+import io.sparkvector.kernels.RunMerge;
 import io.sparkvector.kernels.SegmentVectorBuffers;
 import io.sparkvector.kernels.SortKernels;
 import io.sparkvector.kernels.VectorBuffers;
@@ -88,23 +89,43 @@ public class SortBenchmark {
             default -> rnd.nextLong();
           };
     }
-    VectorBuffers main = column(key, shape, nullFlags, rnd);
-    if (keys == 1) {
-      keyColumns = new VectorBuffers[] {main};
-      ascending = new boolean[] {true};
-      nullsFirst = new boolean[] {true};
-    } else {
-      int[] small = new int[rows];
-      for (int i = 0; i < rows; i++) {
-        small[i] = rnd.nextInt(4);
-      }
-      keyColumns = new VectorBuffers[] {main, ArrowLayout.ofInts(arena, small, null), column(key, shape, nullFlags, rnd)};
-      ascending = new boolean[] {true, false, true};
-      nullsFirst = new boolean[] {true, false, true};
+    keyColumns = keySet(shape, nullFlags, rnd);
+    ascending = keys == 1 ? new boolean[] {true} : new boolean[] {true, false, true};
+    nullsFirst = keys == 1 ? new boolean[] {true} : new boolean[] {true, false, true};
+    // The same rows cut into eight runs, for the runs-and-merge variant.
+    int k = RUNS;
+    int per = (rows + k - 1) / k;
+    runKeyColumns = new VectorBuffers[k][];
+    runSizes = new int[k];
+    for (int r = 0; r < k; r++) {
+      int from = r * per;
+      int to = Math.min(rows, from + per);
+      runSizes[r] = to - from;
+      long[] part = java.util.Arrays.copyOfRange(shape, from, to);
+      boolean[] partNulls = nullFlags == null ? null : java.util.Arrays.copyOfRange(nullFlags, from, to);
+      runKeyColumns[r] = keySet(part, partNulls, rnd);
     }
   }
 
+  static final int RUNS = 8;
+  VectorBuffers[][] runKeyColumns;
+  int[] runSizes;
+
+  /** The key columns over the given rows: the named key alone, or it twice around a four-value int. */
+  private VectorBuffers[] keySet(long[] shape, boolean[] nullFlags, Random rnd) {
+    VectorBuffers main = column(key, shape, nullFlags, rnd);
+    if (keys == 1) {
+      return new VectorBuffers[] {main};
+    }
+    int[] small = new int[shape.length];
+    for (int i = 0; i < shape.length; i++) {
+      small[i] = rnd.nextInt(4);
+    }
+    return new VectorBuffers[] {main, ArrowLayout.ofInts(arena, small, null), column(key, shape, nullFlags, rnd)};
+  }
+
   private VectorBuffers column(String type, long[] shape, boolean[] nullFlags, Random rnd) {
+    int rows = shape.length;
     switch (type) {
       case "INT32" -> {
         int[] v = new int[rows];
@@ -174,6 +195,29 @@ public class SortBenchmark {
   @Benchmark
   public int[] radix() {
     return SortKernels.sortIndices(keyColumns, ascending, nullsFirst, rows);
+  }
+
+  /**
+   * The sort in eight runs of {@code rows / 8} rows each, then the k-way merge ({@link RunMerge})
+   * walked to the end, emitting the merged order as (run, row) pairs -- the operator's path when a
+   * partition exceeds {@code spark.vector.sort.runRows}.
+   */
+  @Benchmark
+  public int runs8() {
+    int k = RUNS;
+    int[][] perm = new int[k][];
+    for (int r = 0; r < k; r++) {
+      perm[r] = SortKernels.sortIndices(runKeyColumns[r], ascending, nullsFirst, runSizes[r]);
+    }
+    RunMerge merge = new RunMerge(runKeyColumns, perm, runSizes, ascending, nullsFirst);
+    int[] runOf = new int[4096];
+    int[] rowOf = new int[4096];
+    int sum = 0;
+    while (merge.hasNext()) {
+      int n = merge.next(runOf, rowOf, 4096);
+      sum += runOf[n - 1] + rowOf[n - 1];
+    }
+    return sum;
   }
 
   @Benchmark
