@@ -388,6 +388,7 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
   private var doubles = if (vecType == VecType.FLOAT64) new Array[Double](1024) else null
   private var bools = if (vecType == VecType.BOOL) new Array[Boolean](1024) else null
   private var bytes = if (vecType == VecType.UTF8) new Array[Byte](8192) else null
+  private var wides = if (vecType == VecType.DECIMAL128) new Array[java.math.BigInteger](1024) else null
   private var offsets = if (vecType == VecType.UTF8) new Array[Int](1025) else null
   private var used = 0
 
@@ -401,6 +402,10 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
         case _ => row.getLong(ordinal)
       }
       case VecType.FLOAT64 => doubles(n) = row.getDouble(ordinal)
+      case VecType.DECIMAL128 =>
+        // A wide decimal from the broadcast rows: the unscaled value, laid out as two limbs below (#259).
+        val d = dt.asInstanceOf[DecimalType]
+        wides(n) = row.getDecimal(ordinal, d.precision, d.scale).toJavaBigDecimal.unscaledValue()
       case VecType.BOOL => bools(n) = row.getBoolean(ordinal)
       case VecType.UTF8 =>
         val str = row.getUTF8String(ordinal)
@@ -419,6 +424,7 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
     if (ints != null) ints = java.util.Arrays.copyOf(ints, cap)
     if (longs != null) longs = java.util.Arrays.copyOf(longs, cap)
     if (doubles != null) doubles = java.util.Arrays.copyOf(doubles, cap)
+    if (wides != null) wides = java.util.Arrays.copyOf(wides, cap)
     if (bools != null) bools = java.util.Arrays.copyOf(bools, cap)
     if (offsets != null) offsets = java.util.Arrays.copyOf(offsets, cap + 1)
   }
@@ -429,6 +435,7 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
       case VecType.INT32 => ArrowLayout.ofInts(arena, java.util.Arrays.copyOf(ints, n), nn)
       case VecType.INT64 => ArrowLayout.ofLongs(arena, java.util.Arrays.copyOf(longs, n), nn)
       case VecType.FLOAT64 => ArrowLayout.ofDoubles(arena, java.util.Arrays.copyOf(doubles, n), nn)
+      case VecType.DECIMAL128 => ArrowLayout.ofDecimal128(arena, java.util.Arrays.copyOf(wides, n), nn)
       case VecType.BOOL => ArrowLayout.ofBooleans(arena, java.util.Arrays.copyOf(bools, n), nn)
       case VecType.UTF8 => ArrowLayout.ofUtf8(arena, bytes, offsets, n, nn)
     }
@@ -830,13 +837,14 @@ object VectorJoinPlanner {
    * both zeros canonical), which is compiled to a real pass, so the tables' bit comparison agrees
    * with Spark's equality.
    */
-  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64)
+  /** Key lanes the table hashes and compares; a wide decimal key is two limbs (#259). */
+  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64, VecType.DECIMAL128)
 
   def compileKeys(keys: Seq[Expression], input: Seq[Attribute]): Array[VectorExpr] =
     keys.map(k => compileKey(k, input).fold(r => throw new IllegalStateException(s"cannot vectorize join key ${k.sql}: $r"), identity)).toArray
 
   def compileKey(key: Expression, input: Seq[Attribute]): Either[String, VectorExpr] =
-    ExpressionCompiler.compile(key, input).flatMap {
+    ExpressionCompiler.compileLaneColumn(key, input).flatMap {
       case _: LiteralExpr => Left("literal join key")
       case k if !keyTypes.contains(k.vecType) => Left(s"join key type ${key.dataType.simpleString} not supported")
       case k => Right(k)

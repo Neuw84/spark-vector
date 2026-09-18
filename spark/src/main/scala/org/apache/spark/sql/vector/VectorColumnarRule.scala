@@ -191,7 +191,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          exchangeInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          laneExchangeInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -205,7 +205,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          exchangeInputReason(streamedPlan).orElse(typeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          laneExchangeInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -221,7 +221,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => j.left
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => j.right
           }
-          exchangeInputReason(j.left).orElse(exchangeInputReason(j.right)).orElse(VectorJoinPlanner.buildSizeReason(shjBuild, maxBuildSize)) match {
+          laneExchangeInputReason(j.left).orElse(laneExchangeInputReason(j.right)).orElse(VectorJoinPlanner.buildSizeReason(shjBuild, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -244,7 +244,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           j.getTagValue(VectorExecRule.SortMergeDecision) match {
             case Some(Right(buildSide)) =>
               val (left, right) = sortMergeInputs(j)
-              exchangeInputReason(left).orElse(exchangeInputReason(right)) match {
+              laneExchangeInputReason(left).orElse(laneExchangeInputReason(right)) match {
                 case None => VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
                 case Some(reason) => fallback(resorted(j), reason)
               }
@@ -357,6 +357,12 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * A join input that is an exchange (or its adaptive stage) is accepted on types alone, like the
    * Final aggregate's input: Spark inserts RowToColumnarExec below us when the shuffle is row based.
    */
+  /** Like [[exchangeInputReason]] for the joins, whose keys and payloads may be any lane type (a wide decimal included, #259). */
+  private def laneExchangeInputReason(plan: SparkPlan): Option[String] = plan match {
+    case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => laneTypeReason(plan)
+    case other => laneInputReason(other)
+  }
+
   private def exchangeInputReason(plan: SparkPlan): Option[String] = plan match {
     case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => typeReason(plan)
     case other => columnarInputReason(other)

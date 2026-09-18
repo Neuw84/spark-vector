@@ -202,6 +202,33 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   }
 
   private val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+  private val BHJ = classOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec]
+  private val SHJ = classOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]
+
+  test("wide decimal join keys and payloads in the broadcast and shuffled hash joins (#259)") {
+    // A small dimension keyed on a wide decimal (the 40 distinct w27 values), with wide payloads on both sides.
+    spark.sql("SELECT w27 AS dk, min(w38) AS dw38, max(w20) AS dw20, count(*) AS dc FROM tw_plain WHERE w27 IS NOT NULL GROUP BY w27")
+      .write.mode("overwrite").parquet(newTempPath("wide/dim"))
+    spark.read.parquet(newTempPath("wide/dim")).createOrReplaceTempView("tw_dim")
+    for (hint <- Seq("BROADCAST(d)", "SHUFFLE_HASH(d)")) {
+      val join = if (hint.startsWith("BROADCAST")) BHJ else SHJ
+      // The build side's wide key and payloads come as rows (broadcast) or as batches (shuffled); the
+      // streamed side's wide key is a lane; null keys never match.
+      checkVectorized(s"SELECT /*+ $hint */ t.i, t.w27, d.dw38, d.dc FROM tw_dict t JOIN tw_dim d ON t.w27 = d.dk WHERE t.i < 6000", Seq(join, Filter))
+      checkVectorized(s"SELECT /*+ $hint */ t.i, t.w38, d.dw20 FROM tw_dict t LEFT JOIN tw_dim d ON t.w27 = d.dk WHERE t.i < 6000", Seq(join, Filter))
+      // A right outer join builds the left (non-preserved) side, so the hint names it: the wide build key comes from batches or rows.
+      checkVectorized(s"SELECT /*+ ${hint.replace("(d)", "(t)")} */ t.i, d.dk FROM tw_dict t RIGHT JOIN tw_dim d ON t.w27 = d.dk AND t.i < 500", Seq(join))
+      checkVectorized(s"SELECT /*+ $hint */ t.i FROM tw_dict t LEFT SEMI JOIN tw_dim d ON t.w27 = d.dk AND d.dc > 400", Seq(join))
+      checkVectorized(s"SELECT /*+ $hint */ t.i, t.w27 FROM tw_dict t LEFT ANTI JOIN tw_dim d ON t.w27 = d.dk", Seq(join))
+      // A wide key beside a narrow one, and a wide non-equi condition over the lane (#258's compare).
+      checkVectorized(s"SELECT /*+ $hint */ t.i, d.dc FROM tw_dict t JOIN tw_dim d ON t.w27 = d.dk AND t.i % 40 = d.dc % 40 WHERE t.i < 3000", Seq(join, Filter))
+      checkVectorized(s"SELECT /*+ $hint */ t.i, d.dw38 FROM tw_dict t JOIN tw_dim d ON t.w27 = d.dk AND t.w38 > d.dw38 WHERE t.i < 6000", Seq(join, Filter))
+    }
+    // A shuffled full outer join on the wide key, wide payloads on both sides.
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(d) */ t.i, t.w38, d.dk, d.dw20 FROM tw_dict t FULL OUTER JOIN tw_dim d ON t.w27 = d.dk WHERE t.i IS NULL OR t.i < 2000", Seq(SHJ))
+    // Two wide keys (w27, w20) joining the two fixture tables to themselves.
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(b) */ a.i, b.i AS j FROM tw_dict a JOIN tw_plain b ON a.w27 = b.w27 AND a.w20 = b.w20 WHERE a.i < 2000", Seq(SHJ, Filter))
+  }
   private val TopN = classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec]
   private val Collect = classOf[org.apache.spark.sql.vector.VectorCollectLimitExec]
   private val LocalLimit = classOf[org.apache.spark.sql.vector.VectorLocalLimitExec]
