@@ -60,6 +60,7 @@ Configuration keys (all default to `true` except the last):
 |---|---|
 | `spark.vector.enabled` | main switch |
 | `spark.vector.exec.filter.enabled` | convert `FilterExec` |
+| `spark.vector.exec.mergeRows.enabled` | convert `MergeRowsExec`, the row-level operator of a `MERGE INTO` (#21), when the join below it is ours |
 | `spark.vector.exec.project.enabled` | convert `ProjectExec` |
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |

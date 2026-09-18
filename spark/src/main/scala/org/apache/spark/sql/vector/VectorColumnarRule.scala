@@ -10,6 +10,7 @@ import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.CometBatchBridge
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
 import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GenerateExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
+import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
 import org.apache.spark.sql.execution.exchange.{ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
@@ -71,6 +72,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           forwardingInputReason(child).orElse(projectReason(p)) match {
             case Some(reason) => fallback(p, reason)
             case None => VectorProjectExec(projectList, child)
+          }
+
+        // The row-level operator of a MERGE INTO (#21): its child is the merge's join, so it converts
+        // when that join is ours (the shuffled hash join, or a sort-merge join re-expressed as one, #10).
+        case m: MergeRowsExec if VectorConf.mergeRowsEnabled(conf) =>
+          columnarInputReason(m.child).orElse(VectorMergeRowsPlanner.reason(m)) match {
+            case Some(reason) => fallback(m, reason)
+            case None =>
+              VectorMergeRowsExec(m.isSourceRowPresent, m.isTargetRowPresent, m.matchedInstructions, m.notMatchedInstructions,
+                m.notMatchedBySourceInstructions, m.checkCardinality, m.output, m.child)
           }
 
         case e: ExpandExec if VectorConf.expandEnabled(conf) =>
