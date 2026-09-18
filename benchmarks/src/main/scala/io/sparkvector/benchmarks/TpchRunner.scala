@@ -316,7 +316,9 @@ object TpchRunner {
        * Iceberg merge-on-read batches the adapter normalized during the last measured run, as rows read
        * (physical) and rows the deletes left (live) -- local mode only, the counters live in the executor JVM.
        */
-      morPhysicalRows: Long = 0, morLiveRows: Long = 0) {
+      morPhysicalRows: Long = 0, morLiveRows: Long = 0,
+      /** Per-operator attribution of the last measured run (#279): ours and Comet's native operators, one entry per plan node. */
+      operatorTimes: Seq[OperatorTime] = Nil) {
     private val sorted = timesMs.sorted
     def medianMs: Double = percentile(50)
     def p90Ms: Double = percentile(90)
@@ -333,8 +335,55 @@ object TpchRunner {
         metrics.map(m => m.json + ",").getOrElse("") +
         s""""sparkVersion":"${esc(env.sparkVersion)}","executors":"${esc(env.executors)}","engineConf":"${esc(env.engineConf)}",""" +
         s""""scan":"${esc(scan)}","morPhysicalRows":$morPhysicalRows,"morLiveRows":$morLiveRows,""" +
+        s""""operatorTimes":"${esc(OperatorTime.encode(operatorTimes))}",""" +
         s""""fallbacks":"${esc(fallbacks.mkString("; "))}","operators":"${esc(operators)}","plan":"${esc(plan)}"}"""
     }
+  }
+
+  /**
+   * One operator's share of a run (#279): the plan node's class, whose engine ran it (`ours`, `comet`),
+   * its output rows and its time in milliseconds summed over tasks (so it exceeds wall clock). Ours
+   * report the `time` metric in nanoseconds; Comet's native operators report DataFusion's
+   * `elapsed_compute` (the operator's own compute, input waits excluded, in nanoseconds) and
+   * `output_rows`. Spark's own operators carry no per-operator time and are not listed.
+   */
+  final case class OperatorTime(operator: String, engine: String, rows: Long, ms: Double) {
+    /** `Filter`, `HashAggregate`, `ShuffledHashJoin`: the operator kind without the engine's prefix and the `Exec` suffix. */
+    def kind: String = OperatorTime.kindOf(operator)
+  }
+
+  object OperatorTime {
+    def kindOf(operator: String): String =
+      operator.stripPrefix("Vector").stripPrefix("Comet").stripSuffix("Exec")
+    /** `op|engine|rows|ms; op|engine|rows|ms` -- one string field, read back by [[decode]]. */
+    def encode(ts: Seq[OperatorTime]): String = ts.map(t => f"${t.operator}|${t.engine}|${t.rows}|${t.ms}%.3f").mkString("; ")
+    def decode(field: String): Seq[OperatorTime] = field.split("; ").map(_.trim).filter(_.nonEmpty).toSeq.flatMap { e =>
+      e.split('|') match {
+        case Array(op, engine, rows, ms) => scala.util.Try(OperatorTime(op, engine, rows.toLong, ms.toDouble)).toOption
+        case _ => None
+      }
+    }
+    /** Attribution from the executed plan: ours from `time`, Comet's native nodes from `elapsed_compute`. */
+    def fromPlan(nodes: Seq[SparkPlan]): Seq[OperatorTime] = nodes.flatMap { n =>
+      val name = n.getClass.getSimpleName
+      if (name.startsWith("Vector") && n.metrics.contains("time")) {
+        Some(OperatorTime(name, "ours", n.metrics.get("numOutputRows").map(_.value).getOrElse(-1L), n.metrics("time").value / 1e6))
+      } else if (name.startsWith("Comet") && !name.contains("Scan") && !name.contains("ColumnarToRow") && !name.contains("Exchange")) {
+        // Measured: the values are nanoseconds (a 21 ms filter reads 21200470), whatever the metric's
+        // description says. An operator without `elapsed_compute` (a join) has its phases as `*_time`.
+        val ns = n.metrics.get("elapsed_compute").map(_.value).orElse {
+          val phases = n.metrics.collect { case (k, m) if k.endsWith("_time") => m.value }
+          if (phases.isEmpty) None else Some(phases.sum)
+        }
+        ns match {
+          case Some(v) => Some(OperatorTime(name, "comet", n.metrics.get("output_rows").map(_.value).getOrElse(-1L), v / 1e6))
+          case None =>
+            if (unattributed.add(name)) println(s"[attribution] $name has no time metric; its metrics: ${n.metrics.keys.toSeq.sorted.mkString(", ")}")
+            None
+        }
+      } else None
+    }
+    private val unattributed = scala.collection.mutable.HashSet.empty[String]
   }
 
   private def measure(spark: SparkSession, listener: ClusterRunner.StageMetricsListener, name: String, sql: String, args: Args): Measurement = {
@@ -367,19 +416,27 @@ object TpchRunner {
     val ops = nodes.map(_.getClass.getSimpleName).filter(n => n.startsWith("Vector") || n.startsWith("Comet"))
       .groupBy(identity).view.mapValues(_.size).toSeq.sortBy(_._1).map { case (n, c) => s"$n x$c" }.mkString(", ")
     // Per-operator kernel time of the last run (summed over tasks, so it exceeds wall clock).
-    nodes.filter(n => n.getClass.getSimpleName.startsWith("Vector") && n.metrics.contains("time")).foreach { n =>
-      val t = n.metrics.get("time").map(m => f"${m.value / 1e6}%.1f ms").getOrElse("-")
-      val r = n.metrics.get("numOutputRows").map(_.value).getOrElse(-1L)
-      println(s"[${args.suite.name}]   ${n.getClass.getSimpleName}: kernel time $t, output rows $r")
-    }
+    val operatorTimes = OperatorTime.fromPlan(nodes)
+    operatorTimes.foreach(t => println(f"[${args.suite.name}]   ${t.operator} (${t.engine}): time ${t.ms}%.1f ms, output rows ${t.rows}"))
     val accelerated = PlanAcceleration.fromPlan(plan)
     val acceleratedOps = accelerated.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated)
     // One line per distinct (operator, reason): the same reason repeats across AQE stages.
-    val fallbacks = accelerated.fallbacks.map { case (node, reason) => s"$node: $reason" }.distinct
+    val fallbacks = (accelerated.fallbacks.map { case (node, reason) => s"$node: $reason" } ++ cometFallbacks(plan)).distinct
     val scan = nodes.map(_.getClass.getSimpleName).filter(_.endsWith("ScanExec")).distinct.sorted.mkString(", ")
     Measurement(name, (runs :+ last).map(_._1), rows.length, checksum, if (ops.isEmpty) "spark only" else ops, plan.treeString.take(4000),
-      acceleratedOps, accelerated.operatorCount, fallbacks, Some(metrics), scan, morPhysical, morLive)
+      acceleratedOps, accelerated.operatorCount, fallbacks, Some(metrics), scan, morPhysical, morLive, operatorTimes)
   }
+
+  /**
+   * Comet's own fallback reasons for the plan (#279), `Comet: <reason>` each, read through its
+   * `ExtendedExplainInfo` when the jar is on the classpath -- so a query where Comet is "slower" because
+   * it left an operator to Spark reads as a fallback, not as an operator comparison. Empty without Comet.
+   */
+  private def cometFallbacks(plan: SparkPlan): Seq[String] =
+    scala.util.Try {
+      val info = Class.forName("org.apache.comet.ExtendedExplainInfo").getDeclaredConstructor().newInstance()
+      info.getClass.getMethod("getFallbackReasons", classOf[SparkPlan]).invoke(info, plan).asInstanceOf[Seq[String]]
+    }.toOption.getOrElse(Nil).map(r => s"Comet: ${r.replace('\n', ' ').trim}").filter(_.length > 7).distinct
 
   private def allNodes(plan: SparkPlan): Seq[SparkPlan] = {
     val inner = plan match {
@@ -439,7 +496,9 @@ object TpchRunner {
       /** Scan operators of the plan and the Iceberg adapter's merge-on-read rows (#260); absent in older records. */
       scan: String = "",
       morPhysicalRows: Long = 0,
-      morLiveRows: Long = 0) {
+      morLiveRows: Long = 0,
+      /** Per-operator attribution (#279); empty for older records. */
+      operatorTimes: Seq[OperatorTime] = Nil) {
     /** Dataset label: the last path element (`sf1`, `sf10`). */
     def dataset: String = data.stripSuffix("/").split('/').last
     /** `5/7` -- operators executed by our kernels or Comet over operators that count. */
@@ -463,6 +522,16 @@ object TpchRunner {
     def acceleratedConfigs: Seq[String] = configs.filter(_ != "spark")
     /** Queries every accelerated configuration runs entirely on our kernels or Comet. */
     def fullyAccelerated(c: String): Int = queries.count(q => latest.get((c, q)).exists(_.fullyAccelerated))
+    /** Configurations whose latest rows carry per-operator times (#279). */
+    def attributedConfigs: Seq[String] = configs.filter(c => queries.exists(q => latest.get((c, q)).exists(_.operatorTimes.nonEmpty)))
+    /** Milliseconds per operator kind in one query under one configuration, summed over the plan's nodes of that kind. */
+    def kindMs(c: String, q: String): Map[String, Double] =
+      latest.get((c, q)).map(_.operatorTimes.groupBy(_.kind).view.mapValues(_.map(_.ms).sum).toMap).getOrElse(Map.empty)
+    /** Every operator kind any attributed configuration ran, ordered by its total time descending. */
+    def kinds: Seq[String] = {
+      val totals = for (c <- attributedConfigs; q <- queries; (k, ms) <- kindMs(c, q).toSeq) yield (k, ms)
+      totals.groupBy(_._1).view.mapValues(_.map(_._2).sum).toSeq.sortBy(-_._2).map(_._1)
+    }
   }
 
   private def report(suite: Suite, dir: Path): Unit = {
@@ -508,6 +577,28 @@ object TpchRunner {
           sb.append(s"| $q | " + d.acceleratedConfigs.map(c => d.latest.get((c, q)).map(_.acceleratedCell).getOrElse("-")).mkString(" | ") + " |\n")
         }
         sb.append("| fully accelerated | " + d.acceleratedConfigs.map(c => s"${d.fullyAccelerated(c)}/${d.queries.size}").mkString(" | ") + " |\n")
+      }
+      if (d.attributedConfigs.size >= 1 && d.kinds.nonEmpty) {
+        sb.append("\nOperator matrix (#279): milliseconds per operator kind, summed over the plan's nodes of that kind and over tasks, " +
+          "for the last measured run; a kind an engine did not run is `-` -- read it beside the fallbacks below, since a kind left to Spark has no time here.\n\n")
+        sb.append("| operator kind | " + d.attributedConfigs.map(c => s"$c (all queries)").mkString(" | ") + " |\n")
+        sb.append("|---|" + d.attributedConfigs.map(_ => "---:").mkString("|") + "|\n")
+        d.kinds.foreach { k =>
+          val cells = d.attributedConfigs.map { c =>
+            val per = d.queries.flatMap(q => d.kindMs(c, q).get(k))
+            if (per.isEmpty) "-" else f"${per.sum}%.0f (${per.size} queries)"
+          }
+          sb.append(s"| $k | " + cells.mkString(" | ") + " |\n")
+        }
+        if (d.attributedConfigs.size >= 2) {
+          sb.append("\nPer query, the kinds both of the first two attributed configurations ran, `ours vs theirs (delta)` in milliseconds:\n\n")
+          val Seq(a, b) = d.attributedConfigs.take(2)
+          d.queries.foreach { q =>
+            val (ma, mb) = (d.kindMs(a, q), d.kindMs(b, q))
+            val shared = d.kinds.filter(k => ma.contains(k) && mb.contains(k))
+            if (shared.nonEmpty) sb.append(s"- $q: " + shared.map(k => f"$k ${ma(k)}%.1f vs ${mb(k)}%.1f (${ma(k) - mb(k)}%+.1f)").mkString("; ") + "\n")
+          }
+        }
       }
       sb.append("\nOperators in the final plan:\n\n")
       d.queries.foreach { q =>
@@ -742,7 +833,8 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
     Row(str("timestamp"), str("config"), str("query"), str("data"), num("medianMs"), num("p90Ms"), num("minMs"), times,
       num("rows").toInt, str("checksum"), str("operators"), anchorRows, accelerated, fallbacks,
       metrics, str("sparkVersion"), str("executors"), str("engineConf"),
-      str("scan"), optLong("morPhysicalRows").getOrElse(0L), optLong("morLiveRows").getOrElse(0L))
+      str("scan"), optLong("morPhysicalRows").getOrElse(0L), optLong("morLiveRows").getOrElse(0L),
+      OperatorTime.decode(str("operatorTimes")))
   }
 }
 
