@@ -43,6 +43,14 @@ class VectorProjectSuite extends VectorQuerySuite {
     spark.read.parquet(nestedPath).createOrReplaceTempView("nested")
   }
 
+  test("bare literal columns -- booleans and typed NULLs included -- are constant columns of the projection (#273)") {
+    // Spark's MERGE INTO plan adds `true AS __row_from_target`; the compiler refuses a boolean or null literal
+    // as an operand, but a whole column of one is materialised directly, dense or under a selection.
+    checkVectorized("SELECT i, true AS t, false AS f, CAST(NULL AS int) AS n, CAST(NULL AS string) AS ns, 'x' AS s, 7 AS k, 2.5 AS d, CAST(1 AS decimal(20,2)) AS w FROM t", Seq(Project))
+    checkVectorized("SELECT i, true AS t, CAST(NULL AS bigint) AS n FROM t WHERE i % 3 = 0", Seq(Project, Filter))
+    checkVectorized("SELECT count(*) AS c, sum(i) AS s FROM (SELECT i, true AS flag FROM t) WHERE flag", Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+  }
+
   test("columns with no lane pass through the project and filter as Spark's vectors, dense or under a selection") {
     def noRowConversion(df: org.apache.spark.sql.DataFrame): Unit = {
       assert(nodesOf[RowToColumnarExec](df).isEmpty, finalPlan(df).treeString)
@@ -465,8 +473,8 @@ class VectorProjectSuite extends VectorQuerySuite {
     // Aliases: nested and over a subquery are transparent; an alias over an unsupported child reports the child's reason.
     checkVectorized("SELECT x AS y, (y2 + 1) AS z FROM (SELECT i AS x, l AS y2 FROM t) sub", Seq(Project))
     checkFallback("SELECT soundex(s) AS renamed FROM t", Seq(Project), "soundex")
-    // Boolean literals are deliberately not constant columns (predicates over them take other paths).
-    checkFallback("SELECT true AS b2 FROM t", Seq(Project), "unsupported literal type boolean")
+    // A bare boolean literal is a constant column since #273 (as an operand it still takes the predicate paths).
+    checkVectorized("SELECT true AS b2 FROM t", Seq(Project))
     // Fallback reasons name what they refused -- the strings the suites, the UI and docs/expressions.md quote.
     val reasons = Seq(
       "SELECT soundex(s) AS a FROM t" -> "soundex",

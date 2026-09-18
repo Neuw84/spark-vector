@@ -180,13 +180,13 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
   }
 
   /**
-   * The columnar MergeRows (#21) is planned over its join: it converts when MergeRowsExec's child is
-   * columnar. Today the merge's join is never ours -- the target side carries Iceberg's struct
-   * `_partition` metadata column, which the hash join does not pass through (the sort-merge route
-   * refuses it with `unsupported column type struct<> for _partition`) -- so the operator records
-   * why and Spark's runs. `VectorMergeRowsSuite` exercises the operator itself over a columnar child.
+   * The columnar MergeRows (#21) is planned over its join, and since #273 the merge's join is ours:
+   * the target side carries Iceberg's struct `_partition` metadata column, which the hash join passes
+   * through on its streamed side (the target is the streamed side of the merge's right outer join),
+   * so the whole merge -- scan, join, MergeRows -- runs on our operators and writes the same table.
+   * `VectorMergeRowsSuite` exercises the operator itself over a columnar child.
    */
-  icebergTest("MergeRows records why the merge's join is not ours, and the merge is unchanged (#21)") {
+  icebergTest("MERGE INTO runs on our join and the columnar MergeRows, and the table is unchanged (#21, #273)") {
     val Db = IcebergTables.Db
     IcebergTables.createMergeSource(spark)
     val on = s"$Db.m_row_on"
@@ -195,7 +195,10 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     IcebergTables.createMixedMor(spark, off, formatVersion = 2)
     withPlugin(enabled = false)(spark.sql(IcebergTables.mergeSql(off)).collect())
     withConf(VectorConf.SortMergeJoinEnabled -> "true", "spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.ExplainFallbackEnabled -> "true") {
-      withPlugin(enabled = true)(spark.sql(IcebergTables.mergeSql(on)).collect())
+      val merge = withPlugin(enabled = true) { val d = spark.sql(IcebergTables.mergeSql(on)); d.collect(); d }
+      val nodes = PlanUtils.allNodes(finalPlan(merge))
+      assert(nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorMergeRowsExec]), finalPlan(merge).treeString)
+      assert(nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]), finalPlan(merge).treeString)
     }
     val readAll = "SELECT i, l, d, d2, dt, b, s FROM %s ORDER BY i"
     val expected = withPlugin(enabled = false)(spark.sql(readAll.format(off)).collect())

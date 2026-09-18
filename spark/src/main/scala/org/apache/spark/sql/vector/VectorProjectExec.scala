@@ -4,7 +4,7 @@ import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, NestedFieldColumnVector, RemappedColumnVector, SelectedColumnarBatch}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, NestedColumnRef, VectorExpr}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, GetStructField, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, GetStructField, Literal, NamedExpression, SortOrder}
 import org.apache.spark.sql.execution.{OrderPreservingUnaryExecNode, PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -44,10 +44,10 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
         case Right((ordinal, path)) => NestedColumnRef(ordinal, path, passed.dataType)
         case Left(reason) => throw new IllegalStateException(s"cannot pass through ${e.sql}: $reason")
       }
-    } else ExpressionCompiler.compile(e, child.output) match {
+    } else VectorProjectExec.constantSlot(e).getOrElse(ExpressionCompiler.compile(e, child.output) match {
       case Right(v) => v
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize projection ${e.sql}: $reason")
-    }
+    })
   }.toArray
 
   private def isIdentity: Boolean =
@@ -74,6 +74,15 @@ object VectorProjectExec {
    * field of one whose type has no lane (Spark's `NestedColumnAliasing` projects `st.inner` for a
    * generate over it): never compiled, Spark's vector is passed through.
    */
+  /**
+   * A bare literal slot (`true AS flag`, `CAST(NULL AS int) AS n`): a whole constant or null column of any
+   * lane type, materialised without the compiler, which refuses boolean and null literals as operands (#273).
+   */
+  def constantSlot(e: NamedExpression): Option[VectorExpr] = e match {
+    case Alias(Literal(v, dt), _) if TypeMapping.hasLane(dt) => Some(LiteralExpr(v, dt))
+    case _ => None
+  }
+
   def isPassThrough(e: NamedExpression): Boolean = e match {
     case _: AttributeReference => true
     case Alias(_: AttributeReference, _) => true
@@ -143,6 +152,7 @@ private[vector] class VectorProjectIterator(
             case ColumnRef(ordinal, _) =>
               // Forwarded columns are never copied: the child keeps them alive until its next batch.
               BorrowedColumnVector.of(batch.column(ordinal))
+            case lit: LiteralExpr if lit.value == null => ArrowOutput.nulls(name, dt, outRows, allocator)
             case lit: LiteralExpr => ArrowOutput.constant(name, dt, lit.value, outRows, allocator)
             case e if compactTo != null => ArrowOutput.compact(name, dt, e.eval(ctx), compactTo, outRows, allocator)
             case e => ArrowOutput.copy(name, dt, e.eval(ctx), allocator)

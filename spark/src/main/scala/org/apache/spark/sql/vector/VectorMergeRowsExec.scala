@@ -75,6 +75,17 @@ private[vector] final case class CompiledInstruction(condition: Option[VectorExp
 /** One output column of a projection: a compiled expression, or a foreign (lane-less) column passed through by ordinal. */
 private[vector] final case class CompiledOutput(name: String, dataType: DataType, expr: VectorExpr, foreignOrdinal: Int)
 
+/** A boolean column that is `true` on every row of the batch: the presence predicate of a side every row has. */
+private[vector] object AllRowsExpr extends VectorExpr {
+  override def dataType: DataType = BooleanType
+  override def children: Seq[VectorExpr] = Nil
+  override def eval(ctx: EvalContext): io.sparkvector.kernels.VectorBuffers = {
+    val bits = io.sparkvector.kernels.ArrowLayout.allocateBitmap(ctx.arena, ctx.numRows)
+    io.sparkvector.kernels.Bitmap.fill(bits, ctx.numRows, true)
+    io.sparkvector.kernels.SegmentVectorBuffers.fixedWidth(io.sparkvector.kernels.VecType.BOOL, ctx.numRows, null, bits)
+  }
+}
+
 private[vector] final case class MergeProgram(
     sourcePresent: VectorExpr,
     targetPresent: VectorExpr,
@@ -115,12 +126,22 @@ object VectorMergeRowsPlanner {
       }
     for {
       rowId <- rowIdOrdinal
-      s <- ExpressionCompiler.compilePredicate(isSourceRowPresent, input).left.map(r => s"source presence: $r")
-      t <- ExpressionCompiler.compilePredicate(isTargetRowPresent, input).left.map(r => s"target presence: $r")
+      s <- presence(isSourceRowPresent, input).left.map(r => s"source presence: $r")
+      t <- presence(isTargetRowPresent, input).left.map(r => s"target presence: $r")
       mi <- all(matched.map(instruction(_, input, output)))
       ni <- all(notMatched.map(instruction(_, input, output)))
       bi <- all(notMatchedBySource.map(instruction(_, input, output)))
     } yield MergeProgram(s, t, mi, ni, bi, rowId)
+  }
+
+  /**
+   * A presence predicate. Spark passes a `true` literal for a side every row has (the source of a
+   * right outer merge join, #273): every live row is present; a `false` or null literal none.
+   */
+  private def presence(e: Expression, input: Seq[Attribute]): Either[String, VectorExpr] = e match {
+    case Literal(true, BooleanType) => Right(AllRowsExpr)
+    case Literal(false, BooleanType) | Literal(null, BooleanType) => Right(NullLiteralExpr(BooleanType))
+    case other => ExpressionCompiler.compilePredicate(other, input)
   }
 
   private def all[T](rs: Seq[Either[String, T]]): Either[String, Seq[T]] =
@@ -160,6 +181,8 @@ object VectorMergeRowsPlanner {
         case a: AttributeReference =>
           val ordinal = input.indexWhere(_.exprId == a.exprId)
           if (ordinal < 0) Left(s"unbound attribute ${a.name}") else Right(CompiledOutput(out.name, out.dataType, null, ordinal))
+        // An inserted row has no partition struct yet: a `NULL` of the lane-less type is a null column (#273).
+        case Literal(null, _) => Right(CompiledOutput(out.name, out.dataType, NullLiteralExpr(out.dataType), -1))
         case other => Left(s"${other.sql}: unsupported output type ${out.dataType.simpleString} for ${out.name}")
       }
     }).map(_.toArray)
@@ -277,6 +300,9 @@ private[vector] class VectorMergeRowsIterator(input: Iterator[ColumnarBatch], pr
           if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(mask, n, count)
           RemappedColumnVector.of(ctx.column(o.foreignOrdinal), foreignRows)
         } else o.expr match {
+          case _: NullLiteralExpr if !TypeMapping.hasLane(o.dataType) =>
+            val v = new org.apache.spark.sql.execution.vectorized.ConstantColumnVector(count, o.dataType); v.setNull(); v
+          case lit: LiteralExpr if lit.value == null => ArrowOutput.nulls(o.name, o.dataType, count, allocator)
           case lit: LiteralExpr => ArrowOutput.constant(o.name, o.dataType, lit.value, count, allocator)
           case ColumnRef(ordinal, _) => ArrowOutput.compact(o.name, o.dataType, ctx.input(ordinal), mask, count, allocator)
           case e => ArrowOutput.compact(o.name, o.dataType, ctx.withActive(mask)(e.eval(ctx)), mask, count, allocator)
