@@ -27,7 +27,8 @@ public final class GroupKeyTable {
   private int[] groupHashes = new int[INITIAL_CAPACITY];
 
   private final int[][] intKeys; // INT32 and BOOL (0/1)
-  private final long[][] longKeys; // INT64 and FLOAT64 (raw bits)
+  private final long[][] longKeys; // INT64 and FLOAT64 (raw bits); the low limb of DECIMAL128
+  private final long[][] hiKeys; // the high limb of DECIMAL128
   private final byte[][] strBytes; // UTF8 byte store per column
   private final MemorySegment[] strSegments; // heap views of strBytes, refreshed on growth
   private final int[] strUsed; // bytes used per UTF8 column
@@ -97,6 +98,7 @@ public final class GroupKeyTable {
     int k = types.length;
     intKeys = new int[k][];
     longKeys = new long[k][];
+    hiKeys = new long[k][];
     strBytes = new byte[k][];
     strSegments = new MemorySegment[k];
     strUsed = new int[k];
@@ -107,6 +109,10 @@ public final class GroupKeyTable {
       switch (types[c]) {
         case INT32, BOOL -> intKeys[c] = new int[INITIAL_CAPACITY];
         case INT64, FLOAT64 -> longKeys[c] = new long[INITIAL_CAPACITY];
+        case DECIMAL128 -> {
+          longKeys[c] = new long[INITIAL_CAPACITY];
+          hiKeys[c] = new long[INITIAL_CAPACITY];
+        }
         case UTF8 -> {
           strBytes[c] = new byte[INITIAL_CAPACITY * 8];
           strSegments[c] = MemorySegment.ofArray(strBytes[c]);
@@ -624,6 +630,12 @@ public final class GroupKeyTable {
             return false;
           }
         }
+        case DECIMAL128 -> {
+          MemorySegment d = k.data();
+          if (longKeys[c][gid] != Decimal128.lo(d, row) || hiKeys[c][gid] != Decimal128.hi(d, row)) {
+            return false;
+          }
+        }
         case UTF8 -> {
           if (!utf8Equals(c, gid, k, row)) {
             return false;
@@ -683,6 +695,10 @@ public final class GroupKeyTable {
         case BOOL -> intKeys[c][gid] = isNull ? 0 : (k.getBoolean(row) ? 1 : 0);
         case INT64 -> longKeys[c][gid] = isNull ? 0L : k.getLong(row);
         case FLOAT64 -> longKeys[c][gid] = isNull ? 0L : Double.doubleToRawLongBits(k.getDouble(row));
+        case DECIMAL128 -> {
+          longKeys[c][gid] = isNull ? 0L : Decimal128.lo(k.data(), row);
+          hiKeys[c][gid] = isNull ? 0L : Decimal128.hi(k.data(), row);
+        }
         case UTF8 -> appendUtf8(c, gid, isNull ? null : k, row);
       }
     }
@@ -733,6 +749,10 @@ public final class GroupKeyTable {
       switch (types[c]) {
         case INT32, BOOL -> intKeys[c] = Arrays.copyOf(intKeys[c], cap);
         case INT64, FLOAT64 -> longKeys[c] = Arrays.copyOf(longKeys[c], cap);
+        case DECIMAL128 -> {
+          longKeys[c] = Arrays.copyOf(longKeys[c], cap);
+          hiKeys[c] = Arrays.copyOf(hiKeys[c], cap);
+        }
         case UTF8 -> strOffsets[c] = Arrays.copyOf(strOffsets[c], cap + 1);
       }
     }
@@ -775,6 +795,11 @@ public final class GroupKeyTable {
     return Double.longBitsToDouble(longKeys[c][gid]);
   }
 
+  /** The 128-bit key of group {@code gid} of a DECIMAL128 column. */
+  public java.math.BigInteger getDecimal128(int c, int gid) {
+    return Decimal128.toBigInteger(hiKeys[c][gid], longKeys[c][gid]);
+  }
+
   public String getString(int c, int gid) {
     int start = strOffsets[c][gid];
     return new String(strBytes[c], start, strOffsets[c][gid + 1] - start, java.nio.charset.StandardCharsets.UTF_8);
@@ -802,6 +827,11 @@ public final class GroupKeyTable {
         }
       }
       case INT64, FLOAT64 -> MemorySegment.copy(longKeys[c], from, data, VectorBuffers.LE_LONG, 0, count);
+      case DECIMAL128 -> {
+        for (int o = 0; o < count; o++) {
+          Decimal128.set(data, o, hiKeys[c][from + o], longKeys[c][from + o]);
+        }
+      }
       case UTF8 -> {
         int base = strOffsets[c][from];
         for (int o = 0; o <= count; o++) {

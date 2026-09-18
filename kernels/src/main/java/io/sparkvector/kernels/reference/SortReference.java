@@ -53,6 +53,7 @@ public final class SortReference {
       case FLOAT64 -> compareDoubles(k.getDouble(a), k.getDouble(b));
       case BOOL -> Boolean.compare(k.getBoolean(a), k.getBoolean(b));
       case UTF8 -> compareBytes(k.getUtf8Bytes(a), k.getUtf8Bytes(b));
+      case DECIMAL128 -> k.getDecimal128(a).compareTo(k.getDecimal128(b));
       default -> throw new IllegalArgumentException("unsupported " + k.type());
     };
     return desc ? -r : r;

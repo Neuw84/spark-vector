@@ -214,6 +214,109 @@ class GroupedAggregationTest {
   }
 
   @Test
+  void wideDecimalKeysGroupByBothLimbs() {
+    Random rnd = new Random(128);
+    try (Arena arena = Arena.ofConfined()) {
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.DECIMAL128, VecType.INT32});
+      Map<List<Object>, Integer> idOf = new HashMap<>();
+      GroupedAccumulators.Decimal128MinMax wmin = new GroupedAccumulators.Decimal128MinMax(true);
+      GroupedAccumulators.Decimal128MinMax wmax = new GroupedAccumulators.Decimal128MinMax(false);
+      GroupedAccumulators.Count wcount = new GroupedAccumulators.Count();
+      Map<Integer, java.math.BigInteger[]> refMinMax = new HashMap<>();
+      Map<Integer, Long> refCount = new HashMap<>();
+      // Values that share a low limb (differ only in the high limb) and vice versa must not collide.
+      java.math.BigInteger[] pool = new java.math.BigInteger[40];
+      for (int i = 0; i < pool.length; i++) {
+        java.math.BigInteger base = i < 8 ? TestData.randomDecimal128(rnd) : pool[i % 8];
+        pool[i] = switch (i / 8) {
+          case 0 -> base;
+          case 1 -> base.add(java.math.BigInteger.ONE.shiftLeft(64)); // same low limb, other high limb
+          case 2 -> base.xor(java.math.BigInteger.ONE); // same high limb, other low limb
+          case 3 -> base.negate();
+          default -> base.shiftLeft(1);
+        };
+        if (pool[i].bitLength() > 127) {
+          pool[i] = pool[i].shiftRight(2);
+        }
+      }
+      for (int n : new int[] {1000, 37, 2048, 64, 999}) {
+        java.math.BigInteger[] k1 = new java.math.BigInteger[n];
+        int[] k2 = new int[n];
+        boolean[] nulls = new boolean[n];
+        for (int i = 0; i < n; i++) {
+          k1[i] = pool[rnd.nextInt(pool.length)];
+          k2[i] = rnd.nextInt(3);
+          nulls[i] = rnd.nextInt(11) == 0;
+        }
+        VectorBuffers key1 = ArrowLayout.ofDecimal128(arena, k1, nulls);
+        VectorBuffers key2 = ArrowLayout.ofInts(arena, k2, null);
+        int[] ids = new int[n];
+        int groups0 = table.assign(new VectorBuffers[] {key1, key2}, n, ids);
+        // Min/max/count over a wide value column, grouped by these keys, against BigInteger.
+        java.math.BigInteger[] vals = new java.math.BigInteger[n];
+        boolean[] valNulls = new boolean[n];
+        for (int i = 0; i < n; i++) {
+          vals[i] = TestData.randomDecimal128(rnd);
+          valNulls[i] = rnd.nextInt(4) == 0;
+        }
+        VectorBuffers values = ArrowLayout.ofDecimal128(arena, vals, valNulls);
+        java.lang.foreign.MemorySegment sel = n % 2 == 0 ? TestData.randomBitmap(arena, rnd, n) : null;
+        GroupAssignment ga = GroupAssignment.of(ids, n, groups0, arena, sel);
+        wmin.update(values, ga);
+        wmax.update(values, ga);
+        wcount.updateNonNull(values, ga);
+        for (int i = 0; i < n; i++) {
+          if ((sel != null && !Bitmap.isSet(sel, i)) || valNulls[i]) {
+            continue;
+          }
+          refCount.merge(ids[i], 1L, Long::sum);
+          java.math.BigInteger[] mm = refMinMax.get(ids[i]);
+          if (mm == null) {
+            refMinMax.put(ids[i], new java.math.BigInteger[] {vals[i], vals[i]});
+          } else {
+            mm[0] = mm[0].min(vals[i]);
+            mm[1] = mm[1].max(vals[i]);
+          }
+        }
+        for (int i = 0; i < n; i++) {
+          List<Object> key = List.of(nulls[i] ? "null" : k1[i], k2[i]);
+          Integer seen = idOf.putIfAbsent(key, ids[i]);
+          if (seen != null) {
+            assertEquals(seen.intValue(), ids[i], "group id of " + key);
+          }
+          assertEquals(nulls[i], table.isNull(0, ids[i]));
+          if (!nulls[i]) {
+            assertEquals(k1[i], table.getDecimal128(0, ids[i]));
+          }
+        }
+      }
+      assertEquals(idOf.size(), table.size());
+      for (int gid = 0; gid < table.size(); gid++) {
+        java.math.BigInteger[] mm = refMinMax.get(gid);
+        assertEquals(mm != null, wmin.hasValue(gid), "min presence of group " + gid);
+        assertEquals(mm != null, wmax.hasValue(gid), "max presence of group " + gid);
+        if (mm != null) {
+          assertEquals(mm[0], wmin.value(gid), "min of group " + gid);
+          assertEquals(mm[1], wmax.value(gid), "max of group " + gid);
+        }
+        assertEquals(refCount.getOrDefault(gid, 0L).longValue(), wcount.count(gid), "count of group " + gid);
+      }
+      // writeKeys emits the lane layout the gather/compact kernels read.
+      int groups = table.size();
+      java.lang.foreign.MemorySegment validity = ArrowLayout.allocateBitmap(arena, groups);
+      java.lang.foreign.MemorySegment data = ArrowLayout.allocateData(arena, VecType.DECIMAL128, groups);
+      table.writeKeys(0, 0, groups, validity, data, null);
+      VectorBuffers out = SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, groups, validity, data);
+      for (int gid = 0; gid < groups; gid++) {
+        assertEquals(table.isNull(0, gid), out.isNull(gid));
+        if (!out.isNull(gid)) {
+          assertEquals(table.getDecimal128(0, gid), out.getDecimal128(gid));
+        }
+      }
+    }
+  }
+
+  @Test
   void dictionaryAndPlainStringsGroupTogether() {
     try (Arena arena = Arena.ofConfined()) {
       GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8});

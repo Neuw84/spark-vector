@@ -64,6 +64,7 @@ public final class HashKernels {
         }
       }
       case UTF8 -> mixUtf8(col, hashes, n);
+      case DECIMAL128 -> mixInt128(col, hashes, n);
       default -> throw new IllegalArgumentException("unsupported key type " + col.type());
     }
   }
@@ -132,6 +133,14 @@ public final class HashKernels {
           hashes[i] = mix32(hashes[i], ((word >>> k) & 1L) == 0 ? NULL_MARK : fold(col.getLong(i)));
         }
       }
+    }
+  }
+
+  /** 128-bit keys: both limbs mixed into one long, then folded like an int64 (scalar lane). */
+  static void mixInt128(VectorBuffers col, int[] hashes, int n) {
+    MemorySegment d = col.data();
+    for (int i = 0; i < n; i++) {
+      hashes[i] = mix32(hashes[i], col.isNull(i) ? NULL_MARK : fold(Decimal128.hash(Decimal128.hi(d, i), Decimal128.lo(d, i))));
     }
   }
 
