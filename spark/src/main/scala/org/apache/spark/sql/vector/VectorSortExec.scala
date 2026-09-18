@@ -205,11 +205,14 @@ private[vector] class VectorSortIterator(
 /** Planning-time checks shared by the rule and the operator. */
 object VectorSortPlanner {
 
-  /** Any compiled non-literal expression of a supported type can be a sort key. */
+  /**
+   * Any compiled non-literal expression of a supported type can be a sort key, and so can a bare
+   * wide decimal column (a DECIMAL128 lane the sort kernel orders limb by limb, #257).
+   */
   def compileKey(order: SortOrder, input: Seq[Attribute]): Either[String, VectorExpr] =
-    ExpressionCompiler.compile(order.child, input).flatMap {
+    ExpressionCompiler.compileLaneColumn(order.child, input).flatMap {
       case _: LiteralExpr => Left("literal sort key")
-      case k if !TypeMapping.isSupported(order.child.dataType) => Left(s"sort key type ${order.child.dataType.simpleString} not supported")
+      case k if !TypeMapping.hasLane(order.child.dataType) => Left(s"sort key type ${order.child.dataType.simpleString} not supported")
       case k => Right(k)
     }
 

@@ -72,6 +72,7 @@ public final class SortKernels {
         case INT64 -> order = passes64(order, k, false, desc, packed, keyScratch, n);
         case FLOAT64 -> order = passes64(order, k, true, desc, packed, keyScratch, n);
         case UTF8 -> order = passesUtf8(order, k, desc, packed, keyScratch, n);
+        case DECIMAL128 -> order = passes128(order, k, desc, packed, keyScratch, n);
         default -> throw new IllegalArgumentException("unsupported sort key type " + k.type());
       }
       if (k.hasNulls()) {
@@ -128,6 +129,51 @@ public final class SortKernels {
       keyScratch[j] = (int) (normalised[(int) packed[j]] >>> 32);
     }
     return pass(afterLow, keyScratch, packed, n);
+  }
+
+  /**
+   * Four passes over a 128-bit value: the low limb is unsigned as it is, the high limb is
+   * sign-normalised like an int64; low limb halves first, then the high limb's. Between passes the
+   * limb arrays follow the permutation the pass produced.
+   */
+  private static int[] passes128(
+      int[] order, VectorBuffers k, boolean desc, long[] packed, int[] keyScratch, int n) {
+    long[] lo = new long[n];
+    long[] hi = new long[n];
+    MemorySegment data = k.data();
+    for (int i = 0; i < n; i++) {
+      int row = order[i];
+      if (k.isNull(row)) {
+        continue; // both limbs stay 0: a constant key keeps null rows in their relative order
+      }
+      long l = Decimal128.lo(data, row);
+      long h = Decimal128.hi(data, row) ^ Long.MIN_VALUE;
+      lo[i] = desc ? ~l : l;
+      hi[i] = desc ? ~h : h;
+    }
+    for (int i = 0; i < n; i++) {
+      keyScratch[i] = (int) lo[i];
+    }
+    order = pass(order, keyScratch, packed, n);
+    long[] lo2 = new long[n];
+    long[] hi2 = new long[n];
+    for (int j = 0; j < n; j++) {
+      int from = (int) packed[j];
+      lo2[j] = lo[from];
+      hi2[j] = hi[from];
+      keyScratch[j] = (int) (lo[from] >>> 32);
+    }
+    order = pass(order, keyScratch, packed, n);
+    for (int j = 0; j < n; j++) {
+      int from = (int) packed[j];
+      hi[j] = hi2[from];
+      keyScratch[j] = (int) hi2[from];
+    }
+    order = pass(order, keyScratch, packed, n);
+    for (int j = 0; j < n; j++) {
+      keyScratch[j] = (int) (hi[(int) packed[j]] >>> 32);
+    }
+    return pass(order, keyScratch, packed, n);
   }
 
   /**

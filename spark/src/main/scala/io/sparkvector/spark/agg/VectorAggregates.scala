@@ -1,6 +1,6 @@
 package io.sparkvector.spark.agg
 
-import io.sparkvector.kernels.{AggKernels, Bitmap, CompareOp, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
+import io.sparkvector.kernels.{AggKernels, Bitmap, CompareOp, Decimal128, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
 import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, SpeculativeDecimalExpr, SpeculativeDecimals, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
@@ -329,8 +329,9 @@ final case class WideDecimalAvgMergeAgg(
       counts = java.util.Arrays.copyOf(counts, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
     }
     def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
-      val column = ctx.column(sumOrdinal)
-      require(column != null, "the wide decimal average buffer needs the batch's column")
+      // The partial's sum buffer is a DECIMAL128 lane (ours in place, Spark's copied once): two limbs per row.
+      val sums = ctx.input(sumOrdinal)
+      val data = sums.data()
       val counted = count.eval(ctx)
       val n = ctx.numRows
       var i = 0
@@ -339,8 +340,8 @@ final case class WideDecimalAvgMergeAgg(
         if (g >= 0) {
           // Spark's count buffer is never null (initial 0); a null here is a defensive skip.
           if (counted.validity() == null || Bitmap.isSet(counted.validity(), i)) counts(g) += counted.data().getAtIndex(VectorBuffers.LE_LONG, i)
-          if (column.isNullAt(i)) overflowed(g) = true
-          else if (!overflowed(g)) total(g) = total(g).add(column.getDecimal(i, bufferType.precision, bufferType.scale).toJavaBigDecimal.unscaledValue())
+          if (sums.isNull(i)) overflowed(g) = true
+          else if (!overflowed(g)) total(g) = total(g).add(Decimal128.toBigInteger(Decimal128.hi(data, i), Decimal128.lo(data, i)))
         }
         i += 1
       }
@@ -412,8 +413,9 @@ final case class WideDecimalSumMergeAgg(
     }
     /** Folds the buffer rows of `ctx` in: `groupOf(i)` is the row's group, or -1 to skip it. */
     def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
-      val column = ctx.column(sumOrdinal)
-      require(column != null, "the wide decimal sum buffer needs the batch's column")
+      // The partial's sum buffer is a DECIMAL128 lane (ours in place, Spark's copied once): two limbs per row.
+      val sums = ctx.input(sumOrdinal)
+      val data = sums.data()
       val empty = isEmpty.eval(ctx)
       val n = ctx.numRows
       var i = 0
@@ -421,8 +423,8 @@ final case class WideDecimalSumMergeAgg(
         val g = groupOf(i)
         if (g >= 0 && !(empty.validity() != null && !Bitmap.isSet(empty.validity(), i)) && !Bitmap.isSet(empty.data(), i)) {
           nonEmpty(g) = true
-          if (column.isNullAt(i)) overflowed(g) = true
-          else if (!overflowed(g)) total(g) = total(g).add(column.getDecimal(i, bufferType.precision, bufferType.scale).toJavaBigDecimal.unscaledValue())
+          if (sums.isNull(i)) overflowed(g) = true
+          else if (!overflowed(g)) total(g) = total(g).add(Decimal128.toBigInteger(Decimal128.hi(data, i), Decimal128.lo(data, i)))
         }
         i += 1
       }

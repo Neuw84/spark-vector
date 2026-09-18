@@ -751,4 +751,108 @@ public final class GroupedAccumulators {
       return best[g];
     }
   }
+
+  /**
+   * Per-group min or max over a DECIMAL128 lane: a two-limb compare per valid row (the lane is
+   * scalar), results kept as limbs.
+   */
+  public static final class Decimal128MinMax {
+    private final boolean min;
+    private long[] bestHi = new long[64];
+    private long[] bestLo = new long[64];
+    private boolean[] any = new boolean[64];
+
+    public Decimal128MinMax(boolean min) {
+      this.min = min;
+    }
+
+    public void update(VectorBuffers v, GroupAssignment a) {
+      ensure(a.numGroups());
+      if (v.type() != VecType.DECIMAL128) {
+        throw new IllegalArgumentException("expected DECIMAL128, got " + v.type());
+      }
+      if (a.useMasks()) {
+        for (int g = 0; g < a.numGroups(); g++) {
+          if (a.maskCount(g) == 0) {
+            continue;
+          }
+          VectorBuffers sub = a.restrict(v, g);
+          MemorySegment data = sub.data();
+          int n = sub.length();
+          for (int i = 0; i < n; i++) {
+            if (!sub.isNull(i)) {
+              offer(g, Decimal128.hi(data, i), Decimal128.lo(data, i));
+            }
+          }
+        }
+      } else {
+        int[] ids = a.ids();
+        MemorySegment data = v.data();
+        MemorySegment validity = a.effectiveValidity(v);
+        int n = a.numRows();
+        if (validity == null) {
+          for (int i = 0; i < n; i++) {
+            offer(ids[i], Decimal128.hi(data, i), Decimal128.lo(data, i));
+          }
+        } else {
+          for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+            long bits = Bitmap.wordAt(validity, w, n);
+            while (bits != 0L) {
+              int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+              bits &= bits - 1;
+              offer(ids[i], Decimal128.hi(data, i), Decimal128.lo(data, i));
+            }
+          }
+        }
+      }
+    }
+
+    private void offer(int g, long hi, long lo) {
+      if (!any[g]) {
+        bestHi[g] = hi;
+        bestLo[g] = lo;
+        any[g] = true;
+      } else {
+        int c = Decimal128.compare(hi, lo, bestHi[g], bestLo[g]);
+        if (min ? c < 0 : c > 0) {
+          bestHi[g] = hi;
+          bestLo[g] = lo;
+        }
+      }
+    }
+
+    private void ensure(int groups) {
+      if (groups > bestHi.length) {
+        int cap = grow(bestHi.length, groups);
+        bestHi = Arrays.copyOf(bestHi, cap);
+        bestLo = Arrays.copyOf(bestLo, cap);
+        any = Arrays.copyOf(any, cap);
+      }
+    }
+
+    public boolean hasValue(int g) {
+      return any[g];
+    }
+
+    public long hi(int g) {
+      return bestHi[g];
+    }
+
+    public long lo(int g) {
+      return bestLo[g];
+    }
+
+    public java.math.BigInteger value(int g) {
+      return Decimal128.toBigInteger(bestHi[g], bestLo[g]);
+    }
+
+    /** Writes the results of groups {@code [from, to)} as a DECIMAL128 lane with validity. */
+    public void writeTo(int from, int to, MemorySegment validity, MemorySegment data) {
+      for (int o = 0; o < to - from; o++) {
+        int g = from + o;
+        Bitmap.setTo(validity, o, any[g]);
+        Decimal128.set(data, o, any[g] ? bestHi[g] : 0L, any[g] ? bestLo[g] : 0L);
+      }
+    }
+  }
 }

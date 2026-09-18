@@ -77,7 +77,7 @@ that pin it.
   DECIMAL128 lane is carried (adapted, compacted, gathered, appended, emitted: #257) but no kernel
   computes on it yet, so `TypeMapping.isSupported` (the kernels compute on it) is false for wide
   decimals while `TypeMapping.hasLane` is true; operators that merely move a column (filter
-  compaction, projection pass-through) ask `hasLane`, everything that reads one asks `isSupported`
+  compaction, projection pass-through, the sort's keys and payloads) ask `hasLane`, everything that reads one asks `isSupported`
   until #258 (expressions) and #259 (keys, payloads, accumulators) flip it. Decimal result types
   above 18 digits are still refused, which is why the TPC-H data is still generated with decimals
   as doubles (`Decimal(12,2) * Decimal(12,2)` is 25 digits).
@@ -646,8 +646,8 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 161 kernel tests, 238 Spark tests (211 without the Comet and Iceberg profiles;
-the two Iceberg suites contribute 17, the Comet ones 10). If a change lowers either number, explain why in the commit.
+Current counts: 165 kernel tests, 246 Spark tests (218 without the Comet and Iceberg profiles;
+the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 

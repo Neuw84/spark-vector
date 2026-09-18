@@ -26,6 +26,18 @@ object ExpressionCompiler {
     case _ => false
   }
 
+  /**
+   * A bare column of any lane type -- including a DECIMAL128 column no kernel computes on yet (#257)
+   * -- or any compiled expression. For operators that only move a column (sort keys, gathered
+   * payloads); everything that reads the column goes through [[compile]], which refuses it.
+   */
+  def compileLaneColumn(expr: Expression, input: Seq[Attribute]): Result = expr match {
+    case a: AttributeReference if TypeMapping.hasLane(a.dataType) && !TypeMapping.isSupported(a.dataType) =>
+      val ordinal = input.indexWhere(_.exprId == a.exprId)
+      if (ordinal < 0) Left(s"unbound attribute ${a.name}") else Right(ColumnRef(ordinal, a.dataType))
+    case e => compile(e, input)
+  }
+
   def compile(expr: Expression, input: Seq[Attribute]): Result = expr match {
     // A scalar subquery result in any reference-free shape (the ScalarSubquery, a struct field of a
     // merged one, a CASE over such fields): a literal by the time the operator runs, read then.

@@ -139,7 +139,8 @@ class GatherSortKernelsTest {
         VectorBuffers plain = strings(arena, rnd, n, 0.15);
         VectorBuffers[] single = {
           TestData.ints(arena, rnd, n, nulls), TestData.longs(arena, rnd, n, nulls), TestData.doubles(arena, rnd, n, nulls),
-          ArrowLayout.ofBooleans(arena, booleans(rnd, n), nulls), plain, dictionary(arena, plain), TestData.ints(arena, rnd, n, null)
+          ArrowLayout.ofBooleans(arena, booleans(rnd, n), nulls), plain, dictionary(arena, plain), TestData.ints(arena, rnd, n, null),
+          TestData.decimal128s(arena, rnd, n, nulls), TestData.decimal128s(arena, rnd, n, null)
         };
         for (VectorBuffers k : single) {
           for (boolean asc : new boolean[] {true, false}) {
@@ -152,9 +153,9 @@ class GatherSortKernelsTest {
           }
         }
         // Multi-key: a low-cardinality first key so the second one decides, mixed directions.
-        VectorBuffers[] keys = {TestData.ints(arena, rnd, n, nulls), TestData.doubles(arena, rnd, n, null), plain};
-        boolean[] asc = {true, false, true};
-        boolean[] nf = {false, true, true};
+        VectorBuffers[] keys = {TestData.ints(arena, rnd, n, nulls), TestData.doubles(arena, rnd, n, null), plain, TestData.decimal128s(arena, rnd, n, nulls)};
+        boolean[] asc = {true, false, true, false};
+        boolean[] nf = {false, true, true, false};
         assertArrayEquals(SortReference.sortIndices(keys, asc, nf, n), SortKernels.sortIndices(keys, asc, nf, n), "multi-key n=" + n);
       }
     }

@@ -47,4 +47,32 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
     assert(IcebergVectorAdapter.normalizedBatches() === batchesBefore)
     assert(IcebergVectorAdapter.adaptedColumns() > columnsBefore)
   }
+
+  private val Sort = classOf[org.apache.spark.sql.vector.VectorSortExec]
+
+  icebergTest("wide decimals from Iceberg's reader become DECIMAL128 lanes: filtered, projected and sorted") {
+    // Iceberg keeps decimal(p > 18) as a 16-byte FixedSizeBinaryVector of big-endian bytes; the adapter
+    // converts each valid row into two limbs (#257), on a plain table and under row-id-mapped deletes.
+    spark.sql(
+      s"""CREATE OR REPLACE TABLE ${IcebergTables.Db}.t_wide USING iceberg AS
+         |SELECT i, l, s,
+         |  CASE WHEN i % 101 = 1 THEN CAST('9999999999999999999999999999.9999999999' AS DECIMAL(38,10))
+         |       WHEN i % 101 = 2 THEN CAST('-9999999999999999999999999999.9999999999' AS DECIMAL(38,10))
+         |       WHEN i % 13 = 0 THEN NULL
+         |       ELSE CAST(CAST(i - 10000 AS DECIMAL(38,10)) * CAST('1234567890123.0000000001' AS DECIMAL(38,10)) AS DECIMAL(38,10)) END AS w38,
+         |  CASE WHEN i % 17 = 0 THEN NULL ELSE CAST(CAST((i % 40) - 20 AS DECIMAL(27,2)) * CAST('1000000000000000.25' AS DECIMAL(27,2)) AS DECIMAL(27,2)) END AS w27
+         |FROM ${IcebergTables.Db}.t_pos""".stripMargin)
+    IcebergTables.useAsT(spark, s"${IcebergTables.Db}.t_wide")
+    val columnsBefore = IcebergVectorAdapter.adaptedColumns()
+    val copiedBefore = io.sparkvector.spark.adapter.ColumnVectorAdapters.copiedColumns()
+    checkVectorized("SELECT i, w38, w27 FROM t WHERE i % 3 = 0 AND l IS NOT NULL", Seq(Filter))
+    checkVectorized("SELECT w38, i + 1 AS j, w27 FROM t WHERE i % 5 = 0", Seq(Filter, Project))
+    checkVectorized("SELECT w38, i FROM t SORT BY w38 DESC NULLS LAST", Seq(Sort))
+    assert(IcebergVectorAdapter.adaptedColumns() > columnsBefore, "expected the wide columns to be adapted by the Iceberg adapter")
+    assert(io.sparkvector.spark.adapter.ColumnVectorAdapters.copiedColumns() === copiedBefore, "no column should have taken the generic copy path")
+    // Under positional deletes the batch is row-id mapped: the wide lane is built over the physical rows.
+    spark.sql(s"DELETE FROM ${IcebergTables.Db}.t_wide WHERE i % 7 = 0")
+    checkVectorized("SELECT i, w38 FROM t WHERE i % 2 = 0", Seq(Filter))
+    checkVectorized("SELECT w27, w38 FROM t SORT BY w27", Seq(Sort))
+  }
 }

@@ -1,6 +1,7 @@
 package io.sparkvector.spark.iceberg;
 
 import io.sparkvector.kernels.ArrowLayout;
+import io.sparkvector.kernels.Decimal128;
 import io.sparkvector.kernels.SegmentVectorBuffers;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
@@ -54,6 +55,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
   private static final String SHADED_ARROW_BUF = "org.apache.iceberg.shaded.org.apache.arrow.memory.ArrowBuf";
   private static final String SHADED_LARGE_VARCHAR =
       "org.apache.iceberg.shaded.org.apache.arrow.vector.LargeVarCharVector";
+  private static final String DICTIONARY_DECIMAL_ACCESSOR =
+      "org.apache.iceberg.arrow.vectorized.GenericArrowVectorAccessorFactory$DictionaryDecimalAccessor";
   private static final String DICTIONARY_STRING_ACCESSOR =
       "org.apache.iceberg.arrow.vectorized.GenericArrowVectorAccessorFactory$DictionaryStringAccessor";
   private static final String SHADED_PARQUET_DICTIONARY =
@@ -86,6 +89,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
   // Dictionary-encoded strings: resolved best effort, null when the Iceberg build differs.
   private final Class<?> dictionaryStringAccessor;
   private final Field accessorDictionary; // DictionaryStringAccessor.dictionary (shaded parquet)
+  private final Field dictionaryParquetField; // DictionaryDecimalAccessor.parquetDictionary (shaded parquet), or null
   private final Method dictionaryMaxId;
   private final Method dictionaryDecodeToBinary;
   private final Method binaryGetBytes;
@@ -130,6 +134,14 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     }
     dictionaryStringAccessor = dsa;
     accessorDictionary = dictField;
+    Field decimalDict = null;
+    try {
+      Class<?> dda = Class.forName(DICTIONARY_DECIMAL_ACCESSOR, false, loader);
+      decimalDict = accessible(dda.getDeclaredField("parquetDictionary"));
+    } catch (ReflectiveOperationException e) {
+      LOG.debug("spark-vector: Iceberg decimal dictionary accessor not resolvable, dictionary wide decimals will be copied", e);
+    }
+    dictionaryParquetField = decimalDict;
     dictionaryMaxId = maxId;
     dictionaryDecodeToBinary = decode;
     binaryGetBytes = getBytes;
@@ -257,8 +269,12 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         if (result != null) {
           ADAPTED_DICTIONARY_COLUMNS.increment();
         }
+      } else if (type == VecType.DECIMAL128 && acc.getClass().getSimpleName().equals("DictionaryDecimalBinaryAccessor")) {
+        result = adaptDictionaryWideDecimal(acc, vector, numRows, validity, scratch);
       } else if (acc.getClass().getSimpleName().startsWith("Dictionary")) {
         return null; // dictionary-encoded non-string column: Iceberg decodes it per row
+      } else if (type == VecType.DECIMAL128) {
+        result = adaptWideDecimal(vector, numRows, validity, scratch);
       } else {
         result = wrap(vector, numRows, type, validity);
       }
@@ -293,8 +309,47 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
       MemorySegment offsets = segment(getOffsetBuffer.invoke(vector));
       return SegmentVectorBuffers.utf8(numRows, validity, offsets, data);
     }
+    if (type == VecType.DECIMAL128 && !vector.getClass().getSimpleName().equals("DecimalVector")) {
+      return null; // converted by adaptWideDecimal (a FixedSizeBinaryVector of big-endian bytes)
+    }
     return SegmentVectorBuffers.fixedWidth(type, numRows, validity, data);
   }
+
+  /**
+   * Iceberg's reader keeps a decimal wider than 18 digits as a {@code FixedSizeBinaryVector} of
+   * big-endian two's complement bytes, as many per value as the precision needs (up to 16); each
+   * valid row becomes two little-endian limbs in a scratch lane (#257).
+   */
+  private VectorBuffers adaptWideDecimal(Object vector, int numRows, MemorySegment validity, Arena scratch)
+      throws ReflectiveOperationException {
+    if (vector.getClass().getSimpleName().equals("DecimalVector")) {
+      return wrap(vector, numRows, VecType.DECIMAL128, validity); // already Arrow Decimal128
+    }
+    if (!vector.getClass().getSimpleName().equals("FixedSizeBinaryVector")) {
+      return null;
+    }
+    int width = (Integer) vector.getClass().getMethod("getByteWidth").invoke(vector);
+    if (width <= 0 || width > Decimal128.WIDTH) {
+      return null;
+    }
+    MemorySegment source = segment(getDataBuffer.invoke(vector));
+    if (source.byteSize() < (long) numRows * width) {
+      return null;
+    }
+    // Parquet stores a decimal in the fewest bytes its precision needs (decimal(27,2) in 12), so
+    // each value is a big-endian string of `width` bytes, sign-extended into the limbs.
+    MemorySegment data = ArrowLayout.allocateData(scratch, VecType.DECIMAL128, numRows);
+    byte[] be = new byte[width];
+    for (int i = 0; i < numRows; i++) {
+      if (validity != null && !io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+        continue;
+      }
+      MemorySegment.copy(source, java.lang.foreign.ValueLayout.JAVA_BYTE, (long) i * width, be, 0, width);
+      Decimal128.set(data, i, Decimal128.hiFromBigEndian(be, 0, width), Decimal128.loFromBigEndian(be, 0, width));
+    }
+    return SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, numRows, validity, data);
+  }
+
 
   /**
    * Dictionary-encoded strings: the indices are the IntVector's data buffer (wrapped in place),
@@ -328,6 +383,48 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     VectorBuffers dict = SegmentVectorBuffers.utf8(size, null, offsets, bytes);
     MemorySegment indices = segment(getDataBuffer.invoke(indexVector));
     return SegmentVectorBuffers.dictionaryUtf8(numRows, validity, indices, dict);
+  }
+
+  /**
+   * Dictionary-encoded wide decimals ({@code DictionaryDecimalBinaryAccessor}): the Parquet
+   * dictionary holds big-endian byte strings and the Arrow vector the int32 indices. A 16-byte
+   * dictionary lookup buys nothing downstream, so the column is decoded per batch: the dictionary
+   * once into limbs, then one two-limb copy per row (#257).
+   */
+  private VectorBuffers adaptDictionaryWideDecimal(
+      Object acc, Object indexVector, int numRows, MemorySegment validity, Arena scratch)
+      throws ReflectiveOperationException {
+    if (dictionaryParquetField == null) {
+      return null;
+    }
+    Object dictionary = dictionaryParquetField.get(acc);
+    int size = (Integer) dictionaryMaxId.invoke(dictionary) + 1;
+    long[] hi = new long[size];
+    long[] lo = new long[size];
+    for (int i = 0; i < size; i++) {
+      byte[] be = (byte[]) binaryGetBytes.invoke(dictionaryDecodeToBinary.invoke(dictionary, i));
+      if (be.length > Decimal128.WIDTH) {
+        return null;
+      }
+      hi[i] = Decimal128.hiFromBigEndian(be, 0, be.length);
+      lo[i] = Decimal128.loFromBigEndian(be, 0, be.length);
+    }
+    MemorySegment indices = segment(getDataBuffer.invoke(indexVector));
+    if (indices.byteSize() < (long) numRows << 2) {
+      return null;
+    }
+    MemorySegment data = ArrowLayout.allocateData(scratch, VecType.DECIMAL128, numRows);
+    for (int i = 0; i < numRows; i++) {
+      if (validity != null && !io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+        continue;
+      }
+      int id = indices.getAtIndex(VectorBuffers.LE_INT, i);
+      if (id < 0 || id >= size) {
+        return null;
+      }
+      Decimal128.set(data, i, hi[id], lo[id]);
+    }
+    return SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, numRows, validity, data);
   }
 
   private MemorySegment segment(Object arrowBuf) throws ReflectiveOperationException {
