@@ -10,6 +10,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
 import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
+import io.sparkvector.spark.iceberg.IcebergVectorAdapter
 
 /**
  * TPC-H runner: the 22 queries over the tables `gen-tpch.sh` writes. One configuration per JVM
@@ -274,6 +275,9 @@ object TpchRunner {
               writer.flush()
               println(s"[${args.suite.name}] ${args.config} $q median=${result.medianMs}ms p90=${result.p90Ms}ms min=${result.minMs}ms rows=${result.rows} " +
                 s"accelerated=${result.acceleratedOps}/${result.operatorCount} operators=${result.operators}")
+              if (result.scan.nonEmpty || result.morPhysicalRows > 0)
+                println(s"[${args.suite.name}]   scan=${result.scan} " +
+                  (if (result.morPhysicalRows > 0) f"merge-on-read live/physical=${result.morLiveRows}/${result.morPhysicalRows} (${100.0 * result.morLiveRows / result.morPhysicalRows}%.1f%% live)" else "merge-on-read batches=0"))
               result.metrics.foreach(m => println(s"[${args.suite.name}]   stages=${m.stages} executorRunTime=${m.executorRunTimeMs}ms gc=${m.jvmGcTimeMs}ms " +
                 s"shuffleRead=${m.shuffleReadBytes} shuffleWrite=${m.shuffleWriteBytes} spill=${m.spillBytes} peakMemory=${m.peakExecutionMemory}"))
               result.fallbacks.foreach(f => println(s"[${args.suite.name}]   fallback: $f"))
@@ -305,7 +309,14 @@ object TpchRunner {
       /** `Operator: reason` for every operator the planner rule tried to convert and could not. */
       fallbacks: Seq[String],
       /** Spark's stage-level metrics of the last measured run (cluster runs need them to explain a regression without a rerun). */
-      metrics: Option[ClusterRunner.StageMetrics] = None) {
+      metrics: Option[ClusterRunner.StageMetrics] = None,
+      /** The scan operators of the plan (`BatchScanExec`, `CometIcebergNativeScanExec`, ...), distinct. */
+      scan: String = "",
+      /**
+       * Iceberg merge-on-read batches the adapter normalized during the last measured run, as rows read
+       * (physical) and rows the deletes left (live) -- local mode only, the counters live in the executor JVM.
+       */
+      morPhysicalRows: Long = 0, morLiveRows: Long = 0) {
     private val sorted = timesMs.sorted
     def medianMs: Double = percentile(50)
     def p90Ms: Double = percentile(90)
@@ -321,6 +332,7 @@ object TpchRunner {
         s""""rows":$rows,"checksum":"$checksum","acceleratedOps":$acceleratedOps,"operatorCount":$operatorCount,""" +
         metrics.map(m => m.json + ",").getOrElse("") +
         s""""sparkVersion":"${esc(env.sparkVersion)}","executors":"${esc(env.executors)}","engineConf":"${esc(env.engineConf)}",""" +
+        s""""scan":"${esc(scan)}","morPhysicalRows":$morPhysicalRows,"morLiveRows":$morLiveRows,""" +
         s""""fallbacks":"${esc(fallbacks.mkString("; "))}","operators":"${esc(operators)}","plan":"${esc(plan)}"}"""
     }
   }
@@ -337,8 +349,13 @@ object TpchRunner {
       (ms, rows, df.queryExecution.executedPlan, metrics)
     }
     (1 to args.warmup).foreach(i => once(-i))
-    val runs = (1 to args.iterations).map(once)
-    val (_, rows, plan, metrics) = runs.last
+    // The adapter's merge-on-read counters around the last measured run (a delta: the JVM is shared by every query).
+    val runs = (1 to args.iterations - 1).map(once)
+    val (physicalBefore, liveBefore) = (IcebergVectorAdapter.normalizedPhysicalRows(), IcebergVectorAdapter.normalizedLiveRows())
+    val last = once(args.iterations)
+    val morPhysical = IcebergVectorAdapter.normalizedPhysicalRows() - physicalBefore
+    val morLive = IcebergVectorAdapter.normalizedLiveRows() - liveBefore
+    val (_, rows, plan, metrics) = last
     if (args.show) rows.foreach(r => println(s"[${args.suite.name}]   row: ${r.mkString(" | ")}"))
     val checksum = rows.map(_.toSeq.map {
       // 10 significant digits: summation order differs between engines (and our interleaved
@@ -359,8 +376,9 @@ object TpchRunner {
     val acceleratedOps = accelerated.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated)
     // One line per distinct (operator, reason): the same reason repeats across AQE stages.
     val fallbacks = accelerated.fallbacks.map { case (node, reason) => s"$node: $reason" }.distinct
-    Measurement(name, runs.map(_._1), rows.length, checksum, if (ops.isEmpty) "spark only" else ops, plan.treeString.take(4000),
-      acceleratedOps, accelerated.operatorCount, fallbacks, Some(metrics))
+    val scan = nodes.map(_.getClass.getSimpleName).filter(_.endsWith("ScanExec")).distinct.sorted.mkString(", ")
+    Measurement(name, (runs :+ last).map(_._1), rows.length, checksum, if (ops.isEmpty) "spark only" else ops, plan.treeString.take(4000),
+      acceleratedOps, accelerated.operatorCount, fallbacks, Some(metrics), scan, morPhysical, morLive)
   }
 
   private def allNodes(plan: SparkPlan): Seq[SparkPlan] = {
@@ -417,12 +435,19 @@ object TpchRunner {
       metrics: Option[ClusterRunner.StageMetrics] = None,
       sparkVersion: String = "",
       executors: String = "",
-      engineConf: String = "") {
+      engineConf: String = "",
+      /** Scan operators of the plan and the Iceberg adapter's merge-on-read rows (#260); absent in older records. */
+      scan: String = "",
+      morPhysicalRows: Long = 0,
+      morLiveRows: Long = 0) {
     /** Dataset label: the last path element (`sf1`, `sf10`). */
     def dataset: String = data.stripSuffix("/").split('/').last
     /** `5/7` -- operators executed by our kernels or Comet over operators that count. */
     def acceleratedCell: String = accelerated.map { case (a, t) => s"$a/$t" }.getOrElse("-")
     def fullyAccelerated: Boolean = accelerated.exists { case (a, t) => t > 0 && a == t }
+    /** `scan=BatchScanExec, merge-on-read live/physical=...`, empty for records without the fields. */
+    def scanCell: String =
+      if (scan.isEmpty) "" else s"scan=$scan" + (if (morPhysicalRows > 0) f", merge-on-read live/physical=$morLiveRows/$morPhysicalRows (${100.0 * morLiveRows / morPhysicalRows}%.1f%% live)" else "")
   }
 
   /** The suite's order (`q1`..`q22`) rather than lexical, with anything else after. */
@@ -489,6 +514,7 @@ object TpchRunner {
         d.configs.foreach { c =>
           d.latest.get((c, q)).foreach { r =>
             sb.append(s"- $q / $c: ${r.operators} (rows=${r.rows}, checksum=${r.checksum})\n")
+            if (r.scanCell.nonEmpty) sb.append(s"  - ${r.scanCell}\n")
             r.fallbacks.foreach(f => sb.append(s"  - not accelerated: $f\n"))
           }
         }
@@ -497,7 +523,47 @@ object TpchRunner {
       sb.append(if (d.mismatches.isEmpty) "All configurations returned identical results (to 10 significant digits).\n"
       else s"WARNING: result checksums differ for ${d.mismatches.mkString(", ")}\n")
     }
+    morSections(datasets).foreach { m =>
+      sb.append(s"\n## Iceberg merge-on-read: `${m.namespace}` (${suite.anchorTable} variants of `gen-iceberg-mor.sh`)\n\n")
+      sb.append("Median milliseconds per variant and configuration; in parentheses the speedup versus `spark` on the same variant, " +
+        "then versus the same configuration on the `plain` table (what the deletes cost that engine: below 1x is slower than plain). " +
+        "Live/physical is the share of the rows read that the deletes left, as the adapter saw it.\n")
+      m.queries.foreach { q =>
+        sb.append(s"\n### $q\n\n")
+        sb.append("| variant | live rows | " + m.configs.mkString(" | ") + " | live/physical |\n")
+        sb.append("|---|---:|" + m.configs.map(_ => "---:").mkString("|") + "|---:|\n")
+        m.variants.foreach { v =>
+          val cells = m.configs.map(c => m.cell(v, c, q).getOrElse("-"))
+          sb.append(s"| `$v` | ${m.liveRows(v)} | " + cells.mkString(" | ") + s" | ${m.liveRatio(v, q).getOrElse("-")} |\n")
+        }
+      }
+    }
     sb.toString
+  }
+
+  /** One Iceberg merge-on-read namespace of the report: its variants (datasets `iceberg:<ns>.<variant>`), configurations and queries. */
+  private final case class MorSection(namespace: String, variants: Seq[String], configs: Seq[String], queries: Seq[String], byVariant: Map[String, DatasetReport]) {
+    def liveRows(v: String): Long = byVariant(v).anchorRows
+    def cell(v: String, c: String, q: String): Option[String] = byVariant(v).latest.get((c, q)).map { r =>
+      val vsSpark = byVariant(v).speedup(c, q).map(x => f" ($x%.2fx").getOrElse(" (-")
+      val vsPlain = byVariant.get("plain").flatMap(_.latest.get((c, q))).filter(_ => v != "plain" && r.medianMs > 0).map(p => f", ${p.medianMs / r.medianMs}%.2fx vs plain)").getOrElse(")")
+      f"${r.medianMs}%.1f" + vsSpark + vsPlain
+    }
+    /** The merge ratio of the first configuration that reports one (the adapter counts only under our plugin). */
+    def liveRatio(v: String, q: String): Option[String] =
+      configs.flatMap(c => byVariant(v).latest.get((c, q))).find(_.morPhysicalRows > 0).map(r => f"${100.0 * r.morLiveRows / r.morPhysicalRows}%.1f%%")
+  }
+
+  private def morSections(datasets: Seq[DatasetReport]): Seq[MorSection] = {
+    val Named = """iceberg:([^.]+)\.(.+)""".r
+    datasets.collect { case d @ DatasetReport(Named(ns, v), _, _, _, _) => (ns, v, d) }.groupBy(_._1).toSeq.sortBy(_._1).map { case (ns, entries) =>
+      val byVariant = entries.map { case (_, v, d) => v -> d }.toMap
+      // plain first, then by name.
+      val variants = byVariant.keys.toSeq.sortBy(v => (if (v == "plain") 0 else 1, v))
+      val configs = ConfigOrder.filter(c => entries.exists(_._3.configs.contains(c)))
+      val queries = entries.flatMap(_._3.queries).distinct.sortBy(queryOrder(Tpch))
+      MorSection(ns, variants, configs, queries, byVariant)
+    }
   }
 
   private val ConfigColors: Map[String, String] = Map(
@@ -618,6 +684,18 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
         sb.append("</details>\n")
       }
     }
+    morSections(datasets).foreach { m =>
+      sb.append(s"<h2>Iceberg merge-on-read: ${esc(m.namespace)}</h2>\n")
+      sb.append("<p>Median milliseconds per variant and configuration (speedup versus <code>spark</code> on the same variant, then versus the same configuration on the <code>plain</code> table); live/physical is the share of the rows read that the deletes left.</p>\n")
+      m.queries.foreach { q =>
+        sb.append(s"<h3>${esc(q)}</h3>\n<table><thead><tr><th>variant</th><th>live rows</th>" + m.configs.map(c => s"<th>${esc(c)}</th>").mkString + "<th>live/physical</th></tr></thead><tbody>\n")
+        m.variants.foreach { v =>
+          sb.append(s"<tr><td><code>${esc(v)}</code></td><td>${m.liveRows(v)}</td>" + m.configs.map(c => s"<td>${esc(m.cell(v, c, q).getOrElse("-"))}</td>").mkString +
+            s"<td>${esc(m.liveRatio(v, q).getOrElse("-"))}</td></tr>\n")
+        }
+        sb.append("</tbody></table>\n")
+      }
+    }
     sb.append("</body></html>\n")
     sb.toString
   }
@@ -663,7 +741,8 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
     }
     Row(str("timestamp"), str("config"), str("query"), str("data"), num("medianMs"), num("p90Ms"), num("minMs"), times,
       num("rows").toInt, str("checksum"), str("operators"), anchorRows, accelerated, fallbacks,
-      metrics, str("sparkVersion"), str("executors"), str("engineConf"))
+      metrics, str("sparkVersion"), str("executors"), str("engineConf"),
+      str("scan"), optLong("morPhysicalRows").getOrElse(0L), optLong("morLiveRows").getOrElse(0L))
   }
 }
 

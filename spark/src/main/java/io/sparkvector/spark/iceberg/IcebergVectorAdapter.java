@@ -68,6 +68,9 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
 
   /** Test-visible counters (executor side; local mode in the suites). */
   private static final LongAdder NORMALIZED_BATCHES = new LongAdder();
+  /** Rows of the normalized batches: the positions read (physical) and the ones the deletes left (live). */
+  private static final LongAdder NORMALIZED_PHYSICAL_ROWS = new LongAdder();
+  private static final LongAdder NORMALIZED_LIVE_ROWS = new LongAdder();
   private static final LongAdder ADAPTED_COLUMNS = new LongAdder();
   private static final LongAdder ADAPTED_DICTIONARY_COLUMNS = new LongAdder();
 
@@ -189,6 +192,16 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     return NORMALIZED_BATCHES.sum();
   }
 
+  /** Physical rows of every merge-on-read batch normalized so far (in this JVM: the local runner sees its executors). */
+  public static long normalizedPhysicalRows() {
+    return NORMALIZED_PHYSICAL_ROWS.sum();
+  }
+
+  /** Live rows of those batches: what the deletes left. {@code live / physical} is the merge ratio. */
+  public static long normalizedLiveRows() {
+    return NORMALIZED_LIVE_ROWS.sum();
+  }
+
   public static long adaptedColumns() {
     return ADAPTED_COLUMNS.sum();
   }
@@ -243,6 +256,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
       return batch;
     }
     NORMALIZED_BATCHES.increment();
+    NORMALIZED_PHYSICAL_ROWS.add(physical);
+    NORMALIZED_LIVE_ROWS.add(live);
     return SelectedColumnarBatch.ofIndices(delegates, physical, mapping, live, false);
   }
 
