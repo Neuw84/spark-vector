@@ -1,0 +1,136 @@
+package io.sparkvector.spark
+
+import io.sparkvector.spark.test.VectorQuerySuite
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.execution.joins.SortMergeJoinExec
+import org.apache.spark.sql.vector.{VectorShuffledHashJoinExec, VectorSortMergeJoinExec}
+
+/**
+ * The merge join (#286) against Spark's sort-merge join, row order included: both are
+ * order-preserving, so the comparison is positional -- unlike the hash join suites, which compare
+ * row sets.
+ */
+class VectorSortMergeJoinSuite extends VectorQuerySuite {
+
+  private val SMJ = classOf[VectorSortMergeJoinExec]
+
+  /** Spark plans a sort-merge join, and we take it as our merge join. */
+  private val merge = Seq(
+    "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+    "spark.sql.join.preferSortMergeJoin" -> "true",
+    VectorConf.SortMergeJoinMode -> "merge")
+
+  override protected def beforeAll(): Unit = {
+    super.beforeAll()
+    val a = newTempPath("smj/a")
+    spark
+      .range(0, 3000)
+      .selectExpr(
+        "if(id % 37 = 0, null, cast(id % 300 as int)) as ki", // ~10 rows per key, nulls
+        "if(id % 41 = 0, null, cast(id % 300 as bigint) * 3000000000) as kl",
+        "case when id % 53 = 0 then cast('NaN' as double) when id % 300 = 7 then -0.0 when id % 59 = 0 then null else cast(id % 300 as double) / 4 end as kd",
+        "if(id % 43 = 0, null, concat('k', id % 300)) as ks",
+        "if(id % 47 = 0, null, cast(id % 300 as decimal(12,2)) / 8) as kdec",
+        "date_add(date '2021-01-01', cast(id % 300 as int)) as kdt",
+        "cast(id % 300 as decimal(27,2)) * 100000000000 as kw",
+        "cast(id as int) as v",
+        "concat('left', id) as name")
+      .write
+      .mode("overwrite")
+      .parquet(a)
+    spark.read.parquet(a).createOrReplaceTempView("a")
+    val b = newTempPath("smj/b")
+    spark
+      .range(0, 1200)
+      .selectExpr(
+        "if(id % 23 = 0, null, cast(id % 400 as int)) as ki", // keys 300..399 only here; ~3 rows per key
+        "if(id % 29 = 0, null, cast(id % 400 as bigint) * 3000000000) as kl",
+        "case when id % 31 = 0 then cast('NaN' as double) when id % 400 = 7 then 0.0 when id % 61 = 0 then null else cast(id % 400 as double) / 4 end as kd",
+        "if(id % 19 = 0, null, concat('k', id % 400)) as ks",
+        "if(id % 17 = 0, null, cast(id % 400 as decimal(12,2)) / 8) as kdec",
+        "date_add(date '2021-01-01', cast(id % 400 as int)) as kdt",
+        "cast(id % 400 as decimal(27,2)) * 100000000000 as kw",
+        "cast(id as int) as w",
+        "concat('right', id) as tag")
+      .write
+      .mode("overwrite")
+      .parquet(b)
+    spark.read.parquet(b).createOrReplaceTempView("b")
+  }
+
+  /** Rows equal to Spark's in order, and the plan carries our merge join (and nothing of the hash rewrite). */
+  private def checkOrdered(sql: String): Unit = withConf(merge: _*) {
+    val expected = withPlugin(false) { spark.sql(sql).collect() }
+    val df = checkVectorized(sql, Seq(SMJ))
+    assert(nodesOf[VectorShuffledHashJoinExec](df).isEmpty, s"hash rewrite took the join for: $sql")
+    assert(nodesOf[SortMergeJoinExec](df).isEmpty, s"Spark's merge join remains for: $sql")
+    val actual = withPlugin(true) { spark.sql(sql).collect() }
+    assert(actual.length === expected.length, s"row count for: $sql")
+    var i = 0
+    while (i < expected.length) {
+      assert(same(expected(i), actual(i)), s"row $i differs for: $sql\n  spark: ${expected(i)}\n  ours:  ${actual(i)}")
+      i += 1
+    }
+  }
+
+  private def same(e: Row, a: Row): Boolean =
+    e.length == a.length && (0 until e.length).forall { c =>
+      (e.get(c), a.get(c)) match {
+        case (x: Double, y: Double) => java.lang.Double.compare(x, y) == 0 || (x.isNaN && y.isNaN)
+        case (x, y) => x == y
+      }
+    }
+
+  test("inner join on every key lane, Spark's order") {
+    checkOrdered("SELECT a.ki, a.v, b.w FROM a JOIN b ON a.ki = b.ki")
+    checkOrdered("SELECT a.kl, a.v, b.w FROM a JOIN b ON a.kl = b.kl")
+    checkOrdered("SELECT a.kd, a.v, b.w FROM a JOIN b ON a.kd = b.kd") // NaN = NaN, -0.0 = 0.0
+    checkOrdered("SELECT a.ks, a.v, b.w FROM a JOIN b ON a.ks = b.ks") // dictionary strings
+    checkOrdered("SELECT a.kdec, a.v, b.w FROM a JOIN b ON a.kdec = b.kdec")
+    checkOrdered("SELECT a.kdt, a.v, b.w FROM a JOIN b ON a.kdt = b.kdt")
+    checkOrdered("SELECT a.kw, a.v, b.w FROM a JOIN b ON a.kw = b.kw") // decimal(27,2): the 128-bit lane
+    checkOrdered("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki AND a.ks = b.ks") // two keys
+  }
+
+  test("every join type, with and without a condition") {
+    for (jt <- Seq("INNER", "LEFT OUTER", "RIGHT OUTER", "FULL OUTER", "LEFT SEMI", "LEFT ANTI")) {
+      checkOrdered(s"SELECT * FROM a $jt JOIN b ON a.ki = b.ki")
+      checkOrdered(s"SELECT * FROM a $jt JOIN b ON a.ki = b.ki AND a.v % 3 < b.w % 5")
+    }
+    // Existence: EXISTS used as a value.
+    checkOrdered("SELECT a.v, EXISTS (SELECT 1 FROM b WHERE b.ki = a.ki) AS e FROM a")
+    checkOrdered("SELECT a.v, EXISTS (SELECT 1 FROM b WHERE b.ki = a.ki AND b.w > a.v) AS e FROM a")
+  }
+
+  test("runs spanning batch boundaries: 64-row batches") {
+    withConf("spark.sql.inMemoryColumnarStorage.batchSize" -> "64") {
+      checkOrdered("SELECT a.ki, a.v, b.w FROM a JOIN b ON a.ki = b.ki")
+      checkOrdered("SELECT * FROM a FULL OUTER JOIN b ON a.ki = b.ki")
+      checkOrdered("SELECT * FROM a LEFT ANTI JOIN b ON a.kl = b.kl")
+    }
+  }
+
+  test("null keys never match, an empty side, a skewed key") {
+    checkOrdered("SELECT a.ki, b.ki FROM a FULL OUTER JOIN b ON a.ki = b.ki WHERE a.ki IS NULL OR b.ki IS NULL")
+    // An empty side: with adaptive execution Spark optimises the join away at runtime, so plan it statically.
+    withConf("spark.sql.adaptive.enabled" -> "false") {
+      checkOrdered("SELECT * FROM a LEFT OUTER JOIN (SELECT * FROM b WHERE w < -1) b2 ON a.ki = b2.ki")
+      checkOrdered("SELECT * FROM (SELECT * FROM a WHERE v < -1) a2 RIGHT OUTER JOIN b ON a2.ki = b.ki")
+    }
+    // One key on both sides: the cross product 2000 x 800 in chunks, Spark's order.
+    checkOrdered("SELECT a.v, b.w FROM (SELECT pmod(v, 1) AS k, v FROM a WHERE v < 2000) a JOIN (SELECT pmod(w, 1) AS k, w FROM b WHERE w < 800) b ON a.k = b.k")
+  }
+
+  test("the mode switch: off leaves Spark's join, hash takes the rewrite, a struct column falls back") {
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinMode -> "off") {
+      val df = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq())
+      assert(nodesOf[SortMergeJoinExec](df).nonEmpty)
+    }
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinMode -> "hash") {
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
+    }
+    withConf(merge: _*) {
+      checkFallback("SELECT a.v, s.st FROM a JOIN (SELECT ki, struct(w, tag) AS st FROM b) s ON a.ki = s.ki", Seq(SMJ), "unsupported column type struct")
+    }
+  }
+}

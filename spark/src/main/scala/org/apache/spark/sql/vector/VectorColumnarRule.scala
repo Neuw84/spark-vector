@@ -232,6 +232,15 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               }
           }
 
+        case j: SortMergeJoinExec if VectorConf.sortMergeJoinMode(conf) == "merge" =>
+          // Our own merge join (#286): Spark's contract kept -- the sorts below stay (ours over a columnar
+          // child, Spark's with a RowToColumnarExec above), the output ordering is the join's own -- so no
+          // pre-pass and no build side: every partition streams both sides.
+          VectorJoinPlanner.planMergeJoin(j) match {
+            case Right(v) => v
+            case Left(reason) => fallback(j, reason)
+          }
+
         case j: SortMergeJoinExec if VectorConf.sortMergeJoinEnabled(conf) =>
           // Re-expressed as our shuffled hash join (#10): same distribution, same rows, no need for
           // the sorts Spark placed below. Two contracts decide it. The parent may have been planned
