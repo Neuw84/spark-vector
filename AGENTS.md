@@ -44,6 +44,8 @@ benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated eight tables, deci
 benchmarks/scripts/gen-tpch.sh 1 benchmarks/data --decimals   # same tables with real DECIMAL(15,2), into sf1-decimal
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5
 benchmarks/scripts/run-tpch.sh --report    # rewrite benchmarks/results/results.{md,html} from the jsonl files
+benchmarks/scripts/gen-iceberg-mor.sh benchmarks/data/sf1   # Iceberg merge-on-read variants of lineitem (#260), namespace sf1
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf1 spark,vector --iceberg benchmarks/data/iceberg --variant sf1.pos_10 --queries q1,q6,probe-count,probe-sum,probe-group
 benchmarks/scripts/gen-tpcds.sh 1          # DuckDB dsdgen, 24 tables with real DECIMAL(7,2)/DATE columns, into benchmarks/data/tpcds-sf1
 benchmarks/scripts/run-tpcds.sh benchmarks/data/tpcds-sf1 spark,vector --queries q10,q35,q45   # results under benchmarks/results/tpcds
 benchmarks/scripts/profile-query.sh benchmarks/data/sf10 vector q6   # one query under a JFR recording + jfr-summary.sh (section 4.7)
@@ -664,6 +666,16 @@ the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers eit
   machine for the whole run: one that started mid-run moved `spark` Q1 from 1106 to 1451 ms.
 - Update `docs/results.md` tables from the report and keep the earlier phase tables for history.
   Speedups are always relative to plain Spark on the same dataset and session.
+- Iceberg merge-on-read (#260): `gen-iceberg-mor.sh <tpch-dir> [namespace]` builds the `lineitem`
+  variants (`plain`, `pos_<pct>[_clustered]`, `pos_upd_<pct>`, `eq_<pct>`, `dv_*`) into a local
+  Hadoop catalog with Spark alone, and writes `README-<namespace>.md` with live rows, delete files and
+  snapshot ids -- the oracle. Run every configuration over a variant with
+  `run-tpch.sh <tpch-dir> <configs> --iceberg <warehouse> --variant <namespace>.<variant>` and the
+  probes `probe-count,probe-sum,probe-group` beside `q1,q6`; checksums must agree across
+  configurations for every variant, and `[tpch] scan=... merge-on-read live/physical=...` says which
+  reader ran and how many rows the deletes removed. The report groups the variants under "Iceberg
+  merge-on-read" with the speedup versus `spark` on the variant and versus `plain` for the same
+  configuration. `docs/iceberg.md` has the variant table.
 
 ## 6. Conventions
 

@@ -273,6 +273,8 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@25
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf1    # spark + vector, q1..q22 (--queries q1,q6 for a subset)
 COMET_JAR=/path/to/comet-spark-spark4.1_2.13-1.0.0.jar \
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10   # + comet-scan, comet-scan-vector, comet-scan-vector-shuffle, comet
+benchmarks/scripts/gen-iceberg-mor.sh benchmarks/data/sf1   # Iceberg merge-on-read variants of lineitem (docs/iceberg.md)
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf1 spark,vector --iceberg benchmarks/data/iceberg --variant sf1.pos_10 --queries q1,q6,probe-count,probe-sum,probe-group
 ```
 
 TPC-DS, the 99 queries (103 with the a/b variants) over the 24 tables, keeping the real

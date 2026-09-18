@@ -42,6 +42,14 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
+      <!-- The Iceberg merge-on-read harness (IcebergMorGenerator, the runner's Iceberg source). Provided,
+           like Spark: on the local classpath the scripts build, supplied by the image on a cluster. -->
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-spark-runtime-4.1_${scala.binary.version}</artifactId>
+      <version>${iceberg.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>org.openjdk.jmh</groupId>
       <artifactId>jmh-core</artifactId>
     </dependency>

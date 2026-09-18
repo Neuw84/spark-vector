@@ -674,6 +674,16 @@ object TpchQueries {
 
 
   /** Every query by its report name, in TPC-H order. */
+  /**
+   * Full-scan probes of the Iceberg merge-on-read harness (#260), which isolate the delete-merging cost from
+   * the operator cost: a count, one column with no predicate (pure merge cost), a dictionary key through the
+   * selection, and Q6 is the selective predicate on top. Not part of a default run; named explicitly.
+   */
+  val Probes: Seq[(String, String)] = Seq(
+    "probe-count" -> "SELECT count(*) FROM lineitem",
+    "probe-sum" -> "SELECT sum(l_extendedprice) FROM lineitem",
+    "probe-group" -> "SELECT l_returnflag, count(*) AS n FROM lineitem GROUP BY l_returnflag ORDER BY l_returnflag")
+
   val All: Seq[(String, String)] = Seq(
     "q1" -> Q1,
     "q2" -> Q2,

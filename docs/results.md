@@ -493,6 +493,44 @@ keep all; a null build key: keep none) and, otherwise, the null-key streamed row
 from 7 to 11 of 17 operators on our side (SF1 decimals, `vector`, one run), and like Q13 its only
 remaining reason is the global sort. Neither query has an expression or join reason left.
 
+## Iceberg merge-on-read: the harness (#260)
+
+The local harness (`gen-iceberg-mor.sh`, `run-tpch.sh --iceberg ... --variant ...`, `docs/iceberg.md`)
+builds `lineitem` variants with the delete shapes a lakehouse table carries between compactions and runs
+every configuration over them. The study itself is #261 (v2 positional and equality deletes) and #262
+(v3 deletion vectors); what follows is the validation run of the harness -- SF1 decimals, the 8-core
+x86 host of the decimal tables above, `local[8]`, 1 warm-up and 3 measured iterations, `spark` against
+`vector`, JVM reader (`BatchScanExec`) in both -- so the medians are indicative, the checksums and the
+merge ratios exact. All 30 cells returned identical checksums; the adapter's counters read 5402462 live
+of 6001215 physical rows on the 10 % variants (90.0 %), as the generator's README says they should.
+
+| variant | q1 spark | q1 vector | q6 spark | q6 vector | probe-sum spark | probe-sum vector | live/physical |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `plain` | 1823 | 535 (3.41x) | 169 | 208 (0.81x) | 129 | 98 (1.32x) | - |
+| `pos_10` | 2024 | 537 (3.77x) | 224 | 315 (0.71x) | 173 | 160 (1.08x) | 90.0 % |
+| `pos_10_clustered` | 1702 | **8339 (0.20x)** | 263 | 300 (0.88x) | 158 | 137 (1.16x) | 92.0 % |
+| `pos_upd_1` | 1746 | **8872 (0.20x)** | 218 | 350 (0.62x) | 185 | 175 (1.06x) | 88.0 % |
+| `eq_10` | 2033 | 847 (2.40x) | 402 | 580 (0.69x) | 351 | 330 (1.06x) | 90.0 % |
+| `dv_10` | 1843 | 520 (3.54x) | 203 | 243 (0.84x) | 149 | 115 (1.29x) | 90.0 % |
+
+Three things the run already says, all for #261 to take up:
+
+- **Clustered deletes and the update/merge shape make Q1 sixteen times slower under `vector`**, and
+  only Q1: the partial `VectorHashAggregateExec`'s kernel time goes from 1.0 s (summed over tasks, on
+  `pos_10`) to 63 s on `pos_10_clustered`, while the filter and the project above the same scan are
+  unchanged (26 ms, 4 ms) and the probes and Q6 are as fast as on the scattered variant. Whole
+  64-row blocks inactive -- the shape the active-block skipping exists for -- or the extra small data
+  files of the update send the aggregate down a slow path; the minimum of the three runs (2.5 s) is
+  also far from the median, so it is not a constant cost. A profile of Q1 on `pos_10_clustered` is the
+  first step.
+- `count(*)` on `plain` is Iceberg's manifest lookup (`LocalTableScanExec`) for every engine, so the
+  probe measures a scan only on the deleted variants -- the scan tag on the per-query line is what
+  shows it.
+- Equality deletes cost both engines about twice the time of the same share of positional deletes
+  (`probe-sum` 351 vs 173 ms under `spark`), and Q6 on any deleted variant is slower under `vector`
+  than under `spark` here as on the plain Parquet SF1 tables above (the sort of the tiny result and the
+  columnar transitions dominate at this size).
+
 ## Q6 revisited: the copy is a dictionary decode (#14)
 
 The Q6 analysis above blames two costs, and #61 built a lever for the first one: with

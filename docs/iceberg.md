@@ -80,6 +80,60 @@ plain string and dictionary string columns were adapted rather than copied.
 - The per-batch dictionary decode is not cached across the batches of a row group.
 - Comet 1.0 reads v3 tables through the JVM reader; the adapter path above applies to them.
 
+## Measuring merge-on-read reads: the local harness (#260)
+
+The claim the adapter path makes -- that a delete bitmap consumed in 64-row blocks beats Spark's
+`int[] rowIdMapping` indirection per column access per row -- is measured on TPC-H `lineitem` tables
+carrying the delete shapes a lakehouse table has between compactions. Everything runs on a laptop
+at SF1 (an evening at 5 warm-up and 10 measured iterations per cell); the 1 TB variant is #247/#249.
+
+```
+benchmarks/scripts/gen-tpch.sh 1                                 # the Parquet lineitem the variants are built from
+benchmarks/scripts/gen-iceberg-mor.sh benchmarks/data/sf1        # every variant into benchmarks/data/iceberg, namespace sf1
+benchmarks/scripts/gen-iceberg-mor.sh benchmarks/data/sf1 sf1 --variants plain,pos_10,dv_10
+benchmarks/scripts/run-tpch.sh benchmarks/data/sf1 spark,vector \
+  --iceberg benchmarks/data/iceberg --variant sf1.pos_10 \
+  --queries q1,q6,probe-count,probe-sum,probe-group --warmup 5 --iterations 10
+benchmarks/scripts/run-tpch.sh --report                          # per-variant sections plus the "Iceberg merge-on-read" tables
+```
+
+`gen-iceberg-mor.sh` runs `IcebergMorGenerator` with Spark alone (no plugin): one table per variant
+in a local Hadoop catalog (`local.<namespace>.<variant>`), the source rows written as 16 data files
+so every delete spans all of them, then mutated with merge-on-read modes. The variants:
+
+| variant | format | mutation |
+|---|---|---|
+| `plain` | v2 | none: the reader's own cost |
+| `pos_<pct>` | v2 | positional deletes of `<pct>` % of the rows, scattered: picked by a hash of `l_orderkey`, so every 64-row block loses a few rows |
+| `pos_<pct>_clustered` | v2 | positional deletes of whole `l_shipdate` ranges from the start of the seven years: entire blocks go, which is what `EvalContext`'s active-block skipping is for |
+| `pos_upd_<pct>` | v2 | `pos_10`, then an `UPDATE` of a further `<pct>` % (deletes of the old images plus small new data files) and one `MERGE INTO` that deletes, updates and inserts: the heavily mutated shape |
+| `eq_<pct>` | v2 | equality delete files on `l_orderkey` (files of at most 20000 keys, about `<pct>` % of the rows), written through the Iceberg Java API the way a CDC sink does -- Spark never writes them |
+| `dv_<pct>`, `dv_<pct>_clustered`, `dv_upd_<pct>` | v3 | the `pos_*` mutations encoded as deletion vectors in Puffin files |
+
+Next to the warehouse, `README-<namespace>.md` records what each table holds -- live rows
+(`count(*)` through Spark's row path, the oracle every configuration is compared to), data and delete
+files with their formats, delete rows and delete rows per data file, the snapshot id -- and the SQL
+that produced it. The runner reads the current snapshot and prints its id; pin it with
+`VERSION AS OF` if a table is mutated again.
+
+`run-tpch.sh --iceberg <warehouse> --variant <namespace>.<variant>` points the `lineitem` view at that
+table (the other TPC-H tables stay Parquet) and labels the dataset `iceberg:<namespace>.<variant>`,
+so every configuration -- `spark`, `vector`, `comet-scan-vector-shuffle`, `comet` -- runs unchanged
+over it. Besides Q1 and Q6, three full-scan probes isolate the delete cost from the operator cost:
+`probe-count` (`count(*)`), `probe-sum` (`sum(l_extendedprice)`: one column, no predicate, the pure
+merge cost) and `probe-group` (`count(*) GROUP BY l_returnflag`: a dictionary key through the
+selection); Q6 is the selective predicate on top of a selection. Per query the `[tpch]` line and the
+`.jsonl` record carry the scan operators of the plan (`BatchScanExec` for the JVM reader,
+`CometIcebergNativeScanExec` for Comet's) and, from counters on the adapter, the rows the normalized
+merge-on-read batches read (physical) against the rows the deletes left (live) during the last
+measured run -- local mode only, the counters live in the executor JVM. One thing the scan tag
+catches: on a table without delete files Iceberg answers `probe-count` from its manifests (the plan
+is a `LocalTableScanExec`, no reader runs), so `plain`'s count is a metadata lookup for every
+engine and only the deleted variants measure a scan there. The report's "Iceberg
+merge-on-read" section lists, per query, every variant against every configuration with the speedup
+versus `spark` on the same variant and versus the same configuration on `plain` (what the deletes
+cost that engine), plus the live/physical share. The numbers themselves are #261 (v2) and #262 (v3).
+
 Wide decimals (`decimal(p > 18)`) from either reader become a DECIMAL128 lane (#257). Iceberg's
 reader keeps them as a `FixedSizeBinaryVector` of big-endian bytes -- as many per value as the
 precision needs, twelve for `decimal(27,2)` -- which the adapter converts limb by limb (a dictionary
