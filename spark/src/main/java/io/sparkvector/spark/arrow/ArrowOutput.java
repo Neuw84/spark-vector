@@ -345,6 +345,15 @@ public final class ArrowOutput {
         }
       }
       case BOOL -> Bitmap.fill(data, length, (Boolean) value);
+      case DECIMAL128 -> {
+        // A wide decimal literal (an expand's constant slot, #259): the unscaled value as two limbs per row.
+        java.math.BigInteger u = ((org.apache.spark.sql.types.Decimal) value).toJavaBigDecimal().unscaledValue();
+        long hi = io.sparkvector.kernels.Decimal128.hiOf(u);
+        long lo = io.sparkvector.kernels.Decimal128.loOf(u);
+        for (int i = 0; i < length; i++) {
+          io.sparkvector.kernels.Decimal128.set(data, i, hi, lo);
+        }
+      }
       default -> throw new UnsupportedOperationException("constant column of " + dt);
     }
     return finish(out, length, true);

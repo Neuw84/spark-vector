@@ -117,7 +117,8 @@ object VectorTakeOrderedPlanner {
   /** Attempts to convert a Spark TakeOrderedAndProjectExec; Left explains the fallback. */
   def plan(t: TakeOrderedAndProjectExec): Either[String, VectorTakeOrderedAndProjectExec] = {
     val keyFailures = t.sortOrder.flatMap(o => VectorSortPlanner.compileKey(o, t.child.output).left.toOption.map(r => s"${o.sql}: $r"))
-    val outputFailures = t.projectList.filterNot(e => TypeMapping.isSupported(e.dataType)).map(e => s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
+    // Spark's own row projection applies `projectList`; the batch built from the rows carries any lane type (a wide decimal included, #259).
+    val outputFailures = t.projectList.filterNot(e => TypeMapping.hasLane(e.dataType)).map(e => s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
     if (t.offset != 0) Left(s"offset ${t.offset} not supported")
     else if (t.sortOrder.isEmpty) Left("sort without keys")
     else if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))

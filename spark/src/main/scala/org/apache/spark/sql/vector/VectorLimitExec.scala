@@ -174,7 +174,7 @@ object VectorLimitPlanner {
     else Right(VectorGlobalLimitExec(g.limit, g.child))
 
   def planCollect(c: CollectLimitExec): Either[String, VectorCollectLimitExec] = {
-    val outputFailures = c.child.output.filterNot(a => TypeMapping.isSupported(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
+    val outputFailures = c.child.output.filterNot(a => TypeMapping.hasLane(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
     if (c.offset != 0) Left(s"offset ${c.offset} not supported")
     else if (c.limit < 0) Left(s"negative limit ${c.limit}")
     else if (outputFailures.nonEmpty) Left(outputFailures.mkString("; "))
