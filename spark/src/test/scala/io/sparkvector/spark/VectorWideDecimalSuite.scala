@@ -204,7 +204,7 @@ class VectorWideDecimalSortSuite extends VectorQuerySuite {
     checkSorted("SELECT i % 3, w38, w27 FROM tws SORT BY i % 3, w38 DESC NULLS LAST", 2)
   }
 
-  test("a computed expression over a wide decimal is still not a sort key until #258") {
-    checkFallback("SELECT w38, i FROM tws SORT BY w38 * 2", Seq(Sort), "decimal")
+  test("a computed expression over a wide decimal is a sort key since #258") {
+    checkVectorized("SELECT w38, i FROM tws SORT BY w38 * 2", Seq(Sort))
   }
 }
