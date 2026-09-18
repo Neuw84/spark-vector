@@ -72,9 +72,35 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
 
   test("expressions over a wide decimal still fall back with the type reason until #258") {
     checkFallback("SELECT w38 + 1 AS x FROM tw_dict WHERE i % 101 > 6", Seq(Project), "exceeds 18 digits")
-    checkFallback("SELECT i FROM tw_dict WHERE w27 > 0", Seq(Filter), "decimal(27,2)")
+    // A comparison over a wide *expression*: the arithmetic is not compiled yet, and says so.
+    checkFallback("SELECT i FROM tw_dict WHERE w27 + 1 > 0", Seq(Filter), "add over decimal(28,2) not supported")
     checkFallback("SELECT cast(w20 AS double) AS d FROM tw_plain", Seq(Project), "decimal(20,0)")
     checkFallback("SELECT abs(w38) AS a FROM tw_plain WHERE i % 101 > 6", Seq(Project), "decimal(38,10)")
+  }
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: comparisons and IN over wide decimal columns and literals compile on the limbs (#258)") {
+      for (ansi <- Seq("true", "false")) {
+        withConf("spark.sql.ansi.enabled" -> ansi) {
+          // Column against a wide literal, every operator, literals at the extremes and straddling the limb boundary.
+          checkVectorized(s"SELECT i, w38 FROM $t WHERE w38 > 922337203.6854775807", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w38 >= cast('922337203.6854775808' as decimal(38,10))", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w38 < cast('-922337203.6854775808' as decimal(38,10))", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w38 <= 0", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w38 = cast('9999999999999999999999999999.9999999999' as decimal(38,10))", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w38 <> cast('-9999999999999999999999999999.9999999999' as decimal(38,10))", Seq(Filter))
+          // Literal on the left, and the shortest wide form.
+          checkVectorized(s"SELECT i FROM $t WHERE 0 > w27", Seq(Filter))
+          checkVectorized(s"SELECT i, w20 FROM $t WHERE w20 >= 100000000000000", Seq(Filter))
+          // IN over wide literals, with the nulls of w27 staying null.
+          checkVectorized(s"SELECT i, w27 FROM $t WHERE w27 IN (0, -20000000000000005.00, 19000000000000004.75)", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w27 NOT IN (0, 1000000000000000.25)", Seq(Filter))
+          // Under AND/OR with narrow predicates, and as a projected boolean.
+          checkVectorized(s"SELECT i FROM $t WHERE (w38 > 0 AND w27 < 0) OR i % 101 = 3", Seq(Filter))
+          checkVectorized(s"SELECT i, w38 > 0 AS pos, w27 = 0 AS zero FROM $t", Seq(Project))
+        }
+      }
+    }
   }
 }
 

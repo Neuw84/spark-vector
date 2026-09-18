@@ -17,7 +17,7 @@ object ExpressionCompiler {
 
   type Result = Either[String, VectorExpr]
 
-  private val comparableTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64, VecType.UTF8)
+  private val comparableTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64, VecType.UTF8, VecType.DECIMAL128)
 
   /** Types whose literals can be used as compare / IN operands. */
   private def isLiteralType(dt: DataType): Boolean = dt match {
@@ -25,6 +25,28 @@ object ExpressionCompiler {
     case d: DecimalType => TypeMapping.isSupported(d)
     case _ => false
   }
+
+  /** A decimal wider than the INT64 lane: carried as DECIMAL128 (#257), compared on its limbs (#258). */
+  private def isWideDecimal(dt: DataType): Boolean = dt match {
+    case d: DecimalType => TypeMapping.hasLane(d) && !TypeMapping.isSupported(d)
+    case _ => false
+  }
+
+  /**
+   * A comparison or IN operand of a wide decimal type: the bare column, or a non-null literal carrying
+   * its unscaled value as two limbs. No kernel computes on the lane yet, so anything else -- an
+   * arithmetic expression, a cast -- keeps its own reason (the rest of #258).
+   */
+  private def wideOperand(e: Expression, input: Seq[Attribute]): Result = e match {
+    case Literal(null, dt) => Left(s"null literal of ${dt.simpleString}")
+    case Literal(v, dt) => Right(LiteralExpr(v, dt))
+    case a: AttributeReference => compileLaneColumn(a, input)
+    case other => Left(s"${other.prettyName} over ${other.dataType.simpleString} not supported")
+  }
+
+  /** Compiles a comparison / IN operand: the wide-decimal path for wide types, [[compile]] otherwise. */
+  private def operand(e: Expression, input: Seq[Attribute]): Result =
+    if (isWideDecimal(e.dataType)) wideOperand(e, input) else compile(e, input)
 
   /**
    * A bare column of any lane type -- including a DECIMAL128 column no kernel computes on yet (#257)
@@ -914,9 +936,11 @@ object ExpressionCompiler {
   private def comparison(op: CompareOp, l: Expression, r: Expression, input: Seq[Attribute]): Result =
     if (l.dataType == BooleanType && r.dataType == BooleanType) booleanComparison(op, l, r, input)
     else
+      // Spark casts both sides of a decimal comparison to one type, so a wide comparison is "same
+      // lane, compare": bare wide columns or wide literals, checked like any other pair.
       for {
-        le <- compile(l, input)
-        re <- compile(r, input)
+        le <- operand(l, input)
+        re <- operand(r, input)
         _ <- check(le, re, l, r)
       } yield CompareExpr(op, le, re)
 
@@ -982,11 +1006,11 @@ object ExpressionCompiler {
     else if (list.exists { case Literal(null, _) => true; case _ => false }) Left("NULL in IN list")
     else if (!list.forall(_.isInstanceOf[Literal])) Left("IN list is not all literals")
     else if (list.exists(_.dataType != value.dataType)) Left(s"IN operands differ: ${value.dataType.simpleString} vs ${list.map(_.dataType.simpleString).distinct.mkString("/")}")
-    else compile(value, input).flatMap {
+    else operand(value, input).flatMap {
       case _: LiteralExpr => Left("IN over a literal")
       case c if !comparableTypes.contains(c.vecType) => Left(s"IN not supported for ${value.dataType.simpleString}")
       case c =>
-        val lits = list.map(compile(_, input))
+        val lits = list.map(operand(_, input))
         lits.collectFirst { case Left(reason) => reason } match {
           case Some(reason) => Left(reason)
           case None => Right(InExpr(c, lits.collect { case Right(lit: LiteralExpr) => lit }))

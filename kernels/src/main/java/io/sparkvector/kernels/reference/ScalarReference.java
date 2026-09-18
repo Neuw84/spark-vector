@@ -42,6 +42,12 @@ public final class ScalarReference {
           Bitmap.setTo(out, i, op.test(a.getDouble(i), s));
         }
       }
+      case DECIMAL128 -> {
+        java.math.BigInteger s = (java.math.BigInteger) scalar;
+        for (int i = 0; i < n; i++) {
+          Bitmap.setTo(out, i, op.test(a.getDecimal128(i).compareTo(s)));
+        }
+      }
       default -> throw new IllegalArgumentException("unsupported " + a.type());
     }
   }
@@ -62,6 +68,11 @@ public final class ScalarReference {
       case FLOAT64 -> {
         for (int i = 0; i < n; i++) {
           Bitmap.setTo(out, i, op.test(a.getDouble(i), b.getDouble(i)));
+        }
+      }
+      case DECIMAL128 -> {
+        for (int i = 0; i < n; i++) {
+          Bitmap.setTo(out, i, op.test(compareDecimal128(a, i, b, i)));
         }
       }
       default -> throw new IllegalArgumentException("unsupported " + a.type());

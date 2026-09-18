@@ -96,8 +96,13 @@ final case class ColumnRef(ordinal: Int, dataType: DataType) extends VectorExpr 
  * materialised as a column on their own, which is why [[eval]] throws.
  */
 final case class LiteralExpr(value: Any, dataType: DataType) extends VectorExpr {
-  /** The literal as a lane value: decimals are their unscaled long. */
+  /**
+   * The literal as a lane value: decimals are their unscaled value -- a long on the INT64 lane, a
+   * `BigInteger` for a wide decimal on the DECIMAL128 lane (the kernels split it into limbs).
+   */
   def number: Number = value match {
+    case d: org.apache.spark.sql.types.Decimal if dataType.asInstanceOf[org.apache.spark.sql.types.DecimalType].precision > TypeMapping.MAX_DECIMAL_PRECISION =>
+      d.toJavaBigDecimal.unscaledValue()
     case d: org.apache.spark.sql.types.Decimal => java.lang.Long.valueOf(d.toUnscaledLong)
     case n: Number => n
   }

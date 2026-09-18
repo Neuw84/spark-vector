@@ -24,6 +24,8 @@ class CompareKernelsTest {
     (a, r, n) -> TestData.ints(a, r, n, null),
     (a, r, n) -> TestData.longs(a, r, n, null),
     (a, r, n) -> TestData.doubles(a, r, n, null),
+    // Wide decimals: random 128-bit values plus the extremes, so both limbs are exercised (#258).
+    (a, r, n) -> TestData.decimal128s(a, r, n, null),
   };
 
   private static final Function<Random, Number>[] SCALARS =
@@ -35,6 +37,13 @@ class CompareKernelsTest {
           case 1 -> Double.POSITIVE_INFINITY;
           case 2 -> -0.0;
           default -> r.nextInt(-5, 5) + 0.5;
+        },
+        (Function<Random, Number>) r -> switch (r.nextInt(5)) {
+          case 0 -> java.math.BigInteger.ZERO;
+          case 1 -> java.math.BigInteger.ONE.shiftLeft(127).negate(); // -2^127
+          case 2 -> java.math.BigInteger.TEN.pow(38).subtract(java.math.BigInteger.ONE);
+          case 3 -> java.math.BigInteger.valueOf(Long.MIN_VALUE); // the low limb alone
+          default -> TestData.randomDecimal128(r);
         },
       };
 
