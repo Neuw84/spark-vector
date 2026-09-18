@@ -570,6 +570,16 @@ into these rather than adding special cases to operators.
   on our classpath (Comet keeps `org.apache.arrow.c.*` unshaded but with shaded signatures, so the
   classes collide), maven-shade relocation (Comet's JNI looks classes up by literal name), and a
   bulk-copy bridge (replaced by the zero-copy one).
+- The crossing cost is a known number (#279, `CrossingBenchmark`; `docs/results.md`, "Hybrid planning
+  study"): into Comet ~2.7-3 µs per column, rows aside, for fixed-width and plain-string lanes (a
+  pointer hand-over); back zero-copy at 0.1-0.25 µs per column; a dictionary string column decoded on
+  the way in at 20-25 ns per row per column; an INT64-lane decimal widened in at 2.5-3 ns and
+  narrowed back at 0.4-0.5 ns per row per column. A per-operator swap pays it twice. Run it with the
+  Comet jar first on the classpath: `java --add-modules=jdk.incubator.vector
+  --enable-native-access=ALL-UNNAMED -cp <comet jar>:benchmarks/target/classes:$(cat
+  benchmarks/target/classpath.txt) org.openjdk.jmh.Main CrossingBenchmark` (the shaded
+  `benchmarks.jar` lacks the provided Spark and Arrow classes; `classpath.txt` is what the run scripts
+  build with `dependency:build-classpath`).
 - What works is sharing memory: `ArrowCData` writes Arrow C Data Interface structs (80-byte
   `ArrowArray`, 72-byte `ArrowSchema`) with the FFM API, with `Linker.upcallStub` release
   callbacks and a live-export registry, and Comet's own `ArrowImporter` imports them into a
