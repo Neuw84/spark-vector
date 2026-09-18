@@ -112,7 +112,7 @@ public final class CompareKernels {
   }
 
   /** DECIMAL128 against DECIMAL128 at the same scale, row by row over the limbs. */
-  private static void d128(
+  static void d128(
       MemorySegment da, MemorySegment db, int n, CompareOp op, MemorySegment active, MemorySegment out) {
     int words = Bitmap.wordsFor(n);
     for (int w = 0; w < words; w++) {
