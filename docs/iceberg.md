@@ -126,7 +126,10 @@ selection); Q6 is the selective predicate on top of a selection. Per query the `
 `.jsonl` record carry the scan operators of the plan (`BatchScanExec` for the JVM reader,
 `CometIcebergNativeScanExec` for Comet's) and, from counters on the adapter, the rows the normalized
 merge-on-read batches read (physical) against the rows the deletes left (live) during the last
-measured run -- local mode only, the counters live in the executor JVM. The report's "Iceberg
+measured run -- local mode only, the counters live in the executor JVM. One thing the scan tag
+catches: on a table without delete files Iceberg answers `probe-count` from its manifests (the plan
+is a `LocalTableScanExec`, no reader runs), so `plain`'s count is a metadata lookup for every
+engine and only the deleted variants measure a scan there. The report's "Iceberg
 merge-on-read" section lists, per query, every variant against every configuration with the speedup
 versus `spark` on the same variant and versus the same configuration on `plain` (what the deletes
 cost that engine), plus the live/physical share. The numbers themselves are #261 (v2) and #262 (v3).
