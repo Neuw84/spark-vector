@@ -654,7 +654,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 170 kernel tests, 265 Spark tests (237 without the Comet and Iceberg profiles;
+Current counts: 170 kernel tests, 268 Spark tests (240 without the Comet and Iceberg profiles;
 the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
@@ -712,14 +712,15 @@ the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers eit
   8 s iterations inside one JVM, then recovery; the partial aggregate's kernel time balloons) in two of
   sixteen JVMs of the v2 run and two more in the v3 run (four of five on the update/merge shape: 18 data files, two small), never under JFR or `-Xlog:deoptimization` -- a JIT signature; catch it by running the sweep command itself with `-XX:+PrintCompilation` and keeping the output of a JVM that shows the 8 s iterations. On v3 the delete cost is `buildRowIdMapping` inside Iceberg's reader (19 % of the pure-merge probe for us, 15 % for Spark); a direct bitmap from the deletion vector would need the reader to hand out the index instead of wrapping the vectors -- an upstream option, not an operator change.
 
-- Iceberg `MERGE INTO`: `MergeRows` has its columnar operator (`VectorMergeRowsExec`, #21; differential
-  tests against Spark's operator in `VectorMergeRowsSuite`) but it fires only over a columnar join, and
-  the merge's join carries the struct `_partition` metadata column, which `VectorHashJoinExec` does not
-  pass through -- the sort-merge route refuses the target side with `unsupported column type struct<>
-  for _partition`. Lane-less payload columns in the join (a row-id remap of the streamed side, a
-  row store for the build side) are the prerequisite; the write stays Spark's. The project above the
-  target scan (`monotonically_increasing_id()` as `MonotonicIdExpr`, plus the struct `_partition`) is
-  no longer refused for the struct since #19. Reads over the merged table are accelerated.
+- Iceberg `MERGE INTO`: columnar end to end since #273 -- `MergeRows` has its columnar operator
+  (`VectorMergeRowsExec`, #21; differential tests against Spark's operator in `VectorMergeRowsSuite`)
+  and the merge's join is ours: `VectorHashJoinExec` passes a lane-less payload column (the struct
+  `_partition` beside `_file` / `_pos` / `_spec_id`) through on its **streamed** side as a
+  `RemappedColumnVector` over the streamed batch with the probe row ids, null-padded for unmatched
+  build rows; the target is that streamed side. A lane-less column on the **build** side is still
+  refused (`unsupported column type struct<...>`): build rows are laid out in lanes and a row store for
+  them is not written. The write stays Spark's. The merge-on-read suite asserts the operators ran
+  (`PlanUtils.allNodes` descends into `CommandResultExec` for that).
 - Pass-through of columns without a lane (#19): `VectorColumnarRule.forwardingInputReason` (filter,
   project) requires only a columnar child; `VectorProjectExec.isPassThrough` (a bare
   `AttributeReference` or an `Alias` of one) is never compiled and becomes a `ColumnRef` of the

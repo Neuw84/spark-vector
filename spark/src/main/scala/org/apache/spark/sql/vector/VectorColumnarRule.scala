@@ -77,7 +77,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         // The row-level operator of a MERGE INTO (#21): its child is the merge's join, so it converts
         // when that join is ours (the shuffled hash join, or a sort-merge join re-expressed as one, #10).
         case m: MergeRowsExec if VectorConf.mergeRowsEnabled(conf) =>
-          columnarInputReason(m.child).orElse(VectorMergeRowsPlanner.reason(m)) match {
+          // A lane-less child column (Iceberg's struct `_partition`) is forwarded by the operator (#273).
+          forwardingInputReason(m.child).orElse(VectorMergeRowsPlanner.reason(m)) match {
             case Some(reason) => fallback(m, reason)
             case None =>
               VectorMergeRowsExec(m.isSourceRowPresent, m.isTargetRowPresent, m.matchedInstructions, m.notMatchedInstructions,
@@ -191,7 +192,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          laneExchangeInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          streamedInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -205,7 +206,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          laneExchangeInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          streamedInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -221,7 +222,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => j.left
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => j.right
           }
-          laneExchangeInputReason(j.left).orElse(laneExchangeInputReason(j.right)).orElse(VectorJoinPlanner.buildSizeReason(shjBuild, maxBuildSize)) match {
+          val shjStreamed = if (shjBuild eq j.left) j.right else j.left
+          streamedInputReason(shjStreamed).orElse(laneExchangeInputReason(shjBuild)).orElse(VectorJoinPlanner.buildSizeReason(shjBuild, maxBuildSize)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -244,7 +246,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           j.getTagValue(VectorExecRule.SortMergeDecision) match {
             case Some(Right(buildSide)) =>
               val (left, right) = sortMergeInputs(j)
-              laneExchangeInputReason(left).orElse(laneExchangeInputReason(right)) match {
+              val (buildPlan, streamedPlan) = if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
+              streamedInputReason(streamedPlan).orElse(laneExchangeInputReason(buildPlan)) match {
                 case None => VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
                 case Some(reason) => fallback(resorted(j), reason)
               }
@@ -350,6 +353,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * (see [[VectorProjectExec]]), so only the columnar contract is required here; an expression that
    * reads such a column is refused by the compiler with the type named.
    */
+  /**
+   * The streamed side of a hash join: columnar or an exchange, any column type -- a payload without a
+   * lane is passed through as a remapped view of the streamed batch (#273); the keys are checked by
+   * the planner. The build side keeps [[laneTypeReason]]: its rows are laid out in lanes.
+   */
+  private def streamedInputReason(plan: SparkPlan): Option[String] = plan match {
+    case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => None
+    case other => forwardingInputReason(other)
+  }
+
   private def forwardingInputReason(plan: SparkPlan): Option[String] =
     if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar") else None
 
@@ -405,7 +418,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
   /** Why a projection would not compile over its child's output (an expression, an output type), input aside. */
   private def projectReason(p: ProjectExec): Option[String] = {
-    val failures = p.projectList.filterNot(VectorProjectExec.isPassThrough).flatMap { e =>
+    val failures = p.projectList.filterNot(e => VectorProjectExec.isPassThrough(e) || VectorProjectExec.constantSlot(e).isDefined).flatMap { e =>
       val compiled = ExpressionCompiler.compile(e, p.child.output)
       // A decimal output wider than 18 digits is a DECIMAL128 lane when its expression compiled (#258).
       val typeCheck =
@@ -453,20 +466,28 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       // convert when its output types are lanes. That assumption is optimistic on purpose: the transform
       // verifies the real children and, when a join has to stay after all, restores the ordering a
       // converted child below it no longer offers (`resorted`), so a wrong guess costs a sort, never a row.
-      def inputReason(p: SparkPlan): Option[String] = p match {
-        case inner: SortMergeJoinExec =>
-          sortMergeEligibility(inner, maxBuildSize, memo).left.toOption.map(r => s"child SortMergeJoin stays with Spark: $r").orElse(typeReason(inner))
-        case proj: ProjectExec if VectorConf.projectEnabled(conf) => projectReason(proj).orElse(inputReason(proj.child))
-        case filt: FilterExec if VectorConf.filterEnabled(conf) => filterReason(filt).orElse(inputReason(filt.child))
-        case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => typeReason(p)
-        case _: UnionExec | _: ExpandExec | _: CoalesceExec | _: SampleExec | _: SortExec | _: LocalLimitExec | _: GlobalLimitExec |
-             _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec | _: ShuffledHashJoinExec | _: HashAggregateExec | _: SortAggregateExec =>
-          typeReason(p)
-        case other => columnarInputReason(other)
+      // The streamed side is judged as the hash join reads it: any column type, a payload without a lane
+      // passed through (#273); the build side needs lanes. So the build side is chosen first.
+      def inputReason(p: SparkPlan, streamed: Boolean): Option[String] = {
+        def types(plan: SparkPlan): Option[String] = if (streamed) None else laneTypeReason(plan)
+        p match {
+          case inner: SortMergeJoinExec =>
+            sortMergeEligibility(inner, maxBuildSize, memo).left.toOption.map(r => s"child SortMergeJoin stays with Spark: $r").orElse(types(inner))
+          case proj: ProjectExec if VectorConf.projectEnabled(conf) => projectReason(proj).orElse(inputReason(proj.child, streamed))
+          case filt: FilterExec if VectorConf.filterEnabled(conf) => filterReason(filt).orElse(inputReason(filt.child, streamed))
+          case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => types(p)
+          case _: UnionExec | _: ExpandExec | _: CoalesceExec | _: SampleExec | _: SortExec | _: LocalLimitExec | _: GlobalLimitExec |
+               _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec | _: ShuffledHashJoinExec | _: HashAggregateExec | _: SortAggregateExec =>
+            types(p)
+          case other => if (streamed) forwardingInputReason(other) else laneInputReason(other)
+        }
       }
-      val decision = inputReason(left).orElse(inputReason(right)) match {
-        case Some(reason) => Left(reason)
-        case None => VectorJoinPlanner.sortMergeBuildSide(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.isSkewJoin, left, right, maxBuildSize)
+      val decision = VectorJoinPlanner.sortMergeBuildSide(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.isSkewJoin, left, right, maxBuildSize).flatMap { buildSide =>
+        val (buildPlan, streamedPlan) = if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
+        inputReason(streamedPlan, streamed = true).orElse(inputReason(buildPlan, streamed = false)) match {
+          case Some(reason) => Left(reason)
+          case None => Right(buildSide)
+        }
       }
       memo.put(j, decision)
       decision
@@ -523,6 +544,8 @@ object PlanUtils {
       case a: AdaptiveSparkPlanExec => Seq(a.executedPlan)
       case q: QueryStageExec => Seq(q.plan)
       case r: ReusedExchangeExec => Seq(r.child)
+      // A command (MERGE INTO, a write) holds its physical plan beside its children.
+      case c: org.apache.spark.sql.execution.CommandResultExec => Seq(c.commandPhysicalPlan)
       case _ => Nil
     }
     plan +: (plan.children ++ inner).flatMap(allNodes)

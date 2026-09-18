@@ -5,7 +5,7 @@ import java.util.ArrayDeque
 
 import io.sparkvector.kernels._
 import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorAllocators}
+import io.sparkvector.spark.arrow.{ArrowOutput, RemappedColumnVector, VectorAllocators}
 import io.sparkvector.spark.expr.{EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
@@ -498,10 +498,15 @@ private[vector] class VectorHashJoinIterator(
   /** `ExistenceJoin`: the semi join's probe, emitting every streamed row plus a match boolean. */
   private val isExistence = spec.joinType.isInstanceOf[ExistenceJoin]
   private val isFullOuter = spec.joinType == FullOuter
-  private val keepUnmatched = spec.joinType == LeftOuter || spec.joinType == RightOuter || isFullOuter
-  /** Build rows paired with a streamed row so far; only a full outer join needs to know. */
-  private val buildMatched: Array[Boolean] = if (isFullOuter) new Array[Boolean](build.numRows) else null
-  private var buildDrained = !isFullOuter
+  /** Whether unmatched streamed rows come out null-padded: the outer join preserves the streamed side. */
+  private val preservesStreamed = isFullOuter || (spec.joinType == LeftOuter && !spec.buildIsLeft) || (spec.joinType == RightOuter && spec.buildIsLeft)
+  /** Whether unmatched build rows come out at the end: the outer join preserves the build side (#273). */
+  private val preservesBuild = isFullOuter || (spec.joinType == LeftOuter && spec.buildIsLeft) || (spec.joinType == RightOuter && !spec.buildIsLeft)
+  /** An outer join of either kind runs the conditional outer path (pairs per streamed row, then the padding rules). */
+  private val keepUnmatched = preservesStreamed || preservesBuild
+  /** Build rows paired with a streamed row so far; a join preserving the build side needs to know. */
+  private val buildMatched: Array[Boolean] = if (preservesBuild) new Array[Boolean](build.numRows) else null
+  private var buildDrained = !preservesBuild
 
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
@@ -590,10 +595,16 @@ private[vector] class VectorHashJoinIterator(
     val count = Bitmap.popcount(sel, ctx.numRows)
     if (count > 0) {
       val columns = new Array[ColumnVector](spec.outputAttrs.length)
+      var foreignRows: Array[Int] = null // the selection as row ids, for columns with no lane (passed through, #273)
       var c = 0
       while (c < columns.length) {
         val (name, dt) = spec.outputAttrs(c)
-        columns(c) = ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
+        columns(c) =
+          if (TypeMapping.hasLane(dt)) ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
+          else {
+            if (foreignRows == null) foreignRows = RemappedColumnVector.rowsOf(sel, ctx.numRows, count)
+            RemappedColumnVector.of(ctx.column(c), foreignRows)
+          }
         c += 1
       }
       pending.add(new ColumnarBatch(columns, count))
@@ -608,7 +619,7 @@ private[vector] class VectorHashJoinIterator(
       if (selected(ctx, i)) {
         var r = firstCandidate(i)
         if (r < 0) {
-          if (keepUnmatched) { count = append(count, i, -1); }
+          if (preservesStreamed) { count = append(count, i, -1); }
         } else {
           while (r >= 0) {
             count = append(count, i, r)
@@ -664,7 +675,7 @@ private[vector] class VectorHashJoinIterator(
       var c = 0
       while (c < streamedWidth) {
         val (name, dt) = spec.outputAttrs(c)
-        columns(c) = ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
+        columns(c) = compactOrPass(ctx, c, name, dt, sel, count)
         c += 1
       }
       val (existsName, existsType) = spec.outputAttrs(streamedWidth)
@@ -718,9 +729,11 @@ private[vector] class VectorHashJoinIterator(
           }
         } else {
           while (p < count && probeIdx(p) == i) p += 1
-          outProbeIdx(w) = i
-          outBuildIdx(w) = -1
-          w += 1
+          if (preservesStreamed) {
+            outProbeIdx(w) = i
+            outBuildIdx(w) = -1
+            w += 1
+          }
         }
       }
       i += 1
@@ -728,7 +741,7 @@ private[vector] class VectorHashJoinIterator(
     if (w > 0) flush(ctx, outProbeIdx, outBuildIdx, w, filter = false)
   }
 
-  /** Full outer join: the build rows no streamed row was ever paired with, streamed side null. */
+  /** An outer join preserving the build side (full outer, or the build side is the preserved one): the build rows no streamed row was ever paired with, streamed side null. */
   private def emitUnmatchedBuild(): Unit = {
     var count = 0
     var r = 0
@@ -745,7 +758,8 @@ private[vector] class VectorHashJoinIterator(
         val (name, dt) = spec.outputAttrs(c)
         columns(c) =
           if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), buildIdx, from, to, allocator)
-          else ArrowOutput.nulls(name, dt, to - from, allocator)
+          else if (TypeMapping.hasLane(dt)) ArrowOutput.nulls(name, dt, to - from, allocator)
+          else nullsWithoutLane(dt, to - from)
         c += 1
       }
       pending.add(new ColumnarBatch(columns, to - from))
@@ -763,6 +777,18 @@ private[vector] class VectorHashJoinIterator(
     count + 1
   }
 
+  /** Compacts an output column by `sel`, or passes a column without a lane through as a remapped view (#273). */
+  private def compactOrPass(ctx: EvalContext, c: Int, name: String, dt: DataType, sel: MemorySegment, count: Int): ColumnVector =
+    if (TypeMapping.hasLane(dt)) ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
+    else RemappedColumnVector.of(ctx.column(c), RemappedColumnVector.rowsOf(sel, ctx.numRows, count))
+
+  /** A column of nulls for a type without a lane (the streamed side of an unmatched build row): Spark's constant vector, set null. */
+  private def nullsWithoutLane(dt: DataType, length: Int): ColumnVector = {
+    val v = new org.apache.spark.sql.execution.vectorized.ConstantColumnVector(length, dt)
+    v.setNull()
+    v
+  }
+
   // Joined rows are left ++ right; which of the two is the build side depends on buildSide.
   private def isBuildColumn(c: Int): Boolean = if (spec.buildIsLeft) c < numBuildCols else c >= streamedWidth
   private def buildOrdinal(c: Int): Int = if (spec.buildIsLeft) c else c - streamedWidth
@@ -771,12 +797,17 @@ private[vector] class VectorHashJoinIterator(
   /** Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). */
   private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int): ColumnarBatch = {
     val columns = new Array[ColumnVector](attrs.length)
+    var probeRows: Array[Int] = null // the probe ids of this batch, for streamed columns with no lane (passed through, #273)
     var c = 0
     while (c < columns.length) {
       val (name, dt) = attrs(c)
       columns(c) =
         if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
-        else ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
+        else if (TypeMapping.hasLane(dt)) ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
+        else {
+          if (probeRows == null) probeRows = java.util.Arrays.copyOfRange(probe, from, to)
+          RemappedColumnVector.of(ctx.column(streamedOrdinal(c)), probeRows)
+        }
       c += 1
     }
     new ColumnarBatch(columns, to - from)
@@ -806,7 +837,7 @@ private[vector] class VectorHashJoinIterator(
         var c = 0
         while (c < columns.length) {
           val (name, dt) = spec.outputAttrs(c)
-          columns(c) = ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
+          columns(c) = compactOrPass(ctx, c, name, dt, sel, count)
           c += 1
         }
         Right(Some(new ColumnarBatch(columns, count)))
@@ -877,18 +908,25 @@ object VectorJoinPlanner {
       s"build side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize"
     }
 
-  private def supportedType(joinType: JoinType, buildSide: BuildSide): Either[String, Unit] = joinType match {
+  /**
+   * Join type against build side. An outer join may preserve the build side (`RightOuter` built from the
+   * right, `LeftOuter` from the left) in the shuffled join -- its per-task matched bitmap emits the
+   * unmatched build rows once, as the full outer join does (#273) -- but not over a broadcast, whose
+   * relation is shared by every task.
+   */
+  private def supportedType(joinType: JoinType, buildSide: BuildSide, preservedBuild: Boolean): Either[String, Unit] = joinType match {
     case _: InnerLike | FullOuter => Right(())
     case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if buildSide == BuildRight => Right(())
+    case LeftOuter | RightOuter if preservedBuild => Right(())
     case RightOuter if buildSide == BuildLeft => Right(())
     case other => Left(s"join type $other with build side $buildSide not supported")
   }
 
   private def check(
       leftKeys: Seq[Expression], rightKeys: Seq[Expression], joinType: JoinType, buildSide: BuildSide,
-      condition: Option[Expression], left: SparkPlan, right: SparkPlan): Either[String, Unit] = {
+      condition: Option[Expression], left: SparkPlan, right: SparkPlan, preservedBuild: Boolean): Either[String, Unit] = {
     if (leftKeys.isEmpty) Left("join without equi-join keys")
-    else supportedType(joinType, buildSide).flatMap { _ =>
+    else supportedType(joinType, buildSide, preservedBuild).flatMap { _ =>
       val keyFailures = leftKeys.flatMap(k => compileKey(k, left.output).left.toOption) ++ rightKeys.flatMap(k => compileKey(k, right.output).left.toOption)
       if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))
       // The condition sees both sides, whatever the join type outputs.
@@ -908,7 +946,7 @@ object VectorJoinPlanner {
     else if (j.joinType == FullOuter) Left("full outer join over a broadcast not supported (Spark plans it as a shuffled join)")
     else {
       val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, j.isNullAwareAntiJoin)
-      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
+      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = false).map(_ => v)
     }
   }
 
@@ -930,7 +968,7 @@ object VectorJoinPlanner {
     if (j.isSkewJoin) Left("skew join not supported")
     else {
       val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
-      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right).map(_ => v)
+      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = true).map(_ => v)
     }
   }
 
@@ -950,9 +988,9 @@ object VectorJoinPlanner {
     if (isSkewJoin) Left("skew join not supported")
     else {
       val sides: Seq[BuildSide] = joinType match {
-        case _: InnerLike | FullOuter => Seq(BuildRight, BuildLeft)
-        case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => Seq(BuildRight)
-        case RightOuter => Seq(BuildLeft)
+        // An outer join may build either side too: the shuffled join preserves a build side by its matched bitmap (#273).
+        case _: InnerLike | FullOuter | LeftOuter | RightOuter => Seq(BuildRight, BuildLeft)
+        case LeftSemi | LeftAnti | _: ExistenceJoin => Seq(BuildRight)
         case _ => Nil
       }
       if (sides.isEmpty) Left(s"join type $joinType not supported")
@@ -964,7 +1002,7 @@ object VectorJoinPlanner {
         else {
           val (buildSide, size) = sized.minBy(_._2)
           if (size > maxBuildSize) Left(s"smallest side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize")
-          else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right).map(_ => buildSide)
+          else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right, preservedBuild = true).map(_ => buildSide)
         }
       }
     }

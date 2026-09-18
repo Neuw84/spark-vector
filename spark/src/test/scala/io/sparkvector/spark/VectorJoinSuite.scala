@@ -387,4 +387,47 @@ class VectorJoinSuite extends VectorQuerySuite {
       checkVectorized("SELECT tk.i FROM tk LEFT SEMI JOIN dim ON tk.i50 = dim.di", Seq(BHJ))
     }
   }
+
+  test("payload columns without a lane (struct, array, map) pass through the joins on the streamed side (#273)") {
+    // A copy of the streamed table with nested payloads beside plain and dictionary strings; the struct
+    // (Iceberg's `_partition` shape) has nulls at two levels.
+    val nk = newTempPath("join/nk")
+    spark.sql(
+      "SELECT i, l, s, i50, if(i % 11 = 4, null, named_struct('a', i, 'b', s, 'c', if(i % 5 = 0, null, named_struct('d', l, 'e', d)))) AS st, " +
+        "if(i % 13 = 6, null, array(i, i + 1, l)) AS arr, if(i % 17 = 2, null, map(coalesce(s, 'none'), l)) AS mp FROM tk WHERE i < 6000")
+      .repartition(2).write.mode("overwrite").parquet(nk)
+    spark.read.parquet(nk).createOrReplaceTempView("nk")
+    for (hint <- Seq("BROADCAST(dim)", "SHUFFLE_HASH(dim)")) {
+      val join = if (hint.startsWith("BROADCAST")) BHJ else SHJ
+      // Inner and left outer: the struct rides with its row; the outer's unmatched rows keep their payloads.
+      checkVectorized(s"SELECT /*+ $hint */ nk.i, nk.st, nk.arr, dim.name FROM nk JOIN dim ON nk.i50 = dim.di", Seq(join))
+      checkVectorized(s"SELECT /*+ $hint */ nk.i, nk.st, nk.mp, dim.name FROM nk LEFT JOIN dim ON nk.i50 = dim.di AND dim.weight > 30.0", Seq(join))
+      // With a condition (evaluated on the joined batch, which carries the pass-through column too) and a struct field read above.
+      checkVectorized(s"SELECT /*+ $hint */ nk.i, nk.st.a AS a, nk.st.c.d AS d, dim.name FROM nk JOIN dim ON nk.i50 = dim.di AND nk.l > dim.dl", Seq(join))
+      // Semi and anti never output the payload but the streamed batch still carries it.
+      checkVectorized(s"SELECT /*+ $hint */ nk.i, nk.st FROM nk LEFT SEMI JOIN dim ON nk.i50 = dim.di AND dim.di < 30", Seq(join))
+      checkVectorized(s"SELECT /*+ $hint */ nk.i, nk.arr FROM nk LEFT ANTI JOIN dim ON nk.i50 = dim.di AND dim.di < 30", Seq(join))
+    }
+    // A right outer join with the build on the left: the streamed (preserved) side is the right table here,
+    // so its payload passes through and the unmatched build rows pad the streamed struct with nulls.
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ dim.name, nk.i, nk.st FROM dim RIGHT JOIN nk ON dim.di = nk.i50 AND dim.di < 40", Seq(SHJ))
+    // A full outer join: pass-through rows and null-padded rows in the same output.
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ dim.name, nk.i, nk.st FROM dim FULL OUTER JOIN nk ON dim.di = nk.i50 AND nk.i < 3000", Seq(SHJ))
+    // The build side is laid out in lanes: a struct there is still refused, with its reason.
+    checkFallback("SELECT /*+ BROADCAST(nk) */ nk.i, nk.st, dim.name FROM dim JOIN nk ON dim.di = nk.i50 WHERE dim.di < 10", Seq(BHJ), "unsupported column type struct")
+    checkFallback("SELECT /*+ SHUFFLE_HASH(nk) */ nk.i, nk.st, dim.name FROM dim JOIN nk ON dim.di = nk.i50 WHERE dim.di < 10", Seq(SHJ), "unsupported column type struct")
+  }
+
+  test("outer joins that preserve the build side in the shuffled hash join (#273)") {
+    // RIGHT JOIN built from the right (preserved) side and LEFT JOIN built from the left: the matched
+    // bitmap of the full outer join emits the unmatched build rows once, with null streamed columns.
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name FROM tk RIGHT JOIN dim ON tk.i50 = dim.di AND tk.i < 500", Seq(SHJ))
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ dim.name, tk.i FROM dim LEFT JOIN tk ON dim.di = tk.i50 AND tk.i < 500", Seq(SHJ))
+    // With a condition on the pairs (duplicate build keys: ten dimension keys appear twice), and with none.
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name, dim.weight FROM tk RIGHT JOIN dim ON tk.i50 = dim.di AND tk.d > dim.weight WHERE tk.i IS NULL OR tk.i < 3000", Seq(SHJ))
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ dim.name, tk.i FROM dim LEFT JOIN tk ON dim.dl = tk.l", Seq(SHJ))
+    // Null build keys never match and come out null-padded; a build side almost nobody matches comes out (nearly) whole.
+    // (An empty streamed side would let AQE rewrite the join to a projection of nulls, so one streamed row stays.)
+    checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.dl FROM tk RIGHT JOIN dim ON tk.l = dim.dl AND tk.i < 40", Seq(SHJ))
+  }
 }

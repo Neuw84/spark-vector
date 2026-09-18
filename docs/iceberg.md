@@ -74,15 +74,15 @@ plain string and dictionary string columns were adapted rather than copied.
 
 - The `MERGE INTO`'s row-level operator, `MergeRows`, has a columnar form (`VectorMergeRowsExec`, #21:
   group masks from the presence predicates, clause-order masks, one compaction per projection, the
-  cardinality check on the row ids) that converts when the merge's join is ours. Today it never is:
-  the target side of that join carries the struct `_partition` metadata column beside `_file` /
-  `_pos` / `_spec_id`, and our hash join does not pass lane-less payload columns through (the
-  sort-merge route refuses it with `unsupported column type struct<> for _partition`), so the join
-  and the operator above it stay Spark's and the operator records `child SortMergeJoin is not
-  columnar`. Passing struct payloads through the join the way filters and projections do (#19) is
-  the prerequisite. The write is Spark's and Iceberg's in any case. The project above the target
-  scan -- `monotonically_increasing_id()` (compiled since #18) beside the struct `_partition` -- is no
-  longer refused for the struct since #19, and the reads before and after the merge are accelerated.
+  cardinality check on the row ids) that converts when the merge's join is ours -- and since #273 it
+  is: the target side of that join carries the struct `_partition` metadata column beside `_file` /
+  `_pos` / `_spec_id`, and the hash join passes a lane-less payload column through on its streamed
+  side as a remapped view of the streamed batch (the filter's and projection's pass-through, #19),
+  null-padded for the unmatched build rows of the merge's right outer join. The target is the
+  streamed side of that join (the source is the build side under the sort-merge route's size rule),
+  so the scan, the join and `MergeRows` run on our operators and the merge-on-read suite asserts it;
+  a lane-less column on the *build* side is still refused (build rows are laid out in lanes). The
+  write is Spark's and Iceberg's in any case, and the reads before and after the merge are accelerated.
 - The per-batch dictionary decode is not cached across the batches of a row group.
 - Comet 1.0 reads v3 tables through the JVM reader; the adapter path above applies to them.
 
