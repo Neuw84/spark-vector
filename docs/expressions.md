@@ -170,7 +170,7 @@ the remaining reasons on the aggregate's inputs.
 |---|---|
 | `LIKE` with `_` wildcards or escape characters, `rlike` | no issue yet (the `LikeSimplification` shapes and every `%`-only pattern are Supported above, #264) |
 | Decimal results wider than 18 digits on narrow operands beyond the speculative `* + -` trees under `sum` / `avg` above: a wide product or sum as a projected value, escalation with a wide *output* column (128-bit `DecimalVector`), `+`/`-` where Spark's precision cap lowers the scale (it rounds there) | #26 (slices 1-4 are the aggregate shapes; the rest is #28's wide lane) |
-| Genuinely wide declared decimals (`p > 18`) | #28 (design note first) |
+| Genuinely wide declared decimals (`p > 18`) as operands of the conditional (`CASE WHEN` / `IF` with a wide result), the `round` family, `%` and as a scalar subquery's value -- the lane exists (#257--#259); these kernels do not yet | follow-up to #258 |
 | `bit_get` / `getbit` (needs an INT8 lane) | #36 |
 | Array element and map value access (`arr[i]`, `map[key]`, `arr.field` over an array of structs); struct fields are Supported above | #50 (only if profiling says nested reads matter; a constant index over a list is the cheap case) |
 | A row-based escape hatch for expressions with no kernel, including Scala UDFs | #51 |

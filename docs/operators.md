@@ -26,8 +26,8 @@ Spark's byte strings, compacted by the filter and forwarded by the projection as
 `Decimal128` vector), computed on by the expression kernels (#258: comparisons, `IN`, `+ - * /`,
 casts, `abs`, negation) and read by the hash aggregate as grouping keys, `sum` / `avg` / `min` /
 `max` / `count` / `first` / `last` inputs and arithmetic over wide sums in the result projection
-(#259). Wide keys and payloads in the sort, joins, window and union are the rest of #259 (the
-operators below say which still fall back). An operator whose input or output carries any other type -- `float`, `short`,
+and carried by every mover, both hash joins and the window as keys, payloads and frames (#259, the
+rows below name the one frame shape that still falls back). An operator whose input or output carries any other type -- `float`, `short`,
 `byte`, `binary`, arrays, maps, structs -- records `unsupported column type <type> for <column>` (input)
 or `unsupported output type <type> for <name>` (a projection or aggregate result), whatever else is
 true of it. The two exceptions are the operators that forward columns without reading them: a filter
