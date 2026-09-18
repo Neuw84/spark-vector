@@ -327,16 +327,17 @@ private[vector] class VectorGroupedAggregateIterator(
 /** Planning-time checks shared by the rule and the operator. */
 object VectorAggregatePlanner {
 
-  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64)
+  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64, VecType.DECIMAL128)
 
   /**
-   * Grouping keys: ints, longs, booleans, strings and doubles. The key table compares doubles by
+   * Grouping keys: ints, longs, booleans, strings, doubles and wide decimals (two limbs hashed and
+   * compared, #259). The key table compares doubles by
    * bits, which matches Spark because the optimizer wraps double grouping keys in
    * NormalizeNaNAndZero (compiled to a real normalisation pass) at the updating stage, and the
    * merging stage, like Spark's own, groups the already normalised values.
    */
   def compileKey(e: NamedExpression, input: Seq[Attribute]): Either[String, VectorExpr] =
-    ExpressionCompiler.compile(e, input).flatMap {
+    ExpressionCompiler.compileLaneColumn(e, input).flatMap {
       case _: LiteralExpr => Left("literal grouping key")
       case k if !keyTypes.contains(k.vecType) => Left(s"grouping key type ${e.dataType.simpleString} not supported")
       case k => Right(k)
@@ -379,10 +380,21 @@ object VectorAggregatePlanner {
         case Some(ordinal) => Right(ColumnRef(ordinal, e.dataType))
         // A literal result (`'store' AS channel` beside the aggregates) is a constant column the
         // result projection materialises like any other.
-        case None => ExpressionCompiler.compile(substituted, input).flatMap {
-          case v if !TypeMapping.isSupported(e.dataType) => Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
-          case v => Right(v)
-        }
+        case None =>
+          // A wide sum or average inside a larger expression (`sum(x) / 7.0`, `0.5 * sum(x)`,
+          // `sum(a) - sum(b)`, #259): each emitted result stands in for its sub-expression as a column
+          // typed as the result (the slot's attribute carries the buffer type, the emitted column the
+          // result's), and the arithmetic around it compiles through the wide kernels (#258).
+          val forwarded = substituted.transform {
+            case sub if sub.isInstanceOf[If] && wideResult(sub, input).isDefined =>
+              val a = input(wideResult(sub, input).get)
+              AttributeReference(a.name, sub.dataType, sub.nullable, a.metadata)(a.exprId, a.qualifier)
+          }
+          val body = forwarded match { case Alias(c, _) => c; case other => other }
+          ExpressionCompiler.compileLaneColumn(body, input).flatMap {
+            case v if !TypeMapping.isSupported(e.dataType) && !TypeMapping.hasLane(e.dataType) => Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
+            case v => Right(v)
+          }
       }).left.map(r => s"${e.sql}: $r")
     }
     compiled.collectFirst { case Left(r) => r } match {
@@ -503,14 +515,15 @@ object VectorAggregatePlanner {
         else outputLayout(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
       if (failures.nonEmpty) Left(failures.mkString("; "))
       else layoutCheck.flatMap { compiled =>
-        // A wide decimal (p > 18) has no lane, but an aggregate may output one in two places: a
-        // buffer-emitting operator's `sum` buffer of a decimal sum (Spark's Decimal(p + 10, s)), and
-        // a Final's result of that sum, which the merge emits ready-made and the projection forwards.
+        // A wide decimal (p > 18) output is a DECIMAL128 lane in three places: a buffer-emitting
+        // operator's `sum` buffer of a decimal sum (Spark's Decimal(p + 10, s)), a Final's result of
+        // that sum, which the merge emits ready-made and the projection forwards, and a Final's
+        // arithmetic over such results, which the wide kernels compute (#259).
         val wideOutputs: Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
           if (results) a.resultExpressions.zip(compiled).collect {
-            case (e, ColumnRef(_, dt: DecimalType)) if dt.precision > TypeMapping.MAX_DECIMAL_PRECISION => e.toAttribute.exprId
+            case (e, v: VectorExpr) if e.dataType.isInstanceOf[DecimalType] && e.dataType.asInstanceOf[DecimalType].precision > TypeMapping.MAX_DECIMAL_PRECISION && v.vecType == VecType.DECIMAL128 => e.toAttribute.exprId
           }.toSet
-          else a.aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes).collect {
+          else (a.groupingExpressions.map(_.toAttribute) ++ a.aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes)).collect {
             case attr if attr.dataType.isInstanceOf[DecimalType] => attr.exprId
           }.toSet
         a.resultExpressions.map(_.toAttribute).find(attr => !TypeMapping.isSupported(attr.dataType) && !wideOutputs.contains(attr.exprId)) match {

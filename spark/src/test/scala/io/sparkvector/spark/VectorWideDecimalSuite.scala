@@ -200,6 +200,47 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
       }
     }
   }
+
+  private val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: wide decimal grouping keys, inputs and result arithmetic in the hash aggregate (#259)") {
+      for (ansi <- Seq("false", "true")) {
+        withConf("spark.sql.ansi.enabled" -> ansi) {
+          // Wide grouping keys (two limbs hashed and compared), alone and beside a narrow key; nulls group together.
+          checkVectorized(s"SELECT w27, count(*) AS c, sum(i) AS s FROM $t GROUP BY w27", Seq(Agg))
+          checkVectorized(s"SELECT w20, i % 3 AS k, count(*) AS c FROM $t WHERE i < 3000 GROUP BY w20, i % 3", Seq(Agg))
+          checkVectorized(s"SELECT w38, w27, count(*) AS c FROM $t WHERE i % 101 IN (1, 2, 3, 4, 5, 6) GROUP BY w38, w27", Seq(Agg))
+          // Wide inputs: sum and average into the 128-bit accumulator, min / max on the limbs, count, first / last.
+          // The decimal(38,10) extremes are excluded from the sums: an intermediate total past the
+          // precision poisons Spark's buffer in row order, which no engine reproduces for another.
+          checkVectorized(s"SELECT i % 7 AS k, sum(w38) AS s, sum(w27) AS s2, sum(w20) AS s3 FROM $t WHERE i % 101 > 6 GROUP BY i % 7", Seq(Agg))
+          checkVectorized(s"SELECT i % 7 AS k, avg(w27) AS a, avg(w20) AS a2 FROM $t GROUP BY i % 7", Seq(Agg))
+          checkVectorized(s"SELECT i % 7 AS k, min(w38) AS lo, max(w38) AS hi, min(w27) AS lo2, max(w20) AS hi2 FROM $t GROUP BY i % 7", Seq(Agg))
+          checkVectorized(s"SELECT i % 7 AS k, count(w38) AS c, count(w27) AS c2 FROM $t GROUP BY i % 7", Seq(Agg))
+          checkVectorized(s"SELECT i % 5 AS k, first(w38) AS f, last(w27) AS l FROM $t WHERE i < 400 AND i % 13 <> 0 AND i % 17 <> 0 GROUP BY i % 5", Seq(Agg))
+          // Ungrouped.
+          checkVectorized(s"SELECT sum(w27) AS s, avg(w27) AS a, min(w38) AS lo, max(w38) AS hi, count(w20) AS c FROM $t", Seq(Agg))
+          checkVectorized(s"SELECT sum(w38) AS s FROM $t WHERE i % 101 > 6", Seq(Agg))
+          // Arithmetic over wide sums in the result projection (#245's shapes), and a wide sum under a narrow one.
+          checkVectorized(s"SELECT i % 7 AS k, sum(w27) / 7.0 AS q, 0.5 * sum(w20) AS h, sum(w27) - sum(w20) AS d FROM $t GROUP BY i % 7", Seq(Agg))
+          checkVectorized(s"SELECT i % 7 AS k, sum(w27) + sum(i) AS m, avg(w27) * 2 AS a2 FROM $t GROUP BY i % 7", Seq(Agg))
+          // The wide sum's result compared and cast in the same projection.
+          checkVectorized(s"SELECT i % 7 AS k, cast(sum(w27) AS double) AS d, sum(w20) > 0 AS pos FROM $t GROUP BY i % 7", Seq(Agg))
+        }
+      }
+      // A total past the sum's precision: 18 rows of 10^37 leave 128 bits as well as the 38 digits.
+      // Null in legacy mode; Spark's numeric range error in ANSI mode.
+      withConf("spark.sql.ansi.enabled" -> "false") {
+        checkVectorized(s"SELECT sum(cast(cast(w38 AS decimal(38,0)) * 1000000000 AS decimal(38,0))) AS s FROM $t WHERE i % 101 = 1 AND i < 1900", Seq(Agg))
+        checkVectorized(s"SELECT sum(w38) AS s FROM $t WHERE i % 101 = 1", Seq(Agg))
+      }
+      withConf("spark.sql.ansi.enabled" -> "true") {
+        val e = intercept[Exception](withPlugin(enabled = true)(spark.sql(s"SELECT sum(cast(cast(w38 AS decimal(38,0)) * 1000000000 AS decimal(38,0))) AS s FROM $t WHERE i % 101 = 1 AND i < 1900").collect()))
+        assert(e.getMessage.contains("NUMERIC_VALUE_OUT_OF_RANGE") || e.getMessage.contains("ARITHMETIC_OVERFLOW"), e.getMessage)
+      }
+    }
+  }
 }
 
 /** Sorting over the lane: the four-pass two-limb key order equals Spark's in every partition. */

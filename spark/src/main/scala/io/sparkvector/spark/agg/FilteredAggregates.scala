@@ -2,7 +2,7 @@ package io.sparkvector.spark.agg
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.{Bitmap, BitmapKernels, GroupAssignment, VecType, VectorBuffers}
+import io.sparkvector.kernels.{Bitmap, BitmapKernels, Decimal128, GroupAssignment, VecType, VectorBuffers}
 import io.sparkvector.spark.expr.{EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, IntegerType, LongType}
@@ -80,7 +80,7 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Bo
       val i = if (ignoreNulls) FirstAgg.firstValid(ctx.masked(v), ctx.numRows, 0)
         else if (ctx.selection == null) (if (ctx.numRows > 0) 0 else -1)
         else FirstAgg.firstValid(new io.sparkvector.kernels.SegmentVectorBuffers(v.`type`(), ctx.numRows, ctx.selection, v.data(), v.offsets(), v.dictionary()), ctx.numRows, 0)
-      if (i >= 0) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i) else null; set = true }
+      if (i >= 0) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; set = true }
     }
     override def bufferValues: Array[Any] = Array(value, java.lang.Boolean.valueOf(set))
   }
@@ -100,7 +100,7 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Bo
       var i = 0
       while (i < n) {
         val g = ids(i)
-        if (g >= 0 && !set(g) && (!ignoreNulls || Rows.valid(v, i))) { values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i) else null; set(g) = true }
+        if (g >= 0 && !set(g) && (!ignoreNulls || Rows.valid(v, i))) { values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; set(g) = true }
         i += 1
       }
     }
@@ -126,6 +126,19 @@ object FirstAgg {
   }
 
   /** Row `i` of `v` boxed as Spark's internal value. */
+  /** Row `i` of a DECIMAL128 lane as well, boxed with the scale of `dt` (first / last over a wide decimal, #259). */
+  private[agg] def box(v: VectorBuffers, i: Int, dt: DataType): Any = v.`type`() match {
+    case VecType.DECIMAL128 =>
+      new java.math.BigDecimal(Decimal128.toBigInteger(Decimal128.hi(v.data(), i), Decimal128.lo(v.data(), i)), dt.asInstanceOf[org.apache.spark.sql.types.DecimalType].scale)
+    case _ => box(v, i)
+  }
+
+  /** `supports` plus the wide decimals, for the functions that box a row ([[FirstAgg]], [[LastAgg]]). */
+  def supportsWide(dt: DataType): Boolean = supports(dt) || (dt match {
+    case _: org.apache.spark.sql.types.DecimalType => io.sparkvector.spark.adapter.TypeMapping.hasLane(dt)
+    case _ => false
+  })
+
   private[agg] def box(v: VectorBuffers, i: Int): Any = v.`type`() match {
     case VecType.INT32 => java.lang.Integer.valueOf(v.data().getAtIndex(VectorBuffers.LE_INT, i))
     case VecType.INT64 => java.lang.Long.valueOf(v.data().getAtIndex(VectorBuffers.LE_LONG, i))
@@ -151,7 +164,7 @@ final case class FirstMergeAgg(first: VectorExpr, valueSet: VectorExpr, dataType
       if (i >= 0) {
         // A set buffer whose value is null is a legitimate (null) first value only when ignoreNulls is
         // false; with ignoreNulls the value is non-null whenever valueSet is.
-        value = if (f.validity() == null || Bitmap.isSet(f.validity(), i)) FirstAgg.box(f, i) else null
+        value = if (f.validity() == null || Bitmap.isSet(f.validity(), i)) FirstAgg.box(f, i, dataType) else null
         set = true
       }
     }
@@ -176,7 +189,7 @@ final case class FirstMergeAgg(first: VectorExpr, valueSet: VectorExpr, dataType
       while (i < n) {
         val g = ids(i)
         if (g >= 0 && !set(g) && (sValidity == null || Bitmap.isSet(sValidity, i)) && Bitmap.isSet(s.data(), i)) {
-          values(g) = if (f.validity() == null || Bitmap.isSet(f.validity(), i)) FirstAgg.box(f, i) else null
+          values(g) = if (f.validity() == null || Bitmap.isSet(f.validity(), i)) FirstAgg.box(f, i, dataType) else null
           set(g) = true
         }
         i += 1

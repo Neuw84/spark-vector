@@ -123,7 +123,7 @@ final case class LastAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boo
     override def update(ctx: EvalContext): Unit = {
       val v = input.eval(ctx)
       val set = valueSet.map(_.eval(ctx)).orNull
-      Rows.ungrouped(ctx) { i => if (counts(v, set, i)) { value = if (Rows.valid(v, i)) Rows.box(v, i) else null; seen = true } }
+      Rows.ungrouped(ctx) { i => if (counts(v, set, i)) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; seen = true } }
     }
     override def bufferValues: Array[Any] = Array(value, java.lang.Boolean.valueOf(seen))
   }
@@ -133,7 +133,7 @@ final case class LastAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boo
       state.ensure(groups.numGroups())
       val v = input.eval(ctx)
       val set = valueSet.map(_.eval(ctx)).orNull
-      Rows.grouped(ctx, groups) { (g, i) => if (counts(v, set, i)) { state.values(g) = if (Rows.valid(v, i)) Rows.box(v, i) else null; state.set(g) = true } }
+      Rows.grouped(ctx, groups) { (g, i) => if (counts(v, set, i)) { state.values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; state.set(g) = true } }
     }
     override def bufferValue(g: Int, slot: Int): Any = if (slot == 0) state.value(g) else java.lang.Boolean.valueOf(state.isSet(g))
   }

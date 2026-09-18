@@ -391,11 +391,19 @@ public final class GroupedAccumulators {
     private long[] hi = new long[64];
     private long[] lo = new long[64];
     private long[] count = new long[64];
+    private boolean[] overflowed = new boolean[64];
     private final Scratch scratch = new Scratch();
 
-    /** Adds every valid row of {@code v} (INT32 or INT64) to the group {@code ids} says. */
+    /**
+     * Adds every valid row of {@code v} (INT32, INT64, or a DECIMAL128 lane whose limbs are added as
+     * a signed 128-bit value) to the group {@code ids} says.
+     */
     public void update(VectorBuffers v, GroupAssignment a) {
       ensure(a.numGroups());
+      if (v.type() == VecType.DECIMAL128) {
+        updateWide(v, a);
+        return;
+      }
       if (a.useMasks()) {
         for (int g = 0; g < a.numGroups(); g++) {
           if (a.maskCount(g) == 0) {
@@ -428,7 +436,86 @@ public final class GroupedAccumulators {
     /** The ungrouped path: every valid row of {@code v} into group 0. */
     public void updateAll(VectorBuffers v) {
       ensure(1);
-      addAll(v, 0);
+      if (v.type() == VecType.DECIMAL128) {
+        addAllWide(v, 0);
+      } else {
+        addAll(v, 0);
+      }
+    }
+
+    private void updateWide(VectorBuffers v, GroupAssignment a) {
+      if (a.useMasks()) {
+        for (int g = 0; g < a.numGroups(); g++) {
+          if (a.maskCount(g) == 0) {
+            continue;
+          }
+          addAllWide(a.restrict(v, g), g);
+        }
+        return;
+      }
+      int[] ids = a.ids();
+      int n = a.numRows();
+      MemorySegment data = v.data();
+      MemorySegment validity = a.effectiveValidity(v);
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
+          addWide(ids[i], Decimal128.hi(data, i), Decimal128.lo(data, i));
+        }
+      } else {
+        for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+          long bits = Bitmap.wordAt(validity, w, n);
+          while (bits != 0L) {
+            int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+            bits &= bits - 1;
+            addWide(ids[i], Decimal128.hi(data, i), Decimal128.lo(data, i));
+          }
+        }
+      }
+    }
+
+    private void addAllWide(VectorBuffers v, int g) {
+      int n = v.length();
+      MemorySegment data = v.data();
+      MemorySegment validity = v.validity();
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
+          addWide(g, Decimal128.hi(data, i), Decimal128.lo(data, i));
+        }
+      } else {
+        for (int w = 0, words = Bitmap.wordsFor(n); w < words; w++) {
+          long bits = Bitmap.wordAt(validity, w, n);
+          while (bits != 0L) {
+            int i = (w << 6) + Long.numberOfTrailingZeros(bits);
+            bits &= bits - 1;
+            addWide(g, Decimal128.hi(data, i), Decimal128.lo(data, i));
+          }
+        }
+      }
+    }
+
+    /**
+     * {@code (hi, lo) += (xh, xl)} as signed 128-bit values. A total that leaves 128 bits sets the
+     * group's sticky overflow flag: every decimal sum type is capped at 38 digits, below 2^127, so a
+     * wrapped accumulator could only ever be reported as an overflowed sum, never as a value.
+     */
+    private void addWide(int g, long xh, long xl) {
+      long l = lo[g];
+      long sum = l + xl;
+      long carry = ((l & xl) | ((l | xl) & ~sum)) >>> 63;
+      long h = hi[g];
+      long hsum = h + xh + carry;
+      // Signed overflow of the high word: both operands share a sign the result does not have.
+      if (((h ^ hsum) & (xh ^ hsum)) < 0) {
+        overflowed[g] = true;
+      }
+      lo[g] = sum;
+      hi[g] = hsum;
+      count[g]++;
+    }
+
+    /** Whether the group's total left 128 bits at some point (the sum is then past any decimal precision). */
+    public boolean overflowed(int g) {
+      return overflowed[g];
     }
 
     private void addAll(VectorBuffers v, int g) {
@@ -467,6 +554,7 @@ public final class GroupedAccumulators {
         hi = Arrays.copyOf(hi, cap);
         lo = Arrays.copyOf(lo, cap);
         count = Arrays.copyOf(count, cap);
+        overflowed = Arrays.copyOf(overflowed, cap);
         capacity = cap;
       }
     }
