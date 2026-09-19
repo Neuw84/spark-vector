@@ -40,11 +40,11 @@ import org.apache.spark.storage.ShuffleBlockId
  */
 object FlightShuffle extends Logging {
 
-  val BackendKey = "spark.vector.shuffle.backend"
+  val BackendKey: String = org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.Key
   val BindHostKey = "spark.vector.shuffle.flight.bindHost"
   val ThreadsKey = "spark.vector.shuffle.flight.threads"
 
-  def backend(conf: SparkConf): String = conf.get(BackendKey, "flight").trim.toLowerCase
+  def backend(conf: SparkConf): String = org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
 
   /** The ticket of one block: 4-byte shuffleId, 8-byte mapId, 4-byte reducePartition, big-endian. */
   def ticket(shuffleId: Int, mapId: Long, reduce: Int): Ticket = {
