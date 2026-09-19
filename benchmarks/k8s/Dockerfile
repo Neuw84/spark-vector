@@ -21,7 +21,7 @@ ARG ICEBERG_VERSION=1.11.0
 
 # ---- build: our jars from this repository, dsdgen from tpcds-kit ------------------------------------
 FROM eclipse-temurin:25-jdk AS build
-RUN apt-get update && apt-get install -y --no-install-recommends maven git make gcc bison flex ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends maven git make gcc libc6-dev bison flex ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . /src
