@@ -80,6 +80,8 @@ spec:
     memoryOverhead: "12g"
     labels:
       app: tpcds-gen
+    # The executors need the IRSA role too: without this they run as the namespace's default account.
+    serviceAccount: sfi-engine
     nodeSelector:
       workload: "spark-xl"
     volumeMounts:
