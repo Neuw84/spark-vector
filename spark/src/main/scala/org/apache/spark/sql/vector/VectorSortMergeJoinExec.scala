@@ -187,28 +187,51 @@ private[vector] class VectorSortMergeJoinIterator(
       while (k < numKeys && !nul) { nul = keys(k).isNull(row); k += 1 }
       nul
     }
-  }
-
-  /** The right side's current run: its rows copied into their own arena, and which of them matched. */
-  /**
-   * The right side's current run: rows `[offset, offset + rows)` of `columns` / `keys`. A run inside
-   * one batch borrows the batch's copy (`arena` null: the batch outlives the run, as the next batch
-   * is only read once the run is passed); a run reaching a batch's edge is copied into its own arena.
-   */
-  private final class RightRun(val columns: Array[VectorBuffers], val keys: Array[VectorBuffers], val offset: Int, val rows: Int, val arena: Arena) {
-    /** Which rows matched (right and full outer joins); allocated on the first match, so a run nothing matched costs no bitmap. */
+    /** Which rows matched (right and full outer joins over a right batch): one bitmap per batch, allocated on the first match. */
     private var matchedBits: MemorySegment = _
-    def matched: MemorySegment = matchedBits
     def setMatched(row: Int): Unit = {
-      if (matchedBits == null) matchedBits = Bitmap.allocate(matchedArena, rows)
+      if (matchedBits == null) matchedBits = Bitmap.allocate(arena, math.max(rows, 1))
       Bitmap.set(matchedBits, row)
     }
-    val keyIsNull: Boolean = { var k = 0; var nul = false; while (k < numKeys && !nul) { nul = keys(k).isNull(offset); k += 1 }; nul }
-    def close(): Unit = if (arena != null) arena.close()
+    def isMatched(row: Int): Boolean = matchedBits != null && Bitmap.isSet(matchedBits, row)
   }
 
-  /** Matched bitmaps of borrowed runs live here (a run's own arena holds the copied ones). */
-  private val matchedArena: Arena = Arena.ofConfined()
+  /**
+   * The right side's current run as cursor state, one object for the whole task: rows
+   * `[offset, offset + rows)` of `columns` / `keys`. A run inside one batch is a view of the batch's
+   * copy (`arena` null; `batch` is the SortedRows it lives in, whose bitmap records its matches) --
+   * nothing is allocated per run, which is what #310 is about: with ~4-row runs the per-run object,
+   * bitmap and call machinery were the join. A run reaching a batch's edge is copied into its own
+   * arena with its own bitmap.
+   */
+  private final class RunCursor {
+    var columns: Array[VectorBuffers] = _
+    var keys: Array[VectorBuffers] = _
+    var offset: Int = 0
+    var rows: Int = 0
+    var arena: Arena = _
+    var batch: SortedRows = _
+    var keyIsNull: Boolean = false
+    private var ownMatched: MemorySegment = _
+
+    def setView(b: SortedRows, from: Int, to: Int): Unit = {
+      release()
+      columns = b.columns; keys = b.keys; offset = from; rows = to - from; arena = null; batch = b
+      keyIsNull = b.keyIsNull(from)
+    }
+    def setCopy(cols: Array[VectorBuffers], ks: Array[VectorBuffers], n: Int, a: Arena): Unit = {
+      release()
+      columns = cols; keys = ks; offset = 0; rows = n; arena = a; batch = null
+      keyIsNull = { var k = 0; var nul = false; while (k < numKeys && !nul) { nul = ks(k).isNull(0); k += 1 }; nul }
+    }
+    def setMatched(row: Int): Unit =
+      if (batch != null) batch.setMatched(offset + row)
+      else { if (ownMatched == null) ownMatched = Bitmap.allocate(arena, math.max(rows, 1)); Bitmap.set(ownMatched, row) }
+    def isMatched(row: Int): Boolean =
+      if (batch != null) batch.isMatched(offset + row) else ownMatched != null && Bitmap.isSet(ownMatched, row)
+    /** Releases a copied run's arena; a view owns nothing. */
+    def release(): Unit = { if (arena != null) { arena.close(); arena = null }; ownMatched = null; batch = null; columns = null }
+  }
 
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
@@ -218,17 +241,24 @@ private[vector] class VectorSortMergeJoinIterator(
   private var rightRows: SortedRows = _
   private var rightRunIdx = 0
   private var rightDone = false
-  private var current: RightRun = _
+  private val current = new RunCursor
+  /** Whether `current` holds a run (false once the right side is exhausted). */
+  private var haveRun = false
 
-  /** Advances to the right side's next run (null when exhausted). A run reaching a batch's edge continues into the next batch while the key is the same. */
-  private def nextRightRun(): RightRun = {
-    if (!ensureRightBatch()) return null
+  /** Advances `current` to the right side's next run; false when exhausted. A run reaching a batch's edge continues into the next batch while the key is the same. */
+  private def nextRightRun(): Boolean = {
+    if (candCount > 0 && (candRightCursor eq current)) flushCandidates()
+    current.release()
+    haveRun = false
+    if (!ensureRightBatch()) return false
     var from = rightRows.runStarts(rightRunIdx)
     var to = rightRows.runStarts(rightRunIdx + 1)
     if (to < rightRows.rows) {
-      // The common run, inside the batch: a view over the batch's copy, nothing allocated per run.
+      // The common run, inside the batch: cursor state over the batch's copy, nothing allocated.
       rightRunIdx += 1
-      return new RightRun(rightRows.columns, rightRows.keys, from, to - from, null)
+      current.setView(rightRows, from, to)
+      haveRun = true
+      return true
     }
     val arena = Arena.ofConfined() // consumed on the task thread; a shared arena's close is a handshake with every thread, ruinous per run
     val builders = rightRows.columns.map(c => new ColumnBuilder(arena, c.`type`(), to - from))
@@ -246,7 +276,9 @@ private[vector] class VectorSortMergeJoinIterator(
       more = to == rightRows.rows && ensureRightBatch() && sameKey(keyBuilders, rightRows)
       if (more) { from = 0; to = rightRows.runStarts(1) }
     }
-    new RightRun(builders.map(_.view()), keyBuilders.map(_.view()), 0, rows, arena)
+    current.setCopy(builders.map(_.view()), keyBuilders.map(_.view()), rows, arena)
+    haveRun = true
+    true
   }
 
   /** A batch with runs left to read, loading the next one when needed. */
@@ -353,12 +385,11 @@ private[vector] class VectorSortMergeJoinIterator(
 
   /** Every right run left once the left side is done: unmatched for right/full outer joins. */
   private def drainRight(): Unit = {
-    if (current == null && !rightDone) current = nextRightRun()
-    while (current != null) {
+    if (!haveRun && !rightDone) nextRightRun()
+    while (haveRun) {
       if (rightOuter) emitRightUnmatched(current)
       if (current.arena != null) releasingRight(current.columns)
-      current.close()
-      current = nextRightRun()
+      nextRightRun()
     }
     flushRows()
   }
@@ -366,7 +397,7 @@ private[vector] class VectorSortMergeJoinIterator(
   private def joinLeftBatch(batch: ColumnarBatch): Unit = {
     val rows = sortedRows(batch, spec.leftKeys)
     try {
-      if (current == null && !rightDone) current = nextRightRun()
+      if (!haveRun && !rightDone) nextRightRun()
       val leftMatched = if (leftOuter || leftOnly) Bitmap.allocate(rows.arena, math.max(rows.rows, 1)) else null
       var r = 0
       while (r < rows.numRuns) {
@@ -375,23 +406,23 @@ private[vector] class VectorSortMergeJoinIterator(
         var matchedRun = false
         if (!rows.keyIsNull(from)) {
           // Pass the right runs that sort before this key (unmatched for right/full outer).
-          var cmp = if (current == null) 1 else compareRuns(rows, from, current)
-          while (current != null && cmp < 0) {
+          var cmp = if (!haveRun) 1 else compareRuns(rows, from, current)
+          while (haveRun && cmp < 0) {
             if (rightOuter) emitRightUnmatched(current)
             if (current.arena != null) releasingRight(current.columns)
-            current.close()
-            current = nextRightRun()
-            cmp = if (current == null) 1 else compareRuns(rows, from, current)
+            nextRightRun()
+            cmp = if (!haveRun) 1 else compareRuns(rows, from, current)
           }
-          if (current != null && cmp == 0) {
+          if (haveRun && cmp == 0) {
             emitRun(rows, from, to, current, leftMatched)
             matchedRun = true
           }
         }
         // A left run with no equal right run: its rows leave padded, in place, for the outer types.
-        if (!matchedRun && leftOuter) { var i = from; while (i < to) { appendRow(rows, null, i, -1); i += 1 } }
+        if (!matchedRun && leftOuter) { flushCandidates(); var i = from; while (i < to) { appendRow(rows, null, i, -1); i += 1 } }
         r += 1
       }
+      flushCandidates() // the left batch's last pairs, before its matched bits are read or it is released
       if (leftOnly) emitLeftOnly(rows, leftMatched)
       flushRows() // the left batch is released below
     } finally {
@@ -400,8 +431,9 @@ private[vector] class VectorSortMergeJoinIterator(
   }
 
   /** The left run's key against the right run's: negative when the right run sorts first. */
-  private def compareRuns(left: SortedRows, leftRow: Int, right: RightRun): Int = {
+  private def compareRuns(left: SortedRows, leftRow: Int, right: RunCursor): Int = {
     if (right.keyIsNull) return -1 // a null run on the right never matches and sorts first (nulls first)
+    if (numKeys == 1) return RunMerge.compareKeys(right.keys(0), right.offset, left.keys(0), leftRow, false, true)
     var k = 0
     var c = 0
     while (k < numKeys && c == 0) {
@@ -419,8 +451,15 @@ private[vector] class VectorSortMergeJoinIterator(
    * padded with nulls for the outer types. Chunks hold whole left rows when the right run fits a
    * batch; a wider right run spreads one left row over several chunks.
    */
-  private def emitRun(left: SortedRows, from: Int, to: Int, right: RightRun, leftMatched: MemorySegment): Unit = {
+  private def emitRun(left: SortedRows, from: Int, to: Int, right: RunCursor, leftMatched: MemorySegment): Unit = {
     val perRow = right.rows
+    if (spec.condition.isDefined && (to - from).toLong * perRow <= OutputBatchSize) {
+      // A short run under a condition: its pairs join the candidate buffer and are gathered and
+      // tested with ~2000 other runs' pairs at once, instead of a 16-row Arrow batch per run.
+      queueCandidates(left, from, to, right, leftMatched)
+      return
+    }
+    flushCandidates()
     if (perRow <= OutputBatchSize) {
       val rowsPerChunk = math.max(1, OutputBatchSize / perRow)
       var i = from
@@ -450,25 +489,37 @@ private[vector] class VectorSortMergeJoinIterator(
    * condition, the matches recorded, then queued in order with the pads of the left rows nothing
    * survived for (when `padHere`). Returns whether any pair survived.
    */
-  private def emitChunk(left: SortedRows, right: RightRun, i0: Int, i1: Int, j0: Int, j1: Int, leftMatched: MemorySegment, padHere: Boolean): Boolean = {
+  private def emitChunk(left: SortedRows, right: RunCursor, i0: Int, i1: Int, j0: Int, j1: Int, leftMatched: MemorySegment, padHere: Boolean): Boolean = {
     val width = j1 - j0
     val count = (i1 - i0) * width
-    val leftIdx = new Array[Int](count)
-    val rightIdx = new Array[Int](count)
-    var p = 0
-    var i = i0
-    while (i < i1) {
-      var j = j0
-      while (j < j1) { leftIdx(p) = i; rightIdx(p) = j; p += 1; j += 1 }
-      i += 1
-    }
     spec.condition match {
       case None =>
-        recordMatches(leftIdx, rightIdx, count, null, leftMatched, right)
-        if (emitsRight) { flushRows(); pending.add(gather(left, right, spec.outputAttrs, leftIdx, rightIdx, count)) }
+        // Every pair survives: matches recorded and the pairs appended to the ordered row buffer,
+        // which gathers 8192 at a time -- with 4-row runs one gather then carries ~2000 runs' worth
+        // of pairs, where a gather per run built an Arrow batch of 4 rows.
+        var i = i0
+        while (i < i1) {
+          if (leftMatched != null) Bitmap.set(leftMatched, i)
+          var j = j0
+          while (j < j1) {
+            if (rightOuter) right.setMatched(j)
+            if (emitsRight) appendRow(left, right, i, j)
+            j += 1
+          }
+          i += 1
+        }
         true
       case Some(cond) =>
-        val joined = gather(left, right, spec.joinedAttrs, leftIdx, rightIdx, count)
+        val leftIdx = new Array[Int](count)
+        val rightIdx = new Array[Int](count)
+        var p = 0
+        var i = i0
+        while (i < i1) {
+          var j = j0
+          while (j < j1) { leftIdx(p) = i; rightIdx(p) = j; p += 1; j += 1 }
+          i += 1
+        }
+        val joined = gatherColumns(left, right.columns, spec.joinedAttrs, leftIdx, shifted(rightIdx, right.offset, count), count, conditionRefs)
         val (sel, survivors) = EvalContexts.withBatch(joined) { ctx =>
           val pred = cond.eval(ctx)
           val (s, n) = VectorExpr.selection(pred, ctx)
@@ -480,7 +531,7 @@ private[vector] class VectorSortMergeJoinIterator(
         }
         joined.close()
         val selected = (p: Int) => (sel(p >>> 6) & (1L << p)) != 0L
-        if (leftMatched != null || right.matched != null) {
+        if (leftMatched != null || rightOuter) {
           var q = 0
           while (q < count) {
             if (selected(q)) {
@@ -539,8 +590,12 @@ private[vector] class VectorSortMergeJoinIterator(
   private var bufRightCols: Array[VectorBuffers] = _
 
   /** Buffers one output row: left row `l` (or -1) of `left`, right row `r` (run-relative, or -1) of `right`. */
-  private def appendRow(left: SortedRows, right: RightRun, l: Int, r: Int): Unit = {
-    val rc = if (right == null || r < 0) null else right.columns
+  private def appendRow(left: SortedRows, right: RunCursor, l: Int, r: Int): Unit =
+    appendRowAbs(left, if (right == null || r < 0) null else right.columns, l, if (r < 0) -1 else r + right.offset)
+
+  /** As [[appendRow]] with the right row absolute over `rightCols`. */
+  private def appendRowAbs(left: SortedRows, rightCols: Array[VectorBuffers], l: Int, r: Int): Unit = {
+    val rc = if (r < 0) null else rightCols
     val ls = if (l < 0) null else left
     if (bufCount == OutputBatchSize
         || (ls != null && bufLeftRows != null && (ls ne bufLeftRows))
@@ -548,8 +603,79 @@ private[vector] class VectorSortMergeJoinIterator(
     if (ls != null) bufLeftRows = ls
     if (rc != null) bufRightCols = rc
     bufLeft(bufCount) = l
-    bufRight(bufCount) = if (r < 0) -1 else r + right.offset
+    bufRight(bufCount) = r
     bufCount += 1
+  }
+
+  // ------------------------------------------------------------ the candidate buffer (#310)
+  // Under a condition, short runs' pairs are collected here in output order and tested together:
+  // one gather of the joined columns and one predicate evaluation per 8192 pairs. A run's pairs
+  // never straddle a flush, so a left row's pad (outer types) is decided inside the flush that
+  // holds its pairs. Flushed before anything that must follow the pairs in Spark's order -- a pad
+  // for an unmatched left run, a passed right run's unmatched rows, the semi/anti emission, the
+  // end of the left batch -- and before a right source is released.
+
+  private val candLeft = new Array[Int](OutputBatchSize)
+  private val candRight = new Array[Int](OutputBatchSize) // absolute over candRightCols
+  private var candCount = 0
+  private var candLeftRows: SortedRows = _
+  private var candLeftMatched: MemorySegment = _
+  private var candRightCols: Array[VectorBuffers] = _
+  /** Where a right match is recorded: the batch the runs are views of, or the cursor holding a copied run. */
+  private var candRightBatch: SortedRows = _
+  private var candRightCursor: RunCursor = _
+
+  private def queueCandidates(left: SortedRows, from: Int, to: Int, right: RunCursor, leftMatched: MemorySegment): Unit = {
+    val n = (to - from) * right.rows
+    if (candCount + n > OutputBatchSize
+        || (candCount > 0 && ((left ne candLeftRows) || (right.columns ne candRightCols)))) flushCandidates()
+    candLeftRows = left
+    candLeftMatched = leftMatched
+    candRightCols = right.columns
+    candRightBatch = right.batch
+    candRightCursor = if (right.batch == null) right else null
+    var i = from
+    while (i < to) {
+      var j = 0
+      while (j < right.rows) { candLeft(candCount) = i; candRight(candCount) = right.offset + j; candCount += 1; j += 1 }
+      i += 1
+    }
+  }
+
+  private def flushCandidates(): Unit = if (candCount > 0) {
+    val count = candCount
+    val left = candLeftRows
+    val rightCols = candRightCols
+    val cond = spec.condition.get
+    val joined = gatherColumns(left, rightCols, spec.joinedAttrs, candLeft, candRight, count, conditionRefs)
+    val sel = EvalContexts.withBatch(joined) { ctx =>
+      val (s, _) = VectorExpr.selection(cond.eval(ctx), ctx)
+      val copy = new Array[Long](Bitmap.wordsFor(count))
+      var w = 0
+      while (w < copy.length) { copy(w) = Bitmap.wordAt(s, w, count); w += 1 }
+      copy
+    }
+    joined.close()
+    var q = 0
+    while (q < count) {
+      // One left row's pairs are contiguous: survivors in order, or its pad when none survived.
+      val l = candLeft(q)
+      var any = false
+      while (q < count && candLeft(q) == l) {
+        if ((sel(q >>> 6) & (1L << q)) != 0L) {
+          any = true
+          if (candLeftMatched != null) Bitmap.set(candLeftMatched, l)
+          if (rightOuter) {
+            if (candRightBatch != null) candRightBatch.setMatched(candRight(q)) else candRightCursor.setMatched(candRight(q))
+          }
+          if (emitsRight) appendRowAbs(left, rightCols, l, candRight(q))
+        }
+        q += 1
+      }
+      if (!any && leftOuter) appendRowAbs(left, null, l, -1)
+    }
+    candCount = 0
+    candLeftRows = null; candLeftMatched = null; candRightCols = null; candRightBatch = null; candRightCursor = null
   }
 
   private def flushRows(): Unit = if (bufCount > 0) {
@@ -560,32 +686,31 @@ private[vector] class VectorSortMergeJoinIterator(
   }
 
   /** Flushes the buffer if it references the given right columns (they are about to be released). */
-  private def releasingRight(cols: Array[VectorBuffers]): Unit = if (bufCount > 0 && (bufRightCols eq cols)) flushRows()
-
-  private def recordMatches(leftIdx: Array[Int], rightIdx: Array[Int], count: Int, sel: MemorySegment, leftMatched: MemorySegment, right: RightRun): Unit = {
-    if (leftMatched == null && !rightOuter) return
-    var p = 0
-    while (p < count) {
-      if (sel == null || Bitmap.isSet(sel, p)) {
-        if (leftMatched != null) Bitmap.set(leftMatched, leftIdx(p))
-        if (rightOuter) right.setMatched(rightIdx(p))
-      }
-      p += 1
-    }
+  private def releasingRight(cols: Array[VectorBuffers]): Unit = {
+    if (candCount > 0 && (candRightCols eq cols)) flushCandidates()
+    if (bufCount > 0 && (bufRightCols eq cols)) flushRows()
   }
 
   /** Left ++ right columns for the given pairs (right indices run-relative); a `-1` index pads the side with nulls. */
-  private def gather(left: SortedRows, right: RightRun, attrs: Array[(String, DataType)], leftIdx: Array[Int], rightIdx: Array[Int], count: Int): ColumnarBatch =
+  private def gather(left: SortedRows, right: RunCursor, attrs: Array[(String, DataType)], leftIdx: Array[Int], rightIdx: Array[Int], count: Int): ColumnarBatch =
     gatherColumns(left, if (right == null) null else right.columns, attrs, leftIdx, if (right == null) rightIdx else shifted(rightIdx, right.offset, count), count)
 
   /** As [[gather]] over the right columns directly, right indices absolute. */
-  private def gatherColumns(left: SortedRows, rightCols: Array[VectorBuffers], attrs: Array[(String, DataType)], leftIdx: Array[Int], rightIdx: Array[Int], count: Int): ColumnarBatch = {
+  private def gatherColumns(left: SortedRows, rightCols: Array[VectorBuffers], attrs: Array[(String, DataType)], leftIdx: Array[Int], rightIdx: Array[Int], count: Int): ColumnarBatch =
+    gatherColumns(left, rightCols, attrs, leftIdx, rightIdx, count, null)
+
+  /**
+   * As above; with `only` set, the ordinals not in it are placeholders the evaluation context never
+   * adapts (it adapts lanes lazily per ordinal), so a condition over two of thirty columns gathers two.
+   */
+  private def gatherColumns(left: SortedRows, rightCols: Array[VectorBuffers], attrs: Array[(String, DataType)], leftIdx: Array[Int], rightIdx: Array[Int], count: Int, only: Array[Boolean]): ColumnarBatch = {
     val columns = new Array[ColumnVector](attrs.length)
     var c = 0
     while (c < columns.length) {
       val (name, dt) = attrs(c)
       columns(c) =
-        if ((c < spec.leftWidth) != spec.swapped) {
+        if (only != null && !only(c)) Placeholder
+        else if ((c < spec.leftWidth) != spec.swapped) {
           // Spark's left side: the streamed rows, or the buffered run when the sides are swapped.
           val ordinal = if (spec.swapped) c - spec.leftWidth else c
           if (left == null) ArrowOutput.nulls(name, dt, count, allocator)
@@ -600,12 +725,45 @@ private[vector] class VectorSortMergeJoinIterator(
     new ColumnarBatch(columns, count)
   }
 
+  /** The joined ordinals the condition reads. */
+  private val conditionRefs: Array[Boolean] = spec.condition.map { cond =>
+    val refs = new Array[Boolean](spec.joinedAttrs.length)
+    def walk(e: VectorExpr): Unit = e match {
+      case io.sparkvector.spark.expr.ColumnRef(o, _) => refs(o) = true
+      case other => other.children.foreach(walk)
+    }
+    walk(cond)
+    refs
+  }.orNull
+
+  /** A column the condition does not read: never adapted, never touched. */
+  private object Placeholder extends ColumnVector(org.apache.spark.sql.types.NullType) {
+    private def no = throw new UnsupportedOperationException("a joined column the condition does not read")
+    override def close(): Unit = ()
+    override def hasNull: Boolean = no
+    override def numNulls: Int = no
+    override def isNullAt(rowId: Int): Boolean = no
+    override def getBoolean(rowId: Int): Boolean = no
+    override def getByte(rowId: Int): Byte = no
+    override def getShort(rowId: Int): Short = no
+    override def getInt(rowId: Int): Int = no
+    override def getLong(rowId: Int): Long = no
+    override def getFloat(rowId: Int): Float = no
+    override def getDouble(rowId: Int): Double = no
+    override def getArray(rowId: Int): org.apache.spark.sql.vectorized.ColumnarArray = no
+    override def getMap(ordinal: Int): org.apache.spark.sql.vectorized.ColumnarMap = no
+    override def getDecimal(rowId: Int, precision: Int, scale: Int): org.apache.spark.sql.types.Decimal = no
+    override def getUTF8String(rowId: Int): org.apache.spark.unsafe.types.UTF8String = no
+    override def getBinary(rowId: Int): Array[Byte] = no
+    override def getChild(ordinal: Int): ColumnVector = no
+  }
+
   /** A right run's rows without a match, the left side null (right and full outer joins). */
-  private def emitRightUnmatched(right: RightRun): Unit = {
-    val bits = right.matched
+  private def emitRightUnmatched(right: RunCursor): Unit = {
+    flushCandidates()
     var i = 0
     while (i < right.rows) {
-      if (bits == null || !Bitmap.isSet(bits, i)) appendRow(null, right, -1, i)
+      if (!right.isMatched(i)) appendRow(null, right, -1, i)
       i += 1
     }
   }
@@ -665,9 +823,8 @@ private[vector] class VectorSortMergeJoinIterator(
       closed = true
       if (emitted != null) { emitted.close(); emitted = null }
       while (!pending.isEmpty) pending.poll().close()
-      if (current != null) { current.close(); current = null }
+      current.release()
       if (rightRows != null) { rightRows.arena.close(); rightRows = null }
-      matchedArena.close()
       allocator.close()
     }
   }
