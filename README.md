@@ -92,7 +92,8 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.explainFallback.enabled` | log why each operator was left to Spark (default `false`) |
 
 JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forces a vector shape
-(the default is the platform's preferred one), `sparkvector.agg.interleave=1|2|4` sets how many
+(the default is the platform's preferred one), `sparkvector.platform=neon|sve|avx2|avx512` overrides the
+probed SIMD platform the kernels dispatch on (`docs/results.md`, "x86 kernel lab"), `sparkvector.agg.interleave=1|2|4` sets how many
 accumulator copies the grouped aggregation rotates through when `spark.vector.exec.strictFloatingPoint`
 is off (default 4; strict mode always uses one), `sparkvector.selection.minFraction` (default 0.5) is the
 surviving fraction below which a filter compacts instead of forwarding a selection, and
