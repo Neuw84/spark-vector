@@ -1388,8 +1388,44 @@ than either 256-bit AVX-512 row for the platform's own sake (masked operations t
 even when the mask comes from a compare). Decision: `MASK_REGISTERS` on AVX-512 at every width; the
 preferred width on this host is 512 anyway. NEON and AVX2 keep the broadcast form.
 
-Remaining in the loop: decision 2 (`compress` against the shuffle table and the bit walk at 256 and
-512, and the full-word bulk copy against a masked store), decision 3 (the 8-group masked-reduction
+### Decision 2: compaction
+
+The rule before the lab was `compress` only for the 16-lane species (512-bit int) and the 256-entry
+shuffle table for every species of 8 lanes or fewer, so on AVX-512 the long and double compactions
+at 512 bits and every compaction at 256 bits took the table. `CompactBenchmark` (rows per
+microsecond, `-wi 2 -i 3 -w 1 -r 1`, 1M rows; both forms on one build through the
+`sparkvector.platform` override, `avx512` = `compress`, `avx2` = the table; the last column is the JIT
+held at `-XX:UseAVX=2`, where `compress` does not exist and the table is the only form):
+
+| type, selectivity, nulls | 512 `compress` | 512 table | 256 `compress` | 256 table | AVX2 table |
+|---|---|---|---|---|---|
+| INT32 2% | 15116 | 15147 | 15156 | 15129 | 15091 |
+| INT32 2%, nulls | 8982 | 8989 | 9036 | 9003 | 9038 |
+| INT32 50% | 5501 | 5342 | 2909 | 2284 | 2465 |
+| INT32 50%, nulls | 4652 | 4657 | 2603 | 2240 | 2289 |
+| INT32 98% | 4945 | 5193 | 4474 | 3830 | 3822 |
+| INT32 98%, nulls | 3903 | 4250 | 3761 | 3207 | 3431 |
+| FLOAT64 2% | 7247 | 7326 | 6030 | 5864 | 5797 |
+| FLOAT64 2%, nulls | 5664 | 5635 | 4798 | 4629 | 4619 |
+| FLOAT64 50% | 2035 | 1594 | 1641 | 1385 | 1222 |
+| FLOAT64 50%, nulls | 2446 | 1946 | 1574 | 1262 | 1124 |
+| FLOAT64 98% | 3759 | 3262 | 2825 | 2568 | 2200 |
+| FLOAT64 98%, nulls | 3190 | 2828 | 2442 | 2230 | 1905 |
+
+Reading. The INT32 rows at 512 bits are 16 lanes, `compress` in both columns by construction, and
+agree within the error bars: the measurement's own sanity check. Where the two forms differ,
+`compress` wins on every dense selection: 8-lane doubles at 512 bits +28% at 50% (+26% with nulls)
+and +15% at 98% (+13%); at 256 bits on AVX-512VL, 8-lane ints +27% at 50% and +17% at 98%, 4-lane
+doubles +18% and +10%. At 2% the two forms tie because the sparse path (a scalar walk over the set
+bits of the selection word) serves both. The full-word bulk copy stays: the 98% rows are within reach
+of the 2% rows on ints only because most words are full and copied whole, and a masked store would
+replace a `memcpy` with a per-word instruction. Decision: `compress` wherever the platform has it
+(`Platform.NATIVE_COMPRESS`, AVX-512 and SVE), at every width and for every species; the table
+stays for the 8-lane species on NEON and AVX2, the scalar walk for the 2-lane species there. A
+second reading from the same table: compaction at 512 bits is 1.3-1.9x its 256-bit self on dense
+selections (INT32 50% 5501 against 2909), an early data point for decision 5.
+
+Remaining in the loop: decision 2's masked-store variant is not worth a run (above), decision 3 (the 8-group masked-reduction
 threshold and `interleave` at 8 and 16 lanes), decision 5 (512 against 256 as the default width, from
 TPC-H Q1/Q6 at SF10), decision 6 (gather) only if a profile shows it.
 
