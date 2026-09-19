@@ -109,6 +109,37 @@ Without `-Pcomet` the suites are excluded by their `CometTest` tag and the rest 
 Comet dependency. The Iceberg-over-Comet suite (`CometIcebergSuite`) carries both the `CometTest`
 and the `IcebergTest` tag and runs with `-Pcomet,iceberg`; see [iceberg.md](iceberg.md).
 
+## Mixed chains: Comet's operators above ours (#280)
+
+Comet below ours needs nothing new: a Comet native block is a columnar child like any other, and
+`CometVectorAdapter` reads its vectors zero-copy. Comet *above* ours cannot come from Comet's own
+rule, which runs first and never sees our operators, so our rule builds it (`mixedChains`, behind
+`spark.vector.comet.mixed.enabled`, default `false`): a Spark operator that was left to Spark and
+whose children are all ours is offered to Comet through the **sink leaf** -- Comet's
+`CometSinkPlaceHolder` over a one-child `CometUnionExec` over our `VectorToCometExec` -- and Comet's
+`CometExecRule` is applied to that subtree; the result is kept only when Comet planned the operator
+natively. The pieces are Comet's own classes, constructed reflectively (`CometMixedBridge`): the Scan
+proto comes from Comet's sink serde (`CometExchangeSink.convert`, with Comet's type checks), the union
+is the pass-through Comet's input walk recognises (`foreachUntilCometInput` lists Comet's own JVM
+operators, never a foreign node -- a placeholder directly over our export node planned but had no
+input at execution), and our batches reach native as `CometVector`s through Comet's
+`ColumnarBatchArrowReader`, a hand-over of the Arrow buffers without a copy. In the final plan Comet's
+block pass unwraps the placeholder, so a mixed plan reads `CometProject` / `CometUnion` /
+`VectorToComet` / ours.
+
+Rejected as the leaf: Comet's `spark.comet.sparkToColumnar` transition. It wraps leaf nodes only
+(`shouldApplySparkToColumnar`, "TODO: consider converting other intermediate operators") and its
+`SparkColumnarArrowReader` copies a Spark columnar batch value by value through `ArrowWriter`.
+
+Boundaries the pass keeps: an aggregate pair is never split across engines (Comet's final needs
+Comet's partial buffers, ours needs ours) -- for now no aggregate half moves at all, the pair as a
+unit is the next slice; exchanges are not offered; a selection is compacted by the export itself,
+dictionaries are decoded and INT64 decimals widened as for the shuffle (#279 measured both). The
+split between the engines is otherwise the two per-operator toggles: an operator ours refused or has
+switched off (`spark.vector.exec.<op>.enabled=false`) with Comet's `spark.comet.exec.<op>.enabled=true`
+goes to Comet. `CometMixedChainSuite` (`-Pcomet`) pins Comet's projection above our filter, ours above
+Comet's filter, today's plan with the key off, and an unsplit aggregate.
+
 ## Per-operator attribution against Comet
 
 The benchmark harness attributes time per operator for both engines (#279): our operators through
