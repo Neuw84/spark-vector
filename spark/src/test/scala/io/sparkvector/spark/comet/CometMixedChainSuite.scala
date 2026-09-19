@@ -27,6 +27,9 @@ class CometMixedChainSuite extends VectorQuerySuite {
   private def nodesNamed(df: org.apache.spark.sql.DataFrame, prefix: String) =
     PlanUtils.allNodes(finalPlan(df)).filter(_.getClass.getSimpleName.startsWith(prefix))
 
+  private def reasonsOf(df: org.apache.spark.sql.DataFrame): String =
+    org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) => s"${n.nodeName}: $r" }.mkString("; ")
+
   private def awaitReleased(): Unit = {
     val deadline = System.nanoTime() + 5_000_000_000L
     while (ArrowCData.liveExports() > 0 && System.nanoTime() < deadline) Thread.sleep(50)
@@ -63,12 +66,54 @@ class CometMixedChainSuite extends VectorQuerySuite {
     }
   }
 
-  test("an aggregate pair is not split across the engines", CometTest) {
+  test("Comet's partial aggregate above our filter when the buffers are compatible", CometTest) {
     withConf("spark.comet.exec.aggregate.enabled" -> "true", VectorConf.AggregateEnabled -> "false") {
-      // Both halves stay on one side: Comet's rule never saw our filter, so the pair is Spark's here,
-      // and the mixed pass leaves an aggregate alone (Comet's final needs Comet's partial buffers).
-      val df = checkVectorized("SELECT s, count(*), sum(d) FROM t WHERE i > 100 GROUP BY s", Seq(Filter))
-      assert(nodesNamed(df, "CometHashAggregate").isEmpty, finalPlan(df).treeString)
+      // sum, min, max and a non-decimal avg lay their buffers out the same way in Spark and in Comet
+      // (Comet's own list), so the partial goes to Comet over the leaf and the final, above Spark's
+      // shuffle, may be anyone's.
+      val df = checkVectorized("SELECT s, sum(d), max(i), min(l), avg(d2) FROM t WHERE i > 100 GROUP BY s", Seq(Filter))
+      val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) => s"$n: $r" }
+      assert(nodesNamed(df, "CometHashAggregate").nonEmpty, s"expected Comet's partial aggregate; reasons: ${reasons.mkString("; ")}\n${finalPlan(df).treeString}")
+      awaitReleased()
+    }
+  }
+
+  test("Comet's local limit, expand and union above our chains", CometTest) {
+    withConf("spark.comet.exec.localLimit.enabled" -> "true", VectorConf.LimitEnabled -> "false", VectorConf.AggregateEnabled -> "false") {
+      // A bare LIMIT plans as CollectLimit, whose Comet form needs Comet's shuffle (off here); a LIMIT
+      // under an aggregate plans a LocalLimit in our filter's stage, and that one Comet takes natively.
+      val df = checkVectorized("SELECT count(*) FROM (SELECT i FROM t WHERE i > 100 LIMIT 10)", Seq(Filter))
+      assert(nodesNamed(df, "CometLocalLimit").nonEmpty, s"expected Comet's local limit above our filter; reasons: ${reasonsOf(df)}\n${finalPlan(df).treeString}")
+    }
+    withConf("spark.comet.exec.expand.enabled" -> "true", VectorConf.ExpandEnabled -> "false", VectorConf.AggregateEnabled -> "false") {
+      val df = checkVectorized("SELECT s, b, sum(d) FROM t WHERE i > 100 GROUP BY s, b WITH ROLLUP", Seq(Filter))
+      assert(nodesNamed(df, "CometExpand").nonEmpty, s"expected Comet's expand above our filter:\n${finalPlan(df).treeString}")
+    }
+    withConf("spark.comet.exec.union.enabled" -> "true", VectorConf.UnionEnabled -> "false") {
+      val df = checkVectorized("SELECT i FROM t WHERE i > 100 UNION ALL SELECT i FROM t WHERE i < 50", Seq(Filter))
+      // Comet's union over two leaves (each a pass-through union over our export node).
+      assert(nodesOf[VectorToCometExec](df).size == 2, s"expected two leaves under Comet's union; reasons: ${reasonsOf(df)}\n${finalPlan(df).treeString}")
+      assert(nodesNamed(df, "CometUnion").nonEmpty, finalPlan(df).treeString)
+      awaitReleased()
+    }
+  }
+
+  test("the acceleration view counts both engines and the leaf as the bridge", CometTest) {
+    withConf(VectorConf.ProjectEnabled -> "false") {
+      val df = checkVectorized("SELECT i * 2 AS ii FROM t WHERE i > 100", Seq(Filter))
+      val accelerated = org.apache.spark.sql.vector.ui.PlanAcceleration.fromPlan(finalPlan(df))
+      val engines = accelerated.nodes.map(_.engine).toSet
+      assert(engines.contains(org.apache.spark.sql.vector.ui.Engine.Vector) && engines.contains(org.apache.spark.sql.vector.ui.Engine.Comet), engines.toString)
+      val bridges = accelerated.nodes.filter(_.engine == org.apache.spark.sql.vector.ui.Engine.Bridge)
+      assert(bridges.size == 2, s"the export node and the pass-through union are the bridge: ${accelerated.nodes.map(n => s"${n.name}=${n.engine}")}")
+      assert(accelerated.fullyAccelerated, accelerated.nodes.map(n => s"${n.name}=${n.engine}").toString)
+    }
+  }
+
+  test("an aggregate whose buffers differ between the engines stays where it is, with the reason", CometTest) {
+    withConf("spark.comet.exec.aggregate.enabled" -> "true", VectorConf.AggregateEnabled -> "false") {
+      // count is not on Comet's list of buffers it will share with Spark: the pair is not split.
+      checkFallback("SELECT s, count(*), sum(d) FROM t WHERE i > 100 GROUP BY s", Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]), "aggregate halves cannot be split across engines")
     }
   }
 }

@@ -38,6 +38,10 @@ public final class CometMixedBridge {
   private final Method execRuleApply;
   private final Class<?> nativeExecClass;
   private final Constructor<?> unionCtor;
+  private final Object serde;
+  private final Method allAggsMix;
+  private final Object explainInfo;
+  private final Method fallbackReasons;
   private final Object emptySeq;
 
   private CometMixedBridge(ClassLoader loader) throws ReflectiveOperationException {
@@ -55,6 +59,12 @@ public final class CometMixedBridge {
     nativeExecClass = Class.forName("org.apache.spark.sql.comet.CometNativeExec", false, loader);
     Class<?> union = Class.forName("org.apache.spark.sql.comet.CometUnionExec", false, loader);
     unionCtor = union.getConstructor(SparkPlan.class, scala.collection.immutable.Seq.class, scala.collection.immutable.Seq.class);
+    Class<?> serdeModule = Class.forName("org.apache.comet.serde.QueryPlanSerde$", true, loader);
+    serde = serdeModule.getField("MODULE$").get(null);
+    allAggsMix = serdeModule.getMethod("allAggsSupportMixedExecution", scala.collection.immutable.Seq.class);
+    Class<?> explain = Class.forName("org.apache.comet.ExtendedExplainInfo", false, loader);
+    explainInfo = explain.getDeclaredConstructor().newInstance();
+    fallbackReasons = explain.getMethod("getFallbackReasons", SparkPlan.class);
     emptySeq = scala.collection.immutable.Nil$.MODULE$;
   }
 
@@ -74,9 +84,44 @@ public final class CometMixedBridge {
     }
   }
 
+  /**
+   * Comet's own answer to whether these aggregate functions' intermediate buffers are laid out the same
+   * way by Spark and by Comet -- when they are, a partial on one engine and a final on the other is
+   * sound (sum, min, max, the bit aggregates and a non-decimal avg are; count and the decimal sums are
+   * not; the ones that are not are Comet's concern too, and its rule refuses a final over a foreign
+   * partial for them).
+   */
+  public boolean aggregatesMix(scala.collection.immutable.Seq<?> aggregateExpressions) {
+    try {
+      return (Boolean) allAggsMix.invoke(serde, aggregateExpressions);
+    } catch (ReflectiveOperationException e) {
+      return false;
+    }
+  }
+
+  /** Comet's fallback reasons on {@code plan}, one string each, after its rule declined an operator. */
+  @SuppressWarnings("unchecked")
+  public scala.collection.immutable.Seq<String> declineReasons(SparkPlan plan) {
+    try {
+      return (scala.collection.immutable.Seq<String>) fallbackReasons.invoke(explainInfo, plan);
+    } catch (ReflectiveOperationException e) {
+      return (scala.collection.immutable.Seq<String>) emptySeq;
+    }
+  }
+
   /** Whether {@code plan} is one of Comet's native operators (a native block or a sink placeholder). */
   public boolean isNative(SparkPlan plan) {
     return nativeExecClass.isInstance(plan);
+  }
+
+  /**
+   * Whether {@code plan} is any of Comet's operators: native ones, and its JVM sinks (union, coalesce,
+   * the limits, take-ordered), which are {@code CometExec} but not {@code CometNativeExec} and whose
+   * batches a native block above reads through Comet's Arrow reader.
+   */
+  public boolean isComet(SparkPlan plan) {
+    String name = plan.getClass().getName();
+    return name.startsWith("org.apache.spark.sql.comet.") || name.startsWith("org.apache.comet.");
   }
 
   /**

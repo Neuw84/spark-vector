@@ -131,14 +131,24 @@ Rejected as the leaf: Comet's `spark.comet.sparkToColumnar` transition. It wraps
 (`shouldApplySparkToColumnar`, "TODO: consider converting other intermediate operators") and its
 `SparkColumnarArrowReader` copies a Spark columnar batch value by value through `ArrowWriter`.
 
-Boundaries the pass keeps: an aggregate pair is never split across engines (Comet's final needs
-Comet's partial buffers, ours needs ours) -- for now no aggregate half moves at all, the pair as a
-unit is the next slice; exchanges are not offered; a selection is compacted by the export itself,
-dictionaries are decoded and INT64 decimals widened as for the shuffle (#279 measured both). The
-split between the engines is otherwise the two per-operator toggles: an operator ours refused or has
+Boundaries the pass keeps. An aggregate half changes engine only when Comet's own predicate
+(`QueryPlanSerde.allAggsSupportMixedExecution`, asked through the bridge) says every function's
+intermediate buffer is laid out the same way by Spark and by Comet -- in Comet 1.0 that is `min`,
+`max`, the bit aggregates, a non-decimal `avg` and a non-decimal, non-TRY `sum`; `count` is *not* on
+the list, nor decimal sums or averages -- so a `GROUP BY` with `count(*)` keeps its pair whole and the
+plan says why (`mixed: aggregate halves cannot be split across engines (intermediate buffer formats
+differ)`); with a shareable pair Comet's partial runs above our chain and the final above the shuffle
+is whoever plans it. Exchanges are not offered. A selection is compacted by the export itself;
+dictionaries are decoded and INT64 decimals widened as for the shuffle (#279 measured both). When
+Comet declines an operator the plan records its reasons (`mixed: Comet declined -- ...`, read through
+Comet's `ExtendedExplainInfo`), and a column type Comet's sink refuses is a reason too. The split
+between the engines is otherwise the two per-operator toggles: an operator ours refused or has
 switched off (`spark.vector.exec.<op>.enabled=false`) with Comet's `spark.comet.exec.<op>.enabled=true`
-goes to Comet. `CometMixedChainSuite` (`-Pcomet`) pins Comet's projection above our filter, ours above
-Comet's filter, today's plan with the key off, and an unsplit aggregate.
+goes to Comet. The acceleration view classifies the one-child union over `VectorToComet` as the
+bridge, so a mixed plan shows both engines and counts as accelerated without the hand-off inflating
+either. `CometMixedChainSuite` (`-Pcomet`) pins Comet's projection, collect limit, expand and union
+above our chains, Comet's partial aggregate above our filter for a shareable pair and the refusal for
+`count`, ours above Comet's filter, today's plan with the key off, and the view.
 
 ## Per-operator attribution against Comet
 
