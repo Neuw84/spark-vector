@@ -43,8 +43,6 @@ spec:
             - --destination=378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:IMAGE_TAG
             - --cache=true
             - --cache-repo=378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/cache
-            - --snapshot-mode=redo
-            - --use-new-run
             - --compressed-caching=false
             - --verbosity=info
           env:
