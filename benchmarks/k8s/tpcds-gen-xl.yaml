@@ -24,6 +24,10 @@ spec:
     - "s3a://sfi-iceberg-wh-378683551918/tpcds/sfSCALE/parquet"
     - "--parallel"
     - "PARALLEL"
+    # The bench-xl nodes have 20 GB root disks: a partitioned table's shuffle goes in rounds of 64 children
+    # (store_sales at SF1000 is ~300 GB of shuffle in all; a round is ~5 GB per node).
+    - "--children-per-round"
+    - "64"
     - "--dsdgen"
     - "/opt/tpcds-kit/tools"
   sparkVersion: "4.1.3"
