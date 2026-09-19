@@ -352,12 +352,21 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         if (VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(conf, session.sparkContext.getConf.get("spark.shuffle.manager", "sort")))
           useCometShuffle(withMixed, conf)
         else withMixed
+      // Our own columnar exchange (#288) where Comet's did not take the shuffle: the module is
+      // optional on the classpath and needs its shuffle manager, so the hook is reflective.
+      val withOurShuffles =
+        if (VectorConf.shuffleEnabled(conf) && VectorShuffle.isAvailable(session.sparkContext.getConf))
+          withShuffles.transformUp {
+            case s: ShuffleExchangeExec if s.child.supportsColumnar && VectorShuffle.supports(s.outputPartitioning, s.child.output) =>
+              VectorShuffle.exchange(s)
+          }
+        else withShuffles
       if (VectorConf.explainFallback(conf)) {
-        VectorFallback.reasons(withShuffles).foreach { case (node, reason) =>
+        VectorFallback.reasons(withOurShuffles).foreach { case (node, reason) =>
           logInfo(s"spark-vector fallback for ${node.nodeName}: $reason")
         }
       }
-      withShuffles
+      withOurShuffles
     }
   }
 

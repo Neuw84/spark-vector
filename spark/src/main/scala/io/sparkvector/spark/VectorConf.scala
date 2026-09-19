@@ -13,6 +13,8 @@ object VectorConf {
   val FinalAggregateEnabled = "spark.vector.exec.aggregate.final.enabled"
   val SelectionEnabled = "spark.vector.exec.selection.enabled"
   val CometShuffleEnabled = "spark.vector.comet.shuffle.enabled"
+  /** Our own columnar shuffle exchange (#288; needs the shuffle module and its shuffle manager). */
+  val ShuffleEnabled = "spark.vector.shuffle.enabled"
   val SortEnabled = "spark.vector.exec.sort.enabled"
   val SortRunRows = "spark.vector.sort.runRows"
   val TakeOrderedEnabled = "spark.vector.exec.takeOrdered.enabled"
@@ -49,6 +51,7 @@ object VectorConf {
   def finalAggregateEnabled(conf: SQLConf): Boolean = bool(conf, FinalAggregateEnabled, default = true)
   /** Feed Comet's native shuffle from spark-vector operators when Comet's shuffle is configured. */
   def cometShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometShuffleEnabled, default = true)
+  def shuffleEnabled(conf: SQLConf): Boolean = bool(conf, ShuffleEnabled, default = false)
   /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   /** Convert SortExec over a columnar child (in-memory, no spill). */

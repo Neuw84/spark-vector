@@ -120,13 +120,29 @@ object PartitionedIpcFile {
   final class PartitionReader(path: Path, partition: Int, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
     private val file = FileChannel.open(path, StandardOpenOption.READ)
     private val index = readIndex(file)
-    private val reader: ArrowStreamReader =
+    private val inner =
       if (index.lengths(partition) == 0) null
-      else new ArrowStreamReader(new RangeChannel(file, index.offsets(partition), index.lengths(partition)), allocator)
-    private var nextBatch: ColumnarBatch = _
-    private var done = reader == null
+      else new StreamReader(new RangeChannel(file, index.offsets(partition), index.lengths(partition)), allocator)
 
     def rows: Long = index.rows(partition)
+    override def hasNext: Boolean = inner != null && inner.hasNext
+    override def next(): ColumnarBatch = { if (inner == null) throw new NoSuchElementException; inner.next() }
+    override def close(): Unit = {
+      if (inner != null) inner.close()
+      file.close()
+    }
+  }
+
+  /**
+   * One IPC stream (a partition's bytes, wherever they come from: a file range, a fetched block, a
+   * Flight stream's file) read back as the operators' column vectors.
+   */
+  final class StreamReader(channel: ReadableByteChannel, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
+    private val reader: ArrowStreamReader = new ArrowStreamReader(channel, allocator)
+    private var nextBatch: ColumnarBatch = _
+    /** The batch last handed out: the consumers do not close their input, so it is closed when the next one is produced (or at close). */
+    private var last: ColumnarBatch = _
+    private var done = false
 
     private def advance(): Unit = if (!done && nextBatch == null) {
       if (!reader.loadNextBatch()) {
@@ -165,13 +181,15 @@ object PartitionedIpcFile {
       if (!hasNext) throw new NoSuchElementException
       val b = nextBatch
       nextBatch = null
+      if (last != null) last.close()
+      last = b
       b
     }
 
     override def close(): Unit = {
       if (nextBatch != null) { nextBatch.close(); nextBatch = null }
-      if (reader != null) reader.close()
-      file.close()
+      if (last != null) { last.close(); last = null }
+      reader.close()
     }
   }
 }

@@ -157,8 +157,12 @@ final class PartitionedIpcWriter(
     }
   }
 
-  /** Ends every stream, writes the data file with its index and footer, and returns the index. */
-  def finish(): PartitionedIpcFile.Index = {
+  /**
+   * Ends every stream and writes the data file: the streams back to back and, when `withFooter`,
+   * the index footer. Under Spark's shuffle the lengths go to the block resolver's index file
+   * instead and the data file must be exactly the streams, so the writer there passes `false`.
+   */
+  def finish(withFooter: Boolean = true): PartitionedIpcFile.Index = {
     val out = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
     try {
       val offsets = new Array[Long](numPartitions)
@@ -187,8 +191,10 @@ final class PartitionedIpcWriter(
         p += 1
       }
       val index = PartitionedIpcFile.Index(offsets, lengths, rowsPerPartition)
-      val footer = ByteBuffer.wrap(PartitionedIpcFile.encodeIndex(index))
-      while (footer.hasRemaining) out.write(footer)
+      if (withFooter) {
+        val footer = ByteBuffer.wrap(PartitionedIpcFile.encodeIndex(index))
+        while (footer.hasRemaining) out.write(footer)
+      }
       out.force(false)
       index
     } finally out.close()
