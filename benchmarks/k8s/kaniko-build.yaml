@@ -2,7 +2,8 @@
 # context (no file leaves the machine that applies this), builds benchmarks/k8s/Dockerfile -- the
 # Maven build of our jars and tpcds-kit happen inside -- and pushes to ECR with the credentials of
 # the pod's service account (IRSA: the role needs ecr:GetAuthorizationToken and push on the
-# repository; the ecr-login credential helper in the Kaniko image picks them up).
+# repository; the ecr-login credential helper in the Kaniko image picks them up). The repository is
+# private, so the clone reads a GitHub token from the Secret `github-read` (key `token`).
 #
 #   sed -e 's|GIT_REF|refs/heads/main|' -e 's|IMAGE_TAG|main-2026-09-19|' benchmarks/k8s/kaniko-build.yaml | kubectl apply -f -
 #   kubectl -n bench logs -f job/spark-vector-image-build
@@ -47,6 +48,13 @@ spec:
             - --compressed-caching=false
             - --verbosity=info
           env:
+            # The repository is private: a fine-grained token with read-only Contents on it, in a Secret
+            #   kubectl -n bench create secret generic github-read --from-literal=token=github_pat_...
+            - name: GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-read
+                  key: token
             - name: AWS_REGION
               value: us-east-1
             - name: AWS_SDK_LOAD_CONFIG
