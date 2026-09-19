@@ -473,6 +473,20 @@ private[vector] class VectorHashJoinIterator(
   /** The candidate pairs of the current batch: streamed row and build row (-1 pads an outer join). */
   private var probeIdx = new Array[Int](OutputBatchSize)
   private var buildIdx = new Array[Int](OutputBatchSize)
+  /** The pairs of one chunk that passed an inner join's condition (#332). */
+  private var survProbeIdx = new Array[Int](0)
+  private var survBuildIdx = new Array[Int](0)
+
+  /** The joined ordinals the condition reads; the others are never gathered for it. */
+  private val conditionRefs: Array[Boolean] = spec.condition.map { cond =>
+    val refs = new Array[Boolean](spec.joinedAttrs.length)
+    def walk(e: VectorExpr): Unit = e match {
+      case io.sparkvector.spark.expr.ColumnRef(o, _) => refs(o) = true
+      case other => other.children.foreach(walk)
+    }
+    walk(cond)
+    refs
+  }.orNull
   /** The pairs an outer join with a condition emits, rewritten from the candidates. */
   private var outProbeIdx = new Array[Int](0)
   private var outBuildIdx = new Array[Int](0)
@@ -691,7 +705,7 @@ private[vector] class VectorHashJoinIterator(
     var from = 0
     while (from < count) {
       val to = math.min(count, from + OutputBatchSize)
-      val joined = gather(ctx, spec.joinedAttrs, probeIdx, buildIdx, from, to)
+      val joined = gather(ctx, spec.joinedAttrs, probeIdx, buildIdx, from, to, conditionRefs)
       try {
         EvalContexts.withBatch(joined) { jctx =>
           val (sel, _) = VectorExpr.selection(cond.eval(jctx), jctx)
@@ -795,15 +809,19 @@ private[vector] class VectorHashJoinIterator(
   private def buildOrdinal(c: Int): Int = if (spec.buildIsLeft) c else c - streamedWidth
   private def streamedOrdinal(c: Int): Int = if (spec.buildIsLeft) c - numBuildCols else c
 
-  /** Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). */
-  private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int): ColumnarBatch = {
+  /**
+   * Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). With `only`,
+   * the columns it does not mark are [[PlaceholderColumn]]: the batch is for the condition alone.
+   */
+  private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int, only: Array[Boolean] = null): ColumnarBatch = {
     val columns = new Array[ColumnVector](attrs.length)
     var probeRows: Array[Int] = null // the probe ids of this batch, for streamed columns with no lane (passed through, #273)
     var c = 0
     while (c < columns.length) {
       val (name, dt) = attrs(c)
       columns(c) =
-        if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
+        if (only != null && !only(c)) PlaceholderColumn
+        else if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
         else if (TypeMapping.hasLane(dt)) ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
         else {
           if (probeRows == null) probeRows = java.util.Arrays.copyOfRange(probe, from, to)
@@ -814,40 +832,46 @@ private[vector] class VectorHashJoinIterator(
     new ColumnarBatch(columns, to - from)
   }
 
-  /** Gathers `count` pairs into output batches of at most [[OutputBatchSize]] rows. */
+  /**
+   * Gathers `count` pairs into output batches of at most [[OutputBatchSize]] rows. With `filter`
+   * (an inner join with a condition) the condition is evaluated first, over a gather of only the
+   * columns it reads, and the output columns are gathered for the surviving pairs alone: a
+   * many-to-many key with a selective residual (TPC-DS q72, 10^9 candidate pairs of which a few
+   * survive) otherwise materialises every pair's full row before dropping it (#332).
+   */
   private def flush(ctx: EvalContext, probe: Array[Int], bld: Array[Int], count: Int, filter: Boolean): Unit = {
     var from = 0
     while (from < count) {
       val to = math.min(count, from + OutputBatchSize)
-      val joined = gather(ctx, spec.outputAttrs, probe, bld, from, to)
-      if (filter) filtered(joined, spec.condition.get).foreach(pending.add)
-      else pending.add(joined)
+      if (filter) {
+        val k = survivors(ctx, spec.condition.get, probe, bld, from, to)
+        if (k > 0) pending.add(gather(ctx, spec.outputAttrs, survProbeIdx, survBuildIdx, 0, k))
+      } else pending.add(gather(ctx, spec.outputAttrs, probe, bld, from, to))
       from = to
     }
   }
 
-  /** Applies the non-equi condition to a joined batch, which is consumed unless every row passes. */
-  private def filtered(joined: ColumnarBatch, cond: VectorExpr): Option[ColumnarBatch] = {
-    val result: Either[Unit, Option[ColumnarBatch]] = EvalContexts.withBatch(joined) { ctx =>
-      val pred = cond.eval(ctx)
-      val (sel, count) = VectorExpr.selection(pred, ctx)
-      if (count == ctx.numRows) Left(())
-      else if (count == 0) Right(None)
-      else {
-        val columns = new Array[ColumnVector](spec.outputAttrs.length)
-        var c = 0
-        while (c < columns.length) {
-          val (name, dt) = spec.outputAttrs(c)
-          columns(c) = compactOrPass(ctx, c, name, dt, sel, count)
-          c += 1
+  /** The pairs of `[from, to)` that pass the condition, compacted into `survProbeIdx` / `survBuildIdx`; their count. */
+  private def survivors(ctx: EvalContext, cond: VectorExpr, probe: Array[Int], bld: Array[Int], from: Int, to: Int): Int = {
+    val n = to - from
+    if (survProbeIdx.length < n) { survProbeIdx = new Array[Int](n); survBuildIdx = new Array[Int](n) }
+    val narrow = gather(ctx, spec.joinedAttrs, probe, bld, from, to, conditionRefs)
+    try {
+      EvalContexts.withBatch(narrow) { jctx =>
+        val (sel, passing) = VectorExpr.selection(cond.eval(jctx), jctx)
+        var k = 0
+        if (passing == n) {
+          System.arraycopy(probe, from, survProbeIdx, 0, n); System.arraycopy(bld, from, survBuildIdx, 0, n); k = n
+        } else if (passing > 0) {
+          var j = 0
+          while (j < n) {
+            if (Bitmap.isSet(sel, j)) { survProbeIdx(k) = probe(from + j); survBuildIdx(k) = bld(from + j); k += 1 }
+            j += 1
+          }
         }
-        Right(Some(new ColumnarBatch(columns, count)))
+        k
       }
-    }
-    result match {
-      case Left(_) => Some(joined)
-      case Right(out) => joined.close(); out
-    }
+    } finally narrow.close()
   }
 
   override def close(): Unit = {

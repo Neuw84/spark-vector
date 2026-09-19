@@ -709,7 +709,7 @@ private[vector] class VectorSortMergeJoinIterator(
     while (c < columns.length) {
       val (name, dt) = attrs(c)
       columns(c) =
-        if (only != null && !only(c)) Placeholder
+        if (only != null && !only(c)) PlaceholderColumn
         else if ((c < spec.leftWidth) != spec.swapped) {
           // Spark's left side: the streamed rows, or the buffered run when the sides are swapped.
           val ordinal = if (spec.swapped) c - spec.leftWidth else c
@@ -736,27 +736,6 @@ private[vector] class VectorSortMergeJoinIterator(
     refs
   }.orNull
 
-  /** A column the condition does not read: never adapted, never touched. */
-  private object Placeholder extends ColumnVector(org.apache.spark.sql.types.NullType) {
-    private def no = throw new UnsupportedOperationException("a joined column the condition does not read")
-    override def close(): Unit = ()
-    override def hasNull: Boolean = no
-    override def numNulls: Int = no
-    override def isNullAt(rowId: Int): Boolean = no
-    override def getBoolean(rowId: Int): Boolean = no
-    override def getByte(rowId: Int): Byte = no
-    override def getShort(rowId: Int): Short = no
-    override def getInt(rowId: Int): Int = no
-    override def getLong(rowId: Int): Long = no
-    override def getFloat(rowId: Int): Float = no
-    override def getDouble(rowId: Int): Double = no
-    override def getArray(rowId: Int): org.apache.spark.sql.vectorized.ColumnarArray = no
-    override def getMap(ordinal: Int): org.apache.spark.sql.vectorized.ColumnarMap = no
-    override def getDecimal(rowId: Int, precision: Int, scale: Int): org.apache.spark.sql.types.Decimal = no
-    override def getUTF8String(rowId: Int): org.apache.spark.unsafe.types.UTF8String = no
-    override def getBinary(rowId: Int): Array[Byte] = no
-    override def getChild(ordinal: Int): ColumnVector = no
-  }
 
   /** A right run's rows without a match, the left side null (right and full outer joins). */
   private def emitRightUnmatched(right: RunCursor): Unit = {
