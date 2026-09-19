@@ -121,7 +121,7 @@ public final class AggKernels {
    * setting is bit-identical to Spark for doubles across the grouped and ungrouped paths.
    */
   public static double sumDouble(VectorBuffers a) {
-    if (GroupedAccumulators.INTERLEAVE == 1) {
+    if (GroupedAccumulators.SEQUENTIAL_SUMS) {
       return sumDoubleSequential(a);
     }
     MemorySegment d = a.data();
@@ -166,7 +166,7 @@ public final class AggKernels {
    * {@code spark.vector.exec.strictFloatingPoint}.
    */
   public static double sumDoubleFrom(VectorBuffers a, double start, boolean strict) {
-    return strict || GroupedAccumulators.INTERLEAVE == 1 ? sumDoubleSequential(a, start) : start + sumDouble(a);
+    return strict || GroupedAccumulators.SEQUENTIAL_SUMS ? sumDoubleSequential(a, start) : start + sumDouble(a);
   }
 
   /**

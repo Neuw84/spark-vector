@@ -30,8 +30,27 @@ public final class GroupedAccumulators {
    */
   public static final int INTERLEAVE = interleave();
 
+  /**
+   * Whether the property was set to 1 explicitly: the legacy meaning of {@code
+   * sparkvector.agg.interleave=1} is "Spark's order everywhere", which the ungrouped double sums
+   * in {@link AggKernels} honour too. The platform default of one copy (below) does not carry that
+   * meaning: it only picks the faster scatter loop.
+   */
+  public static final boolean SEQUENTIAL_SUMS = "1".equals(System.getProperty("sparkvector.agg.interleave"));
+
+  /**
+   * The copies the scatter loops rotate through when the property is unset. Measured in the x86
+   * lab (#283, {@code docs/results.md} "Decision 3"): on AVX-512 one copy is 45-70% faster than
+   * four from 4 groups up -- the only range where the scatter runs, the masked path owning the
+   * groups below -- and four copies win only at 1-2 groups. The NEON measurement above (+40% for
+   * four copies at 4 groups) stands for the other platforms.
+   */
+  static int defaultInterleave() {
+    return Platform.NAME.equals(Platform.AVX512) ? 1 : 4;
+  }
+
   private static int interleave() {
-    int v = Integer.getInteger("sparkvector.agg.interleave", 4);
+    int v = Integer.getInteger("sparkvector.agg.interleave", defaultInterleave());
     if (v != 1 && v != 2 && v != 4) {
       throw new IllegalArgumentException("sparkvector.agg.interleave must be 1, 2 or 4, got " + v);
     }

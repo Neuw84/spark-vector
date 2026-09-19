@@ -16,9 +16,20 @@ import java.lang.foreign.MemorySegment;
  */
 public final class GroupAssignment {
 
-  /** Maximum number of groups for the masked-reduction path; scatter above it. */
+  /**
+   * Maximum number of groups for the masked-reduction path; scatter above it. The default is the
+   * crossover the lab measured (#283, {@code docs/results.md} "Decision 3"): 4 on AVX-512 at both
+   * widths -- the masked path is never slower than the scatter up to 4 groups in either rounding
+   * mode and loses from 6 in Spark's-order mode -- and 1 on the 2-lane NEON species, where the
+   * masked path lost to the scatter from 2 groups. The 4-lane AVX2 species is unmeasured and keeps
+   * the NEON value.
+   */
   public static final int LOW_CARDINALITY =
-      Integer.getInteger("sparkvector.agg.maskPathMaxGroups", Species.DOUBLE_LANES >= 8 ? 8 : 1);
+      Integer.getInteger("sparkvector.agg.maskPathMaxGroups", defaultMaskPathMaxGroups());
+
+  static int defaultMaskPathMaxGroups() {
+    return Platform.MASK_REGISTERS && Species.DOUBLE_LANES >= 4 ? 4 : 1;
+  }
 
 
   private final int[] ids;
