@@ -170,17 +170,26 @@ object PartitionedIpcFile {
    * Flight stream's file) read back as the operators' column vectors.
    */
   final class StreamReader(channel: ReadableByteChannel, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
-    private val reader: ArrowStreamReader = new ArrowStreamReader(channel, allocator)
+    private val input = new PeekableChannel(channel)
+    private var reader: ArrowStreamReader = new ArrowStreamReader(input, allocator)
     private var nextBatch: ColumnarBatch = _
     /** The batch last handed out: the consumers do not close their input, so it is closed when the next one is produced (or at close). */
     private var last: ColumnarBatch = _
     private var done = false
 
-    private def advance(): Unit = if (!done && nextBatch == null) {
-      if (!reader.loadNextBatch()) {
+    /**
+     * Past one stream's end-of-stream marker, another stream may follow: the channel is the
+     * concatenation of several map outputs' streams when a shuffle service aggregated a partition
+     * (future work) -- each carries its own schema and dictionaries, so a fresh reader starts there.
+     */
+    private def advance(): Unit = while (!done && nextBatch == null) {
+      if (reader.loadNextBatch()) {
+        nextBatch = toBatch(reader.getVectorSchemaRoot, id => reader.lookup(id).getVector.asInstanceOf[VarCharVector], allocator)
+      } else if (input.atEnd) {
         done = true
       } else {
-        nextBatch = toBatch(reader.getVectorSchemaRoot, id => reader.lookup(id).getVector.asInstanceOf[VarCharVector], allocator)
+        reader.close(false)
+        reader = new ArrowStreamReader(input, allocator)
       }
     }
 
@@ -200,5 +209,34 @@ object PartitionedIpcFile {
       if (last != null) { last.close(); last = null }
       reader.close()
     }
+  }
+
+  /** A channel that can tell whether any byte is left, by reading one ahead. */
+  private final class PeekableChannel(inner: ReadableByteChannel) extends ReadableByteChannel {
+    private var peeked: Int = -1 // -1 none, 0..255 a byte held back
+    private var eof = false
+
+    def atEnd: Boolean = {
+      if (peeked < 0 && !eof) {
+        val one = ByteBuffer.allocate(1)
+        var n = 0
+        while (n == 0) n = inner.read(one)
+        if (n < 0) eof = true else peeked = one.get(0) & 0xff
+      }
+      peeked < 0
+    }
+
+    override def read(dst: ByteBuffer): Int = {
+      if (!dst.hasRemaining) return 0
+      if (peeked >= 0) {
+        dst.put(peeked.toByte)
+        peeked = -1
+        val more = if (dst.hasRemaining) inner.read(dst) else 0
+        1 + (if (more < 0) 0 else more)
+      } else inner.read(dst)
+    }
+
+    override def isOpen: Boolean = inner.isOpen
+    override def close(): Unit = inner.close()
   }
 }

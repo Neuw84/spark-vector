@@ -88,7 +88,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
 | `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288; needs the `spark-vector-shuffle` jar and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`; default `false` while the series lands) |
-| `spark.vector.shuffle.backend` | how a reducer fetches a remote map output: `flight` (default; one Flight server per executor) or `block` (Spark's block transfer) |
+| `spark.vector.shuffle.backend` | how a reducer fetches a remote map output: `flight` (default; one Flight server per executor -- for executors that stay up for the job), `block` (Spark's block transfer), or the class name of a `VectorShuffleBackend` from another jar |
 | `spark.vector.shuffle.flushBytes` | serialised bytes a map task keeps in memory per reduce partition before spilling to a temporary file (default `1m`) |
 | `spark.vector.shuffle.flight.bindHost`, `spark.vector.shuffle.flight.threads` | the Flight server's bind address (default: the executor's host name) and serving threads (default: the core count, at least 4) |
 | `spark.vector.ui.enabled` | attach the Vector Acceleration tab to the Spark UI (default `true`) |
@@ -101,6 +101,12 @@ refuses to start at all when auth is on but no secret is available); without `sp
 as open as Spark's own block transfer in that configuration. TLS for the Flight server is not wired yet:
 with `spark.ssl.rpc.enabled` the server refuses to start rather than serve in the clear -- use
 `spark.vector.shuffle.backend=block` there until it lands.
+
+Both backends assume executors that stay up for the job: a lost executor loses its map outputs and
+Spark recomputes them. Disposable executors need a push-based shuffle service such as Apache
+Celeborn, which is future work, not part of #288 -- the `VectorShuffleBackend` seam (a commit hook
+per map output, a `read` a service-backed backend overrides whole, a stream reader that decodes
+several map outputs' streams concatenated) is where it plugs in.
 
 JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forces a vector shape
 (the default is the platform's preferred one), `sparkvector.platform=neon|sve|avx2|avx512` overrides the

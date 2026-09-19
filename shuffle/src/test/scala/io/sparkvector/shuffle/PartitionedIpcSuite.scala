@@ -155,6 +155,41 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 4, batches = Seq((500, true), (500, false), (500, true)), flushBytes = 1024)
   }
 
+  test("the stream reader decodes several map outputs' streams concatenated, each with its own schema and dictionaries") {
+    // What an aggregated partition from a shuffle service holds (future work): map output A's stream for
+    // partition p, then map output B's. Dictionaries differ between the two.
+    val dir = Files.createTempDirectory("svipc")
+    val paths = Seq(dir.resolve("a.ipc"), dir.resolve("b.ipc"))
+    val expected = mutable.ArrayBuffer.empty[Row]
+    try {
+      paths.zip(Seq((70, true), (90, false))).foreach { case (path, (n, dict)) =>
+        val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20)
+        val arena = Arena.ofConfined()
+        try {
+          val (b, rows) = batch(n, arena, dict)
+          try { writer.write(b, new Array[Int](n)); expected ++= rows } finally b.close()
+          writer.finish()
+        } finally { arena.close(); writer.close() }
+      }
+      val indexes = paths.map { p =>
+        val ch = java.nio.channels.FileChannel.open(p, java.nio.file.StandardOpenOption.READ)
+        try PartitionedIpcFile.readIndex(ch) finally ch.close()
+      }
+      val bytes = paths.zip(indexes).map { case (p, ix) =>
+        val all = Files.readAllBytes(p); java.util.Arrays.copyOfRange(all, ix.offsets(0).toInt, (ix.offsets(0) + ix.lengths(0)).toInt)
+      }
+      val channel = java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(bytes.reduce(_ ++ _)))
+      val reader = new PartitionedIpcFile.StreamReader(channel, allocator)
+      try {
+        val got = mutable.ArrayBuffer.empty[Row]
+        while (reader.hasNext) got ++= read(reader.next())
+        assert(got === expected)
+      } finally reader.close()
+    } finally {
+      paths.foreach(Files.deleteIfExists); Files.deleteIfExists(dir)
+    }
+  }
+
   test("a partition with no rows reads as empty and one partition takes everything") {
     roundTrip(numPartitions = 1, batches = Seq((50, true)), flushBytes = 1L << 20)
     roundTrip(numPartitions = 64, batches = Seq((3, false)), flushBytes = 1L << 20)

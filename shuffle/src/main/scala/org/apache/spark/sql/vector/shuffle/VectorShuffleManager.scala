@@ -105,7 +105,10 @@ final class VectorShuffleManager(conf: SparkConf) extends ShuffleManager {
       case other => sort.getReader(other, startMapIndex, endMapIndex, startPartition, endPartition, context, metrics)
     }
 
-  override def unregisterShuffle(shuffleId: Int): Boolean = sort.unregisterShuffle(shuffleId)
+  override def unregisterShuffle(shuffleId: Int): Boolean = {
+    VectorShuffleBackend(conf).unregisterShuffle(shuffleId)
+    sort.unregisterShuffle(shuffleId)
+  }
   override def shuffleBlockResolver: ShuffleBlockResolver = sort.shuffleBlockResolver
   override def stop(): Unit = sort.stop()
 }
@@ -195,6 +198,7 @@ final class VectorShuffleWriter(
         writer.close()
         lengths = index.lengths
         resolver.writeMetadataFileAndCommit(handle.shuffleId, mapId, lengths, Array.emptyLongArray, tmp)
+        VectorShuffleBackend(SparkEnv.get.conf).mapOutputCommitted(handle.shuffleId, mapId, dataFile, lengths)
         metrics.incBytesWritten(lengths.sum)
         metrics.incRecordsWritten(rows)
         Some(MapStatus(blockManager.shuffleServerId, lengths, mapId))
@@ -217,10 +221,10 @@ object VectorShuffleWriter {
 }
 
 /**
- * The reduce side of slice 2: every map output's bytes for the reduce partitions come from the block
- * manager -- the local resolver's file segment when the map ran here, Spark's block transfer
- * otherwise (the interim remote path; slice 3 replaces it with a Flight `DoGet` against the same
- * files) -- and each is an IPC stream decoded by [[PartitionedIpcFile.StreamReader]].
+ * The reduce side: the map outputs' non-empty blocks for the reduce partitions, each an IPC stream
+ * decoded by [[PartitionedIpcFile.StreamReader]], from wherever the configured
+ * [[VectorShuffleBackend]] gets them -- the local file when the map ran here, a Flight `DoGet` or
+ * Spark's block transfer otherwise.
  */
 final class VectorShuffleReader(
     handle: VectorShuffleHandle,
@@ -242,28 +246,10 @@ final class VectorShuffleReader(
       open.asScala.foreach(c => try c.close() catch { case _: Exception => })
       allocator.close()
     }
-    val local = env.blockManager.blockManagerId
-    val useFlight = flight.FlightShuffle.backend(env.conf) == "flight"
-    val streams: Iterator[Iterator[ColumnarBatch] with AutoCloseable] = blocksByAddress.iterator.flatMap { case (address, blocks) =>
-      val ids = blocks.collect { case (id, size, _) if size > 0 => id }.toIndexedSeq
-      if (ids.isEmpty) Iterator.empty
-      else if (address.executorId == local.executorId) {
-        ids.iterator.map { id =>
-          metrics.incLocalBlocksFetched(1)
-          val buf = env.blockManager.getLocalBlockData(id)
-          metrics.incLocalBytesRead(buf.size())
-          VectorShuffleReader.blockStream(buf, allocator)
-        }
-      } else if (useFlight) {
-        val location = flight.FlightRegistry.locationOf(address.executorId)
-        ids.iterator.map { case ShuffleBlockId(shuffleId, mapId, reduceId) =>
-          metrics.incRemoteBlocksFetched(1)
-          new flight.FlightBlockStream(location, shuffleId, mapId, reduceId, env.conf, allocator, metrics)
-        }
-      } else {
-        VectorShuffleReader.fetchRemote(address, ids, metrics).map { case (_, buf) => VectorShuffleReader.blockStream(buf, allocator) }
-      }
+    val nonEmpty = blocksByAddress.map { case (address, blocks) =>
+      address -> blocks.collect { case (id: ShuffleBlockId, size, _) if size > 0 => (id, size) }.toIndexedSeq
     }
+    val streams = VectorShuffleBackend(env.conf).read(nonEmpty, allocator, metrics)
     streams.flatMap { reader =>
       open.add(reader)
       new Iterator[Product2[Int, ColumnarBatch]] {
