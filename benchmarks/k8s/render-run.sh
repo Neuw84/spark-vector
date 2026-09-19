@@ -70,6 +70,7 @@ cat <<EOF
   sparkVersion: "4.1.3"
   sparkConf:
     spark.kubernetes.executor.deleteOnTermination: "true"
+    spark.kubernetes.authenticate.executor.serviceAccountName: "$SERVICE_ACCOUNT"
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://sfi-iceberg-wh-378683551918/spark-events"
     spark.hadoop.fs.s3a.connection.maximum: "200"
