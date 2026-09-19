@@ -1,0 +1,87 @@
+# TPC-DS data generation at SF1000 (#247): the same job as tpcds-gen.yaml, sized for the
+# sfi-iceberg-bench `bench-xl` node group (m5.4xlarge, 16 vCPU / 64 GiB, empty otherwise): one executor
+# of 14 cores per node, eight nodes. Scale the group first, and back to zero after:
+#   aws eks update-nodegroup-config --region us-east-1 --cluster-name sfi-iceberg-bench --nodegroup-name bench-xl --scaling-config minSize=0,maxSize=12,desiredSize=8
+#   sed -e 's|SCALE|1000|g' -e 's|IMAGE_TAG|<tag>|' -e 's|PARALLEL|512|' benchmarks/k8s/tpcds-gen-xl.yaml | kubectl apply -f -
+#   kubectl -n bench get sparkapplication tpcds-gen-sfSCALE -w
+#   kubectl -n bench logs -f tpcds-gen-sfSCALE-driver | grep tpcds-gen
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: tpcds-gen-sfSCALE
+  namespace: bench
+spec:
+  type: Scala
+  mode: cluster
+  image: 378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:IMAGE_TAG
+  imagePullPolicy: IfNotPresent
+  mainClass: io.sparkvector.benchmarks.TpcdsGenRunner
+  mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
+  arguments:
+    - "--scale"
+    - "SCALE"
+    - "--out"
+    - "s3a://sfi-iceberg-wh-378683551918/tpcds/sfSCALE/parquet"
+    - "--parallel"
+    - "PARALLEL"
+    - "--dsdgen"
+    - "/opt/tpcds-kit/tools"
+  sparkVersion: "4.1.3"
+  sparkConf:
+    spark.sql.adaptive.enabled: "true"
+    # TPCDSSchema declares char/varchar columns; written as STRING, like the local generator's tables.
+    spark.sql.legacy.charVarcharAsString: "true"
+    spark.sql.parquet.compression.codec: "zstd"
+    spark.sql.files.maxRecordsPerFile: "0"
+    spark.hadoop.fs.s3a.committer.name: "magic"
+    spark.hadoop.fs.s3a.committer.magic.enabled: "true"
+    spark.sql.sources.commitProtocolClass: "org.apache.spark.internal.io.cloud.PathOutputCommitProtocol"
+    spark.sql.parquet.output.committer.class: "org.apache.spark.internal.io.cloud.BindingParquetOutputCommitter"
+    spark.hadoop.fs.s3a.fast.upload: "true"
+    spark.hadoop.fs.s3a.connection.maximum: "200"
+    spark.kubernetes.executor.deleteOnTermination: "true"
+    spark.driver.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
+    spark.executor.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
+  restartPolicy:
+    type: Never
+  driver:
+    cores: 1
+    memory: "3g"
+    serviceAccount: sfi-engine
+    labels:
+      app: tpcds-gen
+    nodeSelector:
+      workload: "spark-xl"
+  executor:
+    instances: 8
+    cores: 14
+    memory: "40g"
+    memoryOverhead: "12g"
+    labels:
+      app: tpcds-gen
+    nodeSelector:
+      workload: "spark-xl"
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
