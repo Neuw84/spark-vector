@@ -574,6 +574,12 @@ into these rather than adding special cases to operators.
   on our classpath (Comet keeps `org.apache.arrow.c.*` unshaded but with shaded signatures, so the
   classes collide), maven-shade relocation (Comet's JNI looks classes up by literal name), and a
   bulk-copy bridge (replaced by the zero-copy one).
+- Mixed chains (#280): Comet above ours is our rule's doing (`mixedChains`, `spark.vector.comet.mixed.enabled`,
+  default off) -- the sink leaf `CometSinkPlaceHolder(scanOp, chain, CometUnionExec(chain, output,
+  Seq(VectorToCometExec(chain))))` built reflectively in `CometMixedBridge`, then Comet's `CometExecRule`
+  applied to the parent subtree. Rejected, do not retry: `sparkToColumnar` (leaf-only, copies) and a
+  placeholder directly over our export node (Comet's input walk ignores foreign nodes: `None.get` in
+  `buildNativeContext`). Aggregate pairs are not offered yet (the pair must move as a unit).
 - The hybrid planning study (#279, `docs/results.md`) is the evidence for #280/#281: Comet's
   operator wins by more than twice the crossing on the many-group hash aggregate (but the wall clock
   there is Spark's row shuffle, #288), the wide-decimal reduction and the broadcast-join probe; ours
@@ -740,8 +746,8 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 278 Spark tests (250 without the Comet and Iceberg profiles;
-the two Iceberg suites contribute 18, the Comet ones 10). If a change lowers either number, explain why in the commit.
+Current counts: 176 kernel tests, 283 Spark tests with the Comet and Iceberg profiles (259 with
+Iceberg alone; the Comet suites contribute 24, `CometMixedChainSuite` 4 of them). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 

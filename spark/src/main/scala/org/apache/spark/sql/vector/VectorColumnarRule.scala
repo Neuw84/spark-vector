@@ -7,7 +7,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
-import io.sparkvector.spark.comet.CometBatchBridge
+import io.sparkvector.spark.comet.{CometBatchBridge, CometMixedBridge}
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
 import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GenerateExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
 import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
@@ -333,10 +333,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           }
       }
       val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
+      val withMixed = if (VectorConf.cometMixedEnabled(conf)) mixedChains(withSelections) else withSelections
       val withShuffles =
         if (VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(conf, session.sparkContext.getConf.get("spark.shuffle.manager", "sort")))
-          useCometShuffle(withSelections, conf)
-        else withSelections
+          useCometShuffle(withMixed, conf)
+        else withMixed
       if (VectorConf.explainFallback(conf)) {
         VectorFallback.reasons(withShuffles).foreach { case (node, reason) =>
           logInfo(s"spark-vector fallback for ${node.nodeName}: $reason")
@@ -345,6 +346,43 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       withShuffles
     }
   }
+
+  /**
+   * Mixed chains (#280): a Spark operator left to Spark whose children are ours goes to Comet's native
+   * operator when Comet can plan it -- our chain ends in the leaf Comet's native block reads from
+   * ([[CometMixedBridge.leaf]]: Comet's sink placeholder over a [[VectorToCometExec]]), and Comet's own
+   * rule builds the operator above it. Comet's rule ran before ours and never saw our operators, so
+   * this is the only way a Comet operator ends up above ours; the split is the two engines' per-operator
+   * toggles (an operator ours refused, or `spark.vector.exec.<op>.enabled=false`, with
+   * `spark.comet.exec.<op>.enabled=true`). Two boundaries the planner keeps: an aggregate pair stays on
+   * one engine (Comet's final needs Comet's partial buffers, ours needs ours), and a selection is
+   * compacted by the export itself. Comet's fallback reasons, when it declines, are its own explain's.
+   */
+  private def mixedChains(plan: SparkPlan): SparkPlan = {
+    val bridge = CometMixedBridge.tryCreate()
+    if (bridge == null) plan
+    else {
+      def ours(p: SparkPlan): Boolean = p.isInstanceOf[VectorPlan] || p.isInstanceOf[VectorToCometExec]
+      plan.transformUp {
+        case p if !ours(p) && !bridge.isNative(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
+            p.children.nonEmpty && p.children.forall(ours) && !splitsAggregatePair(p) =>
+          val leaves = p.children.map(c => bridge.leaf(c, VectorToCometExec(c)))
+          if (leaves.exists(_.isEmpty)) p
+          else {
+            val converted = bridge.convertAbove(session, p.withNewChildren(leaves.map(_.get)))
+            if (bridge.isNative(converted)) converted else p
+          }
+      }
+    }
+  }
+
+  /**
+   * An aggregate never goes to Comet on its own: Comet's final needs Comet's partial buffers and ours
+   * needs ours, so a pair must change engine together -- the partial over our chain and the final
+   * over the exchange in one decision -- which this pass does not do yet (#280, the pair is the next
+   * slice). Until then every aggregate half stays where the bottom-up transform left it.
+   */
+  private def splitsAggregatePair(p: SparkPlan): Boolean = p.isInstanceOf[HashAggregateExec]
 
   /**
    * An exchange fed by one of our operators becomes Comet's native shuffle over a
