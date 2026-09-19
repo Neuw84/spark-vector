@@ -143,7 +143,7 @@ object VectorShuffleExchangeExec {
       override def getPartition(key: Any): Int = 0 // the writer assigns rows, not Spark
     }
     val keyed: RDD[Product2[Int, ColumnarBatch]] = rdd.mapPartitionsInternal(_.map(b => (0, b)))
-    new VectorShuffleDependency(keyed, partitioner, schema, spec, ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics))
+    new VectorShuffleDependency(keyed, partitioner, schema, spec, ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics), dataSize)
   }
 }
 

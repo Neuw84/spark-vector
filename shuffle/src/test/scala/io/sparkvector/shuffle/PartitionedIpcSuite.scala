@@ -101,11 +101,12 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  private def roundTrip(numPartitions: Int, batches: Seq[(Int, Boolean)], flushBytes: Long): Unit = {
+  private def roundTrip(numPartitions: Int, batches: Seq[(Int, Boolean)], flushBytes: Long, batchRows: Int = 8192, bufferBytes: Long = 64L << 20): Unit = {
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val expected = Array.fill(numPartitions)(mutable.ArrayBuffer.empty[Row])
-    val writer = new PartitionedIpcWriter(schema, numPartitions, allocator, path, flushBytes)
+    val writer = new PartitionedIpcWriter(schema, numPartitions, allocator, path, flushBytes,
+      Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), batchRows, 1L << 20, bufferBytes)
     try {
       batches.foreach { case (n, dictStrings) =>
         val arena = Arena.ofConfined()
@@ -188,6 +189,15 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally {
       paths.foreach(Files.deleteIfExists); Files.deleteIfExists(dir)
     }
+  }
+
+  test("slices of several input batches, dictionary and plain strings mixed, become one record batch with one merged dictionary") {
+    // 8192-row record batches over 3 partitions: every partition holds slices of all six inputs until finish.
+    roundTrip(numPartitions = 3, batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)), flushBytes = 1L << 20)
+    // batchRows = 150 forces flushes mid-way: single-slice and multi-slice record batches alternate in one stream.
+    roundTrip(numPartitions = 3, batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)), flushBytes = 1L << 20, batchRows = 150)
+    // A tiny task-wide buffer: the fullest partition is written out whenever the cap is passed.
+    roundTrip(numPartitions = 5, batches = Seq((500, true), (500, false), (500, true)), flushBytes = 1L << 20, bufferBytes = 4096)
   }
 
   test("a partition with no rows reads as empty and one partition takes everything") {

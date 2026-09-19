@@ -86,7 +86,7 @@ object FlightShuffle extends Logging {
       val (shuffleId, mapId, reduce) = parseTicket(ticket)
       val buf = resolver().getBlockData(ShuffleBlockId(shuffleId, mapId, reduce), None)
       val in = Channels.newChannel(buf.createInputStream())
-      val reader = new ArrowStreamReader(in, allocator)
+      val reader = new ArrowStreamReader(in, allocator, org.apache.arrow.compression.CommonsCompressionFactory.INSTANCE)
       try {
         var started = false
         while (reader.loadNextBatch()) {
@@ -264,6 +264,7 @@ final class FlightBlockStream(
     s
   }
   private var nextBatch: org.apache.spark.sql.vectorized.ColumnarBatch = _
+  private var types: Array[org.apache.spark.sql.types.DataType] = _
   private var last: org.apache.spark.sql.vectorized.ColumnarBatch = _
   private var done = false
 
@@ -272,8 +273,9 @@ final class FlightBlockStream(
     else {
       val root = stream.getRoot
       metrics.incRemoteBytesRead(root.getFieldVectors.asScala.map(_.getBufferSize.toLong).sum)
+      if (types == null) types = io.sparkvector.shuffle.PartitionedIpcFile.sparkTypes(root)
       nextBatch = io.sparkvector.shuffle.PartitionedIpcFile.toBatch(
-        root, id => stream.getDictionaryProvider.lookup(id).getVector.asInstanceOf[org.apache.arrow.vector.VarCharVector], allocator)
+        root, id => stream.getDictionaryProvider.lookup(id).getVector.asInstanceOf[org.apache.arrow.vector.VarCharVector], allocator, types)
     }
   }
 

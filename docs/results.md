@@ -340,6 +340,97 @@ this crew leaves it to the maintainer with the two readings it could take. The b
 `spark.vector.exec.sortMergeJoin.enabled=true` reads as `auto` since #287, and the TPC-DS harness's
 `vector` configuration runs under `auto`.
 
+### The columnar shuffle (#288): TPC-H SF10, the row shuffle versus ours
+
+`vector` is the plugin over Spark's row shuffle -- `ColumnarToRowExec` above every shuffled
+operator, `RowToColumnarExec` below its consumer; `vector-shuffle` is the same plugin with
+`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` and
+`spark.vector.shuffle.enabled=true`, every exchange above our operators `VectorShuffleExchangeExec`
+over Arrow IPC files (zstd bodies, 8192-row record batches, dictionary strings) with the Arrow Flight
+data plane in place (all reads are local in this one-JVM run). One session per configuration,
+`local[8]`, 8 GB heap, 8 shuffle partitions, 3 measured iterations after 1 warm-up (a study run in a
+scratch results directory, not the committed report's 5 + 7 protocol), median in ms;
+`accelerated` counts the plan's operators that are ours. Every query's checksum equals the row
+shuffle's.
+
+| Query | vector | vector-shuffle | ratio | accelerated (vector) | accelerated (ours) |
+|---|---|---|---|---|---|
+| Q1 | 1219 | 1154 | 0.95 | 4/7 | 7/7 |
+| Q2 | 2047 | 1861 | 0.91 | 32/45 | 35/45 |
+| Q3 | 4449 | 2699 | 0.61 | 12/17 | 16/17 |
+| Q4 | 3199 | 1684 | 0.53 | 8/13 | 13/13 |
+| Q5 | 6977 | 5885 | 0.84 | 20/30 | 27/30 |
+| Q6 | 600 | 587 | 0.98 | 4/5 | 5/5 |
+| Q7 | 7099 | 5662 | 0.80 | 18/28 | 25/28 |
+| Q8 | 3091 | 2692 | 0.87 | 26/38 | 33/38 |
+| Q9 | 5568 | 4881 | 0.88 | 19/29 | 26/29 |
+| Q10 | 3127 | 3108 | 0.99 | 15/21 | 20/21 |
+| Q11 | 849 | 805 | 0.95 | 0/1 | 0/1 |
+| Q12 | 2397 | 1355 | 0.57 | 7/13 | 12/12 |
+| Q13 | 2825 | 2149 | 0.76 | 8/13 | 13/13 |
+| Q14 | 979 | 879 | 0.90 | 7/10 | 10/10 |
+| Q15 | 2677 | 2274 | 0.85 | 8/11 | 10/11 |
+| Q16 | 1241 | 876 | 0.71 | 11/18 | 17/18 |
+| Q17 | 5446 | 4610 | 0.85 | 13/18 | 16/18 |
+| Q18 | 8372 | 4674 | 0.56 | 20/29 | 27/29 |
+| Q19 | 1206 | 1390 | 1.15 | 7/11 | 10/11 |
+| Q20 | 1655 | 1903 | 1.15 | 21/32 | 27/32 |
+| Q21 | 38904 | 10515 | 0.27 | 20/30 | 25/27 |
+| Q22 | 1243 | 834 | 0.67 | 5/10 | 10/10 |
+| **22 queries** | **105169** | **62477** | **0.59** | | |
+
+Twenty of twenty-two are faster, the total is 0.59x, and 0.78x without Q21. The wins come from two
+places. Where the exchange used to sit between two of our operators, the row conversion pair is gone
+and the operator above reads Arrow batches straight off the wire (Q1 and Q6 are now whole-plan
+accelerated, 7/7 and 5/5, though their shuffles are too small for it to show). Where the plan has
+shuffled joins, the statistics changed them: with `dataSize` reported the way Spark does (the
+uncompressed size), `spark.vector.exec.sortMergeJoin.mode=auto` now sees build sides that fit and
+plans hash joins where the row shuffle's estimates made it keep the merge joins -- Q21's two
+`VectorSortMergeJoinExec` (the #310 per-run cost, 271 s of task time in the q21 analysis) became
+`VectorShuffledHashJoinExec`, 38.9 s to 10.5 s; Q3, Q4, Q12, Q18 and Q22 follow the same pattern
+between 0.53x and 0.67x. Q19 and Q20 are 1.15x slower and are the honest residual, and it is not
+the operators: their per-operator times are equal or lower under our shuffle (Q19's final aggregate
+4.26 s vs 5.15 s, its filter 2.52 s vs 2.88 s). The difference is garbage collection -- Q20's GC time
+is 1168 ms against 304 ms, Q19's 765 against 656 -- on queries whose shuffles are small (5-13 MB)
+and whose wall time is short enough for it to show. Our path allocates on the heap where Spark's
+does not: the writer serialises each partition's stream into a heap `ByteArrayOutputStream` (growth
+copies, a copy per spill), the reader decodes a local file segment through an `InputStream` channel
+(heap chunks copied into Arrow memory), and zstd stages through JNI buffers. Writing the streams to
+the spill channel directly and reading local segments through the block's mapped `nioByteBuffer`
+are the follow-ups; neither changes the format.
+
+What the measurement found, in the order the runs exposed it -- every one general, none visible
+under `local[4]` unit tests:
+
+1. The exchange never fed its `dataSize` metric, so AQE saw every one of our shuffle stages as 0
+   bytes and turned every shuffled join into a broadcast join (first run: Q3 12.8 s vs 4.3 s, Q7
+   22 s vs 7 s). Every map task now adds what it wrote.
+2. Raw Arrow IPC wrote 1.8x the bytes of Spark's lz4-compressed rows (Q3: 1008 MB vs 551 MB).
+   Record-batch bodies are zstd-compressed (`spark.vector.shuffle.compression`); Arrow's own lz4
+   codec is commons-compress pure Java and an order of magnitude slower -- Q3 crawled for fourteen
+   minutes under it -- so zstd is the default and lz4 is documented as the slow option. Q3 now
+   writes 247 MB.
+3. One record batch per (input batch, partition): 512 rows at 8 partitions, 20 at 200, and the
+   per-message costs (Arrow object churn, metadata, a compression call per buffer) made shuffled
+   joins 2x slower after fixes 1 and 2. The writer now holds each partition's compacted slices and
+   writes 8192-row record batches with one merged dictionary (`spark.vector.shuffle.batchRows`,
+   `batchBytes`, `bufferBytes`). Q3 went from 8.3 s to 4.0 s, below the row shuffle.
+4. The task-level shuffle read metrics showed zero bytes: Spark's reader merges them in its
+   completion iterator and the executor only merges on heartbeats, so ours merges them at task
+   completion. A test now asserts the stage's bytes read equal the bytes written.
+5. `dataSize` as the compressed file bytes made AQE broadcast sides three times the size it would
+   for Spark (Q14: a 45 MB side broadcast, 2.4x slower). It is the uncompressed Arrow size now, as
+   Spark's is its rows' pre-compression size.
+6. Q14 stayed 2.1x slower: its shuffled hash join took 5.7 s instead of 285 ms because
+   `ArrowOutput.gather` decoded a dictionary-encoded string column whole -- one string append per
+   row -- before gathering. It gathers through the codes now; the join is back to 287 ms and Q14 to
+   0.90x.
+
+Not measured here: remote fetches (this run is one JVM; `FlightShuffleClusterSuite` covers the
+cross-executor path functionally), TPC-DS, and a real cluster. Known gaps: no TLS on the Flight
+server, one `DoGet` per map output block, and both backends assume executors that stay up -- a
+push-based shuffle service is future work (AGENTS.md 3.10, 7).
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 `lineitem` generated by DuckDB (decimals as doubles; SF1: 6,001,215 rows, 207 MB of Parquet in 11

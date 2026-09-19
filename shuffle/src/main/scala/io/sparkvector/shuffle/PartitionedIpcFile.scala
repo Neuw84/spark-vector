@@ -10,6 +10,7 @@ import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector}
+import org.apache.arrow.compression.CommonsCompressionFactory
 import org.apache.arrow.vector.ipc.ArrowStreamReader
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, Field, FieldType, Schema}
@@ -139,14 +140,19 @@ object PartitionedIpcFile {
    * reader for later batches -- is copied (small by construction), and the wrappers are the operators'
    * own column vector classes.
    */
-  def toBatch(root: org.apache.arrow.vector.VectorSchemaRoot, dictionary: Long => VarCharVector, allocator: BufferAllocator): ColumnarBatch = {
+  /** The Spark type of every field, parsed once per stream (`toBatch` takes it: parsing the JSON per batch showed in profiles). */
+  def sparkTypes(root: org.apache.arrow.vector.VectorSchemaRoot): Array[DataType] =
+    root.getSchema.getFields.asScala.map(sparkType).toArray
+
+  def toBatch(root: org.apache.arrow.vector.VectorSchemaRoot, dictionary: Long => VarCharVector, allocator: BufferAllocator,
+      types: Array[DataType] = null): ColumnarBatch = {
     val n = root.getRowCount
     val fields = root.getSchema.getFields
     val columns = new Array[ColumnVector](fields.size())
     var c = 0
     while (c < columns.length) {
       val field = fields.get(c)
-      val dt = sparkType(field)
+      val dt = if (types != null) types(c) else sparkType(field)
       val source = root.getVector(c)
       val moved = source.getField.createVector(allocator)
       source.makeTransferPair(moved).transfer()
@@ -171,8 +177,9 @@ object PartitionedIpcFile {
    */
   final class StreamReader(channel: ReadableByteChannel, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
     private val input = new PeekableChannel(channel)
-    private var reader: ArrowStreamReader = new ArrowStreamReader(input, allocator)
+    private var reader: ArrowStreamReader = new ArrowStreamReader(input, allocator, CommonsCompressionFactory.INSTANCE)
     private var nextBatch: ColumnarBatch = _
+    private var types: Array[DataType] = _
     /** The batch last handed out: the consumers do not close their input, so it is closed when the next one is produced (or at close). */
     private var last: ColumnarBatch = _
     private var done = false
@@ -184,12 +191,13 @@ object PartitionedIpcFile {
      */
     private def advance(): Unit = while (!done && nextBatch == null) {
       if (reader.loadNextBatch()) {
-        nextBatch = toBatch(reader.getVectorSchemaRoot, id => reader.lookup(id).getVector.asInstanceOf[VarCharVector], allocator)
+        if (types == null) types = sparkTypes(reader.getVectorSchemaRoot)
+        nextBatch = toBatch(reader.getVectorSchemaRoot, id => reader.lookup(id).getVector.asInstanceOf[VarCharVector], allocator, types)
       } else if (input.atEnd) {
         done = true
       } else {
         reader.close(false)
-        reader = new ArrowStreamReader(input, allocator)
+        reader = new ArrowStreamReader(input, allocator, CommonsCompressionFactory.INSTANCE)
       }
     }
 

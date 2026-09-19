@@ -24,6 +24,11 @@
       <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
     </dependency>
     <dependency>
+      <!-- #288: the columnar shuffle (its own jar in a deployment, as here on the benchmark classpath). -->
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-shuffle_${scala.binary.version}</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.scala-lang</groupId>
       <artifactId>scala-library</artifactId>
       <scope>provided</scope>
