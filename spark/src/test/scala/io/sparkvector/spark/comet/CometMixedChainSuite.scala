@@ -99,6 +99,54 @@ class CometMixedChainSuite extends VectorQuerySuite {
     }
   }
 
+  test("a Comet sink executed directly above a chain rooted in our join (two children)", CometTest) {
+    // Comet 1.0's CometUnionExec reads its partitioning through originalPlan.withNewChildren(children):
+    // the pass-through's originalPlan must take one child, or a chain rooted in a join asserts (TPC-H q2).
+    withConf("spark.comet.exec.union.enabled" -> "true", VectorConf.UnionEnabled -> "false") {
+      val df = checkVectorized(
+        "SELECT a.i FROM t a JOIN t b ON a.i = b.i WHERE a.d > 0.5 AND b.l IS NOT NULL UNION ALL SELECT i FROM t WHERE i < 50",
+        Seq(Filter))
+      assert(nodesNamed(df, "CometUnion").nonEmpty, s"reasons: ${reasonsOf(df)}\n${finalPlan(df).treeString}")
+      assert(nodesOf[VectorToCometExec](df).size == 2, finalPlan(df).treeString)
+      awaitReleased()
+    }
+  }
+
+  test("decimals cross the seam with Spark's results (TPC-H q11/q15/q17/q18 shapes, #281)", CometTest) {
+    // decimal(12,2) and decimal(15,2) as in the benchmark's decimal schema: a product projected by Comet above
+    // our filter and summed by ours; a Comet filter over a decimal; a decimal compared after the crossing.
+    spark.range(0, 20000).selectExpr("cast(id as int) as i", "cast(id % 997 as decimal(12,2)) / 7 as m",
+      "cast((id % 89) as decimal(15,2)) * 1.5 as n", "if(id % 10 = 0, null, concat('g', id % 40)) as g")
+      .repartition(3).write.mode("overwrite").parquet(newTempPath("comet-mixed/dec"))
+    spark.read.parquet(newTempPath("comet-mixed/dec")).createOrReplaceTempView("dec")
+    withConf(VectorConf.ProjectEnabled -> "false") {
+      checkVectorized("SELECT g, sum(m * (1 - n / 100)), avg(m), max(n) FROM dec WHERE i > 100 GROUP BY g", Seq(Filter))
+      checkVectorized("SELECT sum(m) FROM dec WHERE i > 100 AND m * 2 > 50", Seq(Filter))
+      checkVectorized("SELECT g, sum(m) AS s FROM dec WHERE i > 100 GROUP BY g HAVING sum(m) > 1000", Seq(Filter))
+    }
+    withConf("spark.comet.exec.filter.enabled" -> "true", VectorConf.FilterEnabled -> "false") {
+      checkVectorized("SELECT g, sum(m + n), count(*) FROM dec WHERE m > 10 AND i > 100 GROUP BY g", Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+    }
+    // q17 / q11 shapes: Comet's filter, delegated, above our join or aggregate, over WIDE decimals our
+    // operators computed and carried through the join's build side -- avg(m) is decimal(20,10),
+    // 0.2 * avg(m) decimal(22,11), sum(m) decimal(26,6): DECIMAL128 lanes, which the export once widened
+    // word by word so Comet read every value as two rows (TPC-H q11/q15/q17/q18 at SF1 decimals, #281).
+    withConf("spark.comet.exec.filter.enabled" -> "true", VectorConf.CometPreferComet -> "filter") {
+      val base = "FROM dec d JOIN (SELECT g AS g2, avg(m) AS a, 0.2 * avg(m) AS thr, sum(m) AS s FROM dec GROUP BY g) x ON d.g = x.g2"
+      val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+      val df1 = checkVectorized(s"SELECT d.i, x.thr $base WHERE x.thr > 14.15 ORDER BY d.i", Seq(Agg))
+      assert(nodesNamed(df1, "CometFilter").nonEmpty, s"expected Comet's delegated filter over the wide decimal:\n${finalPlan(df1).treeString}")
+      checkVectorized(s"SELECT d.i, x.a, x.s $base WHERE x.a > 70 AND x.s > 35000 ORDER BY d.i", Seq(Agg))
+      checkVectorized(
+        "SELECT sum(d.m) / 7.0 FROM dec d JOIN (SELECT g AS g2, 0.2 * avg(m) AS thr FROM dec GROUP BY g) a ON d.g = a.g2 WHERE d.m < a.thr",
+        Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+      checkVectorized(
+        "SELECT g, sum(m * n) AS v FROM dec WHERE i > 100 GROUP BY g HAVING sum(m * n) > (SELECT sum(m * n) * 0.0001 FROM dec WHERE i > 100)",
+        Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]))
+    }
+    awaitReleased()
+  }
+
   test("the acceleration view counts both engines and the leaf as the bridge", CometTest) {
     withConf(VectorConf.ProjectEnabled -> "false") {
       val df = checkVectorized("SELECT i * 2 AS ii FROM t WHERE i > 100", Seq(Filter))

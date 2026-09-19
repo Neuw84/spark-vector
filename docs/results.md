@@ -1321,3 +1321,35 @@ TPC-DS at SF10: the dataset is not on this host (`gen-tpcds.sh 10`, about 12 GB,
 configurations at the protocol's counts are a multi-hour session); the harness runs it unchanged and
 the report prints the same matrix. The x86 host is an 8-vCPU EC2 instance; the kernel-lab issues
 (#282-#284) are where the filter-kernel question above gets its AVX-512 answer.
+
+## The allowlist decided (#281)
+
+The candidates of `spark.vector.comet.preferComet` measured as the harness's `hybrid` configuration
+(`comet-scan-vector-shuffle` plus the mixed pass and one candidate's Comet toggle), TPC-H SF10 on the
+same host and protocol as the #279 matrices above. The decision table with the three rules per entry
+is in `docs/comet.md`. Protocol note: the #279 baselines and the first joins run kept Spark's shuffle
+files in the host's RAM-backed `/tmp`; the later runs keep them on disk and set Comet's off-heap pool
+(the shipped `hybrid` configuration), so they are compared with the unswapped plan rerun under the
+same conditions -- that alone moves q5 from 2.9 to 7.4 s. Every run had a 13 GB memory cap.
+
+| candidate | queries | hybrid | unswapped, same conditions | comet | wins > 5% vs unswapped | losses > 5% vs unswapped |
+|---|---:|---:|---:|---:|---|---|
+| `hashJoin,broadcastHashJoin` (RAM temp, first run) | 22 | 43.2 s | 42.9 s | 39.0 s | q12 1.22x, q3 1.10x | none |
+| `hashJoin,broadcastHashJoin` (disk, after the fixes) | 20 | 40.7 s | 40.9 s | -- | q12 1.30x, q3 1.12x, q19 1.07x | q7 0.88x; q21 exceeded the memory cap |
+| `sort` | died on q5 | -- | -- | -- | -- | q3 0.66x; 12.7 GB resident, killed |
+| `filter,project` | 22 | 44.2 s | 48.4 s | 39.0 s | q19 1.72x, q6 1.70x, q14 1.43x, q15 1.30x, q13 1.29x, q20 1.26x, q12 1.21x, q4 1.17x, q5 1.16x, q3 1.15x, q21 1.10x, q16 1.05x, q22 1.05x | q8 0.86x, q11 0.86x |
+| `filter` | 20 | 37.6 s | 40.9 s | -- | q19 1.74x, q14 1.45x, q15 1.29x, q20 1.29x, q12 1.26x, q6 1.23x, q13 1.22x, q2 1.19x, q7 1.12x, q3 1.09x, q16 1.07x, q4 1.06x, q10 1.06x | none past noise; q21 exceeded the memory cap |
+| `project:wideDecimal`, `filter:wideDecimal` | -- | -- | -- | -- | never fired: the decimal schema is narrow | -- |
+
+Where Comet's join crossed it was 2-3.6x faster than ours on the same rows (q3 568 -> 157 ms on
+1.46M rows, q12 742 -> 334, q19 43 -> 25); where Comet's filter replaced ours on the scan it won by
+the #14 dictionary decode, 8% over the suite; a projection between two of our operators cost its two
+crossings (q8, q11); a Comet sort above our chain pinned every exported batch until the kernel killed
+the JVM; and two candidates pushed q21 past a memory cap the unswapped plan fits under. No entry met
+the three rules as written; the default allowlist stays empty, and the two costs the study names --
+our join probe and our dictionary decode -- are the work to do on our side.
+
+The same runs on the SF1 decimal schema found the hybrid configuration returning wrong results on
+q11, q15, q17 and q18 while both pure configurations agreed with Spark: the C Data export widened a
+wide decimal's two limbs into two rows. Fixed in the same change; all 22 decimal checksums equal
+Spark's afterwards, and wide decimals now also cross Comet's native shuffle.

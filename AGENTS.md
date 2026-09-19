@@ -581,6 +581,17 @@ into these rather than adding special cases to operators.
   operator. Adding an entry needs the three-part rule of `docs/comet.md` (Comet faster by 2x the crossing
   cost in the queries the operator dominates; no query regressed against the better pure configuration;
   a profiled reason) and the commit it was measured at. Empty list = mixed plans allowed, none requested.
+  The #281 study (decision table in `docs/comet.md`) settled four things about the seam: a blocking
+  Comet consumer above our chain (a sort, a build side) pins every exported batch until it finishes, so
+  memory grows with the input -- never delegate one; a projection or filter between two of our operators
+  never pays for its two crossings (q5 0.45x) -- only operators with real own cost can; a delegated child
+  must count as columnar for its parent (`columnarChild`) or the chain breaks above the swap; and Comet's
+  joins are the one swap that wins (2-3.6x on the operator) -- as Comet's own conversion of joins between
+  its shuffle stages, since a static broadcast above our chain is out of reach under adaptive execution.
+- The C Data export (`ArrowCData.export`) hands a DECIMAL128 lane over as its 16-byte Arrow layout; only
+  INT64 decimal lanes are widened. Widening a wide lane word by word made every value two rows -- wrong
+  TPC-H q11/q15/q17/q18 at SF1 decimals through the mixed seam (#281). The shuffle bridge carries wide
+  decimals too (`CometBatchBridge.isSupported` = `hasLane`).
 - Mixed chains (#280): Comet above ours is our rule's doing (`mixedChains`, `spark.vector.comet.mixed.enabled`,
   default off) -- the sink leaf `CometSinkPlaceHolder(scanOp, chain, CometUnionExec(chain, output,
   Seq(VectorToCometExec(chain))))` built reflectively in `CometMixedBridge`, then Comet's `CometExecRule`
@@ -756,8 +767,8 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 296 Spark tests with the Comet and Iceberg profiles (259 with
-Iceberg alone; the Comet suites contribute 37, `CometMixedChainSuite` 8, `CometMixedShuffleSuite` 3 and `CometPreferCometSuite` 6 of them). If a change lowers either number, explain why in the commit.
+Current counts: 176 kernel tests, 301 Spark tests with the Comet and Iceberg profiles (259 with
+Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `CometMixedShuffleSuite` 3 and `CometPreferCometSuite` 7 of them). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 

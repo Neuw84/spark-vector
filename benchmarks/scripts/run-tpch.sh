@@ -9,7 +9,7 @@
 #
 #   data-dir  directory containing the table directories (see gen-tpch.sh); its basename (sf1, sf10) names
 #             the dataset section in the reports
-#   configs   comma-separated subset of: spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet
+#   configs   comma-separated subset of: spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,hybrid,comet
 #             (default: spark,vector plus the Comet configs when COMET_JAR is set)
 #
 # Environment:
@@ -37,7 +37,7 @@ if [ "$DATA" = "--report" ] || [ -n "$CLUSTER_REPORT" ]; then
   CONFIGS=""
 elif [ -z "$CONFIGS" ]; then
   CONFIGS="spark,vector"
-  if [ -n "${COMET_JAR:-}" ]; then CONFIGS="$CONFIGS,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet"; fi
+  if [ -n "${COMET_JAR:-}" ]; then CONFIGS="$CONFIGS,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,hybrid,comet"; fi
 fi
 
 JAVA="${JAVA_HOME:?set JAVA_HOME to a JDK 25}/bin/java"
@@ -79,7 +79,7 @@ LIST=()
 if [ -n "$CONFIGS" ]; then IFS=',' read -ra LIST <<< "$CONFIGS"; fi
 for cfg in ${LIST[@]+"${LIST[@]}"}; do
   case "$cfg" in
-    comet*) if [ -z "${COMET_JAR:-}" ]; then echo "skipping $cfg: COMET_JAR not set"; continue; fi ;;
+    comet*|hybrid) if [ -z "${COMET_JAR:-}" ]; then echo "skipping $cfg: COMET_JAR not set"; continue; fi ;;
   esac
   echo "=== $cfg"
   "$JAVA" "${JVM_OPTS[@]}" ${EXTRA[@]+"${EXTRA[@]}"} -cp "$CP" "$RUNNER" \

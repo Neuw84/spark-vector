@@ -505,9 +505,17 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     plan
   }
 
+  /**
+   * A child the allowlist left to Comet (#281) is still Spark's operator when its parent is planned, but
+   * it will run on Comet or -- if Comet declines -- on ours, columnar either way; refusing the parent over
+   * it would break the chain above the swap (TPC-H q5: a Spark broadcast join over rows above the swap).
+   */
+  private def columnarChild(plan: SparkPlan): Boolean =
+    plan.supportsColumnar || plan.getTagValue(VectorFallback.Delegated).isDefined
+
   /** None if `plan` is an acceptable columnar input, else the reason it is not. */
   private def columnarInputReason(plan: SparkPlan): Option[String] = {
-    if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar") else typeReason(plan)
+    if (!columnarChild(plan)) Some(s"child ${plan.nodeName} is not columnar") else typeReason(plan)
   }
 
   /**
@@ -527,7 +535,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   }
 
   private def forwardingInputReason(plan: SparkPlan): Option[String] =
-    if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar") else None
+    if (!columnarChild(plan)) Some(s"child ${plan.nodeName} is not columnar") else None
 
   /**
    * A join input that is an exchange (or its adaptive stage) is accepted on types alone, like the
@@ -719,7 +727,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
   /** Like [[columnarInputReason]] for an operator that only moves columns: any lane type will do. */
   private def laneInputReason(plan: SparkPlan): Option[String] =
-    if (!plan.supportsColumnar) Some(s"child ${plan.nodeName} is not columnar")
+    if (!columnarChild(plan)) Some(s"child ${plan.nodeName} is not columnar")
     else plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
 
   /** Like [[typeReason]] for an operator that reads any lane type (the aggregate over the DECIMAL128 lane, #259). */
