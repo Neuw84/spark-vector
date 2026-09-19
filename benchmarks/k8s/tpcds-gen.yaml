@@ -81,6 +81,8 @@ spec:
     memoryOverhead: "3g"
     labels:
       app: tpcds-gen
+    # The executors need the IRSA role too: without this they run as the namespace's default account.
+    serviceAccount: sfi-engine
     volumeMounts:
       - name: tmp
         mountPath: /tmp
