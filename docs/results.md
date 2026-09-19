@@ -1465,6 +1465,43 @@ does not imply it. Also visible: in Spark's order the masked path walks only the
 the lane-parallel one re-reads the batch per group, so from 8 groups the sequential masked sum is the
 faster of the two masked forms (1051 against 686) -- moot, since the scatter owns that range.
 
-Remaining in the loop: decision 5 (512 against 256 as the default width, from
-TPC-H Q1/Q6 at SF10), decision 6 (gather) only if a profile shows it.
+### Decision 5: the default width
+
+TPC-H Q1 and Q6 at SF10, the `vector` configuration (`local[8]`, 8g, 5 warm-ups, 7 measured), the
+only change between the two runs `-Dsparkvector.vectorBits`; same checksums.
+
+| query | 512 bits | 256 bits | 512 / 256 | where |
+|---|---:|---:|---:|---|
+| Q1 | 983 ms (min 965) | 1272 ms (min 1167) | 0.77x | the grouped aggregate: 2913 against 4676 ms of task time; the filter 289 against 339 |
+| Q6 | 553 ms (min 520) | 552 ms (min 544) | 1.00x | the filter is 1239 ms of task time at either width: scan and dictionary decode, not the lanes |
+
+Reading. Q1 is the kernel query and 512 bits win it by 23%, almost all of it in the 4-group masked
+aggregation (decisions 1 and 3 are both on that path: `fromLong` masks and the masked path up to 4
+groups); Q6 is a scan-bound filter whose time does not move with the width at all. Decision: the
+preferred width (`Species.SHAPE`, 512 on this host) stays the default; `-Dsparkvector.vectorBits=256`
+stays the override for a host where the JIT's 512-bit code is slower than its 256-bit code (Ice Lake's
+frequency licence, Genoa's double-pumped units -- the measurement for #282/#284 to make). The
+decision-2 table agrees from the other side: compaction at 512 bits is 1.3-1.9x its 256-bit self.
+
+### Decision 6: gather
+
+Not taken. No profile in this loop showed a gather (the hash join probes and the dictionary decode
+walk scalar indices by design, #14), so there is nothing to measure `VectorSpecies.fromArray` with an
+index map against.
+
+### The loop, closed
+
+| decision | before | after | evidence |
+|---|---|---|---|
+| 1, mask construction | broadcast-AND-compare on every platform | `VectorMask.fromLong` where the platform has mask registers | +14-25% on the null paths at 512, a wash at 256 (#312) |
+| 2, compaction | `compress` only on 16-lane species, the shuffle table below | `compress` at every width where the platform has it | +10-28% on dense selections, a tie at 2% (#313) |
+| 3, grouped thresholds | masked path up to 8 groups on 8 lanes, 1 on 4; four scatter copies | masked path up to 4 groups where masks are registers and the species has 4+ lanes; one scatter copy on AVX-512 | the masked path never loses up to 4; one copy +45-70% from 4 groups (#314) |
+| 4, the platform switch | none | `kernels/Platform.java`, `-Dsparkvector.platform` override | both paths of every decision measured on one build (#312) |
+| 5, default width | preferred (512 here) | unchanged | Q1 0.77x at 512, Q6 flat |
+| 6, gather | -- | not taken | no profile shows one |
+
+What this lab did not measure is the other pools: Ice Lake and Genoa (#282, #284: the 512-bit
+frequency and double-pumping questions, `vpcompress` latency, whether decision 5 flips) and Graviton
+(#253: SVE, where `MASK_REGISTERS` and `NATIVE_COMPRESS` are true by construction and unmeasured).
+Every switch above reads `Platform`, so those pools are a measurement away, not a code change.
 
