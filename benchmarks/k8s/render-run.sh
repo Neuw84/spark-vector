@@ -74,7 +74,7 @@ cat <<EOF
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://sfi-iceberg-wh-378683551918/spark-events"
     spark.hadoop.fs.s3a.connection.maximum: "200"
-    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
 EOF
 # Last setting of a key wins, as it does for spark-submit (the strict configuration overrides VECTOR's).
 declare -A SEEN=(); ORDER=()
