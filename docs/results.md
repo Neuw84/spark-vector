@@ -636,7 +636,16 @@ broadcast joins, #325) -- outweighs the kernel work. Two things still read: **q7
 every configuration with our join, against Spark's 3.0 s -- the shuffled hash join re-expression of
 catalog_sales x inventory on `item_sk` (many-to-many, on the order of 10^9 candidate pairs) gathers
 both sides of every pair before the residual `inv_quantity_on_hand < cs_quantity`; take it out and
-hybrid is level with Spark, Comet's scan in front of us costs 6%, our own scan path 17%. And native
+hybrid is level with Spark, Comet's scan in front of us costs 6%, our own scan path 17%. (#332 took
+q72 from 26.1 s to **7.4 s** warm over our shuffle -- Comet's merge join reads 5.8 s, Spark 3.0 s --
+in three steps: the condition evaluated over a gather of only its columns, output for the survivors
+alone; heap mirrors for every fixed-width gather, because the per-element `MemorySegment.get` in a
+pair-wise loop compiles to virtual calls -- the JIT's own log says `no static binding` on the
+segment's offset lookup, the receiver profile being mixed across the kernels, and
+`-XX:TypeProfileLevel=222` alone recovered 14% -- and the residual `lane OP lane` tested per pair on
+the mirrors so a failing pair is never appended. The join now reads 28 s of task time for 10^9 pairs
+and keeps 56 M; what is left of q72 is downstream of it over those rows. q37 1348 -> 732 ms, q82
+1358 -> 1126; TPC-H q21 8.3 -> 7.9 s.) And native
 Comet fully accelerates 95 of 103 queries where our best configuration fully accelerates one: the
 broadcast exchange is in every other plan.
 

@@ -269,6 +269,18 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
   var head: Array[Int] = new Array[Int](0)
   /** Next build row with the same key, -1 at the end. */
   val next: Array[Int] = new Array[Int](numRows)
+  /** Heap mirrors of the fixed-width columns a join condition reads, made on first use (#332). */
+  private val mirrors = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
+
+  /** The heap mirror of column `c`, or null when the column is not one a mirror covers. A shared table may race to make it; the result is the same. */
+  def mirror(c: Int): io.sparkvector.kernels.HeapMirror = {
+    var m = mirrors(c)
+    if (m == null && io.sparkvector.kernels.HeapMirror.mirrors(columns(c))) {
+      m = io.sparkvector.kernels.HeapMirror.of(columns(c))
+      mirrors(c) = m
+    }
+    m
+  }
 
   def build(): BuildTable = {
     if (numRows > 0 && spec.buildKeys.nonEmpty) {
@@ -476,6 +488,19 @@ private[vector] class VectorHashJoinIterator(
   /** The pairs of one chunk that passed an inner join's condition (#332). */
   private var survProbeIdx = new Array[Int](0)
   private var survBuildIdx = new Array[Int](0)
+  private val gatherScratch = new io.sparkvector.kernels.HeapMirror.GatherScratch
+  /** Heap mirrors of the streamed columns the condition reads, for the current batch (#332). */
+  private val streamedMirrors = new Array[io.sparkvector.kernels.HeapMirror](spec.streamedWidth)
+  private val streamedMirrorTried = new Array[Boolean](spec.streamedWidth)
+
+  private def streamedMirror(ctx: EvalContext, ordinal: Int): io.sparkvector.kernels.HeapMirror = {
+    if (!streamedMirrorTried(ordinal)) {
+      streamedMirrorTried(ordinal) = true
+      val in = ctx.input(ordinal)
+      if (io.sparkvector.kernels.HeapMirror.mirrors(in)) streamedMirrors(ordinal) = io.sparkvector.kernels.HeapMirror.of(in)
+    }
+    streamedMirrors(ordinal)
+  }
 
   /** The joined ordinals the condition reads; the others are never gathered for it. */
   private val conditionRefs: Array[Boolean] = spec.condition.map { cond =>
@@ -548,6 +573,8 @@ private[vector] class VectorHashJoinIterator(
 
   private def probe(batch: ColumnarBatch): Unit = {
     metrics.numInputBatches += 1
+    java.util.Arrays.fill(streamedMirrorTried, false)
+    java.util.Arrays.fill(streamedMirrors.asInstanceOf[Array[AnyRef]], null)
     EvalContexts.withBatch(batch) { ctx =>
       val n = ctx.numRows
       if (!nestedLoop) {
@@ -628,6 +655,9 @@ private[vector] class VectorHashJoinIterator(
 
   /** Inner and outer joins whose condition, if any, an inner join applies to the gathered batch. */
   private def emitMatches(ctx: EvalContext, from: Int, until: Int): Unit = {
+    // A simple residual over integer lanes is tested per candidate pair on the heap mirrors, so a
+    // failing pair is never appended, gathered or compacted (#332: q72's 10^9 pairs, a few percent kept).
+    val fused = fusedPredicate(ctx)
     var count = 0
     var i = from
     while (i < until) {
@@ -637,15 +667,60 @@ private[vector] class VectorHashJoinIterator(
           if (preservesStreamed) { count = append(count, i, -1); }
         } else {
           while (r >= 0) {
-            count = append(count, i, r)
-            if (buildMatched != null) buildMatched(r) = true
+            if (fused == null || fused.test(i, r)) {
+              count = append(count, i, r)
+              if (buildMatched != null) buildMatched(r) = true
+            }
             r = nextCandidate(r)
           }
         }
       }
       i += 1
     }
-    if (count > 0) flush(ctx, probeIdx, buildIdx, count, filter = spec.condition.isDefined)
+    if (count > 0) flush(ctx, probeIdx, buildIdx, count, filter = spec.condition.isDefined && fused == null)
+  }
+
+  /**
+   * The condition as a per-pair test over heap mirrors, when it is `lane OP lane` on INT32 or INT64
+   * lanes both mirrored for this batch; null otherwise (the gather-then-compact path applies). A
+   * null on either side fails the pair, as Spark's condition does.
+   */
+  private def fusedPredicate(ctx: EvalContext): PairPredicate = spec.condition match {
+    case Some(io.sparkvector.spark.expr.CompareExpr(op, io.sparkvector.spark.expr.ColumnRef(a, _), io.sparkvector.spark.expr.ColumnRef(b, _)))
+        if isSemiOrAnti == false && !keepUnmatched && !isExistence =>
+      val ma = mirrorOf(ctx, a); val mb = mirrorOf(ctx, b)
+      if (ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)) null
+      else new PairPredicate(op, ma, isBuildColumn(a), mb, isBuildColumn(b))
+    case _ => null
+  }
+
+  /** The heap mirror behind joined ordinal `c` for this batch, or null. */
+  private def mirrorOf(ctx: EvalContext, c: Int): io.sparkvector.kernels.HeapMirror =
+    if (isBuildColumn(c)) build.mirror(buildOrdinal(c))
+    else if (TypeMapping.hasLane(spec.joinedAttrs(c)._2)) streamedMirror(ctx, streamedOrdinal(c))
+    else null
+
+  /** `left OP right` per pair; each side reads the build row or the streamed row of the pair. */
+  private final class PairPredicate(
+      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean,
+      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean) {
+    private val ints = left.`type` == io.sparkvector.kernels.VecType.INT32
+    def test(streamed: Int, buildRow: Int): Boolean = {
+      val li = if (leftIsBuild) buildRow else streamed
+      val ri = if (rightIsBuild) buildRow else streamed
+      if (!left.isValid(li) || !right.isValid(ri)) false
+      else {
+        val cmp = if (ints) Integer.compare(left.ints(li), right.ints(ri)) else java.lang.Long.compare(left.longs(li), right.longs(ri))
+        op match {
+          case io.sparkvector.kernels.CompareOp.EQ => cmp == 0
+          case io.sparkvector.kernels.CompareOp.NE => cmp != 0
+          case io.sparkvector.kernels.CompareOp.LT => cmp < 0
+          case io.sparkvector.kernels.CompareOp.LE => cmp <= 0
+          case io.sparkvector.kernels.CompareOp.GT => cmp > 0
+          case io.sparkvector.kernels.CompareOp.GE => cmp >= 0
+        }
+      }
+    }
   }
 
   /**
@@ -821,6 +896,10 @@ private[vector] class VectorHashJoinIterator(
       val (name, dt) = attrs(c)
       columns(c) =
         if (only != null && !only(c)) PlaceholderColumn
+        else if (isBuildColumn(c) && build.mirror(buildOrdinal(c)) != null)
+          ArrowOutput.gatherHeap(name, dt, build.mirror(buildOrdinal(c)), bld, from, to, allocator, gatherScratch)
+        else if (!isBuildColumn(c) && TypeMapping.hasLane(dt) && streamedMirror(ctx, streamedOrdinal(c)) != null)
+          ArrowOutput.gatherHeap(name, dt, streamedMirror(ctx, streamedOrdinal(c)), probe, from, to, allocator, gatherScratch)
         else if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
         else if (TypeMapping.hasLane(dt)) ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
         else {
@@ -863,10 +942,17 @@ private[vector] class VectorHashJoinIterator(
         if (passing == n) {
           System.arraycopy(probe, from, survProbeIdx, 0, n); System.arraycopy(bld, from, survBuildIdx, 0, n); k = n
         } else if (passing > 0) {
-          var j = 0
-          while (j < n) {
-            if (Bitmap.isSet(sel, j)) { survProbeIdx(k) = probe(from + j); survBuildIdx(k) = bld(from + j); k += 1 }
-            j += 1
+          val words = Bitmap.wordsFor(n)
+          var w = 0
+          while (w < words) {
+            var word = Bitmap.wordAt(sel, w, n)
+            val base = w << 6
+            while (word != 0L) {
+              val j = base + java.lang.Long.numberOfTrailingZeros(word)
+              survProbeIdx(k) = probe(from + j); survBuildIdx(k) = bld(from + j); k += 1
+              word &= word - 1
+            }
+            w += 1
           }
         }
         k

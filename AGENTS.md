@@ -560,11 +560,25 @@ that pin it.
 - Supported: inner, left/right/full outer, left semi, left anti, existence (`ExistenceJoin(exists)`:
   the semi join's probe, every streamed row emitted plus a BOOL column for `exists`, false where
   nothing matched), each with an optional non-equi
-  condition. An inner join evaluates it on the joined batch and compacts the failing rows; semi,
-  anti and outer joins gather every candidate pair of a streamed row as the joined row (the
-  condition is compiled against `left ++ right`, not the operator's output), evaluate the condition
-  over the pairs and decide per row afterwards -- kept/dropped, or its passing pairs / one `-1`
-  padded row -- so a row whose candidates all fail is padded exactly like one with no candidate.
+  condition. The condition is compiled against `left ++ right` (not the operator's output) and
+  evaluated over a gather of **only the columns it reads** (`conditionRefs`; the others are
+  `PlaceholderColumn`, shared with the merge join). An inner join evaluates it *before* the output
+  gather and gathers the output columns for the surviving pairs alone (`survivors`, #332); semi,
+  anti and outer joins gather every candidate pair of a streamed row the same narrow way, evaluate
+  the condition over the pairs and decide per row afterwards -- kept/dropped, or its passing pairs /
+  one `-1` padded row -- so a row whose candidates all fail is padded exactly like one with no
+  candidate. Two things make the pair-wise loops cheap enough for a many-to-many key (TPC-DS q72:
+  10^9 candidate pairs, 56 M kept; 26 s -> 7.4 s, #332). **Heap mirrors**: every fixed-width INT32 /
+  INT64 / FLOAT64 column the join gathers is copied once into Java arrays (`HeapMirror`; the build
+  side per table, lazily per column, the streamed side per batch) and gathered from the arrays with
+  one bulk copy into the Arrow output (`ArrowOutput.gatherHeap`) -- because a per-element
+  `MemorySegment.get` in these loops compiles to virtual calls (the JIT's inlining log says `no
+  static binding` on the segment's offset lookup: the receiver profile mixes native and heap
+  segments across the kernels; `-XX:TypeProfileLevel=222` recovers a seventh of it, arrays all of
+  it). **The fused residual**: a condition of the shape `lane OP lane` over INT32 / INT64 lanes both
+  mirrored is tested per candidate pair on the mirrors inside `emitMatches` (`PairPredicate`; a null
+  on either side fails the pair, as Spark's condition does) so a failing pair is never appended --
+  inner joins only; FLOAT64 is left to the kernel for Spark's NaN order.
   Full outer (shuffled hash join only -- Spark never broadcasts one and our per-task trailing pass
   would duplicate the unmatched build rows; the broadcast planner refuses it with a reason) keeps a
   per-build-row matched flag and emits the unmatched build rows, streamed side
