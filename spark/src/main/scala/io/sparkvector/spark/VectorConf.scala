@@ -51,7 +51,7 @@ object VectorConf {
   def finalAggregateEnabled(conf: SQLConf): Boolean = bool(conf, FinalAggregateEnabled, default = true)
   /** Feed Comet's native shuffle from spark-vector operators when Comet's shuffle is configured. */
   def cometShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometShuffleEnabled, default = true)
-  def shuffleEnabled(conf: SQLConf): Boolean = bool(conf, ShuffleEnabled, default = false)
+  def shuffleEnabled(conf: SQLConf): Boolean = bool(conf, ShuffleEnabled, default = true)
   /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   /** Convert SortExec over a columnar child (in-memory, no spill). */

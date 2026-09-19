@@ -66,7 +66,9 @@ final class VectorShuffleDependency(
     partitioner: Partitioner,
     val schema: StructType,
     val partitioning: VectorPartitioning,
-    writeProcessor: ShuffleWriteProcessor)
+    writeProcessor: ShuffleWriteProcessor,
+    /** The exchange's `dataSize` metric -- AQE's runtime statistic for the stage; every map task adds its uncompressed Arrow bytes. */
+    val dataSize: org.apache.spark.sql.execution.metric.SQLMetric)
   extends ShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
     rdd, partitioner, SparkEnv.get.serializer, None, None, false, writeProcessor)
 
@@ -137,7 +139,13 @@ final class VectorShuffleWriter(
   private val dataFile: File = resolver.getDataFile(handle.shuffleId, mapId)
   private val tmp: File = Utils.tempFileWith(dataFile)
   private val allocator: BufferAllocator = VectorAllocators.newChild(s"shuffle-write-${handle.shuffleId}-$mapId")
-  private val writer = new PartitionedIpcWriter(dep.schema, numPartitions, allocator, tmp.toPath, VectorShuffleWriter.flushBytes(SparkEnv.get.conf))
+  private val writer = {
+    val conf = SparkEnv.get.conf
+    new PartitionedIpcWriter(dep.schema, numPartitions, allocator, tmp.toPath,
+      VectorShuffleWriter.flushBytes(conf), VectorShuffleWriter.compression(conf),
+      conf.getInt(VectorShuffleWriter.BatchRowsKey, 8192), conf.getSizeAsBytes(VectorShuffleWriter.BatchBytesKey, "1m"),
+      conf.getSizeAsBytes(VectorShuffleWriter.BufferBytesKey, "64m"))
+  }
   private var lengths: Array[Long] = _
   private var stopped = false
   private var rows = 0L
@@ -195,11 +203,14 @@ final class VectorShuffleWriter(
         None
       } else {
         val index = writer.finish(withFooter = false)
+        val rawBytes = writer.rawBytes
         writer.close()
         lengths = index.lengths
         resolver.writeMetadataFileAndCommit(handle.shuffleId, mapId, lengths, Array.emptyLongArray, tmp)
         VectorShuffleBackend(SparkEnv.get.conf).mapOutputCommitted(handle.shuffleId, mapId, dataFile, lengths)
         metrics.incBytesWritten(lengths.sum)
+        // Pre-compression size, as Spark's dataSize is; never below the file (IPC framing dominates tiny outputs).
+        dep.dataSize.add(math.max(rawBytes, lengths.sum))
         metrics.incRecordsWritten(rows)
         Some(MapStatus(blockManager.shuffleServerId, lengths, mapId))
       }
@@ -213,8 +224,25 @@ final class VectorShuffleWriter(
 }
 
 object VectorShuffleWriter {
+  /** A partition's held rows / bytes before they become one record batch, and the task-wide cap on held bytes. */
+  val BatchRowsKey = "spark.vector.shuffle.batchRows"
+  val BatchBytesKey = "spark.vector.shuffle.batchBytes"
+  val BufferBytesKey = "spark.vector.shuffle.bufferBytes"
   val FlushBytesKey = "spark.vector.shuffle.flushBytes"
   def flushBytes(conf: SparkConf): Long = conf.getSizeAsBytes(FlushBytesKey, "1m")
+  /**
+   * `zstd` (default; zstd-jni, native), `lz4` (Arrow's codec is commons-compress pure Java -- an order
+   * of magnitude slower, a TPC-H Q3 shuffle crawled under it), or `none`: body compression of the
+   * shuffle's record batches.
+   */
+  val CompressionKey = "spark.vector.shuffle.compression"
+  def compression(conf: SparkConf): Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] =
+    conf.get(CompressionKey, "zstd").trim.toLowerCase match {
+      case "lz4" => Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.LZ4_FRAME)
+      case "zstd" => Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)
+      case "none" | "" => None
+      case other => throw new IllegalArgumentException(s"$CompressionKey: lz4, zstd or none, not '$other'")
+    }
   /** Spark's round robin starts each task at a random partition: same here, seeded by the partition id. */
   def roundRobinStart(context: TaskContext, numPartitions: Int): Int =
     new java.util.Random(context.partitionId()).nextInt(numPartitions)
@@ -245,6 +273,9 @@ final class VectorShuffleReader(
     context.addTaskCompletionListener[Unit] { _ =>
       open.asScala.foreach(c => try c.close() catch { case _: Exception => })
       allocator.close()
+      // The task-level shuffle read metrics are the reader's to merge (Spark's BlockStoreShuffleReader
+      // does it in its completion iterator); the executor only merges them on heartbeats.
+      context.taskMetrics().mergeShuffleReadMetrics()
     }
     val nonEmpty = blocksByAddress.map { case (address, blocks) =>
       address -> blocks.collect { case (id: ShuffleBlockId, size, _) if size > 0 => (id, size) }.toIndexedSeq

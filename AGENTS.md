@@ -677,6 +677,61 @@ into these rather than adding special cases to operators.
   its CSS classes, not Bootstrap 5 `data-bs-*` attributes (they silently do nothing). The DAG is
   rendered client side with the d3/dagre-d3/graphlib-dot bundles Spark already serves.
 
+### 3.10 The columnar shuffle (#288)
+
+Our exchange, `VectorShuffleExchangeExec` (a `ShuffleExchangeLike`, so AQE's coalescing, skew
+splitting and local reads apply unchanged), replaces `ShuffleExchangeExec` above a spark-vector
+operator when `spark.vector.shuffle.enabled` is on, the `spark-vector-shuffle` jar is present and
+`spark.shuffle.manager` is `VectorShuffleManager`; Comet's native shuffle takes precedence where it
+is configured. Four pieces, in the `shuffle` module except the kernel:
+
+- Partition ids: `PartitionKernels` (kernels module) is Spark's `Murmur3_x86_32` verbatim over the
+  lane values -- signed-byte tail for strings, the decimal's unscaled long or 128-bit form, nulls
+  passing the seed -- so `hashPartitionIds` equals `Pmod(Murmur3Hash(keys), n)` for every type,
+  proved by a property test against Spark's own expression. Round-robin starts at a random partition
+  per task like Spark; single is partition 0; range reuses Spark's `RangePartitioner` sampling over a
+  row projection of the child and binary-searches its bounds per row.
+- The map output: `PartitionedIpcWriter` keeps one Arrow IPC stream per reduce partition, strings
+  dictionary-encoded per stream (a plain batch is encoded on the way in; a batch that is already
+  dictionary-encoded gets a replacement dictionary), small decimals as int64 with the Spark type in
+  field metadata, spilling a partition's stream to a temporary file past `spark.vector.shuffle.flushBytes`
+  and concatenating at finish. The file is committed through Spark's `IndexShuffleBlockResolver`, so
+  `MapStatus`, the index file and Spark's own block transfer all work on it. Record batches are
+  sized by the writer, not the input: a partition's compacted slices are held until `batchRows`
+  (8192) or `batchBytes` and written as one record batch, slices concatenated with `VectorAppender`
+  and their string dictionaries concatenated with index offsets into one replacement dictionary.
+  The first SF10 run wrote one record batch per (input batch, partition) -- 512 rows at 8 partitions,
+  20 at 200 -- and the per-message costs made shuffled joins 2x slower than the row shuffle; sized
+  batches made them faster. Bodies are zstd-compressed (`spark.vector.shuffle.compression`): raw IPC
+  wrote 1.8x Spark's lz4 bytes, and Arrow's own lz4 codec is commons-compress pure Java, an order of
+  magnitude too slow (Q3 crawled for minutes under it). The exchange's `dataSize` metric -- AQE's
+  runtime statistic -- is the *uncompressed* Arrow bytes of the record batches written (never below
+  the file bytes), added by every map task: Spark's is its rows' pre-compression size, so a zero there
+  turned every shuffled join into a broadcast join and the compressed file bytes made AQE broadcast
+  sides three times the size it would for Spark (Q14). The consumers matter as much as the wire: a
+  shuffled string column arrives dictionary-encoded, and `ArrowOutput.gather` used to decode such a
+  column whole, one string append per row, before gathering -- the shuffled hash join of Q14 went
+  from 285 ms to 5.7 s; it now gathers through the codes into the dictionary.
+- The data plane: one `FlightServer` per executor (started by the executor plugin, registered with
+  the driver plugin as executor id to host and port), one `DoGet` per map output block, the block's
+  stream re-framed by Flight straight from the file; `spark.authenticate`'s secret is the bearer
+  token, TLS refuses to start rather than serve in the clear. One stream per block because Flight
+  sends dictionaries once per stream. gRPC 1.71 runs on the Netty 4.2 Spark bundles.
+- The reduce side: `VectorShuffleReader` decodes each block's stream with `PartitionedIpcFile.StreamReader`
+  (which also decodes several streams concatenated) and owns batch memory -- a batch is closed when
+  the next one is produced. Where blocks come from is the `VectorShuffleBackend` seam: `flight`
+  (default), `block` (Spark's transfer), or a class name from another jar. A push-based shuffle
+  service such as Celeborn -- what disposable executors need -- would implement it; that is future
+  work, not part of #288. A storage-backed mode (one object per (map, reduce)) was built and dropped:
+  `maps x reduces` small objects per shuffle.
+
+Three Spark facts the executor side works around: `PluginContext.hostname()` throws on an executor
+(client-mode `RpcEnv`, no address); the executor plugin initialises before the block manager, so the
+resolver is looked up at the first request; and the task-level shuffle read metrics are merged by the
+*reader* (Spark's does it in a completion iterator -- the executor only merges on heartbeats), so ours
+merges them in its task-completion listener, or the stage shows zero bytes read. `docs/results.md`
+has the SF10 before/after.
+
 ## 4. Validation: what "done" means
 
 A change is not done until all of the following that apply have run green, locally, on JDK 25.
@@ -845,6 +900,11 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
   row in the same commit), this file (design and validation).
 
 ## 7. Known gaps
+
+- The columnar shuffle (#288): the Flight server has no TLS (Spark's material is JKS, Flight wants
+  PEM; with `spark.ssl.rpc.enabled` it refuses to start -- use `spark.vector.shuffle.backend=block`);
+  one `DoGet` per map output block rather than one stream per executor; both backends assume
+  executors that stay up for the job -- a push-based shuffle service is future work.
 
 - Iceberg merge-on-read reads (#261): the delete cost is a fixed per-batch price paid inside Iceberg's
   reader (`buildRowIdMapping`, the per-task position index) by both engines, so our margin over Spark

@@ -87,6 +87,10 @@ object TpchRunner {
   val Configs: Map[String, Map[String, String]] = Map(
     "spark" -> Map.empty,
     "vector" -> VectorFast,
+    // #288: our columnar exchange over Arrow IPC files and Arrow Flight, no row conversion around shuffles.
+    "vector-shuffle" -> (VectorFast ++ Map(
+      "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
+      "spark.vector.shuffle.enabled" -> "true")),
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
     "comet-scan-vector" -> (VectorFast ++ Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
     // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.
@@ -118,7 +122,7 @@ object TpchRunner {
       "spark.memory.offHeap.enabled" -> "true",
       "spark.memory.offHeap.size" -> "3g"))
 
-  val ConfigOrder: Seq[String] = Seq("spark", "vector", "comet-scan", "comet-scan-vector", "comet-scan-vector-shuffle", "hybrid", "comet")
+  val ConfigOrder: Seq[String] = Seq("spark", "vector", "vector-shuffle", "comet-scan", "comet-scan-vector", "comet-scan-vector-shuffle", "hybrid", "comet")
 
   /** The two pure configurations `hybrid` is judged against, query by query (#281). */
   val HybridBaselines: Seq[String] = Seq("comet-scan-vector-shuffle", "comet")

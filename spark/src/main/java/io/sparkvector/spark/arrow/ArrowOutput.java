@@ -286,10 +286,29 @@ public final class ArrowOutput {
     }
     boolean nulls = in.hasNulls() || padded;
     if (in.type() == VecType.UTF8) {
-      VectorBuffers plain = in.isDictionaryEncoded() ? decodeDictionary(in) : in;
-      long bytes = GatherKernels.gatherUtf8Bytes(plain, idx, from, to);
+      if (in.isDictionaryEncoded()) {
+        // Gather through the codes: output row o is dictionary entry code(idx[o]). Decoding the whole
+        // column first cost a string append per input row -- 20x the join on a shuffled dictionary column.
+        int[] codes = new int[count];
+        boolean anyNull = padded;
+        for (int o = 0; o < count; o++) {
+          int i = idx[from + o];
+          if (i < 0 || in.isNull(i)) {
+            codes[o] = -1;
+            anyNull = true;
+          } else {
+            codes[o] = in.getInt(i);
+          }
+        }
+        VectorBuffers dict = in.dictionary();
+        long bytes = GatherKernels.gatherUtf8Bytes(dict, codes, 0, count);
+        ArrowVectorBuffers out = allocateUtf8(name, count, bytes, allocator);
+        GatherKernels.gatherUtf8(dict, codes, 0, count, out.offsets(), out.data(), anyNull ? out.validity() : null);
+        return finish(out, count, !anyNull);
+      }
+      long bytes = GatherKernels.gatherUtf8Bytes(in, idx, from, to);
       ArrowVectorBuffers out = allocateUtf8(name, count, bytes, allocator);
-      GatherKernels.gatherUtf8(plain, idx, from, to, out.offsets(), out.data(), nulls ? out.validity() : null);
+      GatherKernels.gatherUtf8(in, idx, from, to, out.offsets(), out.data(), nulls ? out.validity() : null);
       return finish(out, count, !nulls);
     }
     ArrowVectorBuffers out = allocateFixed(name, dt, count, allocator);
@@ -321,16 +340,6 @@ public final class ArrowOutput {
 
   /** A plain UTF8 copy of a dictionary-encoded column in the given arena (the sort decodes a run once, #285). */
   public static VectorBuffers decodeDictionary(VectorBuffers in, java.lang.foreign.Arena arena) {
-    io.sparkvector.kernels.ColumnBuilder b = new io.sparkvector.kernels.ColumnBuilder(arena, VecType.UTF8, in.length());
-    b.append(in);
-    return b.view();
-  }
-
-  /** A plain UTF8 view of a dictionary-encoded column, built in a temporary arena-free copy. */
-  private static VectorBuffers decodeDictionary(VectorBuffers in) {
-    // The gather reads a handful of rows out of a whole column; decoding through a scratch
-    // ColumnBuilder keeps GatherKernels ignorant of dictionaries.
-    java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofAuto();
     io.sparkvector.kernels.ColumnBuilder b = new io.sparkvector.kernels.ColumnBuilder(arena, VecType.UTF8, in.length());
     b.append(in);
     return b.view();

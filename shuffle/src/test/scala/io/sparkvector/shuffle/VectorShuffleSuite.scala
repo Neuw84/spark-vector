@@ -141,6 +141,31 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("the stage metrics see our shuffle: bytes and records written, local blocks and bytes read, AQE's data size") {
+    val stages = scala.collection.mutable.ArrayBuffer.empty[org.apache.spark.scheduler.StageInfo]
+    val listener = new org.apache.spark.scheduler.SparkListener {
+      override def onStageCompleted(e: org.apache.spark.scheduler.SparkListenerStageCompleted): Unit = stages.synchronized { stages += e.stageInfo }
+    }
+    spark.sparkContext.addSparkListener(listener)
+    try {
+      val df = spark.sql("select k, count(*) c, sum(x) sx from t group by k")
+      val plan = collectPlan(df)
+      val deadline = System.nanoTime() + 10000000000L
+      while (System.nanoTime() < deadline && stages.synchronized(stages.map(_.taskMetrics.shuffleReadMetrics.localBlocksFetched).sum) == 0) Thread.sleep(50)
+      val ex = exchanges(plan).collectFirst { case e: VectorShuffleExchangeExec => e }.get
+      val write = stages.synchronized(stages.map(_.taskMetrics.shuffleWriteMetrics.bytesWritten).sum)
+      val read = stages.synchronized(stages.map(_.taskMetrics.shuffleReadMetrics))
+      assert(write > 0, "shuffle bytes written")
+      val sql = ex.metrics.filter(_._1.matches(".*(Blocks|Bytes|records|Wait|Time|Size|dataSize).*")).map { case (k, m) => s"$k=${m.value}" }.toSeq.sorted.mkString(", ")
+      assert(read.map(_.localBlocksFetched).sum > 0, s"local blocks fetched; SQL metrics: $sql; stage read totals: blocks=${read.map(_.localBlocksFetched).sum}/${read.map(_.remoteBlocksFetched).sum} bytes=${read.map(_.totalBytesRead).sum}")
+      assert(read.map(_.totalBytesRead).sum === write, s"bytes read ${read.map(_.totalBytesRead).sum} vs written $write")
+      assert(read.map(_.recordsRead).sum > 0, "records read")
+      // dataSize is the pre-compression Arrow size, as Spark's is its rows' pre-compression size: at least the compressed bytes.
+      assert(ex.metrics("dataSize").value >= write, s"AQE's data size ${ex.metrics("dataSize").value} vs bytes written $write")
+      assert(ex.runtimeStatistics.sizeInBytes.toLong === ex.metrics("dataSize").value)
+    } finally spark.sparkContext.removeSparkListener(listener)
+  }
+
   test("a shuffled hash join and a merge join read both sides from our exchanges") {
     spark.sessionState.conf.setConfString("spark.sql.autoBroadcastJoinThreshold", "-1")
     try {
