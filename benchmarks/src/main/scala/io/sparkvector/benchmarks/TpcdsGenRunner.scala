@@ -56,7 +56,9 @@ object TpcdsGenRunner {
       def rowsOf(childRange: Range): DataFrame = {
         val lines: Dataset[String] = spark.createDataset(
           spark.sparkContext.parallelize(childRange, childRange.length).flatMap { child =>
-            generate(dsdgenDir, table, scale, parallel, child)
+            // An unsplit table is generated whole (no -PARALLEL): dsdgen splits some of them, customer_demographics
+            // among them, across the children, and child 1 alone is one slice.
+            generate(dsdgenDir, table, scale, if (children == 1) 1 else parallel, child)
           })(org.apache.spark.sql.Encoders.STRING)
         // dsdgen ends every row with a '|': one trailing empty field the schema does not have.
         spark.read.schema(schema).option("sep", "|").option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
