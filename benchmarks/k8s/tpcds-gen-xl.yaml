@@ -43,6 +43,7 @@ spec:
     spark.hadoop.fs.s3a.fast.upload: "true"
     spark.hadoop.fs.s3a.connection.maximum: "200"
     spark.kubernetes.executor.deleteOnTermination: "true"
+    spark.kubernetes.authenticate.executor.serviceAccountName: "sfi-engine"
     spark.driver.extraJavaOptions: >-
       --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
       --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
