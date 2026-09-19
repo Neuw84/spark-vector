@@ -114,8 +114,29 @@ public final class ArrowCData {
       MemorySegment validity = null;
       MemorySegment data;
       MemorySegment offsets = null;
-      if (dt instanceof DecimalType) {
-        // Our decimals are 64-bit lanes; the C Data format "d:p,s" is 128-bit two's complement,
+      if (dt instanceof DecimalType && in.type() == VecType.DECIMAL128) {
+        // A wide decimal (19 to 38 digits) is already a DECIMAL128 lane: 16 little-endian bytes per
+        // value, Arrow's own Decimal128 layout (#257). Point at an Arrow vector's buffers, copy any
+        // other lane as is -- widening it word by word read every value as two rows (#281).
+        if (in instanceof ArrowVectorBuffers a) {
+          FieldVector v = (FieldVector) a.vector();
+          for (ArrowBuf b : v.getBuffers(false)) {
+            b.getReferenceManager().retain();
+            export.retained.add(b);
+          }
+          if (nullCount > 0) {
+            validity = a.validity();
+          }
+          data = a.data();
+        } else {
+          data = arena.allocate(Math.max((long) n << 4, 16), 16);
+          MemorySegment.copy(in.data(), 0, data, 0, (long) n << 4);
+          if (nullCount > 0) {
+            validity = copyBitmap(arena, in.validity(), n);
+          }
+        }
+      } else if (dt instanceof DecimalType) {
+        // Narrow decimals are 64-bit lanes; the C Data format "d:p,s" is 128-bit two's complement,
         // so widen into the export's arena (sign-extended high word).
         data = arena.allocate(Math.max((long) n << 4, 16), 16);
         for (int i = 0; i < n; i++) {

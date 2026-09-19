@@ -103,7 +103,11 @@ object TpchRunner {
       "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
       CometScanOnly ++ Map(
         "spark.comet.exec.shuffle.enabled" -> "true",
-        "spark.vector.comet.mixed.enabled" -> "true")),
+        "spark.vector.comet.mixed.enabled" -> "true",
+        // Comet's operators take their memory from Spark's off-heap pool; without it Comet's sort grew its
+        // native allocation until the kernel killed the JVM (TPC-H q5 at SF10, 12.7 GB resident).
+        "spark.memory.offHeap.enabled" -> "true",
+        "spark.memory.offHeap.size" -> "3g")),
     "comet" -> Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin",
       "spark.comet.enabled" -> "true",
@@ -298,6 +302,10 @@ object TpchRunner {
               case e: Exception =>
                 failed += q
                 println(s"[${suite.name}] ${args.config} $q FAILED: ${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}")
+                // A future's "Boxed Exception" hides the cause: name the root and where it was thrown.
+                val root = Iterator.iterate(e: Throwable)(_.getCause).takeWhile(_ != null).toSeq.last
+                if (root ne e) println(s"[${suite.name}]   cause: ${root.getClass.getName}: ${Option(root.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}")
+                root.getStackTrace.take(6).foreach(f => println(s"[${suite.name}]     at $f"))
             }
           }
         }

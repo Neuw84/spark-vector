@@ -190,8 +190,53 @@ operator time is lower than ours in the queries the operator dominates by more t
 crossing cost for its widths; the swap regresses no TPC-H or TPC-DS query against the better pure
 configuration (`comet-scan-vector-shuffle`, `comet`) beyond noise -- the harness's `hybrid`
 configuration and its report section check that query by query; and the reason is understood from a
-profile. The entry names the commit it was measured at. Decision table: none yet -- the default is
-empty until the study of #281 lands its rows here.
+profile. The entry names the commit it was measured at.
+
+#### The decision table (TPC-H SF10, the #279 protocol, Comet 1.0.0, measured at the commit that closes #281)
+
+Each candidate ran as `hybrid` with only its Comet toggle on. Protocol note: the #279 baselines and
+the first joins run kept Spark's shuffle files in `/tmp`, a RAM-backed tmpfs on the host; every later
+run keeps them on disk and sets Comet's off-heap pool, which alone makes q5 7.4 s instead of 2.9 s
+and q7 3.7 s instead of 3.6 s, so those candidates are judged against the unswapped plan rerun under
+the same conditions (`comet-scan-vector-shuffle`, disk: 48.4 s over 22 queries; the RAM-backed run
+42.9 s; `comet` 39.0 s). "vs unswapped" is that like-for-like baseline; "vs better pure" is the
+issue's literal rule 2, which no entry can meet on this host because `comet` beats the unswapped
+plan on 17 of 22 queries regardless. Every run had a 13 GB memory cap the unswapped plan fits under.
+
+| entry | where it fired | operator time, ours -> Comet's | wall clock vs unswapped | vs better pure | rule 1 | rule 2 | rule 3 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `hashJoin,broadcastHashJoin` | 4-5 queries (q3 q12 q18 q19 q20): adaptive execution's runtime broadcast joins whose inputs are both Comet shuffle stages -- Comet's own conversion once its toggle is on; a static broadcast above our chain never crosses under adaptive execution (#280) | q3 568 -> 157 ms on 1.46M rows, q12 742 -> 334, q19 43 -> 25 (2-3.6x) | q12 1.26-1.30x, q3 1.10-1.13x, q19 1.07x; the rerun after the fixes lost q7 (0.88x) and q21 exceeded the memory cap the unswapped plan fits under | 18 of 20 slower, the pure gap | met: the crossing is per batch, negligible against 400 ms | met in the first run; the rerun's q7 and q21 say no | the #279 q18 profile: our per-row `GroupKeyTable` probe against DataFusion's hash join; q21's memory unprofiled | the join is the operator that pays; the entry as a whole is **not shipped** until q21's memory is understood |
+| `sort` | every local sort above our chains | -- | q3 1.5x slower where it ran; the run died on q5 | -- | not met | not met | a blocking Comet consumer above our chain holds every exported batch until it finishes, so memory grows with the input (12.7 GB resident at SF10, then the kernel's OOM killer) | **not eligible** |
+| `filter,project` | Comet's filter and projection on its scan in every query (Comet's rule) and above our chains | our join times within noise (q5 SHJ 2987 vs 2187 ms: the export and import around a projection between two joins on 9.1M rows); Comet's projections ~15 ms | 13 queries faster (q19 1.72x, q6 1.70x, q14 1.43x, q15 1.30x, q13 1.29x, q20 1.26x, q12 1.21x, q4 1.17x, q5 1.16x, q3 1.15x, q21 1.10x), q8 0.86x and q11 0.86x slower; 44.2 s vs 48.4 s (-8.7%) | 14 of 22 slower | the filter's wins are Comet's scan-side filter over dictionary-encoded columns beating ours (#14's `decodeDictionary`, 20% of Q6's samples) -- a cost on our side; a projection between two of our operators has no own cost and costs its two crossings (q8, q11) | two losses: narrow | #14's profile for the wins; q8/q11 are the crossings | **not as one entry**: drop `project`, see `filter` |
+| `filter` (alone) | Comet's filter on its scan in every query; above our chains almost never | filter ~20 ms either way; join times unchanged | 13 queries faster (q19 1.74x, q14 1.45x, q15 1.29x, q20 1.29x, q12 1.26x, q6 1.23x, q13 1.22x, q2 1.19x, q7 1.12x, q3 1.09x, ...), q11 0.94x and q1 0.95x (noise); 37.6 s vs 40.9 s over 20 queries (-8%); **q21 exceeded the 13 GB cap** the unswapped plan fits under | 17 of 20 slower | met for Comet's scan-side filter, but as Comet's own conversion, not the seam's; the reason is ours to fix (#14) | no wall-clock loss beyond noise; q21's memory is a regression | #14's profile; q21 unprofiled | **the best available win (-8%) and the maintainer's call**: enabling Comet's filter is `spark.comet.exec.filter.enabled`, the allowlist entry adds little; fix #14 first, understand q21's memory |
+| `project:wideDecimal`, `filter:wideDecimal` | never fired: the decimal schema of the harness is decimal(12,2)/(15,2), narrow by the predicate's definition, and no wide-decimal dataset exists in the protocol | -- | -- | -- | not measurable here; #258's JMH plus the crossing (~3 ns per row per column at 1024-row batches) says Comet's operator time -- unmeasured -- decides | -- | -- | **not measured**; needs a wide-decimal dataset |
+| `aggregate` | refused by the key; under `all` Comet's buffer rule decides the half (#280) | -- | -- | -- | -- | -- | -- | not eligible (the pair) |
+
+The default stays **empty**: no entry met the three rules as written. Two things are worth the
+maintainer's attention: Comet's join is 2-3.6x faster than ours where it fires (a DataFusion hash
+join against our per-row probe -- the #288 and #12 levers), and Comet's filter on its scan beats ours
+by the #14 dictionary decode (-8% over TPC-H) -- both are costs to remove on our side before an
+allowlist entry would be the right answer; and two candidates pushed q21 past a memory cap the
+unswapped plan fits under, which needs a profile before any entry that touches it ships.
+
+#### What the study found and fixed on the way
+
+- **Wide decimals crossed the seam wrong.** The C Data export widened every decimal from a 64-bit
+  lane; a 19-38 digit decimal is a DECIMAL128 lane already, so its two limbs became two rows and
+  Comet read zeros and neighbours' values -- TPC-H q11, q15, q17, q18 at SF1 decimals returned wrong
+  results whenever a delegated Comet operator read a sum or average our side had computed. Fixed in
+  `ArrowCData.export` (the 128-bit lane crosses as is, zero-copy from an Arrow vector); the shuffle
+  bridge had refused wide decimals all along and now carries them too. Regression cases in
+  `CometMixedChainSuite` and `CometShuffleSuite`.
+- **The pass-through union asserted on a chain rooted in a join.** Comet 1.0's `CometUnionExec`
+  reads its partitioning through `originalPlan.withNewChildren(children)`; the leaf now names the
+  export node (one child) as the original plan (TPC-H q2).
+- **A delegated child is columnar.** Our operators refused a delegated (still Spark's) child as
+  "not columnar" and the chain broke above the swap -- Spark's row join and aggregate above a
+  columnar-to-row transition (q5). A delegated child counts as columnar: it ends on Comet or on ours.
+- **Comet's operators need the off-heap pool.** The `hybrid` configuration sets
+  `spark.memory.offHeap.enabled` and a size, as the pure `comet` one does; without it Comet's sort
+  grew its native allocation until the kernel killed the JVM.
 
 ## Per-operator attribution against Comet
 

@@ -74,9 +74,13 @@ public final class CometBatchBridge {
     }
   }
 
-  /** Whether {@link #convert} can carry a column of this type. */
+  /**
+   * Whether {@link #convert} can carry a column of this type: any lane, the DECIMAL128 one included --
+   * a wide decimal crosses as its 16-byte Arrow layout (#281); the bridge only moves columns, so the
+   * kernels' narrower {@link TypeMapping#isSupported} does not apply.
+   */
   public static boolean isSupported(DataType dt) {
-    return TypeMapping.isSupported(dt);
+    return TypeMapping.hasLane(dt);
   }
 
   /**

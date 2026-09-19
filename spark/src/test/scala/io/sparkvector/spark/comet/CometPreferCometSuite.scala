@@ -80,6 +80,21 @@ class CometPreferCometSuite extends VectorQuerySuite {
     }
   }
 
+  test("our operator above a delegated one stays ours (the chain does not break at the swap)", CometTest) {
+    // The delegated projection is still Spark's when its parent is planned; the parent must treat it as
+    // columnar, or a Spark row join runs above the swap (TPC-H q5 under the allowlist).
+    withConf(VectorConf.CometPreferComet -> "project") {
+      val df = checkVectorized(
+        "SELECT a.j, b.s FROM (SELECT i + 1 AS j FROM t WHERE i > 100) a JOIN t b ON a.j = b.i WHERE b.l IS NOT NULL",
+        Seq(Filter))
+      val plan = finalPlan(df)
+      assert(nodesNamed(df, "CometProject").nonEmpty, plan.treeString)
+      val ourJoins = PlanUtils.allNodes(plan).filter(_.getClass.getSimpleName.startsWith("Vector")).filter(_.nodeName.contains("Join"))
+      assert(ourJoins.nonEmpty, s"expected our join above the delegated projection; reasons: ${reasons(df)}\n${plan.treeString}")
+      assert(!reasons(df).exists(_.contains("is not columnar")), s"the swap must not break the chain above it: ${reasons(df)}")
+    }
+  }
+
   test("a listed operator Comet declines is ours, not Spark's", CometTest) {
     // Comet's project is off: it declines the offered projection, so ours takes it after the decline.
     withConf(VectorConf.CometPreferComet -> "project", "spark.comet.exec.project.enabled" -> "false") {

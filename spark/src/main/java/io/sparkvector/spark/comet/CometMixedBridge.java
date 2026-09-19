@@ -142,7 +142,10 @@ public final class CometMixedBridge {
       }
       scala.collection.immutable.Seq<SparkPlan> one =
           scala.collection.immutable.List$.MODULE$.<SparkPlan>empty().$colon$colon(export);
-      SparkPlan passThrough = (SparkPlan) unionCtor.newInstance(chain, chain.output(), one);
+      // The union's originalPlan must take exactly one child: Comet 1.0's CometUnionExec reads its
+      // partitioning through originalPlan.withNewChildren(children), and a chain rooted in a join has two
+      // (TPC-H q2 under the allowlist, #281). The export node has one and forwards the chain's.
+      SparkPlan passThrough = (SparkPlan) unionCtor.newInstance(export, chain.output(), one);
       return Optional.of((SparkPlan) placeholderCtor.newInstance(option.get(), chain, passThrough));
     } catch (InvocationTargetException e) {
       LOG.debug("spark-vector: Comet refused the mixed leaf", e.getCause());

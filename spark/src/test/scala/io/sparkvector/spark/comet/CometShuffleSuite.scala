@@ -78,6 +78,20 @@ class CometShuffleSuite extends VectorQuerySuite {
     assertNoLeak()
   }
 
+  test("wide decimals cross the native shuffle as 128-bit lanes (#281)", CometTest) {
+    // sum(decimal(16,6)) is decimal(26,6), avg decimal(20,10): the partial's results and a wide key
+    // are DECIMAL128 lanes; the export once widened them word by word, so every value became two rows.
+    spark.range(0, 20000).selectExpr("cast(id as int) as i", "cast(id % 997 as decimal(12,2)) / 7 as m",
+      "cast(id % 40 as decimal(22,4)) * 1000000000 as w", "if(id % 10 = 0, null, concat('g', id % 40)) as g")
+      .repartition(3).write.mode("overwrite").parquet(newTempPath("comet-shuffle/dec"))
+    spark.read.parquet(newTempPath("comet-shuffle/dec")).createOrReplaceTempView("dec")
+    val df = checkVectorized("SELECT g, sum(m), avg(m), max(w) FROM dec WHERE i > 100 GROUP BY g", Seq(Filter, Agg))
+    assertBridgedShuffle(df)
+    val keyed = checkVectorized("SELECT w, count(*), sum(m) FROM dec WHERE i > 100 GROUP BY w", Seq(Filter, Agg))
+    assertBridgedShuffle(keyed)
+    assertNoLeak()
+  }
+
   test("grouped keys of every supported type cross the bridge, nulls included", CometTest) {
     assertBridgedShuffle(checkVectorized("SELECT s, count(*), sum(d2) FROM t GROUP BY s", Seq(Agg)))
     assertBridgedShuffle(checkVectorized("SELECT b, dt, i > 100 AS big, count(*), max(d) FROM t GROUP BY b, dt, i > 100", Seq(Agg)))
