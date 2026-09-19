@@ -29,7 +29,7 @@ COPY . /src
 # and Iceberg are provided by the image's jars directory.
 RUN mvn -B -q -Pcomet,iceberg -DskipTests -pl benchmarks -am package
 RUN git clone --depth 1 https://github.com/databricks/tpcds-kit /opt/tpcds-kit \
-    && make -C /opt/tpcds-kit/tools OS=LINUX -j"$(nproc)" >/dev/null
+    && make -C /opt/tpcds-kit/tools OS=LINUX LINUX_CFLAGS="-O3 -std=gnu89 -Wno-implicit-int -Wno-implicit-function-declaration -Wno-return-mismatch" -j"$(nproc)" >/dev/null
 
 # ---- runtime -----------------------------------------------------------------------------------------
 FROM eclipse-temurin:25-jre
