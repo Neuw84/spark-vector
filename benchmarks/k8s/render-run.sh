@@ -108,6 +108,7 @@ cat <<EOF
     memoryOverhead: "$EXEC_OVERHEAD"
     labels:
       app: spark-vector-bench
+    serviceAccount: $SERVICE_ACCOUNT
     volumeMounts:
       - name: tmp
         mountPath: /tmp
