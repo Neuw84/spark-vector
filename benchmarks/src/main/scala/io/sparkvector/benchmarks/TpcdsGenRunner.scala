@@ -57,7 +57,7 @@ object TpcdsGenRunner {
       val schema = StructType.fromDDL(ddl)
       // dsdgen ends every row with a '|': one trailing empty field the schema does not have.
       val rows = spark.read.schema(schema).option("sep", "|").option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
-      val partitionColumns = Schema.partitions.getOrElse(table, Nil)
+      val partitionColumns = Schema.partitions.getOrElse(table, Nil).map(_.stripPrefix("`").stripSuffix("`")) // TPCDSSchema quotes them
       val writer = (if (partitionColumns.nonEmpty) rows.repartition(partitionColumns.map(col): _*) else rows.coalesce(1))
         .write.mode(SaveMode.Overwrite).option("compression", "zstd")
       (if (partitionColumns.nonEmpty) writer.partitionBy(partitionColumns: _*) else writer).parquet(s"$out/$table")
