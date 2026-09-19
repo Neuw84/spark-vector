@@ -86,12 +86,18 @@ public final class SparkColumnVectorBuffers {
           return SegmentVectorBuffers.fixedWidth(type, numRows, validity, view);
         }
       }
-      MemorySegment source =
-          dict != null ? decodeDictionary(w, dict, type, numRows, validity) : wrapData(w, type, numRows);
-      if (source != null) {
+      if (dict != null) {
         MemorySegment data = ArrowLayout.allocateData(arena, type, numRows);
-        MemorySegment.copy(source, 0, data, 0, source.byteSize());
-        return SegmentVectorBuffers.fixedWidth(type, numRows, validity, data);
+        if (decodeDictionaryInto(w, dict, type, numRows, validity, data)) {
+          return SegmentVectorBuffers.fixedWidth(type, numRows, validity, data);
+        }
+      } else {
+        MemorySegment source = wrapData(w, type, numRows);
+        if (source != null) {
+          MemorySegment data = ArrowLayout.allocateData(arena, type, numRows);
+          MemorySegment.copy(source, 0, data, 0, source.byteSize());
+          return SegmentVectorBuffers.fixedWidth(type, numRows, validity, data);
+        }
       }
     }
     switch (type) {
@@ -254,63 +260,66 @@ public final class SparkColumnVectorBuffers {
     return null;
   }
 
+  /** Per-thread scratch for the decoded dictionary table: no allocation per column per batch. */
+  private static final ThreadLocal<long[]> DICTIONARY_TABLE = ThreadLocal.withInitial(() -> new long[256]);
+
   /**
    * Numeric column left dictionary encoded by the Parquet reader: decodes the dictionary once (ids
-   * are dense, so every id up to the largest one referenced exists) and gathers, instead of
-   * Spark's virtual {@code decodeToX} call per row.
+   * are dense, so every id up to the largest one referenced exists) and gathers straight into the
+   * arena segment. Nothing is allocated on the heap: the earlier form built three arrays per column
+   * per batch (ids, table, values) and was the GC behind the shuffle's short-query regressions.
    */
-  private static MemorySegment decodeDictionary(
-      WritableColumnVector cv, Dictionary dict, VecType type, int numRows, MemorySegment validity) {
-    int[] ids = cv.getDictionaryIds().getInts(0, numRows);
-    if (validity != null) {
-      for (int i = 0; i < numRows; i++) {
-        if (!Bitmap.isSet(validity, i)) {
-          ids[i] = 0; // any valid id; the value is masked by the validity bitmap
-        }
-      }
+  private static boolean decodeDictionaryInto(
+      WritableColumnVector cv, Dictionary dict, VecType type, int numRows, MemorySegment validity,
+      MemorySegment data) {
+    if (type != VecType.INT32 && type != VecType.INT64 && type != VecType.FLOAT64) {
+      return false;
     }
+    WritableColumnVector ids = cv.getDictionaryIds();
     int maxId = -1;
     for (int i = 0; i < numRows; i++) {
-      maxId = Math.max(maxId, ids[i]);
+      if (validity == null || Bitmap.isSet(validity, i)) {
+        maxId = Math.max(maxId, ids.getInt(i));
+      }
+    }
+    long[] table = DICTIONARY_TABLE.get();
+    if (table.length <= maxId) {
+      table = new long[Integer.highestOneBit(maxId) << 1];
+      DICTIONARY_TABLE.set(table);
     }
     switch (type) {
       case INT32 -> {
-        int[] table = new int[maxId + 1];
         for (int id = 0; id <= maxId; id++) {
           table[id] = dict.decodeToInt(id);
         }
-        int[] out = new int[numRows];
         for (int i = 0; i < numRows; i++) {
-          out[i] = table[ids[i]];
+          if (validity == null || Bitmap.isSet(validity, i)) {
+            data.setAtIndex(VectorBuffers.LE_INT, i, (int) table[ids.getInt(i)]);
+          }
         }
-        return MemorySegment.ofArray(out);
       }
       case INT64 -> {
-        long[] table = new long[maxId + 1];
         for (int id = 0; id <= maxId; id++) {
           table[id] = dict.decodeToLong(id);
         }
-        long[] out = new long[numRows];
         for (int i = 0; i < numRows; i++) {
-          out[i] = table[ids[i]];
+          if (validity == null || Bitmap.isSet(validity, i)) {
+            data.setAtIndex(VectorBuffers.LE_LONG, i, table[ids.getInt(i)]);
+          }
         }
-        return MemorySegment.ofArray(out);
-      }
-      case FLOAT64 -> {
-        double[] table = new double[maxId + 1];
-        for (int id = 0; id <= maxId; id++) {
-          table[id] = dict.decodeToDouble(id);
-        }
-        double[] out = new double[numRows];
-        for (int i = 0; i < numRows; i++) {
-          out[i] = table[ids[i]];
-        }
-        return MemorySegment.ofArray(out);
       }
       default -> {
-        return null;
+        for (int id = 0; id <= maxId; id++) {
+          table[id] = Double.doubleToRawLongBits(dict.decodeToDouble(id));
+        }
+        for (int i = 0; i < numRows; i++) {
+          if (validity == null || Bitmap.isSet(validity, i)) {
+            data.setAtIndex(VectorBuffers.LE_LONG, i, table[ids.getInt(i)]);
+          }
+        }
       }
     }
+    return true;
   }
 
   /**
@@ -319,19 +328,23 @@ public final class SparkColumnVectorBuffers {
    */
   private static VectorBuffers copyDictionaryUtf8(
       WritableColumnVector cv, Dictionary dict, int numRows, Arena arena, MemorySegment validity) {
-    int[] ids = cv.getDictionaryIds().getInts(0, numRows); // a fresh array; remapped in place
-    int[] remap = new int[64];
+    // Per-thread scratch, grown and kept: the four fresh arrays per column per batch this used to
+    // allocate were GC on every dictionary string column adapted (the shuffle adapts every batch).
+    Utf8Scratch sc = UTF8_SCRATCH.get();
+    WritableColumnVector idVector = cv.getDictionaryIds();
+    int[] remap = sc.remap;
     Arrays.fill(remap, -1);
     int distinct = 0;
-    byte[] bytes = new byte[256];
+    byte[] bytes = sc.bytes;
     int used = 0;
-    int[] offsets = new int[65];
+    int[] offsets = sc.offsets;
+    MemorySegment indices = ArrowLayout.allocateData(arena, VecType.INT32, numRows);
     for (int i = 0; i < numRows; i++) {
       if (validity != null && !Bitmap.isSet(validity, i)) {
-        ids[i] = 0;
+        indices.setAtIndex(VectorBuffers.LE_INT, i, 0);
         continue;
       }
-      int id = ids[i];
+      int id = idVector.getInt(i);
       if (id >= remap.length) {
         int old = remap.length;
         remap = Arrays.copyOf(remap, Math.max(id + 1, old * 2));
@@ -352,10 +365,11 @@ public final class SparkColumnVectorBuffers {
         offsets[distinct] = used;
         remap[id] = k;
       }
-      ids[i] = k;
+      indices.setAtIndex(VectorBuffers.LE_INT, i, k);
     }
-    MemorySegment indices = ArrowLayout.allocateData(arena, VecType.INT32, numRows);
-    MemorySegment.copy(ids, 0, indices, VectorBuffers.LE_INT, 0, numRows);
+    sc.remap = remap;
+    sc.bytes = bytes;
+    sc.offsets = offsets;
     MemorySegment dictOffsets = ArrowLayout.allocateOffsets(arena, distinct);
     MemorySegment.copy(offsets, 0, dictOffsets, VectorBuffers.LE_INT, 0, distinct + 1);
     MemorySegment dictData = ArrowLayout.allocateBytes(arena, used);
@@ -363,6 +377,14 @@ public final class SparkColumnVectorBuffers {
     VectorBuffers dictionary = SegmentVectorBuffers.utf8(distinct, null, dictOffsets, dictData);
     return SegmentVectorBuffers.dictionaryUtf8(numRows, validity, indices, dictionary);
   }
+
+  private static final class Utf8Scratch {
+    int[] remap = new int[1024];
+    byte[] bytes = new byte[1 << 16];
+    int[] offsets = new int[1025];
+  }
+
+  private static final ThreadLocal<Utf8Scratch> UTF8_SCRATCH = ThreadLocal.withInitial(Utf8Scratch::new);
 
   /** Plain strings in a writable vector: copied straight out of its byte storage. */
   private static VectorBuffers copyWritableUtf8(

@@ -729,8 +729,11 @@ Three Spark facts the executor side works around: `PluginContext.hostname()` thr
 (client-mode `RpcEnv`, no address); the executor plugin initialises before the block manager, so the
 resolver is looked up at the first request; and the task-level shuffle read metrics are merged by the
 *reader* (Spark's does it in a completion iterator -- the executor only merges on heartbeats), so ours
-merges them in its task-completion listener, or the stage shows zero bytes read. `docs/results.md`
-has the SF10 before/after.
+merges them in its task-completion listener, or the stage shows zero bytes read. Heap on the path is
+GC on short queries: local segments are read positionally into Arrow memory, streams go straight to
+their spill file up to 200 partitions, a batch is adapted once for ids and streams, and the Parquet
+adapter decodes dictionary columns into the arena with no per-batch arrays (which also pays on the
+scan side of every configuration). `docs/results.md` has the SF10 before/after.
 
 ## 4. Validation: what "done" means
 

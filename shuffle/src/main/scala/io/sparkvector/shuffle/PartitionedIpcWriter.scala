@@ -86,18 +86,26 @@ final class PartitionedIpcWriter(
 
     def start(): Unit = {
       root = VectorSchemaRoot.create(arrowSchema, allocator)
+      // Up to Spark's bypass-merge threshold of partitions the stream goes straight to its own file,
+      // Arrow memory to the page cache with no heap in between; above it, a heap staging buffer up to
+      // `flushBytes` keeps the file count down, as Spark's sort-based writer does.
+      val sink: java.nio.channels.WritableByteChannel =
+        if (numPartitions <= PartitionedIpcWriter.DirectFileMaxPartitions) { openOverflow(); overflow }
+        else Channels.newChannel(bytes)
       writer = compression match {
-        case Some(codec) => new ArrowStreamWriter(root, provider, Channels.newChannel(bytes), IpcOption.DEFAULT, CommonsCompressionFactory.INSTANCE, codec)
-        case None => new ArrowStreamWriter(root, provider, Channels.newChannel(bytes))
+        case Some(codec) => new ArrowStreamWriter(root, provider, sink, IpcOption.DEFAULT, CommonsCompressionFactory.INSTANCE, codec)
+        case None => new ArrowStreamWriter(root, provider, sink)
       }
       writer.start()
     }
 
+    private def openOverflow(): Unit = if (overflow == null) {
+      overflowPath = Files.createTempFile(path.getParent, path.getFileName.toString + ".p" + partition + ".", ".tmp")
+      overflow = FileChannel.open(overflowPath, StandardOpenOption.WRITE)
+    }
+
     def spillIfNeeded(): Unit = if (bytes.size() >= flushBytes) {
-      if (overflow == null) {
-        overflowPath = Files.createTempFile(path.getParent, path.getFileName.toString + ".p" + partition + ".", ".tmp")
-        overflow = FileChannel.open(overflowPath, StandardOpenOption.WRITE)
-      }
+      openOverflow()
       val buf = ByteBuffer.wrap(bytes.toByteArray)
       while (buf.hasRemaining) overflow.write(buf)
       overflowBytes += buf.limit()
@@ -106,6 +114,8 @@ final class PartitionedIpcWriter(
 
     def end(): Unit = if (writer != null) {
       writer.end()
+      // A direct stream wrote to the overflow channel, which the writer closes with itself.
+      if (overflow != null && overflow.isOpen) overflowBytes = math.max(overflowBytes, overflow.position())
       writer.close()
       root.close()
       writer = null
@@ -138,17 +148,26 @@ final class PartitionedIpcWriter(
     if (n == 0) return
     val scratch = Arena.ofConfined()
     try {
-      val masks = Array.tabulate(numPartitions)(_ => scratch.allocate(Bitmap.bytesFor(n), 8))
-      val counts = new Array[Int](numPartitions)
-      PartitionKernels.partitionMasks(ids, n, masks, counts)
       val buffers: Array[VectorBuffers] =
         Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, scratch))
-      var p = 0
-      while (p < numPartitions) {
-        if (counts(p) > 0) appendPartition(segments(p), buffers, masks(p), counts(p))
-        p += 1
-      }
+      write(buffers, n, ids, scratch)
     } finally scratch.close()
+  }
+
+  /**
+   * The same over columns already adapted into `scratch` -- the shuffle writer adapts a batch once
+   * for the partition ids and the streams (adapting a Parquet dictionary column decodes it).
+   */
+  def write(buffers: Array[VectorBuffers], n: Int, ids: Array[Int], scratch: Arena): Unit = {
+    if (n == 0) return
+    val masks = Array.tabulate(numPartitions)(_ => scratch.allocate(Bitmap.bytesFor(n), 8))
+    val counts = new Array[Int](numPartitions)
+    PartitionKernels.partitionMasks(ids, n, masks, counts)
+    var p = 0
+    while (p < numPartitions) {
+      if (counts(p) > 0) appendPartition(segments(p), buffers, masks(p), counts(p))
+      p += 1
+    }
   }
 
   private def appendPartition(seg: Segment, buffers: Array[VectorBuffers], mask: MemorySegment, count: Int): Unit = {
@@ -322,6 +341,9 @@ final class PartitionedIpcWriter(
 }
 
 object PartitionedIpcWriter {
+  /** Partition count up to which each stream is written straight to its own file (Spark's `spark.shuffle.sort.bypassMergeThreshold`). */
+  val DirectFileMaxPartitions = 200
+
   /** Dictionary-encodes a plain string vector: the distinct values in first-seen order, int32 ids, nulls kept. */
   def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator): (IntVector, VarCharVector) = {
     val n = in.getValueCount

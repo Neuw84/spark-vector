@@ -97,7 +97,8 @@ object PartitionedIpcFile {
   }
 
   /** A channel over `[offset, offset + length)` of a file. */
-  private final class RangeChannel(file: FileChannel, offset: Long, length: Long) extends ReadableByteChannel {
+  /** `length` bytes of `file` from `offset`, read with positional reads straight into the caller's buffers; closes the file. */
+  final class RangeChannel(file: FileChannel, offset: Long, length: Long) extends ReadableByteChannel {
     private var pos = 0L
     override def read(dst: ByteBuffer): Int = {
       if (pos >= length) return -1

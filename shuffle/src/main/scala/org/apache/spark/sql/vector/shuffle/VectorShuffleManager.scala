@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters._
 
 import io.sparkvector.kernels.PartitionKernels
 import io.sparkvector.kernels.PartitionKernels.KeyKind
+import io.sparkvector.kernels.VectorBuffers
 import io.sparkvector.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
 import io.sparkvector.spark.adapter.ColumnVectorAdapters
 import io.sparkvector.spark.arrow.VectorAllocators
@@ -161,23 +162,24 @@ final class VectorShuffleWriter(
       val batch = records.next()._2
       val n = batch.numRows()
       if (n > 0) {
-        val ids = partitionIds(batch, n)
-        writer.write(batch, ids)
+        val arena = java.lang.foreign.Arena.ofConfined()
+        try {
+          val buffers = Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
+          val ids = partitionIds(batch, buffers, n)
+          writer.write(buffers, n, ids, arena)
+        } finally arena.close()
         rows += n
       }
     }
     metrics.incWriteTime(System.nanoTime() - start)
   }
 
-  private def partitionIds(batch: ColumnarBatch, n: Int): Array[Int] = {
+  private def partitionIds(batch: ColumnarBatch, buffers: Array[VectorBuffers], n: Int): Array[Int] = {
     val ids = new Array[Int](n)
     dep.partitioning match {
       case VectorPartitioning.Hash(ordinals, kinds, num) =>
-        val arena = java.lang.foreign.Arena.ofConfined()
-        try {
-          val keys = ordinals.map(o => ColumnVectorAdapters.adapt(batch.column(o), n, arena))
-          PartitionKernels.hashPartitionIds(keys, kinds, n, num, new Array[Int](n), ids)
-        } finally arena.close()
+        val keys = ordinals.map(o => buffers(o))
+        PartitionKernels.hashPartitionIds(keys, kinds, n, num, new Array[Int](n), ids)
       case VectorPartitioning.RoundRobin(num) =>
         roundRobinNext = PartitionKernels.roundRobinIds(n, num, roundRobinNext, ids)
       case VectorPartitioning.Single =>
@@ -305,7 +307,15 @@ object VectorShuffleReader {
   /** A fetched or local block (one partition's IPC stream) as batches; the buffer is released with the stream. */
   def blockStream(buf: ManagedBuffer, allocator: BufferAllocator): Iterator[ColumnarBatch] with AutoCloseable =
     new Iterator[ColumnarBatch] with AutoCloseable {
-      private val inner = new PartitionedIpcFile.StreamReader(Channels.newChannel(buf.createInputStream()), allocator)
+      // A file segment is read with positional reads straight into Arrow memory; an InputStream
+      // channel would copy every byte through a heap array first (the GC behind Q19/Q20's 1.15x).
+      private val channel = buf match {
+        case f: org.apache.spark.network.buffer.FileSegmentManagedBuffer =>
+          new PartitionedIpcFile.RangeChannel(
+            java.nio.channels.FileChannel.open(f.getFile.toPath, java.nio.file.StandardOpenOption.READ), f.getOffset, f.getLength)
+        case other => Channels.newChannel(other.createInputStream())
+      }
+      private val inner = new PartitionedIpcFile.StreamReader(channel, allocator)
       private var released = false
       override def hasNext: Boolean = inner.hasNext
       override def next(): ColumnarBatch = inner.next()
