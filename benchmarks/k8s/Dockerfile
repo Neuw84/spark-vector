@@ -52,15 +52,16 @@ RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spa
     && cp /opt/spark/kubernetes/dockerfiles/spark/entrypoint.sh /opt/entrypoint.sh \
     && cp /opt/spark/kubernetes/dockerfiles/spark/decom.sh /opt/decom.sh \
     && chmod a+x /opt/entrypoint.sh /opt/decom.sh \
-    && rm -rf /opt/spark/examples /opt/spark/data
-
-# Spark 4.1.3 bundles Hadoop 3.4.2, whose UserGroupInformation calls Subject.getSubject and fails on
-# JDK 24+ (HADOOP-19212, fixed in 3.4.3): the shaded client jars are swapped for 3.4.3, as the root
-# pom does for the local harness.
-RUN cd /opt/spark/jars \
+    && rm -rf /opt/spark/examples /opt/spark/data \
+    && cd /opt/spark/jars \
     && rm -f hadoop-client-api-3.4.*.jar hadoop-client-runtime-3.4.*.jar \
     && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-api/${HADOOP_VERSION}/hadoop-client-api-${HADOOP_VERSION}.jar" \
-    && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/${HADOOP_VERSION}/hadoop-client-runtime-${HADOOP_VERSION}.jar"
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/${HADOOP_VERSION}/hadoop-client-runtime-${HADOOP_VERSION}.jar" \
+    && ls hadoop-client-*.jar
+# (The Hadoop swap above: Spark 4.1.3 bundles Hadoop 3.4.2, whose UserGroupInformation calls
+# Subject.getSubject and fails on JDK 24+ -- HADOOP-19212, fixed in 3.4.3 -- so the shaded client
+# jars are replaced, as the root pom does for the local harness; in the extraction's own layer so the
+# removal cannot be lost to a snapshot that misses deletions.)
 
 # The jars the runners need beyond the distribution: S3A (hadoop-aws + the AWS SDK v2 bundle it is
 # built against), the S3A magic committer binding (spark-hadoop-cloud), Comet, the Iceberg runtime,
