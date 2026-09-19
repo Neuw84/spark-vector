@@ -1,6 +1,6 @@
 package io.sparkvector.benchmarks
 
-import org.apache.spark.sql.{Dataset, SaveMode, SparkSession, TPCDSSchema}
+import org.apache.spark.sql.{DataFrame, Dataset, SaveMode, SparkSession, TPCDSSchema}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.StructType
 
@@ -15,7 +15,7 @@ import scala.sys.process._
  * partitioned by their date key as the reference generator does, dimensions as one file each.
  *
  * {{{
- *   TpcdsGenRunner --scale 100 --out s3a://bucket/tpcds/sf100/parquet [--parallel 64]
+ *   TpcdsGenRunner --scale 100 --out s3a://bucket/tpcds/sf100/parquet [--parallel 64] [--children-per-round 64]
  *                  [--dsdgen /opt/tpcds-kit/tools] [--tables store_sales,date_dim]
  * }}}
  *
@@ -40,6 +40,7 @@ object TpcdsGenRunner {
     val out = opts.getOrElse("out", sys.error("--out <base URI> is required")).stripSuffix("/")
     val parallel = opts.get("parallel").map(_.toInt).getOrElse(math.max(4, scale / 2))
     val dsdgenDir = opts.getOrElse("dsdgen", "/opt/tpcds-kit/tools")
+    val childrenPerRound = opts.get("children-per-round").map(_.toInt).getOrElse(parallel)
     val only = opts.get("tables").map(_.split(",").map(_.trim).toSet)
 
     val spark = SparkSession.builder().appName(s"tpcds-gen-sf$scale").getOrCreate()
@@ -50,17 +51,30 @@ object TpcdsGenRunner {
       val start = System.nanoTime()
       val children = if (Unsplit(table)) 1 else parallel
       val ddl = Schema.columns(table)
-      val lines: Dataset[String] = spark.createDataset(
-        spark.sparkContext.parallelize(1 to children, children).flatMap { child =>
-          generate(dsdgenDir, table, scale, parallel, child)
-        })(org.apache.spark.sql.Encoders.STRING)
       val schema = StructType.fromDDL(ddl)
-      // dsdgen ends every row with a '|': one trailing empty field the schema does not have.
-      val rows = spark.read.schema(schema).option("sep", "|").option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
       val partitionColumns = Schema.partitions.getOrElse(table, Nil).map(_.stripPrefix("`").stripSuffix("`")) // TPCDSSchema quotes them
-      val writer = (if (partitionColumns.nonEmpty) rows.repartition(partitionColumns.map(col): _*) else rows.coalesce(1))
-        .write.mode(SaveMode.Overwrite).option("compression", "zstd")
-      (if (partitionColumns.nonEmpty) writer.partitionBy(partitionColumns: _*) else writer).parquet(s"$out/$table")
+      def rowsOf(childRange: Range): DataFrame = {
+        val lines: Dataset[String] = spark.createDataset(
+          spark.sparkContext.parallelize(childRange, childRange.length).flatMap { child =>
+            generate(dsdgenDir, table, scale, parallel, child)
+          })(org.apache.spark.sql.Encoders.STRING)
+        // dsdgen ends every row with a '|': one trailing empty field the schema does not have.
+        spark.read.schema(schema).option("sep", "|").option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
+      }
+      if (partitionColumns.isEmpty) {
+        rowsOf(1 to children).coalesce(1).write.mode(SaveMode.Overwrite).option("compression", "zstd").parquet(s"$out/$table")
+      } else {
+        // The repartition by the date key shuffles the whole table through the executors' local disks; in
+        // rounds of `--children-per-round` children (append after the first) one round's shuffle is what
+        // has to fit. Each round writes one file per date partition.
+        val rounds = (1 to children).grouped(childrenPerRound).toSeq
+        rounds.zipWithIndex.foreach { case (range, i) =>
+          val mode = if (i == 0) SaveMode.Overwrite else SaveMode.Append
+          rowsOf(range.head to range.last).repartition(partitionColumns.map(col): _*)
+            .write.mode(mode).option("compression", "zstd").partitionBy(partitionColumns: _*).parquet(s"$out/$table")
+          if (rounds.length > 1) println(s"[tpcds-gen]   $table round ${i + 1}/${rounds.length} (children ${range.head}-${range.last}) written")
+        }
+      }
       val count = spark.read.parquet(s"$out/$table").count()
       println(f"[tpcds-gen] $table: $count%,d rows, ${(System.nanoTime() - start) / 1e9}%.0f s" +
         (if (partitionColumns.nonEmpty) s", partitioned by ${partitionColumns.mkString(",")}" else ""))
