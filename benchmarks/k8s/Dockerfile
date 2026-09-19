@@ -54,6 +54,14 @@ RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spa
     && chmod a+x /opt/entrypoint.sh /opt/decom.sh \
     && rm -rf /opt/spark/examples /opt/spark/data
 
+# Spark 4.1.3 bundles Hadoop 3.4.2, whose UserGroupInformation calls Subject.getSubject and fails on
+# JDK 24+ (HADOOP-19212, fixed in 3.4.3): the shaded client jars are swapped for 3.4.3, as the root
+# pom does for the local harness.
+RUN cd /opt/spark/jars \
+    && rm -f hadoop-client-api-3.4.*.jar hadoop-client-runtime-3.4.*.jar \
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-api/${HADOOP_VERSION}/hadoop-client-api-${HADOOP_VERSION}.jar" \
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/${HADOOP_VERSION}/hadoop-client-runtime-${HADOOP_VERSION}.jar"
+
 # The jars the runners need beyond the distribution: S3A (hadoop-aws + the AWS SDK v2 bundle it is
 # built against), the S3A magic committer binding (spark-hadoop-cloud), Comet, the Iceberg runtime,
 # and Spark's spark-sql tests jar.
