@@ -462,6 +462,11 @@ object VectorAggregatePlanner {
       case (a: Attribute, pos) =>
         keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId)).orElse(if (resultExpressions.length == positional.length) positional.lift(pos) else None)
           .toRight(s"result attribute ${a.name} is neither a grouping key nor an aggregation buffer")
+      // A grouping key under another name (`ss_customer_sk AS customer_sk ... GROUP BY ss_customer_sk`,
+      // TPC-DS q97): the same lane, emitted under the alias's attribute (#328).
+      case (Alias(a: Attribute, name), _) =>
+        keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId))
+          .toRight(s"result expression $name aliases ${a.name}, which is neither a grouping key nor an aggregation buffer")
       case (other, _) => Left(s"result expression ${other.sql} is not a plain attribute")
     }
     mapped.collectFirst { case Left(r) => r } match {

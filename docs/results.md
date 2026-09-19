@@ -516,7 +516,7 @@ worth far more than that: 37 of the ~90 fallback reasons over Spark's shuffle we
 | a wide decimal as a *value* across operators: a scalar subquery result in a filter (6), `CASE WHEN` with a `decimal(p,s)` result in a broadcast join (2), `round` over a wide decimal (1) | 9 | the #258 follow-up |
 | `TINYINT`: the `lochierarchy` window column (3), `CAST(... AS TINYINT)` over `spark_grouping_id` in grouping-set aggregates (4) | 7 | a `ByteType` / `ShortType` lane widening |
 | a merge join left to Spark by the size gate | 3 | the rule above; a merge join over our sorted shuffle instead of Spark's row sort is the way back in |
-| an aggregate whose result expression is an alias (`ss_customer_sk AS customer_sk is not a plain attribute`) | 2 | small |
+| an aggregate whose result expression is an alias (`ss_customer_sk AS customer_sk is not a plain attribute`) | 2 | done in #328: the alias maps onto the key's lane; q97 21/23 (the two left are broadcast exchanges, #325), checksum equal |
 | a `Union` with no columnar child | 1 | cascade of the above |
 
 **TPC-H SF10** (2 iterations, 1 warmup, doubles schema; `vector` = our operators over Spark's row

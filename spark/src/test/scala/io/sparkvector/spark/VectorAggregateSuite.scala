@@ -41,6 +41,12 @@ class VectorAggregateSuite extends VectorQuerySuite {
     checkVectorized("SELECT count(*) FROM t WHERE i < 0", Seq(Filter, Agg))
   }
 
+  test("grouping keys emitted under an alias (#328): keys-only and with an aggregate") {
+    // TPC-DS q97's shape: a distinct whose result renames its own keys.
+    checkVectorized("SELECT s AS key_s, i AS key_i FROM t GROUP BY s, i", Seq(Agg))
+    checkVectorized("SELECT s AS key_s, count(*) AS n, sum(d) AS total FROM t GROUP BY s", Seq(Agg))
+  }
+
   test("count(*) over a scan with no projected columns") {
     checkVectorized("SELECT count(*) FROM t", Seq(Agg))
   }
