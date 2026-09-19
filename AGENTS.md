@@ -458,7 +458,11 @@ that pin it.
   its reason the `SortMergeWhy` tag both operators print (`Sort-merge join as hash join: right side fits
   spark.vector.join.maxBuildSize by statistics` / `as merge join: the row order reaches a limit or a
   sort` / `ordering relied on by the parent` / `no size statistics ...`). A hash join below a merge join
-  (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). A hash rewrite whose inputs are
+  (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). Measured at TPC-H SF10 (#279):
+  q21's chain of two merge joins over lineitem (four-row runs) ran 44.9 s against Spark's own
+  sort-merge join at 16.8 s and three of our hash joins (under Comet's shuffle) at 6.5 s, so `auto` is
+  slower than `hash` at scale and the merge join must not be chosen for large inputs until it walks
+  runs without a run object. A hash rewrite whose inputs are
   refused (Spark's operators below, q97) does NOT fall through to the merge join: measured, the merge
   join over Spark's row inputs on q97 ran 2960 ms against 385 ms for Spark's own (per-run bookkeeping
   over unique keys, #286); the join stays Spark's until the merge join walks runs without a run object. Spark's contract is kept (clustered distribution, both children
@@ -570,6 +574,12 @@ into these rather than adding special cases to operators.
   on our classpath (Comet keeps `org.apache.arrow.c.*` unshaded but with shaded signatures, so the
   classes collide), maven-shade relocation (Comet's JNI looks classes up by literal name), and a
   bulk-copy bridge (replaced by the zero-copy one).
+- The hybrid planning study (#279, `docs/results.md`) is the evidence for #280/#281: Comet's
+  operator wins by more than twice the crossing on the many-group hash aggregate (but the wall clock
+  there is Spark's row shuffle, #288), the wide-decimal reduction and the broadcast-join probe; ours
+  stays on windows (Comet has none), narrow decimals, few-group aggregates and the shuffled hash join;
+  the plain filter is 1-3x behind DataFusion's even over Arrow input, which #282-#284 must explain
+  before an allowlist is written.
 - The crossing cost is a known number (#279, `CrossingBenchmark`; `docs/results.md`, "Hybrid planning
   study"): into Comet ~2.7-3 µs per column, rows aside, for fixed-width and plain-string lanes (a
   pointer hand-over); back zero-copy at 0.1-0.25 µs per column; a dictionary string column decoded on
