@@ -150,6 +150,23 @@ either. `CometMixedChainSuite` (`-Pcomet`) pins Comet's projection, collect limi
 above our chains, Comet's partial aggregate above our filter for a shareable pair and the refusal for
 `count`, ours above Comet's filter, today's plan with the key off, and the view.
 
+The pass walks bottom-up, so a parent above an operator it has just given to Comet is offered too
+-- Comet's own rule ran before ours and never saw a native child there -- and a broadcast exchange
+is looked through, since Comet converts one only together with the join above it. Joins and final
+aggregates are then reached through the exchange: a shuffle over one of our operators is Comet's
+native shuffle over `VectorToComet` (the section above), and Comet's JVM shuffle that its rule had
+planned over a block this pass later converted becomes Comet's native shuffle over that block.
+`CometMixedShuffleSuite` (Comet's shuffle manager on) pins Comet's hash join above its shuffles
+above two of our filters, Comet's final aggregate above its shuffle above its partial above our
+filter, and Comet's broadcast join with its broadcast over our chain -- the last with adaptive
+execution off: under it the broadcast stage is planned and run before the join's stage, with Spark's
+exchange over the child as Comet's rule saw it, so Comet's broadcast is out of reach and the join
+stays Spark's above our rows. A failure inside Comet's block above the leaf (an ANSI division by
+zero in Comet's projection) still releases every export -- the task-completion listener the shuffle
+bridge already had. What the seam cannot reach in Comet 1.0: a window (Comet has no window operator)
+and a sort-merge join without Comet's shuffle. Which operators *should* go to Comet is #281's
+allowlist, informed by the #279 matrices; this key stays off until then.
+
 ## Per-operator attribution against Comet
 
 The benchmark harness attributes time per operator for both engines (#279): our operators through

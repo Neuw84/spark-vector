@@ -749,8 +749,8 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 286 Spark tests with the Comet and Iceberg profiles (259 with
-Iceberg alone; the Comet suites contribute 27, `CometMixedChainSuite` 7 of them). If a change lowers either number, explain why in the commit.
+Current counts: 176 kernel tests, 290 Spark tests with the Comet and Iceberg profiles (259 with
+Iceberg alone; the Comet suites contribute 31, `CometMixedChainSuite` 8 and `CometMixedShuffleSuite` 3 of them). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 
