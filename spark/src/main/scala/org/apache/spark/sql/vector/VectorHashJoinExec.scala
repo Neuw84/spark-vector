@@ -1025,7 +1025,12 @@ object VectorJoinPlanner {
         if (sized.isEmpty) Left("no size statistics for a build side (a sort-merge join is re-expressed only when statistics say the build side fits)")
         else {
           val (buildSide, size) = sized.minBy(_._2)
+          val streamed = estimatedBuildSize(if (buildSide == BuildLeft) right else left)
           if (size > maxBuildSize) Left(s"smallest side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize")
+          // A semi or anti join may only build its right side; when that is the larger one (TPC-H q4:
+          // orders semi-joined with lineitem), hashing it costs more than Spark's merge over the
+          // sorted inputs -- measured 14% slower at SF10 -- so the rewrite declines (#311).
+          else if (streamed.exists(_ < size)) Left(s"build side estimated at $size bytes is larger than the streamed side (${streamed.get} bytes)")
           else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right, preservedBuild = true).map(_ => buildSide)
         }
       }

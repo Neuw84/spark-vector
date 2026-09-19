@@ -93,6 +93,11 @@ object TpchRunner {
       "spark.vector.shuffle.enabled" -> "true")),
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
     "comet-scan-vector" -> (VectorFast ++ Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
+    // #311: Comet's native scan, our operators, and OUR columnar shuffle (#288) -- Comet's shuffle off.
+    "comet-scan-vector-ourshuffle" -> (VectorFast ++ Map(
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
+      "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
+      "spark.vector.shuffle.enabled" -> "true") ++ CometScanOnly),
     // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.
     "comet-scan-vector-shuffle" -> (VectorFast ++ Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
@@ -122,7 +127,7 @@ object TpchRunner {
       "spark.memory.offHeap.enabled" -> "true",
       "spark.memory.offHeap.size" -> "3g"))
 
-  val ConfigOrder: Seq[String] = Seq("spark", "vector", "vector-shuffle", "comet-scan", "comet-scan-vector", "comet-scan-vector-shuffle", "hybrid", "comet")
+  val ConfigOrder: Seq[String] = Seq("spark", "vector", "vector-shuffle", "comet-scan", "comet-scan-vector-ourshuffle", "comet-scan-vector", "comet-scan-vector-shuffle", "hybrid", "comet")
 
   /** The two pure configurations `hybrid` is judged against, query by query (#281). */
   val HybridBaselines: Seq[String] = Seq("comet-scan-vector-shuffle", "comet")

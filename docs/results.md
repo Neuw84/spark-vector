@@ -471,6 +471,92 @@ each. With #288's shuffle the sort below is ours and `auto` plans q21's joins as
 real statistics (10.5 s); a trial of the merge join forced over our shuffle and our sort did not
 finish one iteration in an hour and is parked for a profile under a hard timeout -- not a #310 item.
 
+### `auto` by default (#311): the three conditions, measured
+
+#287 left the planning mode `off` by default and named what a flip needs: the golden files under
+`auto`, TPC-DS with every checksum equal to Spark's, and TPC-H SF10 under `auto` not slower than
+without it. Two rules were added on the way and are part of the default (AGENTS 3.6b): the **size
+gate** -- a merge join `auto` would choose is left to Spark unless both inputs have statistics and fit
+`spark.vector.exec.sortMergeJoin.maxInputSize` (1 GiB; the shape that failed the third condition in
+#287 was q21's merge joins over Spark's spilling row sort) -- and the **build-side rule** -- the hash
+rewrite declines a build side larger than the streamed side (a semi or anti join may only build its
+right side).
+
+**Golden suite** (`run-spark-sql-tests.sh`, this branch, `auto` default): 642 passed, 0 failed, 111
+ignored; 27 cases run above the floor and are not rewritten. Same as `off`.
+
+**TPC-DS SF1** (3 iterations, 1 warmup -- a study run, the protocol's 10/10 was not needed for a
+count; the accelerated-operator totals and the checksums are what the condition asks):
+
+| configuration | operators accelerated | queries at 75%+ | checksums vs `spark` |
+|---|---|---|---|
+| `vector`, `auto` + gate, Spark's row shuffle | 3413 / 4662 (73%) | 62 / 103 | 103 equal |
+| `vector`, `auto` without the gate (#287) | 3437 / 4662 (74%) | 66 / 103 | 103 equal |
+| `vector-shuffle`, `auto` + gate, our columnar shuffle (#288) | 3772 / 4661 (81%) | 91 / 103 | 103 equal |
+
+The gate costs 24 operators and four queries at 75% (the four merge joins it leaves to Spark: three
+"inputs too large", one "no size statistics") -- the price of not repeating q21 at scale. Our shuffle is
+worth far more than that: 37 of the ~90 fallback reasons over Spark's shuffle were a `Sort` or a
+`TakeOrderedAndProject` over Spark's row exchange, and every one of them is gone under ours.
+
+**What TPC-DS still leaves to Spark**, by root cause (the rest of the reason list is cascades --
+"child X is not columnar" -- from these), with our shuffle on:
+
+| root cause | reasons | where |
+|---|---|---|
+| a wide decimal as a *value* across operators: a scalar subquery result in a filter (6), `CASE WHEN` with a `decimal(p,s)` result in a broadcast join (2), `round` over a wide decimal (1) | 9 | the #258 follow-up |
+| `TINYINT`: the `lochierarchy` window column (3), `CAST(... AS TINYINT)` over `spark_grouping_id` in grouping-set aggregates (4) | 7 | a `ByteType` / `ShortType` lane widening |
+| a merge join left to Spark by the size gate | 3 | the rule above; a merge join over our sorted shuffle instead of Spark's row sort is the way back in |
+| an aggregate whose result expression is an alias (`ss_customer_sk AS customer_sk is not a plain attribute`) | 2 | small |
+| a `Union` with no columnar child | 1 | cascade of the above |
+
+**TPC-H SF10** (2 iterations, 1 warmup, doubles schema; `vector` = our operators over Spark's row
+shuffle, `vector-shuffle` = over our columnar shuffle; `off` = `--conf spark.vector.exec.sortMergeJoin.mode=off`,
+Spark's own sort-merge join with our operators around it). Medians in ms, ratio = `auto` / `off`:
+
+| query | `vector` off | `vector` auto | ratio | `vector-shuffle` off | `vector-shuffle` auto | ratio |
+|---|---|---|---|---|---|---|
+| q1 | 1122 | 1189 | 1.06 | 1122 | 1135 | 1.01 |
+| q2 | 1608 | 1872 | 1.16 | 1595 | 1618 | 1.01 |
+| q3 | 3887 | 4327 | 1.11 | 3343 | 2900 | 0.87 |
+| q4 | 2675 | 3069 | 1.15 | 1495 | 1711 → 1508 | 1.14 → 1.01 |
+| q5 | 8615 | 6763 | 0.79 | 7211 | 5893 | 0.82 |
+| q6 | 482 | 576 | 1.20 (noise, same plan) | 500 | 540 | 1.08 (same plan) |
+| q7 | 6003 | 6817 | 1.14 | 6186 | 5188 | 0.84 |
+| q8 | 2161 | 2264 | 1.05 | 2329 | 2281 | 0.98 |
+| q9 | 5401 | 4938 | 0.91 | 4550 | 4611 | 1.01 |
+| q10 | 3065 | 3205 | 1.05 | 3289 | 3267 | 0.99 |
+| q11 | 743 | 734 | 0.99 | 638 | 691 | 1.08 (same plan) |
+| q12 | 2390 | 2465 | 1.03 | 1718 | 1332 | 0.78 |
+| q13 | 2714 | 2893 | 1.07 | 2287 | 2306 | 1.01 |
+| q14 | 925 | 924 | 1.00 | 950 | 1014 | 1.07 |
+| q15 | 1798 | 1933 | 1.08 | 1849 | 1857 | 1.00 |
+| q16 | 1195 | 1269 | 1.06 | 1125 | 982 | 0.87 |
+| q17 | 5212 | 5561 | 1.07 | 4988 | 4613 | 0.92 |
+| q18 | 8481 | 8302 | 0.98 | 6249 | 4881 | 0.78 |
+| q19 | 1155 | 1127 | 0.98 | 1252 | 1332 | 1.06 |
+| q20 | 1444 | 1341 | 0.93 | 1294 | 1324 | 1.02 |
+| q21 | 18997 | 16941 | 0.89 | 9020 | 8674 | 0.96 |
+| q22 | 1457 | 1255 | 0.86 | 1188 | 882 | 0.74 |
+| **total** | 81529 | 79768 | **0.98** | 64175 | 59033 | **0.92** |
+
+(The `vector-shuffle` q21/q22 `off` readings come from a separate run of those two queries; the first
+run's unit was stopped by its memory cap at q21. The two q4 `auto` numbers are before and after the
+build-side rule: 1711 with the hash rewrite building lineitem, 1508 with our merge join, 15 of 15
+operators ours; Spark's merge join reads 1495. Our merge join *forced* on q4 read 1703 in another run
+-- the 1.5 s query moves 10% between runs.)
+
+What the tables say. Under our shuffle `auto` is a net win with no loser beyond noise: 0.92x overall,
+q22 0.74x, q12 and q18 0.78x, q5 0.82x, q7 0.84x, q3 and q16 0.87x; q21 is 0.96x, the gate having left
+its lineitem joins to Spark. Over Spark's row shuffle `auto` is 0.98x overall and q21 is at parity for
+the same reason, but the hash rewrite's conversions on q2, q3, q4 and q7 run 11-16% *slower* than
+Spark's merge join: there the rewrite's build side arrives as rows and is converted, and at SF10 that
+conversion plus the per-task hash build cost more than Spark's merge over the inputs Spark has already
+sorted. At SF1 (#287) the same rewrite won over Spark's shuffle, so this is a matter of scale, and it
+is recorded here rather than gated on: a deployment without our shuffle manager that sees it can set
+`spark.vector.exec.sortMergeJoin.mode=off` (or `merge`), and the shuffle manager is the configuration
+this project is heading for.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 

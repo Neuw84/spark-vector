@@ -104,7 +104,11 @@ object VectorConf {
    */
   def sortMergeJoinMode(conf: SQLConf): String = {
     val explicit = conf.getConfString(SortMergeJoinMode, "").trim.toLowerCase
-    if (explicit.nonEmpty) explicit else if (bool(conf, SortMergeJoinEnabled, default = false)) "auto" else "off"
+    if (explicit.nonEmpty) explicit
+    else conf.getConfString(SortMergeJoinEnabled, "").trim.toLowerCase match {
+      case "false" => "off" // the boolean flag still switches the rewrite off
+      case _ => "auto" // the default since #311: the hash rewrite where a side fits, our merge join where the order can show and the inputs are small, Spark's otherwise
+    }
   }
   /**
    * Largest build side (bytes, size strings like `512m` accepted) a hash-style join converts for (#86);
