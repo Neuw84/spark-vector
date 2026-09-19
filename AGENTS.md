@@ -473,7 +473,12 @@ that pin it.
   Spark's row sort was 2.3x slower than Spark's own); and the hash rewrite declines a build side larger
   than the streamed side by statistics (`VectorJoinPlanner.sortMergeBuildSide`: a semi or anti join may
   only build its right side; q4 hashed lineitem and ran 14% slower than Spark's merge -- with the rule
-  `auto` takes our merge join there and is at parity, fully accelerated). The `auto`
+  `auto` takes our merge join there and is at parity, fully accelerated). Both rules read
+  `VectorJoinPlanner.estimatedBuildSize`, which under adaptive execution prefers the **query stage that
+  has run** (its `mapStats` bytes) to the logical estimate: it reads through a `SortExec` to the stage
+  below and caps any logical estimate by a materialised stage reachable through unary nodes (#329 -- a
+  sort's own estimate over a join is the join's product estimate; TPC-DS q1/q30/q81 read 10^16 bytes
+  at SF1 and were left to Spark until this). The `auto`
   rule, in `markSortMergeJoins`: a join whose ordering a parent relies on (`orderingNeeded`) takes the
   merge join; so does one whose row order is *visible* -- below a `LocalLimit` / `GlobalLimit` /
   `CollectLimit` / `TakeOrderedAndProject` / `Sort`, or a range-partitioned exchange (a global sort's,

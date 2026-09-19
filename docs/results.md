@@ -469,7 +469,13 @@ shuffle here, so our sort cannot take it; 7.7 GB of spill in the stage) plus the
 above it. The operator's `time` includes pulling that input, which is why the joins still read 46 s
 each. With #288's shuffle the sort below is ours and `auto` plans q21's joins as hash joins on the
 real statistics (10.5 s); a trial of the merge join forced over our shuffle and our sort did not
-finish one iteration in an hour and is parked for a profile under a hard timeout -- not a #310 item.
+finish one iteration in an hour and was parked for a profile under a hard timeout -- not a #310 item.
+(#329 ran that profile on the finished #310 code: the pathology is gone -- q21 with `mode=merge` over
+our shuffle reads 10.9 s warm, against Spark's merge join at 9.0 s, our hash rewrite at 8.3 s and
+Comet's merge join at 11.0 s; the recording shows no quadratic step, the merge join's own frames at
+about 5% of samples, our sort at 12% and the JDK's memory-segment bookkeeping -- alignment and
+liveness checks, zeroing of fresh native allocations -- at about 30% of top-of-stack samples, which is
+the sort's next work, not the join's.)
 
 ### `auto` by default (#311): the three conditions, measured
 
@@ -495,7 +501,10 @@ count; the accelerated-operator totals and the checksums are what the condition 
 | `vector-shuffle`, `auto` + gate, our columnar shuffle (#288) | 3772 / 4661 (81%) | 91 / 103 | 103 equal |
 
 The gate costs 24 operators and four queries at 75% (the four merge joins it leaves to Spark: three
-"inputs too large", one "no size statistics") -- the price of not repeating q21 at scale. Our shuffle is
+"inputs too large", one "no size statistics") -- the price of not repeating q21 at scale. Three of
+those four were a false reading (#329): the sort above a self-joined aggregate carried the join's
+product estimate, 10^16 bytes at SF1; with the estimate reading the query stage that has run, q1,
+q30 and q81 keep their merge join (34/38, 40/46, 39/45 operators, checksums equal). Our shuffle is
 worth far more than that: 37 of the ~90 fallback reasons over Spark's shuffle were a `Sort` or a
 `TakeOrderedAndProject` over Spark's row exchange, and every one of them is gone under ours.
 

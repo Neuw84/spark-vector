@@ -181,6 +181,39 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     }
   }
 
+  test("the size gate reads the stage that has run, not a sort's product estimate (#329)") {
+    import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
+    import org.apache.spark.sql.vector.VectorJoinPlanner
+    // The q1/q30/q81 shape: an aggregate self-joined against its own average, a sort above the join.
+    // The logical estimate of the join's inputs is derived from a join; the stages below have run.
+    val ctr =
+      """WITH t AS (SELECT ki, sum(v) AS total FROM a GROUP BY ki)
+        |SELECT t1.ki, t1.total FROM t t1, (SELECT ki, avg(total) * 1.2 AS lim FROM t GROUP BY ki) t2
+        |WHERE t1.ki = t2.ki AND t1.total > t2.lim ORDER BY t1.ki LIMIT 50""".stripMargin
+    val auto = Seq("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "true", VectorConf.SortMergeJoinMode -> "auto")
+    withConf(auto: _*) {
+      val df = spark.sql(ctr)
+      df.collect()
+      val plan = finalPlan(df)
+      val joins = nodesOf[VectorSortMergeJoinExec](df).flatMap(j => Seq(j.left, j.right)) ++
+        nodesOf[VectorShuffledHashJoinExec](df).flatMap(j => Seq(j.left, j.right)) ++
+        nodesOf[SortMergeJoinExec](df).flatMap(j => Seq(j.left, j.right))
+      assume(joins.nonEmpty, plan.treeString)
+      // Each input of the join estimates as no more than the runtime bytes of the stage below it.
+      joins.foreach { child =>
+        child.collectFirst { case q: ShuffleQueryStageExec => q }.foreach { q =>
+          val runtime = q.computeStats().map(_.sizeInBytes.toLong)
+          val est = VectorJoinPlanner.estimatedBuildSize(child)
+          assert(est.isDefined && runtime.exists(_ >= est.get), s"estimate $est, stage $runtime\n${plan.treeString}")
+        }
+      }
+      // And the join is ours, not left to Spark for its size.
+      val left = org.apache.spark.sql.vector.VectorFallback.reasons(plan).map(_._2).filter(_.contains("inputs too large"))
+      assert(left.isEmpty, left.mkString("; ") + "\n" + plan.treeString)
+      assert(nodesOf[VectorSortMergeJoinExec](df).nonEmpty || nodesOf[VectorShuffledHashJoinExec](df).nonEmpty, plan.treeString)
+    }
+  }
+
   test("the mode switch: off leaves Spark's join, hash takes the rewrite, a struct column falls back") {
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinMode -> "off") {
       val df = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq())

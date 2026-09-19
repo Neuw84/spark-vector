@@ -893,7 +893,26 @@ object VectorJoinPlanner {
   def estimatedBuildSize(plan: SparkPlan): Option[Long] = plan match {
     case r: org.apache.spark.sql.execution.adaptive.AQEShuffleReadExec => estimatedBuildSize(r.child)
     case q: org.apache.spark.sql.execution.adaptive.QueryStageExec => q.computeStats().map(_.sizeInBytes).flatMap(known)
-    case other => other.logicalLink.map(_.stats.sizeInBytes).flatMap(known)
+    // A sort keeps its input's bytes: read the stage below it. The sort's own logical estimate is the
+    // estimate of whatever it sorts -- for a sort over a join, the join's product estimate (#329:
+    // TPC-DS q1/q30/q81 read 10^16 bytes at SF1 and were left to Spark).
+    case s: org.apache.spark.sql.execution.SortExec => estimatedBuildSize(s.child)
+    case other =>
+      val logical = other.logicalLink.map(_.stats.sizeInBytes).flatMap(known)
+      // A materialised stage below, through unary nodes, has run: its bytes bound the estimate above
+      // it (a filter or a project does not multiply rows the way a join's estimate does).
+      (logical, runtimeSizeBelow(other)) match {
+        case (Some(l), Some(r)) => Some(math.min(l, r))
+        case (l, r) => l.orElse(r)
+      }
+  }
+
+  /** The runtime bytes of a query stage reached from `plan` through unary operators only, if it has run. */
+  private def runtimeSizeBelow(plan: SparkPlan): Option[Long] = plan match {
+    case q: org.apache.spark.sql.execution.adaptive.QueryStageExec => q.computeStats().map(_.sizeInBytes).flatMap(known)
+    case r: org.apache.spark.sql.execution.adaptive.AQEShuffleReadExec => runtimeSizeBelow(r.child)
+    case u if u.children.size == 1 => runtimeSizeBelow(u.children.head)
+    case _ => None
   }
 
   private def known(size: BigInt): Option[Long] = if (size >= 0 && size < BigInt(Long.MaxValue)) Some(size.toLong) else None
