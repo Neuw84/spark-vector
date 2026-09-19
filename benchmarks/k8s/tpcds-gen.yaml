@@ -69,11 +69,13 @@ spec:
     serviceAccount: sfi-engine
     labels:
       app: tpcds-gen
+  # The bench nodes also carry the kafka and flink operators (~2.5 cores, ~9 GiB each): what is left
+  # per node is about 5 cores and 21 GiB, hence one executor of 4 cores / 17 GiB per node.
   executor:
     instances: 4
-    cores: 6
-    memory: "18g"
-    memoryOverhead: "4g"
+    cores: 4
+    memory: "14g"
+    memoryOverhead: "3g"
     labels:
       app: tpcds-gen
     volumeMounts:
