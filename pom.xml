@@ -14,6 +14,7 @@
   <modules>
     <module>kernels</module>
     <module>spark</module>
+    <module>shuffle</module>
     <module>benchmarks</module>
   </modules>
 
