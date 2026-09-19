@@ -1,0 +1,80 @@
+package io.sparkvector.benchmarks
+
+import org.apache.spark.sql.{Dataset, SaveMode, SparkSession, TPCDSSchema}
+import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.types.StructType
+
+import scala.sys.process._
+
+/**
+ * Generates the TPC-DS tables as Parquet on any Hadoop file system by running `dsdgen` on the
+ * executors (#247): each of `--parallel` children generates its slice of every table
+ * (`dsdgen -TABLE t -SCALE sf -PARALLEL n -CHILD i -FILTER Y`, the rows on stdout), the lines are
+ * parsed with Spark's own `TPCDSSchema` (money as DECIMAL(7,2), dates as DATE, keys as INT -- the
+ * schema the runners and the per-query issues assume) and written with ZSTD, the seven fact tables
+ * partitioned by their date key as the reference generator does, dimensions as one file each.
+ *
+ * {{{
+ *   TpcdsGenRunner --scale 100 --out s3a://bucket/tpcds/sf100/parquet [--parallel 64]
+ *                  [--dsdgen /opt/tpcds-kit/tools] [--tables store_sales,date_dim]
+ * }}}
+ *
+ * `dsdgen` and `tpcds.idx` must be at `--dsdgen` on every executor (the image builds tpcds-kit
+ * there). At 1 TB one child of store_sales is ~2.9 GB of text; `--parallel` around the executor
+ * core count times four keeps a child under a few minutes.
+ */
+object TpcdsGenRunner {
+
+  private object Schema extends TPCDSSchema {
+    def columns: Map[String, String] = tableColumns
+    def partitions: Map[String, Seq[String]] = tablePartitionColumns
+  }
+
+  /** Tables dsdgen only emits from child 1 (it does not split them): generated once, not per child. */
+  private val Unsplit = Set("call_center", "catalog_page", "customer_demographics", "date_dim", "household_demographics",
+    "income_band", "item", "promotion", "reason", "ship_mode", "store", "time_dim", "warehouse", "web_page", "web_site")
+
+  def main(args: Array[String]): Unit = {
+    val opts = args.sliding(2, 2).collect { case Array(k, v) if k.startsWith("--") => k.stripPrefix("--") -> v }.toMap
+    val scale = opts.getOrElse("scale", "1").toInt
+    val out = opts.getOrElse("out", sys.error("--out <base URI> is required")).stripSuffix("/")
+    val parallel = opts.get("parallel").map(_.toInt).getOrElse(math.max(4, scale / 2))
+    val dsdgenDir = opts.getOrElse("dsdgen", "/opt/tpcds-kit/tools")
+    val only = opts.get("tables").map(_.split(",").map(_.trim).toSet)
+
+    val spark = SparkSession.builder().appName(s"tpcds-gen-sf$scale").getOrCreate()
+    val tables = Schema.columns.keys.toSeq.sorted.filter(t => only.forall(_.contains(t)))
+    println(s"[tpcds-gen] scale $scale, ${tables.length} tables, $parallel children, dsdgen at $dsdgenDir, out $out")
+
+    tables.foreach { table =>
+      val start = System.nanoTime()
+      val children = if (Unsplit(table)) 1 else parallel
+      val ddl = Schema.columns(table)
+      val lines: Dataset[String] = spark.createDataset(
+        spark.sparkContext.parallelize(1 to children, children).flatMap { child =>
+          generate(dsdgenDir, table, scale, parallel, child)
+        })(org.apache.spark.sql.Encoders.STRING)
+      val schema = StructType.fromDDL(ddl)
+      // dsdgen ends every row with a '|': one trailing empty field the schema does not have.
+      val rows = spark.read.schema(schema).option("sep", "|").option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
+      val partitionColumns = Schema.partitions.getOrElse(table, Nil)
+      val writer = (if (partitionColumns.nonEmpty) rows.repartition(partitionColumns.map(col): _*) else rows.coalesce(1))
+        .write.mode(SaveMode.Overwrite).option("compression", "zstd")
+      (if (partitionColumns.nonEmpty) writer.partitionBy(partitionColumns: _*) else writer).parquet(s"$out/$table")
+      val count = spark.read.parquet(s"$out/$table").count()
+      println(f"[tpcds-gen] $table: $count%,d rows, ${(System.nanoTime() - start) / 1e9}%.0f s" +
+        (if (partitionColumns.nonEmpty) s", partitioned by ${partitionColumns.mkString(",")}" else ""))
+    }
+    spark.stop()
+  }
+
+  /** One dsdgen child's rows of one table, streamed from its stdout (a child's slice can be gigabytes of text). */
+  private def generate(dsdgenDir: String, table: String, scale: Int, parallel: Int, child: Int): Iterator[String] = {
+    val cmd = Seq(s"$dsdgenDir/dsdgen", "-TABLE", table, "-SCALE", scale.toString, "-FILTER", "Y", "-QUIET", "Y",
+      "-RNGSEED", "100", "-DISTRIBUTIONS", s"$dsdgenDir/tpcds.idx") ++
+      (if (parallel > 1) Seq("-PARALLEL", parallel.toString, "-CHILD", child.toString) else Nil)
+    val errors = new StringBuilder
+    // lazyLines throws at the end of the stream when dsdgen exits non-zero, with stderr collected here.
+    Process(cmd, new java.io.File(dsdgenDir)).lazyLines(ProcessLogger(_ => (), err => errors.synchronized { errors.append(err).append('\n') })).iterator
+  }
+}
