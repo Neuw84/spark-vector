@@ -25,12 +25,24 @@ public final class CompactKernels {
   private static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;
 
   /**
-   * {@code Vector.compress} is only a native instruction on AVX-512 and SVE; on NEON and AVX2 the
-   * JDK falls back to scalar code. For species of up to 8 lanes we instead index a precomputed
-   * table of {@link VectorShuffle}s by the selection bits and use {@code rearrange}, which every
-   * platform implements with a single permute. Wider species (16 int lanes = AVX-512) use compress.
+   * {@code Vector.compress} is only a native instruction on AVX-512 and SVE ({@link
+   * Platform#NATIVE_COMPRESS}); on NEON and AVX2 the JDK falls back to scalar code. There, for species
+   * of up to 8 lanes, we instead index a precomputed table of {@link VectorShuffle}s by the selection
+   * bits and use {@code rearrange}, which every platform implements with a single permute. Where
+   * compress is native it is used at every width (#283, decision 2: 8-lane longs and doubles at 512
+   * bits and every 256-bit species on AVX-512VL used to take the table). The tables are built
+   * regardless so the two forms can be compared on one machine.
    */
   private static final int MAX_TABLE_LANES = 8;
+
+  /** Whether the shuffle table is the compaction path for a species of {@code lanes} lanes. */
+  static boolean usesTable(int lanes) {
+    return !Platform.NATIVE_COMPRESS && lanes <= MAX_TABLE_LANES;
+  }
+
+  private static final boolean I_TABLE = usesTable(I.length());
+  private static final boolean L_TABLE = usesTable(L.length());
+  private static final boolean D_TABLE = usesTable(D.length());
 
   /**
    * A selection word with at most this many bits set is compacted by walking the bits rather than
@@ -171,7 +183,7 @@ public final class CompactKernels {
                 ? IntVector.fromMemorySegment(I, data, off, LE)
                 : IntVector.fromMemorySegment(I, data, off, LE, I.indexInRange(k, limit));
         IntVector c =
-            I_SHUFFLES != null
+            I_TABLE
                 ? v.rearrange(I_SHUFFLES[(int) bits])
                 : v.compress(VectorMask.fromLong(I, bits));
         int count = Long.bitCount(bits);
@@ -225,7 +237,7 @@ public final class CompactKernels {
                 ? LongVector.fromMemorySegment(L, data, off, LE)
                 : LongVector.fromMemorySegment(L, data, off, LE, L.indexInRange(k, limit));
         LongVector c =
-            L_SHUFFLES != null
+            L_TABLE
                 ? v.rearrange(L_SHUFFLES[(int) bits])
                 : v.compress(VectorMask.fromLong(L, bits));
         int count = Long.bitCount(bits);
@@ -279,7 +291,7 @@ public final class CompactKernels {
                 ? DoubleVector.fromMemorySegment(D, data, off, LE)
                 : DoubleVector.fromMemorySegment(D, data, off, LE, D.indexInRange(k, limit));
         DoubleVector c =
-            D_SHUFFLES != null
+            D_TABLE
                 ? v.rearrange(D_SHUFFLES[(int) bits])
                 : v.compress(VectorMask.fromLong(D, bits));
         int count = Long.bitCount(bits);

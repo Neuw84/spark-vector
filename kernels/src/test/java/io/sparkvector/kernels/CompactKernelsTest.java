@@ -2,6 +2,7 @@ package io.sparkvector.kernels;
 
 import static io.sparkvector.kernels.TestData.assertBitmapEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import io.sparkvector.kernels.reference.ScalarReference;
 import java.lang.foreign.Arena;
@@ -87,6 +88,16 @@ class CompactKernelsTest {
         }
       }
     }
+  }
+
+  @Test
+  void compressIsThePathWhereverThePlatformHasIt() {
+    // #283, decision 2: the shuffle table stands in for compress only where compress is not native,
+    // and only for species it can index (up to 8 lanes).
+    for (int lanes : new int[] {2, 4, 8}) {
+      assertEquals(!Platform.NATIVE_COMPRESS, CompactKernels.usesTable(lanes), "lanes " + lanes);
+    }
+    assertFalse(CompactKernels.usesTable(16), "no table for 16 lanes");
   }
 
   @Test

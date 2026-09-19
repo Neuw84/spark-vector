@@ -189,8 +189,9 @@ that pin it.
   1. `lanewise(op, ...)` / `compare(op, ...)` are only intrinsified when `op` is a compile-time
      constant. Never pass a `VectorOperators` value through a variable or a parameter; switch on
      the operation and call the constant form.
-  2. `compress` is not native on NEON. Compaction uses a shuffle table there, and a real `compress`
-     only on 512-bit species (16-lane int).
+  2. `compress` is native on AVX-512 and SVE and emulated on NEON and AVX2. Compaction uses it at
+     every width where `Platform.NATIVE_COMPRESS` (13-28% over the table on dense selections, #283)
+     and the shuffle table for 8-lane species elsewhere; a real `compress` is never emulated.
   3. Two 64-bit lanes are not worth a shuffle: compacting doubles by `rearrange` lost to a scalar
      walk over set bits on NEON. Full selection words are bulk copied; partial words take the scalar
      walk when the species has two lanes, the 256-entry shuffle table on 8-lane species.
@@ -212,9 +213,11 @@ that pin it.
   all but name; `docs/results.md`, "x86 kernel lab"). Measured there: the aggregate kernels' lane
   masks come from `VectorMask.fromLong` (one `kmov`) when `Platform.MASK_REGISTERS`, 14-25% faster
   on the null paths at 512 bits and a wash at 256; the broadcast-AND-compare form stays for NEON and
-  AVX2. Still to measure (the loop of #283): `compress` against the shuffle table, the 8-group
-  masked-reduction threshold and `interleave` at 8 and 16 lanes, and 512 against 256 as the default
-  width from TPC-H Q1/Q6; never measured: Ice Lake, Genoa, Graviton (#282, #284, #253).
+  AVX2. Compaction takes `compress` wherever `Platform.NATIVE_COMPRESS` (the table lost by 10-28% on
+  dense selections at both widths, tied at 2% where the sparse bit walk serves both). Still to
+  measure (the loop of #283): the 8-group masked-reduction threshold and `interleave` at 8 and 16
+  lanes, and 512 against 256 as the default width from TPC-H Q1/Q6; never measured: Ice Lake, Genoa,
+  Graviton (#282, #284, #253).
 - Popcount and bitmap bookkeeping are `Long.bitCount` over 64-bit words and never show in profiles.
 
 ### 3.4 Selection vectors between our operators
