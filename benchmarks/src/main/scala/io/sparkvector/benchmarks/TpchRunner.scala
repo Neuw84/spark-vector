@@ -591,12 +591,14 @@ object TpchRunner {
           sb.append(s"| $k | " + cells.mkString(" | ") + " |\n")
         }
         if (d.attributedConfigs.size >= 2) {
-          sb.append("\nPer query, the kinds both of the first two attributed configurations ran, `ours vs theirs (delta)` in milliseconds:\n\n")
-          val Seq(a, b) = d.attributedConfigs.take(2)
-          d.queries.foreach { q =>
-            val (ma, mb) = (d.kindMs(a, q), d.kindMs(b, q))
-            val shared = d.kinds.filter(k => ma.contains(k) && mb.contains(k))
-            if (shared.nonEmpty) sb.append(s"- $q: " + shared.map(k => f"$k ${ma(k)}%.1f vs ${mb(k)}%.1f (${ma(k) - mb(k)}%+.1f)").mkString("; ") + "\n")
+          val a = d.attributedConfigs.head
+          d.attributedConfigs.tail.foreach { b =>
+            sb.append(s"\nPer query, the kinds both `$a` and `$b` ran, `$a vs $b (delta)` in milliseconds:\n\n")
+            d.queries.foreach { q =>
+              val (ma, mb) = (d.kindMs(a, q), d.kindMs(b, q))
+              val shared = d.kinds.filter(k => ma.contains(k) && mb.contains(k))
+              if (shared.nonEmpty) sb.append(s"- $q: " + shared.map(k => f"$k ${ma(k)}%.1f vs ${mb(k)}%.1f (${ma(k) - mb(k)}%+.1f)").mkString("; ") + "\n")
+            }
           }
         }
       }

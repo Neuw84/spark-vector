@@ -1118,3 +1118,206 @@ The rule the study applies: a swap candidate must beat ours by more than *twice*
 columns it touches -- for fixed-width lanes that is a few microseconds per batch and any real operator
 gap clears it; for dictionary strings it is ~45 ns per row per column, which only a large kernel gap
 clears; for INT64 decimals ~6 ns per row per column.
+
+### The operator matrix: TPC-H at SF10
+
+Four configurations, one JVM each, `local[8]`, 8 GB heap, 5 warm-up and 7 measured runs (the
+protocol's SF10 counts), the doubles schema of `gen-tpch.sh`; Comet 1.0.0; x86-64 (an 8-vCPU EC2
+host, not the development laptop, so the absolute numbers are not comparable with the earlier
+tables). `vector` is the harness's default (`sortMergeJoin.mode=auto` since #287);
+`comet-scan-vector-shuffle` is Comet's scan and shuffle with our operators in between; `comet` is all
+Comet. All checksums equal across the four.
+
+| | spark | vector | comet-scan-vector-shuffle | comet |
+|---|---:|---:|---:|---:|
+| total of the 22 medians | 80.6 s | 112.3 s | 42.9 s | 39.0 s |
+| q21 | 16.8 s | 44.9 s | 6.5 s | 10.9 s |
+| total without q21 | 63.8 s | 67.4 s | 36.4 s | 28.1 s |
+
+Milliseconds per operator kind, summed over the plan's nodes and over tasks for the last measured
+run of every query (ours: kernel time inside the operator; Comet: native `elapsed_compute`; neither
+includes the wait on children; the clocks are not identical, see `docs/comet.md`):
+
+| operator kind | vector | comet-scan-vector-shuffle | comet |
+|---|---:|---:|---:|
+| SortMergeJoin | 272 236 (2 queries) | 461 (1) | 215 903 (13) |
+| HashAggregate | 48 124 (21) | 44 267 (21) | 12 340 (21) |
+| Filter | 44 403 (21) | 20 445 (21) | 9 102 (21) |
+| BroadcastHashJoin | 27 132 (15) | 14 857 (15) | 5 705 (15) |
+| ShuffledHashJoin | 20 983 (14) | 32 314 (14) | -- |
+| Sort | -- | 226 (12) | 39 077 (16) |
+| Project | 7 504 (21) | 2 135 (21) | 328 (21) |
+| TakeOrderedAndProject | 103 (5) | 109 (5) | 5 (5) |
+
+**Reading, query by query where it matters.**
+
+- **The merge join at scale is the headline, and it is ours.** q21 runs two of our merge joins
+  (`auto` chose them: the upper join relies on the lower's ordering, so the chain takes the merge)
+  over 2.0M- and 36.6M-row outputs: 271 s of task time, 44.9 s of wall clock against Spark's own
+  sort-merge join at 16.8 s and Comet's at 10.9 s. The same query under Comet's shuffle plans three
+  of our *hash* joins and runs in 6.5 s -- the fastest of the four. The per-run bookkeeping named in
+  the #286 notes (a run object, a compare through the columns, a buffer append per run; lineitem's
+  order keys make runs of about four rows) is the whole difference. Two conclusions for #287: at SF10
+  `auto` *is* slower than `hash` on TPC-H, so its third condition for the default is not met; and
+  the merge join must not be chosen for large inputs until it walks runs without a run object --
+  `auto` should take the merge only where the hash rewrite cannot go *and* the inputs are small by
+  statistics, otherwise leave the join to Spark. q2 is the same story in miniature (merge join
+  1359 ms of task time; wall 1855 ms against Spark's 1218 ms).
+- **Hash aggregate with many groups: confirmed.** q18 (1.5M groups over lineitem) 13.7 s of task
+  time against Comet's 1.7 s, q17 (per-part averages) 23.4 s against 6.6 s, q13 (customer counts)
+  2.2 s against 0.06 s -- 4-40x. With few groups the two are level: q1 (4 groups, 60M rows) 4.1 s
+  against 3.1 s. The gap is the group-key table, not the reductions. The crossing to reach Comet's
+  aggregate is a pointer hand-over for these fixed-width keys, so the candidate clears the rule by
+  seconds.
+- **Broadcast hash join: behind, half of it the scan copy.** q9 8.9 s against 1.9 s, q8 5.8 s against
+  0.86 s, q2 2.1 s against 0.3 s. Under Comet's scan (the middle column) the same joins cost 3.6 s
+  and 1.8 s: reading Spark's Parquet vectors into our buffers is a copy the first operator above the
+  scan pays, and it lands on the filter or the join. The remaining 2x is the probe itself.
+- **Filter: the copy again, then a real gap.** Over Spark's scan our filter's time is dominated by
+  the input adaptation (q20 5.4 s of task time; over Comet's scan 0.66 s; Comet's own 0.22 s; q15 3.9
+  s / -- / 0.12 s; q8 3.6 s / 0.09 s / 0.09 s). Where the input is already Arrow the filter kernel is
+  1-3x behind Comet's (q6 0.93 s against 0.28 s; q13's `like` filters 3.8 s against 1.2 s; q19 4.5 s
+  against 2.0 s), never ahead. The control operator does not come out level, so the study has to say
+  it: on this x86 host our kernels lose to DataFusion's on the plain filter too, and the question the
+  hybrid issues (#280, #281) have to answer is not only "which operator" but "why our per-row cost is
+  higher on the simplest kernel" -- the JFR profiles below are the start.
+- **Project: a materialising projection is slow.** q21 6.1 s of task time over 37.9M rows (160 ns per
+  row) against Comet's 12 ms; q3 0.81 s against 26 ms. Comet's projection over a join output is
+  near-free; ours copies the columns it keeps. A pass-through projection (`isPassThrough`) is not the
+  issue; the gather after a join is.
+- **Shuffled hash join: ours only.** Comet has no shuffled hash join in these plans (its plans keep
+  the sort-merge join, 216 s of task time over 13 queries, plus 39 s of sorts); ours runs 14 of them
+  in 21 s. q5 (3.6 s against Comet's merge join 12.1 s + sort 7.9 s), q7 (5.0 s against 9.4 + 5.0 s)
+  and q9 (3.9 s against 7.3 + 4.3 s) are the queries where our operator is the better one *by
+  construction* -- a hash join instead of a sort and a merge -- and the wall clock still favours
+  Comet there (q5 7.0 s against 3.7 s) because of the filter, aggregate and broadcast-join gaps
+  above. Keeping ours here is the right call; the rest of the chain is what loses the query.
+- **String functions.** q13 (`like`), q16 (`not like`, `in`), q22 (`substr`): the filters carrying
+  them are 1-3x behind Comet's (q13 3.8 s against 1.2 s over Comet's scan; q22 0.33 s against 0.09
+  s); no candidate stands out beyond the general filter gap.
+- **Comet's fallbacks.** One: q11's `EmptyRelation is not supported`. Ours are the sorts over row
+  exchanges (`Sort: child AQEShuffleRead is not columnar`, twelve queries), which stay Spark's by
+  design; Comet sorts natively (39 s of task time) and it is part of why its merge-join plans still
+  win the wall clock.
+
+### Decimal arithmetic: TPC-H at SF1, the decimal schema
+
+`gen-tpch.sh --decimals` keeps DuckDB's `DECIMAL(15,2)` columns, so the price arithmetic runs on
+decimals -- narrow ones through #26's INT64 path, the wide products (`l_extendedprice * (1 -
+l_discount)` is decimal(33,4)) through #258's two-limb kernels. Three configurations, 3 warm-up and 5
+measured runs; totals of the 22 medians: `spark` 12.8 s, `vector` 13.0 s, `comet` 6.9 s; all
+checksums equal.
+
+- **Narrow decimals: refuted as a swap candidate.** q1 (four groups, the sums and averages over
+  6M rows of decimal(15,2)) runs 347 ms under ours against 355 ms under Comet, and our
+  aggregate's task time is *lower* (585 ms against 1037 ms). Where the INT64 path applies there is
+  nothing to gain from Comet's i128 arithmetic.
+- **Wide decimals: confirmed.** q6 sums a decimal(33,4) product into one group: our aggregate spends
+  283 ms of task time, Comet's 2 ms -- the two-limb scalar reduction against a native i128 add. The
+  wall clock is 161 ms against 64 ms. The crossing for these columns is the decimal widening, 2.5-3 ns
+  per row per column each way; against a 100x operator gap it does not matter.
+- **The shapes we refuse** stay refused: q8 and q14 fall back on `sum(CASE WHEN ... decimal)` (the
+  #258 follow-up named in the expressions notes); Comet runs them natively. That is not an operator
+  comparison but a coverage gap, listed here so the matrix is not misread.
+- The many-group aggregate gap of SF10 repeats at SF1 (q18 1099 ms against 203 ms of task time,
+  q17 1261 against 421).
+
+### Profiles: the two largest gaps under a recording
+
+The JFR-first protocol (AGENTS.md section 4.7) for the two gaps with the most task time behind them,
+each `profile-query.sh` at SF10 under `vector`, 2 warm-up and 3 measured runs.
+
+- **q18, the many-group hash aggregate.** Inside our operator the hottest method is
+  `GroupKeyTable.lookupOrInsert` (13.6 % of samples; `rehash`, `GroupedAccumulators.regroup`,
+  `insert`, `equals` and the hash mix another 4 %) -- the probe of a 1.5M-entry key table, which is
+  what the swap candidate would replace. But three quarters of the samples carry no plugin frame at
+  all: `BufferedInputStream.read1` 10 %, `BufferedOutputStream.growIfNeeded` 9 %,
+  `UnsafeRowWriter.zeroOutNullBytes` 5 %, `ShuffleExchangeExec.prepareShuffleDependency` 4 %,
+  `RowToColumnConverter.append` 3 % -- Spark's *row* shuffle of the 1.5M-group partial aggregate:
+  every group serialised to an `UnsafeRow`, written, read, and converted back into columns above
+  the exchange. Comet's aggregate is faster, and Comet's shuffle carries Arrow batches; the wall clock
+  (8.7 s against 3.4 s) is mostly the second. The finding belongs to the columnar shuffle (#288) as
+  much as to hybrid planning: swapping the aggregate alone would leave the shuffle.
+- **q20, the filter over Spark's scan.** `SparkColumnVectorBuffers.decodeDictionary` is 25 % of all
+  samples (28 % of plugin self time), ahead of everything in the query: the strings the Parquet
+  reader hands us dictionary-encoded are decoded into our buffers before the first kernel runs, the
+  same copy "Q6 revisited" found at SF1. The filter kernels themselves (`CompactKernels`,
+  `StringMatchKernels.match`, `CompareKernels`) are 7 % together. Under Comet's scan the same
+  filter's task time falls from 5.4 s to 0.66 s. The remedy is not a swap: it is keeping the
+  dictionary through the adapter (or the Arrow scan) -- the same lesson as #14, at scale.
+
+### The operator matrix: TPC-DS at SF1
+
+`spark`, `vector`, `comet`; 2 warm-up and 3 measured runs (the protocol's 10 and 10 were a
+multi-hour session for three configurations on this host; the medians below are steady to a few
+percent between runs, the outliers are named). Totals of the 103 medians: `spark` 47.7 s, `vector`
+82.2 s, `comet` 34.4 s; all checksums equal. Comet is fully native on 95 of the 103 queries; ours is
+fully accelerated on one (sorts over row exchanges and Spark's exchanges stay Spark's by design).
+
+| operator kind | vector | comet |
+|---|---:|---:|
+| ShuffledHashJoin | 161 757 (13 queries; q72 alone most of it) | -- |
+| BroadcastHashJoin | 85 839 (100) | 19 748 (100) |
+| SortMergeJoin | 280 (5) | 40 029 (7) |
+| HashAggregate | 18 123 (100) | 4 848 (99) |
+| Filter | 13 114 (102) | 4 425 (103) |
+| Sort | 1 008 (8) | 2 963 (29) |
+| Project | 1 771 (102) | 1 555 (102) |
+| Window | 647 (13) | -- (Comet has no window operator; `WindowGroupLimit is not supported` on 3) |
+| TakeOrderedAndProject | 187 (60) | 2 (64) |
+| Expand | 137 (10) | -- |
+
+- **Broadcast hash join is the TPC-DS gap.** 85.8 s of task time against Comet's 19.7 s over the
+  same hundred queries, 4x, and it is the operator on the critical path of nearly every query here
+  (a fact table probing a chain of dimension broadcasts): q4 5.0 s against 1.9 s, q11 3.1 against
+  1.5, q14a/b 1.3-1.5 against 0.3-0.4, q64 1.4 against 0.2, q58 0.72 against 0.12, q15 0.75 against
+  0.18. At SF1 the dimension tables are small and the probe dominates: this is our probe, not a copy
+  (the input copy is a smaller share here than at TPC-H SF10 because the streamed fact-table columns
+  are mostly fixed-width). A candidate that clears the rule: the crossing for a probe's key and
+  payload columns is a few microseconds per batch.
+- **Shuffled hash join: q72.** 27.0 s of wall clock against Comet's 5.8 s (Spark's is the same order
+  as ours); the per-query issue #168 has the shape. Our operator, not Comet's, so not a swap
+  question -- a fix.
+- **Hash aggregate 3.7x, filter 3x** -- the SF10 reading at small scale; the many-group cases (q4,
+  q11, q74: 1.27 s / 0.84 s / 0.35 s against 0.40 / 0.25 / 0.09) carry it, q23a/b's 1.1-1.3 s
+  against 0.3 s too.
+- **Window: not a candidate -- Comet has none.** Comet 1.0 leaves every window to Spark (and refuses
+  `WindowGroupLimit`); ours runs 13 windows in 0.65 s of task time and three group limits in 0.18 s.
+  The window queries (q47, q51, q57, q67) lose their wall clock to the joins and aggregates around
+  the window, not to the window (q51: window 481 ms of task time, Comet's plan runs it in Spark).
+- **Project is level** (1.8 s against 1.6 s over 102 queries) -- the SF10 project gap was the
+  materialising gather after a merge join, absent here; on q64 Comet's project is the slower one
+  (936 ms against 4 ms).
+- **String functions** (q8, q15, q19, q45, q75, q79, q85): the filters carrying `substr`, `like` and
+  the `in` lists are 1.5-5x behind (q8 174 ms against 37, q19 88 against 48, q79 110 against 84);
+  the joins around them are the larger share of the wall clock in every one of those queries.
+- **Decimal-heavy queries** (q1, q14, q24, q30, q58, q64, q65, q81, q83): no decimal-specific gap
+  stands out from the join and aggregate gaps above; q83 is level (180 ms against 197).
+- **Comet's fallbacks**: `WindowGroupLimit` (3 queries), an aggregate whose child aggregate is not
+  Comet's (2), `Spark's BigDecimal rounding` (1). Ours: sorts over row exchanges and the
+  expression shapes named in `docs/expressions.md`.
+
+### Candidates and controls: the verdict
+
+Against the rule -- *a swap must beat ours by more than twice the crossing of the columns it
+touches* -- and with the profiles read:
+
+| candidate | verdict | evidence |
+|---|---|---|
+| Hash aggregate, many groups | **Comet wins by 4-40x on the operator**, but the wall clock is Spark's row shuffle of the many-group partial result (q18 profile: 75 % of samples). A swap of the aggregate alone leaves most of the time where it is; the columnar shuffle (#288) is the larger lever. | TPC-H SF10 q13/q17/q18; TPC-DS q4/q11/q74; the q18 profile |
+| Hash aggregate, few groups | Level. Keep ours. | q1 SF10 4.1 s vs 3.1 s; decimal q1 ours ahead |
+| Wide-decimal reduction (two-limb) | **Comet wins, ~100x on the operator.** | decimal q6 283 ms vs 2 ms |
+| Narrow decimals (INT64 path) | Refuted. Keep ours. | decimal q1 347 vs 355 ms wall, ours lower task time |
+| Sort + sort-merge join at scale | **Comet's (and Spark's) win**; our merge join must not be chosen on large inputs (#287 comment). Where the hash rewrite applies, ours is the better plan by construction. | SF10 q21 44.9 s vs 16.8 / 10.9 s; q5/q7/q9 hash vs Comet's sort+merge |
+| Window | Not a candidate: Comet has no window operator. Keep ours. | TPC-DS: Comet 0 windows, `WindowGroupLimit` refused |
+| String functions | No specific gap beyond the filter gap; the joins around them dominate. | TPC-DS q8/q19/q79; SF10 q13/q16/q22 |
+| Broadcast hash join | **Comet ahead 4x on the probe** at TPC-DS SF1, 2x at TPC-H SF10 once the input copy is separated. The largest TPC-DS lever and a candidate that clears the rule. | TPC-DS 85.8 s vs 19.7 s; SF10 q8/q9 |
+| Filter, project (the controls) | Project level (TPC-DS); filter 1-3x behind even over Arrow input, so the controls do **not** all come out level: on this x86 host our per-row cost on the simplest kernel is higher than DataFusion's. #280/#281 need that answered before any allowlist -- profile the filter kernel itself (AVX-512 vs the 256-bit shapes, #282-#284). | SF10 q6/q13/q19 over Comet's scan; TPC-DS Project 1.8 vs 1.6 s |
+| The input copy over Spark's scan | Not a swap: half of filter and join time at SF10 is decoding Spark's dictionary vectors (q20 profile, 25 %). Keep the dictionary through the adapter, or scan through Arrow. | SF10 q20 5.4 s → 0.66 s under Comet's scan |
+
+### Not measured here
+
+TPC-DS at SF10: the dataset is not on this host (`gen-tpcds.sh 10`, about 12 GB, then three
+configurations at the protocol's counts are a multi-hour session); the harness runs it unchanged and
+the report prints the same matrix. The x86 host is an 8-vCPU EC2 instance; the kernel-lab issues
+(#282-#284) are where the filter-kernel question above gets its AVX-512 answer.
