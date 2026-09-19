@@ -17,7 +17,8 @@ class CometMixedChainSuite extends VectorQuerySuite {
 
   override protected def extraSparkConf: Map[String, String] = CometTestConf.scanOnly ++ Map(
     "spark.comet.exec.project.enabled" -> "true",
-    VectorConf.CometMixedEnabled -> "true")
+    VectorConf.CometMixedEnabled -> "true",
+    VectorConf.CometPreferComet -> "all")
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()

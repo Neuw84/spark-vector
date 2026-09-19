@@ -94,6 +94,16 @@ object TpchRunner {
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
       "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
       CometScanOnly ++ Map("spark.comet.exec.shuffle.enabled" -> "true")),
+    // #281: comet-scan-vector-shuffle plus the mixed-chain pass and the shipped allowlist. The allowlist is
+    // the repository default (empty until an entry meets the three-part rule of docs/comet.md), and Comet's
+    // operator toggles stay off as in the scan-only configurations; a study run turns a candidate on with
+    // `--conf spark.comet.exec.<kind>.enabled=true --conf spark.vector.comet.preferComet=<kind> --label <kind>`.
+    "hybrid" -> (VectorFast ++ Map(
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
+      "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
+      CometScanOnly ++ Map(
+        "spark.comet.exec.shuffle.enabled" -> "true",
+        "spark.vector.comet.mixed.enabled" -> "true")),
     "comet" -> Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin",
       "spark.comet.enabled" -> "true",
@@ -104,7 +114,10 @@ object TpchRunner {
       "spark.memory.offHeap.enabled" -> "true",
       "spark.memory.offHeap.size" -> "3g"))
 
-  val ConfigOrder: Seq[String] = Seq("spark", "vector", "comet-scan", "comet-scan-vector", "comet-scan-vector-shuffle", "comet")
+  val ConfigOrder: Seq[String] = Seq("spark", "vector", "comet-scan", "comet-scan-vector", "comet-scan-vector-shuffle", "hybrid", "comet")
+
+  /** The two pure configurations `hybrid` is judged against, query by query (#281). */
+  val HybridBaselines: Seq[String] = Seq("comet-scan-vector-shuffle", "comet")
 
   /** The TPC-H tables, each a Parquet directory of that name under `--data` (see `gen-tpch.sh`). */
   val Tables: Seq[String] = Seq("customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier")
@@ -569,6 +582,24 @@ object TpchRunner {
         }
         sb.append(s"| $q | " + cells.mkString(" | ") + " |\n")
       }
+      if (d.configs.contains("hybrid") && HybridBaselines.exists(d.configs.contains)) {
+        // #281's rule 2: a swap is shipped only if it regresses no query against the better pure configuration.
+        val bases = HybridBaselines.filter(d.configs.contains)
+        sb.append(s"\n`hybrid` against the pure configurations (${bases.mkString(", ")}): the ratio of the better pure median to hybrid's; below 1.00 is a regression.\n\n")
+        sb.append("| query | hybrid ms | " + bases.map(b => s"$b ms").mkString(" | ") + " | vs better pure |\n")
+        sb.append("|---|---:|" + bases.map(_ => "---:").mkString("|") + "|---:|\n")
+        var regressions = 0
+        d.queries.foreach { q =>
+          d.latest.get(("hybrid", q)).foreach { h =>
+            val pure = bases.flatMap(b => d.latest.get((b, q)).map(_.medianMs))
+            val ratio = if (pure.nonEmpty && h.medianMs > 0) Some(pure.min / h.medianMs) else None
+            if (ratio.exists(_ < 0.95)) regressions += 1
+            val cells = bases.map(b => d.latest.get((b, q)).map(r => f"${r.medianMs}%.1f").getOrElse("-"))
+            sb.append(f"| $q | ${h.medianMs}%.1f | " + cells.mkString(" | ") + " | " + ratio.map(x => f"$x%.2fx").getOrElse("-") + " |\n")
+          }
+        }
+        sb.append(s"\nQueries slower than the better pure configuration by more than 5%: $regressions.\n")
+      }
       if (d.acceleratedConfigs.nonEmpty) {
         sb.append("\nAccelerated operators per query (operators run by our kernels or Comet / operators that count; scans and row/columnar transitions are neither):\n\n")
         sb.append("| query | " + d.acceleratedConfigs.mkString(" | ") + " |\n")
@@ -665,6 +696,7 @@ object TpchRunner {
     "comet-scan" -> "#c48a1a",
     "comet-scan-vector" -> "#3b9e5a",
     "comet-scan-vector-shuffle" -> "#1f7a5c",
+    "hybrid" -> "#7a4fb3",
     "comet" -> "#b3452e")
 
   private def esc(s: String): String = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

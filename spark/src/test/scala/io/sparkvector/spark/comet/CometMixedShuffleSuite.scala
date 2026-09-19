@@ -36,6 +36,7 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
     "spark.sql.parquet.enableVectorizedReader" -> "true",
     "spark.sql.adaptive.enabled" -> "true",
     VectorConf.CometMixedEnabled -> "true",
+    VectorConf.CometPreferComet -> "all",
     VectorConf.AggregateEnabled -> "false",
     VectorConf.ProjectEnabled -> "false",
     VectorConf.BroadcastHashJoinEnabled -> "false",

@@ -33,6 +33,8 @@ object VectorConf {
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   /** Mixed chains (#280): Comet's native operators above ours through the sink leaf. Off until #281 decides an allowlist. */
   val CometMixedEnabled = "spark.vector.comet.mixed.enabled"
+  /** The operator allowlist of the mixed-chain pass (#281): kinds, optionally qualified, offered to Comet. */
+  val CometPreferComet = "spark.vector.comet.preferComet"
   val StrictFloatingPoint = "spark.vector.exec.strictFloatingPoint"
   val ExplainFallbackEnabled = "spark.vector.explainFallback.enabled"
   val UiEnabled = "spark.vector.ui.enabled"
@@ -116,6 +118,7 @@ object VectorConf {
   /** Also hand range-partitioned exchanges (global sorts) to Comet's native shuffle. */
   def cometRangeShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometRangeShuffleEnabled, default = true)
   def cometMixedEnabled(conf: SQLConf): Boolean = bool(conf, CometMixedEnabled, default = false)
+  def cometPreferComet(conf: SQLConf): String = conf.getConfString(CometPreferComet, "")
   /**
    * Bit-identical floating-point results to Spark's (the default): double sums use one accumulator
    * per group and add rows in order, instead of lane-parallel and interleaved partial sums that
