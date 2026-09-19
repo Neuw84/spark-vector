@@ -26,6 +26,24 @@ class PlatformTest {
   }
 
   @Test
+  void groupedAggregationDefaultsFollowThePlatform() {
+    // #283, decision 3: the masked path up to 4 groups where masks are registers and the species has
+    // at least 4 lanes, 1 group elsewhere; one scatter copy on AVX-512, four elsewhere. The
+    // properties override both, and only an explicit interleave=1 means Spark's order.
+    int lanes = Species.DOUBLE_LANES;
+    assertEquals(Platform.MASK_REGISTERS && lanes >= 4 ? 4 : 1, GroupAssignment.defaultMaskPathMaxGroups());
+    assertEquals(Platform.NAME.equals(Platform.AVX512) ? 1 : 4, GroupedAccumulators.defaultInterleave());
+    if (System.getProperty("sparkvector.agg.maskPathMaxGroups") == null) {
+      assertEquals(GroupAssignment.defaultMaskPathMaxGroups(), GroupAssignment.LOW_CARDINALITY);
+    }
+    String interleave = System.getProperty("sparkvector.agg.interleave");
+    assertEquals("1".equals(interleave), GroupedAccumulators.SEQUENTIAL_SUMS);
+    if (interleave == null) {
+      assertEquals(GroupedAccumulators.defaultInterleave(), GroupedAccumulators.INTERLEAVE);
+    }
+  }
+
+  @Test
   void bothMaskFormsAgreeOnEveryLanePattern() {
     int longLanes = Species.L.length();
     for (long bits = 0; bits < (1L << longLanes); bits++) {

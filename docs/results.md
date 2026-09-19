@@ -1425,7 +1425,46 @@ stays for the 8-lane species on NEON and AVX2, the scalar walk for the 2-lane sp
 second reading from the same table: compaction at 512 bits is 1.3-1.9x its 256-bit self on dense
 selections (INT32 50% 5501 against 2909), an early data point for decision 5.
 
-Remaining in the loop: decision 2's masked-store variant is not worth a run (above), decision 3 (the 8-group masked-reduction
-threshold and `interleave` at 8 and 16 lanes), decision 5 (512 against 256 as the default width, from
+### Decision 3: the grouped-aggregation thresholds
+
+`GroupedAggBenchmark` (4096-row double sum, rows per microsecond, `-wi 2 -i 3 -w 1 -r 1`): the masked
+path (one masked SIMD reduction per group) against the scatter (a scalar `sum[g] += x` loop), for 1
+to 32 uniformly random groups, at both widths. `interleave` is the scatter's accumulator copies;
+`interleave=1` also switches every double sum to Spark's sequential order, which is what
+`strictFloatingPoint` (the default) does at run time, so the `i1` columns are the production rounding
+mode and the `i4` columns the fast one.
+
+| groups | 512 i4 mask / scatter | 512 i2 | 512 i1 (Spark's order) | 256 i4 | 256 i1 |
+|---:|---|---|---|---|---|
+| 1 | 5829 / 753 | 7615 / 691 | 1681 / 425 | 3982 / 754 | 1622 / 427 |
+| 2 | 2066 / 746 | 2249 / 747 | 1202 / 803 | 1337 / 728 | 1205 / 802 |
+| 4 | 1163 / 740 | 1210 / 760 | 1108 / 1070 | 826 / 747 | 1129 / 1055 |
+| 6 | 855 / 743 | 882 / 766 | 1087 / 1234 | 604 / 740 | 1095 / 1227 |
+| 8 | 686 / 748 | 702 / 764 | 1051 / 1250 | 433 / 740 | 1049 / 1252 |
+| 12 | 490 / 748 | 497 / 762 | 941 / 1234 | 369 / 742 | 952 / 1234 |
+| 16 | 215 / 738 | 240 / 761 | 870 / 1243 | 124 / 745 | 875 / 1240 |
+| 32 | 158 / 731 | 161 / 763 | 656 / 1278 | 111 / 742 | 668 / 1285 |
+
+Reading, threshold. The masked path wins up to 4 groups at both widths in both rounding modes (512
+bits, 4 groups: +57% fast, a tie in Spark's order; 256 bits: +11% and +7%) and loses from 6 in
+Spark's order (-12%) and from 8 (512) or 6 (256) in the fast mode. The old default of 8 on 8-lane
+species was a guess and is 8% slow at 8 groups; the old default of 1 on 4-lane species was NEON's
+measurement (2 lanes, `docs/results.md` above) and left +84% at 2 groups and +11% at 4 on the 256-bit
+AVX-512 species. Decision: `maskPathMaxGroups` defaults to 4 where the platform has mask registers and
+the double species has at least 4 lanes, 1 elsewhere (NEON measured; AVX2 unmeasured and kept
+conservative). TPC-H Q1's 4 groups stay on the masked path.
+
+Reading, interleave. The scatter's copies were measured on NEON (+40% for 4 copies at 4 groups,
+above). On this host the picture inverts: 4 copies win only at 1-2 groups (753 against 425 at one
+group), which the masked path owns, and from 4 groups one copy is 45-70% faster (1070 against 740 at
+4, 1250 against 748 at 8, 1278 against 731 at 32) -- the four-way loop's extra indexing costs more
+than the store-to-load chains it breaks, which random group ids already break. Decision: one copy on
+AVX-512 by default, four elsewhere; the explicit `sparkvector.agg.interleave=1` keeps its meaning
+(Spark's order in every double sum, `GroupedAccumulators.SEQUENTIAL_SUMS`), the default of one copy
+does not imply it. Also visible: in Spark's order the masked path walks only the group's rows while
+the lane-parallel one re-reads the batch per group, so from 8 groups the sequential masked sum is the
+faster of the two masked forms (1051 against 686) -- moot, since the scatter owns that range.
+
+Remaining in the loop: decision 5 (512 against 256 as the default width, from
 TPC-H Q1/Q6 at SF10), decision 6 (gather) only if a profile shows it.
 

@@ -95,7 +95,7 @@ JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forc
 (the default is the platform's preferred one), `sparkvector.platform=neon|sve|avx2|avx512` overrides the
 probed SIMD platform the kernels dispatch on (`docs/results.md`, "x86 kernel lab"), `sparkvector.agg.interleave=1|2|4` sets how many
 accumulator copies the grouped aggregation rotates through when `spark.vector.exec.strictFloatingPoint`
-is off (default 4; strict mode always uses one), `sparkvector.selection.minFraction` (default 0.5) is the
+is off (default 1 on AVX-512 and 4 elsewhere; strict mode always uses one, and an explicit 1 also means Spark's summation order), `sparkvector.selection.minFraction` (default 0.5) is the
 surviving fraction below which a filter compacts instead of forwarding a selection, and
 `sparkvector.agg.plainDictMaxEntries` (default 512) is the number of distinct values above which a
 plain (non-dictionary) string group key stops being dictionary-encoded on the fly and is hashed and

@@ -196,11 +196,13 @@ that pin it.
      walk over set bits on NEON. Full selection words are bulk copied; partial words take the scalar
      walk when the species has two lanes, the 256-entry shuffle table on 8-lane species.
 - Grouped aggregation decides between one masked reduction per group and a scatter into
-  accumulators by `sparkvector.agg.maskPathMaxGroups` (1 on <=4-lane species, 8 on wider; the 8 is
-  a guess from lane count, not a measurement). The scatter rotates over
-  `sparkvector.agg.interleave` accumulator copies (default 4: +40% at TPC-H Q1's 4 groups) and
-  therefore sums doubles in a different order than Spark; strict floating point (below) forces one
-  copy for double sums.
+  accumulators by `sparkvector.agg.maskPathMaxGroups` (default 4 where the platform has mask
+  registers and the double species has 4+ lanes, 1 elsewhere: the measured crossover, #283 decision
+  3; the masked path never loses up to 4 groups in either rounding mode). The scatter rotates over
+  `sparkvector.agg.interleave` accumulator copies (default 1 on AVX-512, where one copy is 45-70%
+  faster from 4 groups up; 4 elsewhere, +40% at 4 groups on NEON) and with several copies sums
+  doubles in a different order than Spark; strict floating point (below) forces one copy for double
+  sums, and an explicit `interleave=1` forces Spark's order in every double sum.
 - Platform dispatch (`kernels/Platform.java`, #283): the SIMD target is probed once at class init from
   HotSpot's own `UseAVX` / `UseSVE` / `MaxVectorSize` (`-Dsparkvector.platform=neon|sve|avx2|avx512`
   overrides it, for forcing a foreign path emulated or measuring one path against another on the same
@@ -214,10 +216,9 @@ that pin it.
   masks come from `VectorMask.fromLong` (one `kmov`) when `Platform.MASK_REGISTERS`, 14-25% faster
   on the null paths at 512 bits and a wash at 256; the broadcast-AND-compare form stays for NEON and
   AVX2. Compaction takes `compress` wherever `Platform.NATIVE_COMPRESS` (the table lost by 10-28% on
-  dense selections at both widths, tied at 2% where the sparse bit walk serves both). Still to
-  measure (the loop of #283): the 8-group masked-reduction threshold and `interleave` at 8 and 16
-  lanes, and 512 against 256 as the default width from TPC-H Q1/Q6; never measured: Ice Lake, Genoa,
-  Graviton (#282, #284, #253).
+  dense selections at both widths, tied at 2% where the sparse bit walk serves both). The grouped
+  thresholds above are the lab's decision 3. Still to measure (the loop of #283): 512 against 256 as
+  the default width from TPC-H Q1/Q6; never measured: Ice Lake, Genoa, Graviton (#282, #284, #253).
 - Popcount and bitmap bookkeeping are `Long.bitCount` over 64-bit words and never show in profiles.
 
 ### 3.4 Selection vectors between our operators
