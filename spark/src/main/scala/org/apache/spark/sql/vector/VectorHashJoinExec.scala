@@ -269,6 +269,18 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
   var head: Array[Int] = new Array[Int](0)
   /** Next build row with the same key, -1 at the end. */
   val next: Array[Int] = new Array[Int](numRows)
+  /** Heap mirrors of the fixed-width columns a join condition reads, made on first use (#332). */
+  private val mirrors = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
+
+  /** The heap mirror of column `c`, or null when the column is not one a mirror covers. A shared table may race to make it; the result is the same. */
+  def mirror(c: Int): io.sparkvector.kernels.HeapMirror = {
+    var m = mirrors(c)
+    if (m == null && io.sparkvector.kernels.HeapMirror.mirrors(columns(c))) {
+      m = io.sparkvector.kernels.HeapMirror.of(columns(c))
+      mirrors(c) = m
+    }
+    m
+  }
 
   def build(): BuildTable = {
     if (numRows > 0 && spec.buildKeys.nonEmpty) {
@@ -473,6 +485,33 @@ private[vector] class VectorHashJoinIterator(
   /** The candidate pairs of the current batch: streamed row and build row (-1 pads an outer join). */
   private var probeIdx = new Array[Int](OutputBatchSize)
   private var buildIdx = new Array[Int](OutputBatchSize)
+  /** The pairs of one chunk that passed an inner join's condition (#332). */
+  private var survProbeIdx = new Array[Int](0)
+  private var survBuildIdx = new Array[Int](0)
+  private val gatherScratch = new io.sparkvector.kernels.HeapMirror.GatherScratch
+  /** Heap mirrors of the streamed columns the condition reads, for the current batch (#332). */
+  private val streamedMirrors = new Array[io.sparkvector.kernels.HeapMirror](spec.streamedWidth)
+  private val streamedMirrorTried = new Array[Boolean](spec.streamedWidth)
+
+  private def streamedMirror(ctx: EvalContext, ordinal: Int): io.sparkvector.kernels.HeapMirror = {
+    if (!streamedMirrorTried(ordinal)) {
+      streamedMirrorTried(ordinal) = true
+      val in = ctx.input(ordinal)
+      if (io.sparkvector.kernels.HeapMirror.mirrors(in)) streamedMirrors(ordinal) = io.sparkvector.kernels.HeapMirror.of(in)
+    }
+    streamedMirrors(ordinal)
+  }
+
+  /** The joined ordinals the condition reads; the others are never gathered for it. */
+  private val conditionRefs: Array[Boolean] = spec.condition.map { cond =>
+    val refs = new Array[Boolean](spec.joinedAttrs.length)
+    def walk(e: VectorExpr): Unit = e match {
+      case io.sparkvector.spark.expr.ColumnRef(o, _) => refs(o) = true
+      case other => other.children.foreach(walk)
+    }
+    walk(cond)
+    refs
+  }.orNull
   /** The pairs an outer join with a condition emits, rewritten from the candidates. */
   private var outProbeIdx = new Array[Int](0)
   private var outBuildIdx = new Array[Int](0)
@@ -534,6 +573,8 @@ private[vector] class VectorHashJoinIterator(
 
   private def probe(batch: ColumnarBatch): Unit = {
     metrics.numInputBatches += 1
+    java.util.Arrays.fill(streamedMirrorTried, false)
+    java.util.Arrays.fill(streamedMirrors.asInstanceOf[Array[AnyRef]], null)
     EvalContexts.withBatch(batch) { ctx =>
       val n = ctx.numRows
       if (!nestedLoop) {
@@ -614,6 +655,9 @@ private[vector] class VectorHashJoinIterator(
 
   /** Inner and outer joins whose condition, if any, an inner join applies to the gathered batch. */
   private def emitMatches(ctx: EvalContext, from: Int, until: Int): Unit = {
+    // A simple residual over integer lanes is tested per candidate pair on the heap mirrors, so a
+    // failing pair is never appended, gathered or compacted (#332: q72's 10^9 pairs, a few percent kept).
+    val fused = fusedPredicate(ctx)
     var count = 0
     var i = from
     while (i < until) {
@@ -623,15 +667,60 @@ private[vector] class VectorHashJoinIterator(
           if (preservesStreamed) { count = append(count, i, -1); }
         } else {
           while (r >= 0) {
-            count = append(count, i, r)
-            if (buildMatched != null) buildMatched(r) = true
+            if (fused == null || fused.test(i, r)) {
+              count = append(count, i, r)
+              if (buildMatched != null) buildMatched(r) = true
+            }
             r = nextCandidate(r)
           }
         }
       }
       i += 1
     }
-    if (count > 0) flush(ctx, probeIdx, buildIdx, count, filter = spec.condition.isDefined)
+    if (count > 0) flush(ctx, probeIdx, buildIdx, count, filter = spec.condition.isDefined && fused == null)
+  }
+
+  /**
+   * The condition as a per-pair test over heap mirrors, when it is `lane OP lane` on INT32 or INT64
+   * lanes both mirrored for this batch; null otherwise (the gather-then-compact path applies). A
+   * null on either side fails the pair, as Spark's condition does.
+   */
+  private def fusedPredicate(ctx: EvalContext): PairPredicate = spec.condition match {
+    case Some(io.sparkvector.spark.expr.CompareExpr(op, io.sparkvector.spark.expr.ColumnRef(a, _), io.sparkvector.spark.expr.ColumnRef(b, _)))
+        if isSemiOrAnti == false && !keepUnmatched && !isExistence =>
+      val ma = mirrorOf(ctx, a); val mb = mirrorOf(ctx, b)
+      if (ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)) null
+      else new PairPredicate(op, ma, isBuildColumn(a), mb, isBuildColumn(b))
+    case _ => null
+  }
+
+  /** The heap mirror behind joined ordinal `c` for this batch, or null. */
+  private def mirrorOf(ctx: EvalContext, c: Int): io.sparkvector.kernels.HeapMirror =
+    if (isBuildColumn(c)) build.mirror(buildOrdinal(c))
+    else if (TypeMapping.hasLane(spec.joinedAttrs(c)._2)) streamedMirror(ctx, streamedOrdinal(c))
+    else null
+
+  /** `left OP right` per pair; each side reads the build row or the streamed row of the pair. */
+  private final class PairPredicate(
+      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean,
+      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean) {
+    private val ints = left.`type` == io.sparkvector.kernels.VecType.INT32
+    def test(streamed: Int, buildRow: Int): Boolean = {
+      val li = if (leftIsBuild) buildRow else streamed
+      val ri = if (rightIsBuild) buildRow else streamed
+      if (!left.isValid(li) || !right.isValid(ri)) false
+      else {
+        val cmp = if (ints) Integer.compare(left.ints(li), right.ints(ri)) else java.lang.Long.compare(left.longs(li), right.longs(ri))
+        op match {
+          case io.sparkvector.kernels.CompareOp.EQ => cmp == 0
+          case io.sparkvector.kernels.CompareOp.NE => cmp != 0
+          case io.sparkvector.kernels.CompareOp.LT => cmp < 0
+          case io.sparkvector.kernels.CompareOp.LE => cmp <= 0
+          case io.sparkvector.kernels.CompareOp.GT => cmp > 0
+          case io.sparkvector.kernels.CompareOp.GE => cmp >= 0
+        }
+      }
+    }
   }
 
   /**
@@ -691,7 +780,7 @@ private[vector] class VectorHashJoinIterator(
     var from = 0
     while (from < count) {
       val to = math.min(count, from + OutputBatchSize)
-      val joined = gather(ctx, spec.joinedAttrs, probeIdx, buildIdx, from, to)
+      val joined = gather(ctx, spec.joinedAttrs, probeIdx, buildIdx, from, to, conditionRefs)
       try {
         EvalContexts.withBatch(joined) { jctx =>
           val (sel, _) = VectorExpr.selection(cond.eval(jctx), jctx)
@@ -795,15 +884,23 @@ private[vector] class VectorHashJoinIterator(
   private def buildOrdinal(c: Int): Int = if (spec.buildIsLeft) c else c - streamedWidth
   private def streamedOrdinal(c: Int): Int = if (spec.buildIsLeft) c - numBuildCols else c
 
-  /** Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). */
-  private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int): ColumnarBatch = {
+  /**
+   * Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). With `only`,
+   * the columns it does not mark are [[PlaceholderColumn]]: the batch is for the condition alone.
+   */
+  private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int, only: Array[Boolean] = null): ColumnarBatch = {
     val columns = new Array[ColumnVector](attrs.length)
     var probeRows: Array[Int] = null // the probe ids of this batch, for streamed columns with no lane (passed through, #273)
     var c = 0
     while (c < columns.length) {
       val (name, dt) = attrs(c)
       columns(c) =
-        if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
+        if (only != null && !only(c)) PlaceholderColumn
+        else if (isBuildColumn(c) && build.mirror(buildOrdinal(c)) != null)
+          ArrowOutput.gatherHeap(name, dt, build.mirror(buildOrdinal(c)), bld, from, to, allocator, gatherScratch)
+        else if (!isBuildColumn(c) && TypeMapping.hasLane(dt) && streamedMirror(ctx, streamedOrdinal(c)) != null)
+          ArrowOutput.gatherHeap(name, dt, streamedMirror(ctx, streamedOrdinal(c)), probe, from, to, allocator, gatherScratch)
+        else if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
         else if (TypeMapping.hasLane(dt)) ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
         else {
           if (probeRows == null) probeRows = java.util.Arrays.copyOfRange(probe, from, to)
@@ -814,40 +911,53 @@ private[vector] class VectorHashJoinIterator(
     new ColumnarBatch(columns, to - from)
   }
 
-  /** Gathers `count` pairs into output batches of at most [[OutputBatchSize]] rows. */
+  /**
+   * Gathers `count` pairs into output batches of at most [[OutputBatchSize]] rows. With `filter`
+   * (an inner join with a condition) the condition is evaluated first, over a gather of only the
+   * columns it reads, and the output columns are gathered for the surviving pairs alone: a
+   * many-to-many key with a selective residual (TPC-DS q72, 10^9 candidate pairs of which a few
+   * survive) otherwise materialises every pair's full row before dropping it (#332).
+   */
   private def flush(ctx: EvalContext, probe: Array[Int], bld: Array[Int], count: Int, filter: Boolean): Unit = {
     var from = 0
     while (from < count) {
       val to = math.min(count, from + OutputBatchSize)
-      val joined = gather(ctx, spec.outputAttrs, probe, bld, from, to)
-      if (filter) filtered(joined, spec.condition.get).foreach(pending.add)
-      else pending.add(joined)
+      if (filter) {
+        val k = survivors(ctx, spec.condition.get, probe, bld, from, to)
+        if (k > 0) pending.add(gather(ctx, spec.outputAttrs, survProbeIdx, survBuildIdx, 0, k))
+      } else pending.add(gather(ctx, spec.outputAttrs, probe, bld, from, to))
       from = to
     }
   }
 
-  /** Applies the non-equi condition to a joined batch, which is consumed unless every row passes. */
-  private def filtered(joined: ColumnarBatch, cond: VectorExpr): Option[ColumnarBatch] = {
-    val result: Either[Unit, Option[ColumnarBatch]] = EvalContexts.withBatch(joined) { ctx =>
-      val pred = cond.eval(ctx)
-      val (sel, count) = VectorExpr.selection(pred, ctx)
-      if (count == ctx.numRows) Left(())
-      else if (count == 0) Right(None)
-      else {
-        val columns = new Array[ColumnVector](spec.outputAttrs.length)
-        var c = 0
-        while (c < columns.length) {
-          val (name, dt) = spec.outputAttrs(c)
-          columns(c) = compactOrPass(ctx, c, name, dt, sel, count)
-          c += 1
+  /** The pairs of `[from, to)` that pass the condition, compacted into `survProbeIdx` / `survBuildIdx`; their count. */
+  private def survivors(ctx: EvalContext, cond: VectorExpr, probe: Array[Int], bld: Array[Int], from: Int, to: Int): Int = {
+    val n = to - from
+    if (survProbeIdx.length < n) { survProbeIdx = new Array[Int](n); survBuildIdx = new Array[Int](n) }
+    val narrow = gather(ctx, spec.joinedAttrs, probe, bld, from, to, conditionRefs)
+    try {
+      EvalContexts.withBatch(narrow) { jctx =>
+        val (sel, passing) = VectorExpr.selection(cond.eval(jctx), jctx)
+        var k = 0
+        if (passing == n) {
+          System.arraycopy(probe, from, survProbeIdx, 0, n); System.arraycopy(bld, from, survBuildIdx, 0, n); k = n
+        } else if (passing > 0) {
+          val words = Bitmap.wordsFor(n)
+          var w = 0
+          while (w < words) {
+            var word = Bitmap.wordAt(sel, w, n)
+            val base = w << 6
+            while (word != 0L) {
+              val j = base + java.lang.Long.numberOfTrailingZeros(word)
+              survProbeIdx(k) = probe(from + j); survBuildIdx(k) = bld(from + j); k += 1
+              word &= word - 1
+            }
+            w += 1
+          }
         }
-        Right(Some(new ColumnarBatch(columns, count)))
+        k
       }
-    }
-    result match {
-      case Left(_) => Some(joined)
-      case Right(out) => joined.close(); out
-    }
+    } finally narrow.close()
   }
 
   override def close(): Unit = {

@@ -4,6 +4,7 @@ import io.sparkvector.kernels.Bitmap;
 import io.sparkvector.kernels.BitmapKernels;
 import io.sparkvector.kernels.CompactKernels;
 import io.sparkvector.kernels.GatherKernels;
+import io.sparkvector.kernels.HeapMirror;
 import io.sparkvector.kernels.RunMerge;
 import io.sparkvector.kernels.VecType;
 import io.sparkvector.kernels.VectorBuffers;
@@ -316,6 +317,25 @@ public final class ArrowOutput {
     return finish(out, count, !nulls);
   }
 
+
+  /**
+   * Gathers rows {@code idx[from..to)} of a heap-mirrored fixed-width column into a new Arrow vector
+   * (#332): the pair-wise reads are array reads, the result one bulk copy. A negative index pads a
+   * null row.
+   */
+  public static ColumnVector gatherHeap(
+      String name, DataType dt, HeapMirror in, int[] idx, int from, int to, BufferAllocator allocator,
+      HeapMirror.GatherScratch scratch) {
+    int count = to - from;
+    boolean padded = false;
+    for (int o = from; o < to && !padded; o++) {
+      padded = idx[o] < 0;
+    }
+    boolean nulls = in.validity != null || padded;
+    ArrowVectorBuffers out = allocateFixed(name, dt, count, allocator);
+    in.gather(idx, from, to, out.data(), nulls ? out.validity() : null, scratch);
+    return finish(out, count, !nulls);
+  }
   /**
    * Gathers {@code count} rows from several sorted runs into a new Arrow vector: output row {@code o}
    * is row {@code rowOf[o]} of {@code runs[runOf[o]]} (the sort's k-way merge, #285). UTF8 runs must
