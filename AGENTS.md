@@ -478,11 +478,12 @@ that pin it.
   (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). Measured at TPC-H SF10 (#279):
   q21's chain of two merge joins over lineitem (four-row runs) ran 44.9 s against Spark's own
   sort-merge join at 16.8 s and three of our hash joins (under Comet's shuffle) at 6.5 s, so `auto` is
-  slower than `hash` at scale and the merge join must not be chosen for large inputs until it walks
-  runs without a run object. A hash rewrite whose inputs are
-  refused (Spark's operators below, q97) does NOT fall through to the merge join: measured, the merge
-  join over Spark's row inputs on q97 ran 2960 ms against 385 ms for Spark's own (per-run bookkeeping
-  over unique keys, #286); the join stays Spark's until the merge join walks runs without a run object. Spark's contract is kept (clustered distribution, both children
+  slower than `hash` at scale; #310 halved the merge join's q21 (below), and what is left of the gap is
+  the row sort Spark runs below it. A hash rewrite whose inputs are
+  refused (Spark's operators below, q97) does NOT fall through to the merge join: measured before the
+  row buffer, the merge join over Spark's row inputs on q97 ran 2960 ms against 385 ms for Spark's own
+  (per-run bookkeeping over unique keys, #286); with the row buffer and #310 the shape is at parity with
+  the hash rewrite, and the rule is unchanged. Spark's contract is kept (clustered distribution, both children
   sorted by the keys ascending, the preserved side's ordering out), so the sorts below stay and no
   pre-pass, build side or statistics are involved: the rule's `merge` case plans it directly
   (`VectorJoinPlanner.planMergeJoin`: keys and condition compile, every column a lane, any SMJ join
@@ -497,9 +498,20 @@ that pin it.
   -- in 8192-pair chunks through `ArrowOutput.gather` (`-1` pads). Single rows (pads, right-only rows,
   a condition's survivors) go through an ordered 8192-row buffer flushed when full, before a direct
   chunk gather and before a source they reference is released -- a full outer join over unique keys
-  emitted one Arrow batch per row without it (q51 3.9 s -> 1.1 s). The shape that stays slow is a merge
-  where every row of both large sides is its own run (q97: 8x the hash rewrite); the remedy is a
-  per-batch cursor without a run object. Readings in docs/results.md. A right outer join runs the iterator with the sides
+  emitted one Arrow batch per row without it (q51 3.9 s -> 1.1 s). #310 took the per-run machinery
+  out of the walk: the right run is cursor state (one `RunCursor` per task; a run inside a batch is a
+  view whose matched flags live in one bitmap per batch, a run at the edge keeps its own arena), the
+  single-key compare is hoisted, unconditional pairs go through the row buffer rather than a gather
+  per run, and under a condition the pairs of short runs (cross product <= 8192) collect in a
+  candidate buffer and are gathered and tested together -- only the joined columns the condition
+  reads are gathered, the rest are placeholders the lazy context never adapts -- with flushes at
+  every point Spark's order needs (a passed right run's unmatched rows, an unmatched left run's pads,
+  the semi/anti emission, the end of a left batch, a source's release), a run never straddling a
+  flush so a pad is decided inside it. SF10 q21 under `auto` went from 38.9 s to 21 s (the two joins
+  from 244 s to 92 s of task time); q97 was already at parity with the hash rewrite on `main` (529 vs
+  511 ms -- the row buffer had fixed the unique-key shape). What remains on q21 is not the join: the
+  profile puts its own machinery under a tenth of the samples, the rest is Spark's spilling row sort
+  (7.7 GB of spill) feeding it through `RowToColumnarExec`. Readings in docs/results.md. A right outer join runs the iterator with the sides
   swapped (Spark streams the preserved side, so its output is in right order) and the gather lays the
   columns back in left ++ right order. Null keys never match. Tested positionally against Spark
   (`VectorSortMergeJoinSuite`): the hash join suites compare row sets, this one row order.
