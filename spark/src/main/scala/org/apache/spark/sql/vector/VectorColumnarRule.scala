@@ -364,12 +364,29 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     else {
       def ours(p: SparkPlan): Boolean = p.isInstanceOf[VectorPlan] || p.isInstanceOf[VectorToCometExec]
       plan.transformUp {
+        // A shuffle over ours is Comet's native shuffle already (useCometShuffle); a broadcast exchange over
+        // ours is offered like an operator, since Comet's broadcast join needs Comet's broadcast below it.
+        // Bottom-up, so a parent above an operator this pass just gave to Comet is offered too (up to and
+        // including a broadcast exchange): Comet's rule ran before ours and never saw a native child there.
+        // A Comet-native child needs no leaf; a parent Comet already declined is declined again, cheaply.
+        // Comet converts a broadcast exchange only together with the join above it, so the exchange is looked
+        // through here and the join is what gets offered.
         case p if !ours(p) && !bridge.isComet(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
-            p.children.nonEmpty && p.children.forall(ours) =>
+            p.children.nonEmpty && p.children.forall(c => ours(c) || bridge.isNative(c) || (c match {
+              case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec => ours(b.child) || bridge.isNative(b.child)
+              case _ => false
+            })) =>
           aggregatePairReason(p, bridge) match {
             case Some(reason) => fallback(p, reason)
             case None =>
-              val leaves = p.children.map(c => bridge.leaf(c, VectorToCometExec(c)))
+              def leafOf(c: SparkPlan): java.util.Optional[SparkPlan] = c match {
+                case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec =>
+                  val under = leafOf(b.child)
+                  if (under.isEmpty) under else java.util.Optional.of(b.withNewChildren(Seq(under.get)))
+                case c if ours(c) => bridge.leaf(c, VectorToCometExec(c))
+                case c => java.util.Optional.of(c)
+              }
+              val leaves = p.children.map(leafOf)
               if (leaves.exists(_.isEmpty)) fallback(p, "mixed: Comet's sink refuses a column type of the input")
               else {
                 val converted = bridge.convertAbove(session, p.withNewChildren(leaves.map(_.get)))
@@ -413,6 +430,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     case c if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) &&
         c.children.head.isInstanceOf[VectorPlan] && bridgeable(c.children.head, c.outputPartitioning, conf) =>
       CometShuffle.toNative(c, VectorToCometExec(c.children.head))
+    // Comet's JVM shuffle over a block the mixed pass gave to Comet after Comet's own rule had run: its
+    // native shuffle reads a native child directly (#280).
+    case c if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) && VectorConf.cometMixedEnabled(conf) &&
+        c.children.head.getClass.getName.startsWith("org.apache.spark.sql.comet.") && c.children.head.supportsColumnar =>
+      CometShuffle.toNative(c, c.children.head)
   }
 
   /**

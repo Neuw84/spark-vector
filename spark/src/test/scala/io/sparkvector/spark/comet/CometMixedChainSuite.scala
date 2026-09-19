@@ -110,6 +110,15 @@ class CometMixedChainSuite extends VectorQuerySuite {
     }
   }
 
+  test("a failure inside Comet's block above the leaf still releases every export", CometTest) {
+    withConf("spark.sql.ansi.enabled" -> "true", VectorConf.ProjectEnabled -> "false") {
+      // Comet's projection divides by zero under ANSI above our filter; whatever raises, our exports go.
+      val failed = scala.util.Try(spark.sql("SELECT l DIV (i - i) AS z FROM t WHERE i > 100").collect())
+      assert(failed.isFailure, "the ANSI division by zero should fail the query")
+      awaitReleased()
+    }
+  }
+
   test("an aggregate whose buffers differ between the engines stays where it is, with the reason", CometTest) {
     withConf("spark.comet.exec.aggregate.enabled" -> "true", VectorConf.AggregateEnabled -> "false") {
       // count is not on Comet's list of buffers it will share with Spark: the pair is not split.
