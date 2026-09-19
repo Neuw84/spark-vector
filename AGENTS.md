@@ -511,7 +511,11 @@ that pin it.
   from 244 s to 92 s of task time); q97 was already at parity with the hash rewrite on `main` (529 vs
   511 ms -- the row buffer had fixed the unique-key shape). What remains on q21 is not the join: the
   profile puts its own machinery under a tenth of the samples, the rest is Spark's spilling row sort
-  (7.7 GB of spill) feeding it through `RowToColumnarExec`. Readings in docs/results.md. A right outer join runs the iterator with the sides
+  (7.7 GB of spill) feeding it through `RowToColumnarExec`. Hence the size gate of #311: under `auto` a
+  merge-join choice is taken only where both inputs are within
+  `spark.vector.exec.sortMergeJoin.maxInputSize` by statistics (default: the join budget); over it, or
+  without statistics, the join is left to Spark's own with a printed reason (`left to Spark: ...;
+  would have been as merge join: ...`), so `auto` is never slower than `off` beyond noise. Readings in docs/results.md. A right outer join runs the iterator with the sides
   swapped (Spark streams the preserved side, so its output is in right order) and the gather lays the
   columns back in left ++ right order. Null keys never match. Tested positionally against Spark
   (`VectorSortMergeJoinSuite`): the hash join suites compare row sets, this one row order.

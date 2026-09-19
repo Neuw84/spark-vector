@@ -288,6 +288,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
                   // the join stays Spark's until the merge join walks runs without a run object.
                   fallback(resorted(j), reason)
               }
+            case Some(Left(why)) if why.startsWith("left to Spark") =>
+              // The size gate (#311): the merge join would be ours but the inputs are large or unsized.
+              fallback(resorted(j), why)
             case Some(Left(why)) =>
               VectorJoinPlanner.planMergeJoin(j) match {
                 case Right(v) =>
@@ -705,8 +708,23 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               case Right(side) => Right((side, s"as hash join: ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"} side fits ${VectorConf.JoinMaxBuildSize} by statistics"))
               case Left(reason) => Left(s"as merge join: $reason")
             }
-          j.setTagValue(VectorExecRule.SortMergeChoice, choice)
-          choice.isRight
+          // The size gate (#311): our merge join is taken only where both inputs are small by statistics.
+          // On large inputs it still loses to Spark's own (SF10 q21: 21 s vs 17 s after #310 -- the row
+          // sort and conversion feeding it), so `auto` stays no slower than `off`: a merge-join choice
+          // over inputs that are large or unknown is left to Spark, and the reason says so.
+          val gated = choice match {
+            case Left(why) if why.startsWith("as merge join") =>
+              val (left, right) = sortMergeInputs(j)
+              val budget = VectorConf.sortMergeJoinMaxInputSize(session.sessionState.conf, maxBuildSize)
+              (VectorJoinPlanner.estimatedBuildSize(left), VectorJoinPlanner.estimatedBuildSize(right)) match {
+                case (Some(l), Some(r)) if l <= budget && r <= budget => choice
+                case (Some(l), Some(r)) => Left(s"left to Spark: inputs too large for the merge join (${math.max(l, r)} bytes over ${VectorConf.SortMergeJoinMaxInputSize} = $budget); would have been $why")
+                case _ => Left(s"left to Spark: no size statistics for the merge join's inputs; would have been $why")
+              }
+            case other => other
+          }
+          j.setTagValue(VectorExecRule.SortMergeChoice, gated)
+          gated.isRight
         } else decision.isRight
       case _ => false
     }
