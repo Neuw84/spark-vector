@@ -158,10 +158,22 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       // An aggregate above ends the visibility: the join's order cannot show through a GROUP BY.
       checkVectorized("SELECT a.ki, count(*) AS n FROM a JOIN b ON a.ki = b.ki GROUP BY a.ki ORDER BY a.ki", Seq(classOf[VectorShuffledHashJoinExec]))
     }
-    // No statistics (adaptive execution off): the hash rewrite is not allowed, the merge join takes it.
+    // No statistics (adaptive execution off): neither the hash rewrite nor -- under the size gate (#311)
+    // -- our merge join: the join is left to Spark, and the fallback reason says why.
     withConf((auto :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
-      val m = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
-      assert(why(m).contains("as merge join: no size statistics"), why(m))
+      val df = spark.sql("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki")
+      df.collect()
+      assert(nodesOf[VectorSortMergeJoinExec](df).isEmpty && nodesOf[VectorShuffledHashJoinExec](df).isEmpty, df.queryExecution.executedPlan.treeString)
+      val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ")
+      assert(reasons.contains("left to Spark: no size statistics for the merge join's inputs"), reasons)
+    }
+    // Inputs over the merge join's input budget: left to Spark even where the order can show.
+    withConf((auto :+ (VectorConf.SortMergeJoinMaxInputSize -> "1")): _*) {
+      val df = spark.sql("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20")
+      df.collect()
+      assert(nodesOf[VectorSortMergeJoinExec](df).isEmpty && nodesOf[VectorShuffledHashJoinExec](df).isEmpty, df.queryExecution.executedPlan.treeString)
+      val choice = nodesOf[SortMergeJoinExec](df).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeChoice)).map(_.swap.getOrElse("")).mkString("; ")
+      assert(choice.contains("left to Spark: inputs too large for the merge join"), choice + "\n" + finalPlan(df).treeString)
     }
     // The boolean flag reads as auto.
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinEnabled -> "true") {

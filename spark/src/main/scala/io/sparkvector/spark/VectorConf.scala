@@ -32,6 +32,7 @@ object VectorConf {
   val SortMergeJoinEnabled = "spark.vector.exec.sortMergeJoin.enabled"
   val SortMergeJoinMode = "spark.vector.exec.sortMergeJoin.mode"
   val JoinMaxBuildSize = "spark.vector.join.maxBuildSize"
+  val SortMergeJoinMaxInputSize = "spark.vector.exec.sortMergeJoin.maxInputSize"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   /** Mixed chains (#280): Comet's native operators above ours through the sink leaf. Off until #281 decides an allowlist. */
   val CometMixedEnabled = "spark.vector.comet.mixed.enabled"
@@ -117,6 +118,15 @@ object VectorConf {
       val offHeap = if (sparkConf.getBoolean("spark.memory.offHeap.enabled", false)) sparkConf.getSizeAsBytes("spark.memory.offHeap.size", "0") else 0L
       if (offHeap > 0) math.max(1L, offHeap / math.max(1, sparkConf.getInt("spark.executor.cores", 1))) else 1L << 30
     }
+  }
+  /**
+   * Under `auto`, the largest input (bytes, by statistics) our merge join is taken for (#311): above
+   * it, or without statistics, the join is left to Spark's own sort-merge join, which beats ours on
+   * large inputs while the row sort and conversion below feed it. Default: the join budget.
+   */
+  def sortMergeJoinMaxInputSize(conf: SQLConf, maxBuildSize: Long): Long = {
+    val explicit = conf.getConfString(SortMergeJoinMaxInputSize, "")
+    if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit) else maxBuildSize
   }
   /** Also hand range-partitioned exchanges (global sorts) to Comet's native shuffle. */
   def cometRangeShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometRangeShuffleEnabled, default = true)
