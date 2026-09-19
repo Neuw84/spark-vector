@@ -462,9 +462,18 @@ that pin it.
   change to an operator's output contract.
 - There is a merge join (#286, section 3.6b): `VectorSortMergeJoinExec` under
   `spark.vector.exec.sortMergeJoin.mode=merge`, or under `auto` (#287) where the pre-pass chooses it. The
-  modes: `off` | `hash` (the rewrite below) | `merge` | `auto`; the boolean flag reads as `auto`; the
-  default is `off` (the flip to `auto` is the maintainer's: the issue conditions it on the golden files
-  under `auto`, on memory accounted through #12 and on SF10 not being slower than `hash`). The `auto`
+  modes: `off` | `hash` (the rewrite below) | `merge` | `auto`; the boolean flag set to `false` reads as
+  `off`, `true` as `auto`; the default is `auto` since #311 (it was `off` until the issue's three
+  conditions were measured: the golden files under `auto` 642/0, TPC-DS SF1 with every checksum equal
+  to Spark's, and TPC-H SF10 under `auto` not slower than `off` under our shuffle -- see results.md,
+  "auto by default"). Two size rules guard `auto` (both #311): a merge-join choice is kept only when
+  *both* inputs have statistics and each fits `spark.vector.exec.sortMergeJoin.maxInputSize` (default
+  = `spark.vector.join.maxBuildSize`, 1 GiB) -- otherwise the join is *left to Spark* (`Left("left to
+  Spark: inputs too large ...")`, reason on the tag; q21's lineitem joins at SF10, where our merge over
+  Spark's row sort was 2.3x slower than Spark's own); and the hash rewrite declines a build side larger
+  than the streamed side by statistics (`VectorJoinPlanner.sortMergeBuildSide`: a semi or anti join may
+  only build its right side; q4 hashed lineitem and ran 14% slower than Spark's merge -- with the rule
+  `auto` takes our merge join there and is at parity, fully accelerated). The `auto`
   rule, in `markSortMergeJoins`: a join whose ordering a parent relies on (`orderingNeeded`) takes the
   merge join; so does one whose row order is *visible* -- below a `LocalLimit` / `GlobalLimit` /
   `CollectLimit` / `TakeOrderedAndProject` / `Sort`, or a range-partitioned exchange (a global sort's,

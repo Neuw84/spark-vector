@@ -327,9 +327,9 @@ class VectorJoinSuite extends VectorQuerySuite {
     }
   }
 
-  test("a sort-merge join stays Spark's when its ordering is relied on, its statistics are missing or too large, or by default") {
-    // Off by default: the rewrite changes the memory profile of Spark's default join, so the maintainer opts in.
-    withConf(SortMerge.take(2): _*) {
+  test("a sort-merge join stays Spark's when its ordering is relied on, its statistics are missing or too large, or when switched off") {
+    // `auto` by default since #311; the boolean flag set to false still leaves Spark's join alone.
+    withConf((SortMerge.take(2) :+ (VectorConf.SortMergeJoinEnabled -> "false")): _*) {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di"); d.collect(); d }
       assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](df).nonEmpty, finalPlan(df).treeString)
     }
