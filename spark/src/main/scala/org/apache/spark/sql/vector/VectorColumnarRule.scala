@@ -364,25 +364,40 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     else {
       def ours(p: SparkPlan): Boolean = p.isInstanceOf[VectorPlan] || p.isInstanceOf[VectorToCometExec]
       plan.transformUp {
-        case p if !ours(p) && !bridge.isNative(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
-            p.children.nonEmpty && p.children.forall(ours) && !splitsAggregatePair(p) =>
-          val leaves = p.children.map(c => bridge.leaf(c, VectorToCometExec(c)))
-          if (leaves.exists(_.isEmpty)) p
-          else {
-            val converted = bridge.convertAbove(session, p.withNewChildren(leaves.map(_.get)))
-            if (bridge.isNative(converted)) converted else p
+        case p if !ours(p) && !bridge.isComet(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
+            p.children.nonEmpty && p.children.forall(ours) =>
+          aggregatePairReason(p, bridge) match {
+            case Some(reason) => fallback(p, reason)
+            case None =>
+              val leaves = p.children.map(c => bridge.leaf(c, VectorToCometExec(c)))
+              if (leaves.exists(_.isEmpty)) fallback(p, "mixed: Comet's sink refuses a column type of the input")
+              else {
+                val converted = bridge.convertAbove(session, p.withNewChildren(leaves.map(_.get)))
+                // Native, or one of Comet's JVM sinks (a union, a limit): Comet's own block pass has already
+                // unwrapped the placeholders a JVM sink does not need.
+                if (bridge.isComet(converted)) converted
+                else {
+                  val reasons = bridge.declineReasons(converted)
+                  fallback(p, if (reasons.isEmpty) "mixed: Comet declined the operator" else s"mixed: Comet declined -- ${reasons.mkString("; ")}")
+                }
+              }
           }
       }
     }
   }
 
   /**
-   * An aggregate never goes to Comet on its own: Comet's final needs Comet's partial buffers and ours
-   * needs ours, so a pair must change engine together -- the partial over our chain and the final
-   * over the exchange in one decision -- which this pass does not do yet (#280, the pair is the next
-   * slice). Until then every aggregate half stays where the bottom-up transform left it.
+   * An aggregate half may change engine only when its functions' intermediate buffers are laid out the
+   * same way by Spark and by Comet (Comet's own predicate, `allAggsSupportMixedExecution`: sum, min, max,
+   * the bit aggregates and a non-decimal avg are; count is not, nor a decimal sum or avg; a Comet final
+   * over a foreign partial of an incompatible function is refused by Comet's rule as well). Otherwise the
+   * pair stays where the bottom-up transform left it, with the reason.
    */
-  private def splitsAggregatePair(p: SparkPlan): Boolean = p.isInstanceOf[HashAggregateExec]
+  private def aggregatePairReason(p: SparkPlan, bridge: CometMixedBridge): Option[String] = p match {
+    case a: HashAggregateExec if !bridge.aggregatesMix(a.aggregateExpressions) =>
+      Some("mixed: aggregate halves cannot be split across engines (intermediate buffer formats differ)")
+    case _ => None
+  }
 
   /**
    * An exchange fed by one of our operators becomes Comet's native shuffle over a

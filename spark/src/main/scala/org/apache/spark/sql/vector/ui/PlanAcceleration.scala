@@ -211,6 +211,8 @@ object PlanAcceleration {
     def engineOf(p: SparkPlan): Engine = p match {
       case _: VectorPlan => Engine.Vector
       case _ if p.nodeName == "VectorToComet" => Engine.Bridge
+      // The mixed-chain leaf (#280): Comet's one-child union over our export node is the hand-off, not an operator.
+      case _ if isCometClass(p.getClass) && p.children.size == 1 && p.children.head.nodeName == "VectorToComet" => Engine.Bridge
       case _ if isCometClass(p.getClass) => Engine.Comet
       case _ if isTransition(p.nodeName) => Engine.Transition
       case _ if isShuffleRead(p.nodeName) => Engine.ShuffleRead

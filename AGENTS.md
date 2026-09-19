@@ -579,7 +579,10 @@ into these rather than adding special cases to operators.
   Seq(VectorToCometExec(chain))))` built reflectively in `CometMixedBridge`, then Comet's `CometExecRule`
   applied to the parent subtree. Rejected, do not retry: `sparkToColumnar` (leaf-only, copies) and a
   placeholder directly over our export node (Comet's input walk ignores foreign nodes: `None.get` in
-  `buildNativeContext`). Aggregate pairs are not offered yet (the pair must move as a unit).
+  `buildNativeContext`). An aggregate half moves only when Comet's `allAggsSupportMixedExecution` says
+  its buffers are shared (min/max/bit/non-decimal avg and sum -- not count, not decimals); Comet's
+  decline reasons are recorded as `mixed: Comet declined -- ...` fallbacks; the pass-through union is
+  the `Bridge` engine in the acceleration view.
 - The hybrid planning study (#279, `docs/results.md`) is the evidence for #280/#281: Comet's
   operator wins by more than twice the crossing on the many-group hash aggregate (but the wall clock
   there is Spark's row shuffle, #288), the wide-decimal reduction and the broadcast-join probe; ours
@@ -746,8 +749,8 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 283 Spark tests with the Comet and Iceberg profiles (259 with
-Iceberg alone; the Comet suites contribute 24, `CometMixedChainSuite` 4 of them). If a change lowers either number, explain why in the commit.
+Current counts: 176 kernel tests, 286 Spark tests with the Comet and Iceberg profiles (259 with
+Iceberg alone; the Comet suites contribute 27, `CometMixedChainSuite` 7 of them). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 
