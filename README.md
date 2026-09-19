@@ -337,7 +337,12 @@ without benchmarking with
 `benchmarks/scripts/run-tpch.sh --report`. See [docs/results.md](docs/results.md) for numbers
 measured on an Apple M3 Pro; at SF10, Q1 runs 1.64x faster than Spark over Spark's own scan and
 1.84x over Comet's scan and shuffle (Comet end to end: 1.62x), while the highly selective Q6 stays
-at 0.86x over Spark's scan.
+at 0.86x over Spark's scan. The five-configuration matrix on an x86 host after #311 (results.md,
+"The five configurations"): over the 22 TPC-H SF10 queries pure Spark 86.5 s, our operators over our
+columnar shuffle 59.6 s (1.45x), with Comet's scan in front 53.4 s (1.62x), hybrid 44.0 s (1.97x),
+native Comet 40.6 s (2.13x); TPC-DS SF1 runs 80-87% of operators on our kernels (85-87% with Comet's
+scan) with every checksum equal to Spark's, and at that scale is a coverage harness rather than a speed
+benchmark.
 
 When a result is not what you expected, profile before theorising. Java Flight Recorder attaches
 to a benchmark JVM with one environment variable, and `RESULTS_DIR` keeps the profiling run out of

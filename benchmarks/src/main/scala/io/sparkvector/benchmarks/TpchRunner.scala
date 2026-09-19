@@ -75,8 +75,8 @@ object TpchRunner {
    * counterpart of Comet's default `spark.comet.exec.strictFloatingPoint=false`. The plugin's own
    * default is strict (Spark's rounding); Q15 compares a double sum for equality against a maximum
    * of the same sums computed by Spark and returns no rows in fast mode, so its checksum differs.
-   * The opt-in sort-merge join rewrite is on: Comet accelerates those joins too (natively, as
-   * merge joins), and the rewrite is our only way to.
+   * The sort-merge planning mode is `auto` -- the default since #311, spelled out here so a
+   * configuration reads the same whatever the plugin's default; Comet accelerates those joins too.
    */
   val VectorFast: Map[String, String] = Map(
     "spark.plugins" -> "io.sparkvector.spark.VectorPlugin",
