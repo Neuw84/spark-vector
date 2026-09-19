@@ -50,7 +50,11 @@ spec:
           env:
             # The repository is private: a fine-grained token with read-only Contents on it, in a Secret
             #   kubectl -n bench create secret generic github-read --from-literal=token=github_pat_...
-            - name: GIT_TOKEN
+            # Basic auth: GitHub's git-over-HTTPS takes the token as the password (a bearer header,
+            # which GIT_TOKEN would send, is refused with "authorization failed").
+            - name: GIT_USERNAME
+              value: x-access-token
+            - name: GIT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: github-read
