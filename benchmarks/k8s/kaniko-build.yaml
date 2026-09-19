@@ -1,0 +1,66 @@
+# Builds the cluster image ON the cluster (#246/#247): Kaniko clones this repository as the build
+# context (no file leaves the machine that applies this), builds benchmarks/k8s/Dockerfile -- the
+# Maven build of our jars and tpcds-kit happen inside -- and pushes to ECR with the credentials of
+# the pod's service account (IRSA: the role needs ecr:GetAuthorizationToken and push on the
+# repository; the ecr-login credential helper in the Kaniko image picks them up).
+#
+#   sed -e 's|GIT_REF|refs/heads/main|' -e 's|IMAGE_TAG|main-2026-09-19|' benchmarks/k8s/kaniko-build.yaml | kubectl apply -f -
+#   kubectl -n bench logs -f job/spark-vector-image-build
+#
+# The names below are the sfi-iceberg-bench cluster's (namespace bench, service account sfi-engine,
+# the account's ECR); change them for another cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kaniko-docker-config
+  namespace: bench
+data:
+  config.json: |
+    { "credHelpers": { "378683551918.dkr.ecr.us-east-1.amazonaws.com": "ecr-login" } }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-vector-image-build
+  namespace: bench
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: spark-vector-image-build
+    spec:
+      serviceAccountName: sfi-engine
+      restartPolicy: Never
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:v1.23.2
+          args:
+            - --context=git://github.com/Neuw84/spark-vector.git#GIT_REF
+            - --dockerfile=benchmarks/k8s/Dockerfile
+            - --destination=378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:IMAGE_TAG
+            - --cache=true
+            - --cache-repo=378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/cache
+            - --snapshot-mode=redo
+            - --use-new-run
+            - --compressed-caching=false
+            - --verbosity=info
+          env:
+            - name: AWS_REGION
+              value: us-east-1
+            - name: AWS_SDK_LOAD_CONFIG
+              value: "true"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 10Gi
+            limits:
+              memory: 20Gi
+          volumeMounts:
+            - name: docker-config
+              mountPath: /kaniko/.docker/
+      volumes:
+        - name: docker-config
+          configMap:
+            name: kaniko-docker-config
