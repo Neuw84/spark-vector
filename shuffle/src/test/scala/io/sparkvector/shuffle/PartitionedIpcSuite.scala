@@ -153,7 +153,9 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("streams overflow to a temporary file and are concatenated at finish") {
+    // Up to 200 partitions each stream goes straight to its file; above, the heap staging spills past flushBytes.
     roundTrip(numPartitions = 4, batches = Seq((500, true), (500, false), (500, true)), flushBytes = 1024)
+    roundTrip(numPartitions = 256, batches = Seq((3000, true), (3000, false)), flushBytes = 1024)
   }
 
   test("the stream reader decodes several map outputs' streams concatenated, each with its own schema and dictionaries") {

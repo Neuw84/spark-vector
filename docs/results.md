@@ -395,9 +395,15 @@ is 1168 ms against 304 ms, Q19's 765 against 656 -- on queries whose shuffles ar
 and whose wall time is short enough for it to show. Our path allocates on the heap where Spark's
 does not: the writer serialises each partition's stream into a heap `ByteArrayOutputStream` (growth
 copies, a copy per spill), the reader decodes a local file segment through an `InputStream` channel
-(heap chunks copied into Arrow memory), and zstd stages through JNI buffers. Writing the streams to
-the spill channel directly and reading local segments through the block's mapped `nioByteBuffer`
-are the follow-ups; neither changes the format.
+(heap chunks copied into Arrow memory), and zstd stages through JNI buffers. The follow-up (the
+PR after #320) removed the heap from the path without changing the format: local file segments are
+read with positional reads straight into Arrow memory, streams go straight to their spill file up to
+200 partitions, the shuffle writer adapts a batch once for the partition ids and the streams, and --
+the largest share, 26% of Q20's samples -- the Parquet adapter decodes a dictionary column straight
+into the arena instead of through three heap arrays per column per batch (its string twin reuses
+per-thread scratch). Same probe, 3 iterations: Q20 1531 ms vs 1464 (1.05x, GC 320 vs 288 ms), Q19
+1427 vs 1306 (1.09x, GC 709 vs 472 ms). The adapter change pays on every configuration, not only
+the shuffle's.
 
 What the measurement found, in the order the runs exposed it -- every one general, none visible
 under `local[4]` unit tests:
