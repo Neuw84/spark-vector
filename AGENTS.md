@@ -574,6 +574,13 @@ into these rather than adding special cases to operators.
   on our classpath (Comet keeps `org.apache.arrow.c.*` unshaded but with shaded signatures, so the
   classes collide), maven-shade relocation (Comet's JNI looks classes up by literal name), and a
   bulk-copy bridge (replaced by the zero-copy one).
+- The Comet allowlist (#281): `spark.vector.comet.preferComet` (`PreferComet.scala`) gates the mixed offer --
+  a listed operator is tagged `VectorFallback.Delegated` and left with the reason `delegated to Comet
+  (spark.vector.comet.preferComet)` before our conversions run; if Comet declines it in `mixedChains`, the
+  same `conversions` partial function converts it to ours, so a requested swap never lands on Spark's
+  operator. Adding an entry needs the three-part rule of `docs/comet.md` (Comet faster by 2x the crossing
+  cost in the queries the operator dominates; no query regressed against the better pure configuration;
+  a profiled reason) and the commit it was measured at. Empty list = mixed plans allowed, none requested.
 - Mixed chains (#280): Comet above ours is our rule's doing (`mixedChains`, `spark.vector.comet.mixed.enabled`,
   default off) -- the sink leaf `CometSinkPlaceHolder(scanOp, chain, CometUnionExec(chain, output,
   Seq(VectorToCometExec(chain))))` built reflectively in `CometMixedBridge`, then Comet's `CometExecRule`
@@ -749,8 +756,8 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 290 Spark tests with the Comet and Iceberg profiles (259 with
-Iceberg alone; the Comet suites contribute 31, `CometMixedChainSuite` 8 and `CometMixedShuffleSuite` 3 of them). If a change lowers either number, explain why in the commit.
+Current counts: 176 kernel tests, 296 Spark tests with the Comet and Iceberg profiles (259 with
+Iceberg alone; the Comet suites contribute 37, `CometMixedChainSuite` 8, `CometMixedShuffleSuite` 3 and `CometPreferCometSuite` 6 of them). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol
 

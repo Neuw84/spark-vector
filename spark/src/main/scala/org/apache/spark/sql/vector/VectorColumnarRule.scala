@@ -42,6 +42,9 @@ object VectorExecRule {
 object VectorFallback {
   val Tag: TreeNodeTag[String] = TreeNodeTag[String]("io.sparkvector.fallback")
 
+  /** Set on an operator our rule left to Comet on the allowlist's request (#281), so the mixed pass knows to run ours if Comet declines. */
+  val Delegated: TreeNodeTag[Boolean] = TreeNodeTag[Boolean]("io.sparkvector.delegated")
+
   def reason(plan: SparkPlan): Option[String] = plan.getTagValue(Tag)
 
   /** All fallback reasons in a plan tree, including inside adaptive query stages. */
@@ -72,7 +75,17 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       if (sortMergeMode == "hash" || sortMergeMode == "auto") {
         markSortMergeJoins(plan, orderingNeeded = false, orderVisible = false, sortMergeMode == "auto", maxBuildSize, new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]])
       }
-      val converted = plan.transformUp {
+      val bridge = if (VectorConf.cometMixedEnabled(conf)) CometMixedBridge.tryCreate() else null
+      val prefer = if (bridge != null) PreferComet.parse(VectorConf.cometPreferComet(conf)) else PreferComet.Empty
+      // The allowlist (#281): a listed operator the mixed pass will be able to offer (its inputs are ours, bottom-up)
+      // is left to that pass; if Comet declines it there, ours converts it after all, so a requested swap never
+      // ends on Spark's operator.
+      val delegation: PartialFunction[SparkPlan, SparkPlan] = {
+        case p if !prefer.isEmpty && !p.isInstanceOf[VectorPlan] && prefer.wants(p) && offerable(p, bridge) =>
+          p.setTagValue(VectorFallback.Delegated, true)
+          fallback(p, PreferComet.Reason)
+      }
+      val conversions: PartialFunction[SparkPlan, SparkPlan] = {
         case f @ FilterExec(condition, child) if VectorConf.filterEnabled(conf) =>
           forwardingInputReason(child).orElse(filterReason(f)) match {
             case Some(reason) => fallback(f, reason)
@@ -332,8 +345,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case other => other
           }
       }
+      val converted = plan.transformUp(delegation.orElse(conversions))
       val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
-      val withMixed = if (VectorConf.cometMixedEnabled(conf)) mixedChains(withSelections) else withSelections
+      val withMixed = if (bridge != null) mixedChains(withSelections, bridge, prefer, conversions) else withSelections
       val withShuffles =
         if (VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(conf, session.sparkContext.getConf.get("spark.shuffle.manager", "sort")))
           useCometShuffle(withMixed, conf)
@@ -358,11 +372,30 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * one engine (Comet's final needs Comet's partial buffers, ours needs ours), and a selection is
    * compacted by the export itself. Comet's fallback reasons, when it declines, are its own explain's.
    */
-  private def mixedChains(plan: SparkPlan): SparkPlan = {
-    val bridge = CometMixedBridge.tryCreate()
-    if (bridge == null) plan
-    else {
-      def ours(p: SparkPlan): Boolean = p.isInstanceOf[VectorPlan] || p.isInstanceOf[VectorToCometExec]
+  private def ours(p: SparkPlan): Boolean = p.isInstanceOf[VectorPlan] || p.isInstanceOf[VectorToCometExec]
+
+  /**
+   * Whether the mixed pass can offer this operator to Comet: not ours, not Comet's, not an exchange, and every
+   * input ours or a block Comet already owns -- a broadcast exchange over such an input is looked through, since
+   * Comet converts one only together with the join above it.
+   */
+  private def offerable(p: SparkPlan, bridge: CometMixedBridge): Boolean =
+    !ours(p) && !bridge.isComet(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
+      p.children.nonEmpty && p.children.forall(c => ours(c) || bridge.isNative(c) || (c match {
+        case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec => ours(b.child) || bridge.isNative(b.child)
+        case _ => false
+      }))
+
+  private def mixedChains(plan: SparkPlan, bridge: CometMixedBridge, prefer: PreferComet, conversions: PartialFunction[SparkPlan, SparkPlan]): SparkPlan = {
+    {
+      // Comet declined an operator the allowlist asked for: ours takes it after all (#281).
+      def declined(p: SparkPlan, reason: String): SparkPlan =
+        if (p.getTagValue(VectorFallback.Delegated).isDefined) {
+          p.unsetTagValue(VectorFallback.Delegated)
+          p.unsetTagValue(VectorFallback.Tag)
+          logInfo(s"spark-vector: ${p.nodeName} was requested for Comet but $reason; ours runs")
+          conversions.applyOrElse(p, (q: SparkPlan) => fallback(q, s"$reason; ours could not take it either"))
+        } else fallback(p, reason)
       plan.transformUp {
         // A shuffle over ours is Comet's native shuffle already (useCometShuffle); a broadcast exchange over
         // ours is offered like an operator, since Comet's broadcast join needs Comet's broadcast below it.
@@ -371,13 +404,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         // A Comet-native child needs no leaf; a parent Comet already declined is declined again, cheaply.
         // Comet converts a broadcast exchange only together with the join above it, so the exchange is looked
         // through here and the join is what gets offered.
-        case p if !ours(p) && !bridge.isComet(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
-            p.children.nonEmpty && p.children.forall(c => ours(c) || bridge.isNative(c) || (c match {
-              case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec => ours(b.child) || bridge.isNative(b.child)
-              case _ => false
-            })) =>
+        case p if prefer.wants(p) && offerable(p, bridge) =>
           aggregatePairReason(p, bridge) match {
-            case Some(reason) => fallback(p, reason)
+            case Some(reason) => declined(p, reason)
             case None =>
               def leafOf(c: SparkPlan): java.util.Optional[SparkPlan] = c match {
                 case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec =>
@@ -387,15 +416,18 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
                 case c => java.util.Optional.of(c)
               }
               val leaves = p.children.map(leafOf)
-              if (leaves.exists(_.isEmpty)) fallback(p, "mixed: Comet's sink refuses a column type of the input")
+              if (leaves.exists(_.isEmpty)) declined(p, "mixed: Comet's sink refuses a column type of the input")
               else {
                 val converted = bridge.convertAbove(session, p.withNewChildren(leaves.map(_.get)))
                 // Native, or one of Comet's JVM sinks (a union, a limit): Comet's own block pass has already
                 // unwrapped the placeholders a JVM sink does not need.
-                if (bridge.isComet(converted)) converted
-                else {
+                if (bridge.isComet(converted)) {
+                  // The swap the allowlist asked for, shown where the operator now runs (#281).
+                  if (p.getTagValue(VectorFallback.Delegated).isDefined) converted.setTagValue(VectorFallback.Tag, PreferComet.Reason)
+                  converted
+                } else {
                   val reasons = bridge.declineReasons(converted)
-                  fallback(p, if (reasons.isEmpty) "mixed: Comet declined the operator" else s"mixed: Comet declined -- ${reasons.mkString("; ")}")
+                  declined(p, if (reasons.isEmpty) "mixed: Comet declined the operator" else s"mixed: Comet declined -- ${reasons.mkString("; ")}")
                 }
               }
           }

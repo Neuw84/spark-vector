@@ -164,8 +164,34 @@ exchange over the child as Comet's rule saw it, so Comet's broadcast is out of r
 stays Spark's above our rows. A failure inside Comet's block above the leaf (an ANSI division by
 zero in Comet's projection) still releases every export -- the task-completion listener the shuffle
 bridge already had. What the seam cannot reach in Comet 1.0: a window (Comet has no window operator)
-and a sort-merge join without Comet's shuffle. Which operators *should* go to Comet is #281's
-allowlist, informed by the #279 matrices; this key stays off until then.
+and a sort-merge join without Comet's shuffle. Which operators *should* go to Comet is the
+allowlist below.
+
+### The allowlist: `spark.vector.comet.preferComet` (#281)
+
+The pass offers Comet only the operator kinds this key names -- comma-separated, each optionally
+qualified by a predicate the planner reads off the plan: `project:wideDecimal` (an input or output
+column of `decimal(p > 18)`), `filter:strings` (a string input), `sort:estimatedRows>1000000` (the
+logical estimate, rows or bytes over the row width); `all` names every kind. Kinds: `filter`,
+`project`, `sort`, `sortMergeJoin`, `hashJoin`, `broadcastHashJoin`, `window`, `expand`, `union`,
+`limit`. `aggregate` is refused with a warning -- a pair cannot be split; under `all` an aggregate
+half is offered and Comet's buffer rule decides. Comet's own rule runs before ours and already owns
+whatever sits on its scan, so the list is about the operators above our chains.
+
+A listed operator our rule could take is left to the pass instead, with the reason `delegated to
+Comet (spark.vector.comet.preferComet)` (shown on Comet's operator once it runs there); if Comet
+declines it -- its own fallback, the sink's type rule, the aggregate pair -- ours converts it after
+all, so a requested swap never ends on Spark's operator (`CometPreferCometSuite`). The two escape
+hatches: `spark.vector.comet.mixed.enabled=false` is today's plan, and an empty list under it allows
+mixed plans but requests none.
+
+An entry is added only when all three hold on the SF10 matrices of #279 (`docs/results.md`): Comet's
+operator time is lower than ours in the queries the operator dominates by more than twice the
+crossing cost for its widths; the swap regresses no TPC-H or TPC-DS query against the better pure
+configuration (`comet-scan-vector-shuffle`, `comet`) beyond noise -- the harness's `hybrid`
+configuration and its report section check that query by query; and the reason is understood from a
+profile. The entry names the commit it was measured at. Decision table: none yet -- the default is
+empty until the study of #281 lands its rows here.
 
 ## Per-operator attribution against Comet
 
