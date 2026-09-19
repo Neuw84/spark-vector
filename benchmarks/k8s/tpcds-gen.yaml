@@ -30,6 +30,8 @@ spec:
   sparkVersion: "4.1.3"
   sparkConf:
     spark.sql.adaptive.enabled: "true"
+    # TPCDSSchema declares char/varchar columns; written as STRING, like the local generator's tables.
+    spark.sql.legacy.charVarcharAsString: "true"
     spark.sql.parquet.compression.codec: "zstd"
     spark.sql.files.maxRecordsPerFile: "0"
     spark.hadoop.fs.s3a.committer.name: "magic"
