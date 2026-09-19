@@ -38,6 +38,9 @@ spec:
     spark.hadoop.fs.s3a.committer.magic.enabled: "true"
     spark.sql.sources.commitProtocolClass: "org.apache.spark.internal.io.cloud.PathOutputCommitProtocol"
     spark.sql.parquet.output.committer.class: "org.apache.spark.internal.io.cloud.BindingParquetOutputCommitter"
+    # IRSA: hadoop-aws 3.4's default chain has no web-identity provider (the SF100 run passed on the
+    # node role); the SDK's default chain reads the pod's token.
+    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
     spark.hadoop.fs.s3a.fast.upload: "true"
     spark.hadoop.fs.s3a.connection.maximum: "200"
     spark.kubernetes.executor.deleteOnTermination: "true"
