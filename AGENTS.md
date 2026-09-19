@@ -28,6 +28,7 @@ Comet-backed tests and benchmarks. Maven builds everything.
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, decimal, cast, agg incl. overflow-checked sums, hash, grouped accumulators, group key table with lookup), the sort, gather and column-builder kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
 | `spark-sql-tests/` | Scala 2.13 | Spark's `SQLQueryTestSuite` with the extension injected; profile `spark-sql-tests` only, run by `benchmarks/scripts/run-spark-sql-tests.sh` |
 | `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the four operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
+| `shuffle/` | Scala 2.13 | the columnar shuffle (#288, in progress): `PartitionKernels` ids (kernels), `PartitionedIpcWriter`/`PartitionedIpcFile` -- one Arrow IPC stream per reduce partition in the map output file, dictionary strings encoded on the wire, an index footer; Arrow Flight (`flight-core` 18.3.0, gRPC with Spark's Netty) lives here so the plugin jar never carries gRPC |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H / TPC-DS runners (`TpchQueries`: all 22 queries, `TpchRunner`; `TpcdsRunner`: the 103 queries from Spark's `tpcds/q*.sql` test resources, sharing `TpchRunner`'s engine through `TpchRunner.Suite`) with their markdown/HTML reports and per-query accelerated-operator counts |
 
 Commands that are known to work (always unset `JAVA_TOOL_OPTIONS` first; the IDE sets one that
@@ -40,6 +41,7 @@ mvn -B -q -Pcomet clean install            # also the Comet-backed suites (needs
 mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.11 runtime from Maven Central)
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
 mvn -pl spark install -Dsuites=io.sparkvector.spark.VectorAggregateSuite   # one suite
+mvn -B -Pcomet,iceberg -pl kernels,spark,shuffle,benchmarks install   # the gate the crews run before a PR
 benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated eight tables, decimals as doubles; 10 for SF10 (gitignored)
 benchmarks/scripts/gen-tpch.sh 1 benchmarks/data --decimals   # same tables with real DECIMAL(15,2), into sf1-decimal
 benchmarks/scripts/run-tpch.sh benchmarks/data/sf10 spark,vector,comet-scan,comet-scan-vector,comet-scan-vector-shuffle,comet --iterations 7 --warmup 5

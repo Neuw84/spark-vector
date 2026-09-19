@@ -1,0 +1,177 @@
+package io.sparkvector.shuffle
+
+import java.nio.ByteBuffer
+import java.nio.channels.{FileChannel, ReadableByteChannel}
+import java.nio.file.{Path, StandardOpenOption}
+import java.util.{HashMap => JHashMap}
+import scala.jdk.CollectionConverters._
+
+import io.sparkvector.spark.adapter.TypeMapping
+import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
+import org.apache.arrow.memory.BufferAllocator
+import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector}
+import org.apache.arrow.vector.ipc.ArrowStreamReader
+import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
+import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, Field, FieldType, Schema}
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+
+/**
+ * The map output file of the columnar shuffle: `numPartitions` Arrow IPC streams back to back, then
+ * the index (`(offset, length, rows)` per partition), its length and a magic word, so a reader seeks
+ * to one partition's stream and never touches the others. The Arrow schema is the one
+ * `ArrowOutput.newVector` produces for the Spark type, with two conventions the reader needs to
+ * rebuild the operators' column vectors: a string column is a dictionary-encoded `int32` field
+ * (dictionary id = column ordinal + 1) whatever the batch's own encoding, and a decimal of at most 18
+ * digits is an `int64` of unscaled values. Every field carries the Spark type in its metadata under
+ * `sparkvector.type`.
+ */
+object PartitionedIpcFile {
+
+  val Magic: Long = 0x53564950434631L // "SVIPCF1"
+  val TypeKey = "sparkvector.type"
+
+  final case class Index(offsets: Array[Long], lengths: Array[Long], rows: Array[Long]) {
+    def numPartitions: Int = offsets.length
+  }
+
+  def arrowType(dt: DataType): ArrowType = dt match {
+    case IntegerType => new ArrowType.Int(32, true)
+    case DateType => new ArrowType.Date(DateUnit.DAY)
+    case LongType => new ArrowType.Int(64, true)
+    case TimestampType => new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC")
+    case DoubleType => new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)
+    case BooleanType => ArrowType.Bool.INSTANCE
+    case StringType => new ArrowType.Int(32, true) // the indices of the dictionary encoding
+    case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION => new ArrowType.Int(64, true)
+    case d: DecimalType => new ArrowType.Decimal(d.precision, d.scale, 128)
+    case other => throw new IllegalArgumentException(s"no shuffle lane for $other")
+  }
+
+  def dictionaryEncoding(ordinal: Int): DictionaryEncoding =
+    new DictionaryEncoding(ordinal + 1L, false, new ArrowType.Int(32, true))
+
+  def arrowField(name: String, dt: DataType, ordinal: Int): Field = {
+    val metadata = new JHashMap[String, String]()
+    metadata.put(TypeKey, dt.json)
+    val encoding = if (dt == StringType) dictionaryEncoding(ordinal) else null
+    new Field(name, new FieldType(true, arrowType(dt), encoding, metadata), null)
+  }
+
+  def arrowSchema(schema: StructType): Schema =
+    new Schema(schema.fields.zipWithIndex.map { case (f, i) => arrowField(f.name, f.dataType, i) }.toSeq.asJava)
+
+  def sparkType(field: Field): DataType = DataType.fromJson(field.getMetadata.get(TypeKey))
+
+  /** `[n:int][offsets:long*n][lengths:long*n][rows:long*n][footerLength:int][magic:long]`. */
+  def encodeIndex(index: Index): Array[Byte] = {
+    val n = index.numPartitions
+    val body = 4 + 3 * 8 * n
+    val buf = ByteBuffer.allocate(body + 4 + 8)
+    buf.putInt(n)
+    index.offsets.foreach(buf.putLong)
+    index.lengths.foreach(buf.putLong)
+    index.rows.foreach(buf.putLong)
+    buf.putInt(body)
+    buf.putLong(Magic)
+    buf.array()
+  }
+
+  def readIndex(channel: FileChannel): Index = {
+    val size = channel.size()
+    val tail = ByteBuffer.allocate(12)
+    channel.read(tail, size - 12)
+    tail.flip()
+    val body = tail.getInt
+    val magic = tail.getLong
+    require(magic == Magic, s"not a partitioned IPC file (magic $magic)")
+    val buf = ByteBuffer.allocate(body)
+    channel.read(buf, size - 12 - body)
+    buf.flip()
+    val n = buf.getInt
+    val offsets = Array.fill(n)(buf.getLong)
+    val lengths = Array.fill(n)(buf.getLong)
+    val rows = Array.fill(n)(buf.getLong)
+    Index(offsets, lengths, rows)
+  }
+
+  /** A channel over `[offset, offset + length)` of a file. */
+  private final class RangeChannel(file: FileChannel, offset: Long, length: Long) extends ReadableByteChannel {
+    private var pos = 0L
+    override def read(dst: ByteBuffer): Int = {
+      if (pos >= length) return -1
+      val remaining = length - pos
+      if (dst.remaining() > remaining) dst.limit(dst.position() + remaining.toInt)
+      val n = file.read(dst, offset + pos)
+      if (n > 0) pos += n
+      n
+    }
+    override def isOpen: Boolean = file.isOpen
+    override def close(): Unit = {}
+  }
+
+  /**
+   * Reads one partition's stream back as the column vectors the operators produce:
+   * `VectorDictionaryColumnVector` for strings, `VectorDecimalColumnVector` for small decimals,
+   * `VectorArrowColumnVector` otherwise. Each batch owns its memory (the reader's root is reused, so
+   * its buffers are transferred out; the dictionary, which the reader keeps for later batches, is
+   * copied -- it is small by construction).
+   */
+  final class PartitionReader(path: Path, partition: Int, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
+    private val file = FileChannel.open(path, StandardOpenOption.READ)
+    private val index = readIndex(file)
+    private val reader: ArrowStreamReader =
+      if (index.lengths(partition) == 0) null
+      else new ArrowStreamReader(new RangeChannel(file, index.offsets(partition), index.lengths(partition)), allocator)
+    private var nextBatch: ColumnarBatch = _
+    private var done = reader == null
+
+    def rows: Long = index.rows(partition)
+
+    private def advance(): Unit = if (!done && nextBatch == null) {
+      if (!reader.loadNextBatch()) {
+        done = true
+      } else {
+        val root = reader.getVectorSchemaRoot
+        val n = root.getRowCount
+        val fields = root.getSchema.getFields
+        val columns = new Array[ColumnVector](fields.size())
+        var c = 0
+        while (c < columns.length) {
+          val field = fields.get(c)
+          val dt = sparkType(field)
+          val source = root.getVector(c)
+          val moved = source.getField.createVector(allocator)
+          source.makeTransferPair(moved).transfer()
+          columns(c) = dt match {
+            case StringType =>
+              val dict = reader.lookup(field.getDictionary.getId).getVector.asInstanceOf[VarCharVector]
+              val copy = new VarCharVector(field.getName + ".dictionary", allocator)
+              dict.makeTransferPair(copy).splitAndTransfer(0, dict.getValueCount)
+              new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], copy)
+            case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
+              new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
+            case _ => new VectorArrowColumnVector(moved)
+          }
+          c += 1
+        }
+        nextBatch = new ColumnarBatch(columns, n)
+      }
+    }
+
+    override def hasNext: Boolean = { advance(); nextBatch != null }
+
+    override def next(): ColumnarBatch = {
+      if (!hasNext) throw new NoSuchElementException
+      val b = nextBatch
+      nextBatch = null
+      b
+    }
+
+    override def close(): Unit = {
+      if (nextBatch != null) { nextBatch.close(); nextBatch = null }
+      if (reader != null) reader.close()
+      file.close()
+    }
+  }
+}
