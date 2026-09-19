@@ -217,8 +217,9 @@ that pin it.
   on the null paths at 512 bits and a wash at 256; the broadcast-AND-compare form stays for NEON and
   AVX2. Compaction takes `compress` wherever `Platform.NATIVE_COMPRESS` (the table lost by 10-28% on
   dense selections at both widths, tied at 2% where the sparse bit walk serves both). The grouped
-  thresholds above are the lab's decision 3. Still to measure (the loop of #283): 512 against 256 as
-  the default width from TPC-H Q1/Q6; never measured: Ice Lake, Genoa, Graviton (#282, #284, #253).
+  thresholds above are the lab's decision 3. The preferred width stays the default (decision 5: TPC-H
+  Q1 at SF10 is 23% faster at 512 than 256 bits, Q6 scan-bound and flat). Never measured: Ice Lake,
+  Genoa, Graviton (#282, #284, #253) -- every switch reads `Platform`, so they are a measurement away.
 - Popcount and bitmap bookkeeping are `Long.bitCount` over 64-bit words and never show in profiles.
 
 ### 3.4 Selection vectors between our operators
