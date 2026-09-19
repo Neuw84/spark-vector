@@ -134,6 +134,38 @@ object PartitionedIpcFile {
   }
 
   /**
+   * A loaded root (an IPC reader's or a Flight stream's, both reused across batches) as a batch that
+   * owns its memory: the vectors are transferred out into `allocator`, the dictionary -- kept by the
+   * reader for later batches -- is copied (small by construction), and the wrappers are the operators'
+   * own column vector classes.
+   */
+  def toBatch(root: org.apache.arrow.vector.VectorSchemaRoot, dictionary: Long => VarCharVector, allocator: BufferAllocator): ColumnarBatch = {
+    val n = root.getRowCount
+    val fields = root.getSchema.getFields
+    val columns = new Array[ColumnVector](fields.size())
+    var c = 0
+    while (c < columns.length) {
+      val field = fields.get(c)
+      val dt = sparkType(field)
+      val source = root.getVector(c)
+      val moved = source.getField.createVector(allocator)
+      source.makeTransferPair(moved).transfer()
+      columns(c) = dt match {
+        case StringType =>
+          val dict = dictionary(field.getDictionary.getId)
+          val copy = new VarCharVector(field.getName + ".dictionary", allocator)
+          dict.makeTransferPair(copy).splitAndTransfer(0, dict.getValueCount)
+          new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], copy)
+        case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
+          new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
+        case _ => new VectorArrowColumnVector(moved)
+      }
+      c += 1
+    }
+    new ColumnarBatch(columns, n)
+  }
+
+  /**
    * One IPC stream (a partition's bytes, wherever they come from: a file range, a fetched block, a
    * Flight stream's file) read back as the operators' column vectors.
    */
@@ -148,30 +180,7 @@ object PartitionedIpcFile {
       if (!reader.loadNextBatch()) {
         done = true
       } else {
-        val root = reader.getVectorSchemaRoot
-        val n = root.getRowCount
-        val fields = root.getSchema.getFields
-        val columns = new Array[ColumnVector](fields.size())
-        var c = 0
-        while (c < columns.length) {
-          val field = fields.get(c)
-          val dt = sparkType(field)
-          val source = root.getVector(c)
-          val moved = source.getField.createVector(allocator)
-          source.makeTransferPair(moved).transfer()
-          columns(c) = dt match {
-            case StringType =>
-              val dict = reader.lookup(field.getDictionary.getId).getVector.asInstanceOf[VarCharVector]
-              val copy = new VarCharVector(field.getName + ".dictionary", allocator)
-              dict.makeTransferPair(copy).splitAndTransfer(0, dict.getValueCount)
-              new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], copy)
-            case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
-              new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
-            case _ => new VectorArrowColumnVector(moved)
-          }
-          c += 1
-        }
-        nextBatch = new ColumnarBatch(columns, n)
+        nextBatch = toBatch(reader.getVectorSchemaRoot, id => reader.lookup(id).getVector.asInstanceOf[VarCharVector], allocator)
       }
     }
 

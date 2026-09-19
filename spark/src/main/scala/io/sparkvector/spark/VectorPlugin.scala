@@ -35,13 +35,22 @@ class VectorPlugin extends SparkPlugin {
         retainedExecutions = VectorConf.uiRetainedExecutions(get))
       Collections.emptyMap()
     }
+
+    /** The columnar shuffle's Flight location registry (#288), when its module is on the classpath. */
+    override def receive(message: AnyRef): AnyRef =
+      org.apache.spark.sql.vector.VectorShuffle.driverReceive(message)
   }
 
   override def executorPlugin(): ExecutorPlugin = new ExecutorPlugin {
     override def init(ctx: PluginContext, extraConf: java.util.Map[String, String]): Unit = {
       VectorPlugin.requireVectorApi()
       io.sparkvector.spark.comet.CometVectorAdapter.tryRegister()
+      // Starts the Flight shuffle server on this executor when the shuffle module is present, its
+      // manager configured and the backend is Flight (#288).
+      org.apache.spark.sql.vector.VectorShuffle.executorInit(ctx)
     }
+
+    override def shutdown(): Unit = org.apache.spark.sql.vector.VectorShuffle.executorShutdown()
   }
 }
 

@@ -28,6 +28,27 @@ object VectorShuffle {
     c.getClass.getMethod("supports", classOf[Partitioning], classOf[Seq[_]]).invoke(c, partitioning, output).asInstanceOf[Boolean]
   }
 
+  val RegistryClass = "org.apache.spark.sql.vector.shuffle.flight.FlightRegistry"
+
+  private lazy val registry: Option[AnyRef] =
+    try {
+      val cls = Class.forName(RegistryClass + "$", true, getClass.getClassLoader)
+      Some(cls.getField("MODULE$").get(null))
+    } catch { case _: ClassNotFoundException | _: NoClassDefFoundError => None }
+
+  /** Driver plugin `receive`: the Flight registry answers, or null when the module is absent. */
+  def driverReceive(message: AnyRef): AnyRef = registry.map { r =>
+    r.getClass.getMethod("driverReceive", classOf[AnyRef]).invoke(r, message)
+  }.orNull
+
+  def executorInit(ctx: org.apache.spark.api.plugin.PluginContext): Unit = registry.foreach { r =>
+    r.getClass.getMethod("executorInit", classOf[org.apache.spark.api.plugin.PluginContext]).invoke(r, ctx)
+  }
+
+  def executorShutdown(): Unit = registry.foreach { r =>
+    r.getClass.getMethod("executorShutdown").invoke(r)
+  }
+
   /** `VectorShuffleExchangeExec(partitioning, child, origin, advisoryPartitionSize)` over the same child. */
   def exchange(s: ShuffleExchangeExec): SparkPlan = {
     val cls = Class.forName(ExchangeClass, true, getClass.getClassLoader)

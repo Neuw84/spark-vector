@@ -243,7 +243,8 @@ final class VectorShuffleReader(
       allocator.close()
     }
     val local = env.blockManager.blockManagerId
-    val buffers: Iterator[(BlockId, ManagedBuffer)] = blocksByAddress.iterator.flatMap { case (address, blocks) =>
+    val useFlight = flight.FlightShuffle.backend(env.conf) == "flight"
+    val streams: Iterator[Iterator[ColumnarBatch] with AutoCloseable] = blocksByAddress.iterator.flatMap { case (address, blocks) =>
       val ids = blocks.collect { case (id, size, _) if size > 0 => id }.toIndexedSeq
       if (ids.isEmpty) Iterator.empty
       else if (address.executorId == local.executorId) {
@@ -251,22 +252,26 @@ final class VectorShuffleReader(
           metrics.incLocalBlocksFetched(1)
           val buf = env.blockManager.getLocalBlockData(id)
           metrics.incLocalBytesRead(buf.size())
-          (id, buf)
+          VectorShuffleReader.blockStream(buf, allocator)
+        }
+      } else if (useFlight) {
+        val location = flight.FlightRegistry.locationOf(address.executorId)
+        ids.iterator.map { case ShuffleBlockId(shuffleId, mapId, reduceId) =>
+          metrics.incRemoteBlocksFetched(1)
+          new flight.FlightBlockStream(location, shuffleId, mapId, reduceId, env.conf, allocator, metrics)
         }
       } else {
-        VectorShuffleReader.fetchRemote(address, ids, metrics)
+        VectorShuffleReader.fetchRemote(address, ids, metrics).map { case (_, buf) => VectorShuffleReader.blockStream(buf, allocator) }
       }
     }
-    buffers.flatMap { case (_, buf) =>
-      val channel = Channels.newChannel(buf.createInputStream())
-      val reader = new PartitionedIpcFile.StreamReader(channel, allocator)
+    streams.flatMap { reader =>
       open.add(reader)
       new Iterator[Product2[Int, ColumnarBatch]] {
         private var live = true
         override def hasNext: Boolean = {
           if (!live) return false
           val more = reader.hasNext
-          if (!more) { reader.close(); open.remove(reader); buf.release(); live = false }
+          if (!more) { reader.close(); open.remove(reader); live = false }
           more
         }
         override def next(): Product2[Int, ColumnarBatch] = {
@@ -280,6 +285,16 @@ final class VectorShuffleReader(
 }
 
 object VectorShuffleReader {
+  /** A fetched or local block (one partition's IPC stream) as batches; the buffer is released with the stream. */
+  def blockStream(buf: ManagedBuffer, allocator: BufferAllocator): Iterator[ColumnarBatch] with AutoCloseable =
+    new Iterator[ColumnarBatch] with AutoCloseable {
+      private val inner = new PartitionedIpcFile.StreamReader(Channels.newChannel(buf.createInputStream()), allocator)
+      private var released = false
+      override def hasNext: Boolean = inner.hasNext
+      override def next(): ColumnarBatch = inner.next()
+      override def close(): Unit = { inner.close(); if (!released) { buf.release(); released = true } }
+    }
+
   /** Interim remote path over Spark's block transfer: all of one executor's blocks in one request, collected as they land. */
   def fetchRemote(address: BlockManagerId, ids: Seq[BlockId], metrics: ShuffleReadMetricsReporter): Iterator[(BlockId, ManagedBuffer)] = {
     val client = SparkEnv.get.blockManager.blockStoreClient
