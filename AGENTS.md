@@ -200,11 +200,21 @@ that pin it.
   `sparkvector.agg.interleave` accumulator copies (default 4: +40% at TPC-H Q1's 4 groups) and
   therefore sums doubles in a different order than Spark; strict floating point (below) forces one
   copy for double sums.
-- AVX2 and AVX-512 paths exist and are executed emulated (`vectorBits=256|512`) by the kernel test
-  suite on the Apple M3 development machine. They have never been measured on real hardware. Two
-  things to re-measure there before trusting defaults: `VectorMask.fromLong` is a single `kmov` on
-  AVX-512 so the broadcast-AND-compare mask construction chosen for NEON may be the slower option,
-  and the 8-group masked-reduction threshold.
+- Platform dispatch (`kernels/Platform.java`, #283): the SIMD target is probed once at class init from
+  HotSpot's own `UseAVX` / `UseSVE` / `MaxVectorSize` (`-Dsparkvector.platform=neon|sve|avx2|avx512`
+  overrides it, for forcing a foreign path emulated or measuring one path against another on the same
+  machine) and folded into `static final` booleans -- `MASK_REGISTERS` (AVX-512, SVE) and
+  `NATIVE_COMPRESS` (AVX-512, SVE). Kernels switch on those at the top of a loop, never per call, and
+  never on CPU flags read at runtime. A decision that differs by platform is gated here so the NEON
+  path is untouched by construction.
+- AVX2 and AVX-512 paths are executed emulated (`vectorBits=256|512`) by the kernel test suite on the
+  Apple M3 development machine and measured on a Sapphire Rapids Xeon (the lab's `x86-spr` pool in
+  all but name; `docs/results.md`, "x86 kernel lab"). Measured there: the aggregate kernels' lane
+  masks come from `VectorMask.fromLong` (one `kmov`) when `Platform.MASK_REGISTERS`, 14-25% faster
+  on the null paths at 512 bits and a wash at 256; the broadcast-AND-compare form stays for NEON and
+  AVX2. Still to measure (the loop of #283): `compress` against the shuffle table, the 8-group
+  masked-reduction threshold and `interleave` at 8 and 16 lanes, and 512 against 256 as the default
+  width from TPC-H Q1/Q6; never measured: Ice Lake, Genoa, Graviton (#282, #284, #253).
 - Popcount and bitmap bookkeeping are `Long.bitCount` over 64-bit words and never show in profiles.
 
 ### 3.4 Selection vectors between our operators
@@ -767,7 +777,7 @@ A change is not done until all of the following that apply have run green, local
    attaches to the cluster runner of #246 when it lands; the summary script reads those recordings
    unchanged.
 
-Current counts: 176 kernel tests, 301 Spark tests with the Comet and Iceberg profiles (259 with
+Current counts: 176 kernel tests, 300 Spark tests with the Comet and Iceberg profiles (259 with
 Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `CometMixedShuffleSuite` 3 and `CometPreferCometSuite` 7 of them). If a change lowers either number, explain why in the commit.
 
 ## 5. Benchmarking protocol

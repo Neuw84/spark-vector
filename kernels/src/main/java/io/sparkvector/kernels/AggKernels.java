@@ -52,21 +52,50 @@ public final class AggKernels {
     return b;
   }
 
-  /** Lane mask from the low {@code lanes} bits of {@code bits}. */
+  /**
+   * Lane mask from the low {@code lanes} bits of {@code bits}. With predicate registers
+   * ({@link Platform#MASK_REGISTERS}) {@code VectorMask.fromLong} is one {@code kmov}; elsewhere it has
+   * no fast path and the broadcast-AND-compare form is used (#283, decision 1).
+   */
   static VectorMask<Long> maskL(long bits) {
+    if (Platform.MASK_REGISTERS) {
+      return VectorMask.fromLong(L, bits);
+    }
+    return maskLBroadcast(bits);
+  }
+
+  /** The broadcast-AND-compare form, the path without predicate registers (tests compare the two). */
+  static VectorMask<Long> maskLBroadcast(long bits) {
     return LongVector.broadcast(L, bits).and(L_LANE_BITS).compare(VectorOperators.NE, 0L);
   }
 
+  static VectorMask<Integer> maskIBroadcast(long bits) {
+    return IntVector.broadcast(I, (int) bits).and(I_LANE_BITS).compare(VectorOperators.NE, 0);
+  }
+
+  static VectorMask<Integer> maskIHBroadcast(long bits) {
+    return IntVector.broadcast(IH, (int) bits).and(IH_LANE_BITS).compare(VectorOperators.NE, 0);
+  }
+
   static VectorMask<Double> maskD(long bits) {
+    if (Platform.MASK_REGISTERS) {
+      return VectorMask.fromLong(D, bits);
+    }
     return maskL(bits).cast(D);
   }
 
   static VectorMask<Integer> maskI(long bits) {
-    return IntVector.broadcast(I, (int) bits).and(I_LANE_BITS).compare(VectorOperators.NE, 0);
+    if (Platform.MASK_REGISTERS) {
+      return VectorMask.fromLong(I, bits);
+    }
+    return maskIBroadcast(bits);
   }
 
   static VectorMask<Integer> maskIH(long bits) {
-    return IntVector.broadcast(IH, (int) bits).and(IH_LANE_BITS).compare(VectorOperators.NE, 0);
+    if (Platform.MASK_REGISTERS) {
+      return VectorMask.fromLong(IH, bits);
+    }
+    return maskIHBroadcast(bits);
   }
 
   /** Number of non-null elements. */

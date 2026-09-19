@@ -1353,3 +1353,43 @@ The same runs on the SF1 decimal schema found the hybrid configuration returning
 q11, q15, q17 and q18 while both pure configurations agreed with Spark: the C Data export widened a
 wide decimal's two limbs into two rows. Fixed in the same change; all 22 decimal checksums equal
 Spark's afterwards, and wide decimals now also cross Comet's native shuffle.
+
+## x86 kernel lab: the AVX-512 loop (#283)
+
+The hand-tuning loop of #283 run on the one x86 pool available before the lab of #282 exists: an
+Intel Xeon Platinum 8488C (Sapphire Rapids; 8 vCPUs; AVX-512 F/BW/DQ/VL/VBMI/VNNI/VPOPCNTDQ -- the
+lab's `x86-spr` pool in all but name), Corretto 25.0.4.8.1 (25.0.4.1+8-LTS), base commit `e00cc27`.
+The evidence rule is the project's: a JMH number before and after, at `vectorBits=512` and `256`, and
+under `-XX:UseAVX=2` for the AVX2 row. Both paths of a decision run on the same build, one of them
+forced through `-Dsparkvector.platform` (the probe of `kernels/Platform.java`, which reads HotSpot's
+`UseAVX`/`UseSVE`/`MaxVectorSize` once and folds the answer into `static final` booleans the JIT
+constant-folds). Not measured here, for #282/#284: Ice Lake, Genoa (its double-pumped 512 and
+`vpcompress` latency), the Arm pools (the NEON path is untouched by construction), the `hsdis` dumps.
+
+### Decision 1: mask construction
+
+`AggBenchmark`, 8192 rows, one thread, `-wi 3 -i 5 -w 1 -r 1`, ops/us (higher is better); the
+aggregate kernels' lane masks from a validity word, built by `VectorMask.fromLong` (one `kmov` into
+a `k` register: `Platform.MASK_REGISTERS`) against the broadcast-AND-compare form chosen on NEON.
+
+| kernel | nulls | 512 bits, `fromLong` | 512 bits, broadcast | 256 bits, `fromLong` | 256 bits, broadcast | `-XX:UseAVX=2`, 256 bits (broadcast) |
+|---|---:|---:|---:|---:|---:|---:|
+| sumDouble | 1% | 6156 ± 94 | 5281 ± 185 | 3895 ± 125 | 3470 ± 98 | 2909 ± 51 |
+| sumDouble | 30% | 4795 ± 154 | 3850 ± 229 | 2516 ± 27 | 2632 ± 59 | 2020 ± 74 |
+| sumLong | 1% | 6189 ± 61 | 5276 ± 225 | 3876 ± 87 | 3408 ± 87 | 2908 ± 44 |
+| sumLong | 30% | 4814 ± 83 | 3919 ± 181 | 2497 ± 69 | 2639 ± 76 | 2005 ± 87 |
+| minDouble | 1% | 2905 ± 167 | 2807 ± 275 | 1127 ± 57 | 1127 ± 44 | 1035 ± 13 |
+| minDouble | 30% | 2834 ± 44 | 2472 ± 457 | 1044 ± 21 | 1073 ± 29 | 899 ± 24 |
+
+Reading: at 512 bits the mask register wins 17-25% on the sums' null paths and 15% on the minimum
+with dense nulls; at 256 bits on AVX-512VL it is a wash (+12-14% with sparse nulls, -4-5% with dense,
+at the edge of the error bars); the AVX2 row runs the broadcast form by construction and is slower
+than either 256-bit AVX-512 row for the platform's own sake (masked operations through `k` registers
+even when the mask comes from a compare). Decision: `MASK_REGISTERS` on AVX-512 at every width; the
+preferred width on this host is 512 anyway. NEON and AVX2 keep the broadcast form.
+
+Remaining in the loop: decision 2 (`compress` against the shuffle table and the bit walk at 256 and
+512, and the full-word bulk copy against a masked store), decision 3 (the 8-group masked-reduction
+threshold and `interleave` at 8 and 16 lanes), decision 5 (512 against 256 as the default width, from
+TPC-H Q1/Q6 at SF10), decision 6 (gather) only if a profile shows it.
+
