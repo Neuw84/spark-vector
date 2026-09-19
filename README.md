@@ -87,9 +87,20 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.strictFloatingPoint` | **on by default**: double `sum`/`avg` round exactly like Spark (one accumulator per group, rows added in order). `false` uses lane-parallel and interleaved partial sums that differ from Spark's in the last bits (about 7% of aggregate kernel time, 2.5% of TPC-H Q1) and can make an equality between two double sums fail (TPC-H Q15 returns no rows). Comet's `spark.comet.exec.strictFloatingPoint` is the analogous switch with the opposite default (`false`) and mechanism (`true` makes Comet fall back to Spark for such operations; we compute the strict result in our kernels). The benchmark configurations run with `false`, matching Comet's default |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
+| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288; needs the `spark-vector-shuffle` jar and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`; default `false` while the series lands) |
+| `spark.vector.shuffle.backend` | how a reducer fetches a remote map output: `flight` (default; one Flight server per executor) or `block` (Spark's block transfer) |
+| `spark.vector.shuffle.flushBytes` | serialised bytes a map task keeps in memory per reduce partition before spilling to a temporary file (default `1m`) |
+| `spark.vector.shuffle.flight.bindHost`, `spark.vector.shuffle.flight.threads` | the Flight server's bind address (default: the executor's host name) and serving threads (default: the core count, at least 4) |
 | `spark.vector.ui.enabled` | attach the Vector Acceleration tab to the Spark UI (default `true`) |
 | `spark.vector.ui.retainedExecutions` | queries kept by that tab (default `100`) |
 | `spark.vector.explainFallback.enabled` | log why each operator was left to Spark (default `false`) |
+
+The Flight shuffle server is a new network endpoint on every executor. With `spark.authenticate` on it
+requires Spark's shuffle secret as a bearer token on every call and refuses unauthenticated `DoGet`s (it
+refuses to start at all when auth is on but no secret is available); without `spark.authenticate` it is
+as open as Spark's own block transfer in that configuration. TLS for the Flight server is not wired yet:
+with `spark.ssl.rpc.enabled` the server refuses to start rather than serve in the clear -- use
+`spark.vector.shuffle.backend=block` there until it lands.
 
 JVM system properties for the kernels: `sparkvector.vectorBits=128|256|512` forces a vector shape
 (the default is the platform's preferred one), `sparkvector.platform=neon|sve|avx2|avx512` overrides the
