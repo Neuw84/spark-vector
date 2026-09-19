@@ -21,6 +21,8 @@ if [ ! -f "$CP_FILE" ] || [ "$ROOT/benchmarks/pom.xml" -nt "$CP_FILE" ]; then
   (cd "$ROOT" && mvn -q -B -pl benchmarks dependency:build-classpath -Dmdep.outputFile="$CP_FILE" >/dev/null)
 fi
 CP="$ROOT/benchmarks/target/classes:$(cat "$CP_FILE")"
+# COMET_JAR (as in run-tpch.sh) enables the Comet-backed configurations.
+if [ -n "${COMET_JAR:-}" ]; then CP="$COMET_JAR:$CP"; fi
 JVM_OPTS=(
   -Xmx"$JVM_MEM" -XX:+UseG1GC
   --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED
@@ -45,6 +47,9 @@ TABLE="${2:?usage: run-cdc-merge.sh <warehouse> <namespace.table> [configs] [ext
 CONFIGS="${3:-spark,vector}"
 shift 3 || shift $#
 for cfg in ${CONFIGS//,/ }; do
+  case "$cfg" in
+    comet*|hybrid) if [ -z "${COMET_JAR:-}" ]; then echo "skipping $cfg: COMET_JAR not set"; continue; fi ;;
+  esac
   echo "[cdc] === $cfg ==="
   "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.sparkvector.benchmarks.CdcMergeRunner \
     --config "$cfg" --iceberg "$WAREHOUSE" --table "$TABLE" --out "$OUT" --threads "$THREADS" "$@"
