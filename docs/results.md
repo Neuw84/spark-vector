@@ -826,32 +826,43 @@ but one equal to Spark's.** The four, each with its own issue and fix:
    dictionary of thousands of names, and the flush concatenated hundreds of such copies per batch.
    That was the 15-25x shuffle-read gap and the whole 20x on q73/q79/q34/q68/q46/q30 (q79: 55.6 s ->
    6.3 s). A slice now carries only the entries it uses.
+5. **The Flight reader fetched one block per round trip, in sequence (#347).** With the four above
+   in, most queries were still 1.5-2x -- the small ones included -- at the *same* executor time as
+   Spark's (q3: 62 s of executor time to Spark's 64, 2.75 s of wall to 1.39). Wall without CPU is
+   waiting: a reduce task's input is a block per map task, and the backend opened a `DoGet` per block,
+   one after another -- ~100 sequential gRPC stream setups per reduce task at SF100. Now one call per
+   (executor, reducer) carrying all of that executor's blocks, the calls to every executor opened
+   together: 0.58x -> 0.73x on the suite.
 
 Two more things the cluster taught: a node's 20 GB root disk fills with the shuffle files of finished
 queries (the driver's `ContextCleaner` removes them after a GC, every 30 min by default; the kubelet
 evicted an executor at query 95 -- `spark.cleaner.periodicGC.interval=2min` in the manifests), and
 hadoop-aws 3.4's default credential chain has no IRSA (`WebIdentityTokenFileCredentialsProvider` set).
 
-**v5 (the three engine fixes in), spark and vector-shuffle, 102 of 103 queries comparable:**
+**v6 (the five fixes in), spark and vector-shuffle, 102 of 103 queries comparable:**
 
 | configuration | suite wall (s) | failed | comparable total (s, 102 queries) | vs Spark |
 |---|---:|---:|---:|---:|
-| spark | 643 | 0 | 572.1 | 1.00x |
-| vector-shuffle | 1071 | 0 | 982.3 | 0.58x |
+| spark | 644 | 0 | 569.6 | 1.00x |
+| vector-shuffle | 858 | 0 | 782.1 | 0.73x |
 
-(v2, the first run, 87 comparable: vector-shuffle 878.5 s to Spark's 398.0, 0.45x with 9 failures; v3
-after #338: 0.33x, 2 failures; v4 after #340: 0.35x, the 5 failures all one evicted executor.)
-`vector-shuffle-strict` in v2 cost **0.6%** over `vector-shuffle` (873.0 s against 878.5), within noise:
-the same failures, the same checksums. The other configurations of v2: comet-scan-vector-ourshuffle
-0.78x (3 failures), hybrid 1.20x, comet 1.29x -- to be rerun on the fixed engine.
+The runs before it: v2 (the first, 87 comparable) vector-shuffle 878.5 s to Spark's 398.0, 0.45x with 9
+failures; v3 after #338: 0.33x, 2 failures; v4 after #340: 0.35x, 5 failures all one evicted executor;
+v5 after #343 and #345: 0.58x, none. `vector-shuffle-strict` in v2 cost **0.6%** over `vector-shuffle`
+(873.0 s against 878.5), within noise: the same failures, the same checksums. The other configurations
+of v2: comet-scan-vector-ourshuffle 0.78x (3 failures), hybrid 1.20x, comet 1.29x -- to be rerun on the
+fixed engine.
 
-Where the 0.58x now lives: 9 queries faster than Spark (q41 1.34x, q66 1.33x, q48, q97, q96), 8 within
-10%, and a broad 1.5-2x on most of the rest -- small queries included (q32 0.96 -> 1.92 s, q55 0.96 ->
-1.62 s), which points at a per-stage cost of the exchange rather than at one operator; the worst are
-q30 (4.8x), q53 (4.3x), q77 (4.1x), q71, q39a/b, q92 (3.1-3.3x), q11 (14.7 -> 42.0 s), q4 (20.9 ->
-56.9 s), q67 (14.5 -> 38.2 s), q1. q65's checksum differs from Spark's in every configuration but Spark
-(100 rows each: a tie in its `LIMIT` order, to be confirmed); q64 returns 0 rows under Comet (a Comet
-1.0 issue). Per-query tables: `results/sf100-parquet-v5/cluster-results.md` on the results bucket.
+Where the 0.73x now lives: 14 queries faster than Spark (q29 1.69x, q42 1.51x, q97 1.49x, q50 and q66
+and q93 1.4x, q80 1.33x), 27 within 10%, and the string-heavy exchanges at 2-4x: q30 (4.6 -> 18.5 s),
+q39b, q81, q82, q67 (14.4 -> 36.4 s), q39a, q8, q72 (22.0 -> 47.0 s), q4 (21.1 -> 44.1 s), q79, q1, q53,
+q51. A JFR of q30 at SF10 puts 63% of its CPU in the shuffle write: at 200 partitions a slice is ~41
+rows, and every slice allocated a vector per column and, per plain string column, built a hash-map
+dictionary -- 2,600 per 8192-row batch for `customer` (#349, the writer encoding a record batch's
+strings once: q30 at SF10 4.1 -> 2.7 s; the per-slice allocations are the item after). q65's checksum
+differs from Spark's in every configuration but Spark (100 rows each: a tie in its `LIMIT` order, to be
+confirmed); q64 returns 0 rows under Comet (a Comet 1.0 issue). Per-query tables:
+`results/sf100-parquet-v6/cluster-results.md` on the results bucket.
 The 1 TB baselines (#248, `results/sf1000-parquet`): spark 3029.9 s, hybrid 2246.3 (1.35x), comet
 2091.3 (1.45x), 100 comparable, no failures; our shuffle's 1 TB run follows the speed work.
 
