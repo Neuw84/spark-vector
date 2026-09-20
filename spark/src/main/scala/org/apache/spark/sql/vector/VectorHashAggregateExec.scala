@@ -151,6 +151,16 @@ case class VectorHashAggregateExec(
   }
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
+    val make = partitionIterator
+    child.executeColumnar().mapPartitionsInternal(iter => make(iter))
+  }
+
+  /**
+   * The per-partition iterator as a function built on the driver (everything it captures is
+   * compiled here, once), so the rollup chain (#383) can run one of these levels over an input of its
+   * own choosing.
+   */
+  private[vector] def partitionIterator: Iterator[ColumnarBatch] => Iterator[ColumnarBatch] = {
     val aggs = compiled
     val keys = compiledKeys
     val l = layout
@@ -168,7 +178,7 @@ case class VectorHashAggregateExec(
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
     val results = if (finalMode) resultProjection else Array.empty[VectorExpr]
     val m = vectorMetrics
-    child.executeColumnar().mapPartitionsInternal { iter =>
+    (iter: Iterator[ColumnarBatch]) => {
       val buffers: Iterator[ColumnarBatch] =
         if (keys.isEmpty) new VectorUngroupedAggregateIterator(iter, aggs, l, bufferAttrs, m)
         else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics))
@@ -178,6 +188,21 @@ case class VectorHashAggregateExec(
         new VectorProjectIterator(buffers, results, identity = false, outputAttrs, emitSelection = false, scratch)
       } else buffers
     }
+  }
+
+  /** A buffer-emitting level of the rollup chain (#383): the iterator itself, for push-mode feeding (the empty set is ungrouped). */
+  private[vector] def levelIterator: Iterator[ColumnarBatch] => RollupLevel = {
+    require(!emitsResults, "a rollup level is a buffer-emitting aggregate")
+    val aggs = compiled
+    val keys = compiledKeys
+    val l = layout
+    val policy = spillPolicy(aggs)
+    val spillMetrics = (longMetric("spills"), longMetric("spilledGroups"))
+    val bufferAttrs = output.map(a => (a.name, a.dataType)).toArray
+    val m = vectorMetrics
+    (iter: Iterator[ColumnarBatch]) =>
+      if (keys.isEmpty) new VectorUngroupedAggregateIterator(iter, aggs, l, bufferAttrs, m)
+      else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics))
   }
 
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
@@ -193,6 +218,16 @@ case class VectorHashAggregateExec(
   }
 }
 
+/**
+ * A level of the rollup chain (#383): an aggregate iterator that can also take its input pushed --
+ * `feed` one batch at a time (early emissions under a memory budget come back, owned by the caller),
+ * then `finishFeed`, then the remaining table through `next`.
+ */
+private[vector] trait RollupLevel extends Iterator[ColumnarBatch] with AutoCloseable {
+  def feed(batch: ColumnarBatch): Seq[ColumnarBatch]
+  def finishFeed(): Unit
+}
+
 /** Drains the partition, then emits exactly one buffer row. */
 private[vector] class VectorUngroupedAggregateIterator(
     input: Iterator[ColumnarBatch],
@@ -200,34 +235,35 @@ private[vector] class VectorUngroupedAggregateIterator(
     layout: Array[OutputSlot],
     outputAttrs: Array[(String, DataType)],
     metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch]
-    with AutoCloseable {
+    extends RollupLevel {
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
   private var emitted = false
   private var result: ColumnarBatch = _
   private var closed = false
+  private val states: Array[AggState] = aggs.map(_.newState())
 
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
   override def hasNext: Boolean = !emitted
 
+  private def update(batch: ColumnarBatch): Unit = if (batch.numRows() > 0) {
+    metrics.timed {
+      metrics.numInputBatches += 1
+      EvalContexts.withBatch(batch) { ctx =>
+        var i = 0
+        while (i < states.length) { states(i).update(ctx); i += 1 }
+      }
+    }
+  }
+
+  override def feed(batch: ColumnarBatch): Seq[ColumnarBatch] = { update(batch); Nil }
+  override def finishFeed(): Unit = ()
+
   override def next(): ColumnarBatch = {
     if (emitted) throw new NoSuchElementException("aggregate already emitted")
     emitted = true
-    val states: Array[AggState] = aggs.map(_.newState())
-    while (input.hasNext) {
-      val batch = input.next()
-      if (batch.numRows() > 0) {
-        metrics.timed {
-          metrics.numInputBatches += 1
-          EvalContexts.withBatch(batch) { ctx =>
-            var i = 0
-            while (i < states.length) { states(i).update(ctx); i += 1 }
-          }
-        }
-      }
-    }
+    while (input.hasNext) update(input.next())
     val buffers = states.map(_.bufferValues)
     val columns = new Array[ColumnVector](layout.length)
     var c = 0
@@ -268,8 +304,7 @@ private[vector] class VectorGroupedAggregateIterator(
     metrics: VectorMetrics,
     policy: AggSpillPolicy = AggSpillPolicy.InMemory,
     spillMetrics: Option[(SQLMetric, SQLMetric)] = None)
-    extends Iterator[ColumnarBatch]
-    with AutoCloseable {
+    extends RollupLevel {
 
   private val OutputBatchSize = 4096
 
@@ -394,6 +429,7 @@ private[vector] class VectorGroupedAggregateIterator(
 
   /** Makes groups available to emit; false when the iterator is exhausted. */
   private def advance(): Boolean = {
+    if (fed) return inputDone && emittedGroups < table.size()
     while (emittedGroups >= table.size()) {
       policy match {
         case AggSpillPolicy.InMemory =>
@@ -436,6 +472,39 @@ private[vector] class VectorGroupedAggregateIterator(
   }
 
   override def hasNext: Boolean = advance()
+
+  // Push mode (#383): a rollup level receives the previous level's partial rows through feed() instead
+  // of pulling an input; finishFeed() closes the input and the table is emitted through next().
+  private var fed = false
+
+  /**
+   * Consumes one batch pushed by the caller. Under an emit-and-reset policy a table past its budget is
+   * returned as finished batches (the caller owns them and closes them) and the table starts over.
+   */
+  override def feed(batch: ColumnarBatch): Seq[ColumnarBatch] = {
+    fed = true
+    fillRows += batch.numRows()
+    consume(batch)
+    policy match {
+      case AggSpillPolicy.EmitAndReset(budget, _) if budget > 0 && overBudget(budget) =>
+        spillMetrics.foreach { case (spills, groups) => spills += 1; groups += table.size() }
+        val out = Seq.newBuilder[ColumnarBatch]
+        var from = 0
+        while (from < table.size()) {
+          val to = math.min(table.size(), from + OutputBatchSize)
+          out += buildBatch(from, to)
+          metrics.numOutputBatches += 1
+          metrics.numOutputRows += (to - from)
+          from = to
+        }
+        reset()
+        out.result()
+      case _ => Nil
+    }
+  }
+
+  /** No more batches will be fed: what the table holds is emitted through next(). */
+  override def finishFeed(): Unit = { fed = true; inputDone = true }
 
   override def next(): ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException("no more groups")
