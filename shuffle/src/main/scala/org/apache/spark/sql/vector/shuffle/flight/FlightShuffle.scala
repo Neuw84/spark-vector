@@ -1,7 +1,6 @@
 package org.apache.spark.sql.vector.shuffle.flight
 
 import java.nio.ByteBuffer
-import java.nio.channels.Channels
 import java.util.concurrent.{ConcurrentHashMap, Executors}
 import scala.jdk.CollectionConverters._
 
@@ -11,7 +10,6 @@ import org.apache.arrow.flight.auth2.{Auth2Constants, BearerCredentialWriter, Ca
 import org.apache.arrow.flight.grpc.CredentialCallOption
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.VectorSchemaRoot
-import org.apache.arrow.vector.ipc.ArrowStreamReader
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.api.plugin.PluginContext
 import org.apache.spark.internal.Logging
@@ -22,10 +20,10 @@ import org.apache.spark.storage.ShuffleBlockId
  * The Arrow Flight data plane of the columnar shuffle (#288, slice 3). Every executor runs one
  * [[FlightServer]] on the block manager's host and an ephemeral port; a reducer's `DoGet` names one
  * map output's partition -- `(shuffleId, mapId, reducePartition)` -- and the server streams that
- * block's IPC record batches straight from the shuffle file the slice-2 writer produced. Each block
- * is one Flight stream because Flight sends a stream's dictionaries once at its start while our
- * blocks carry their own (possibly different) dictionaries; coalescing an executor's blocks into one
- * stream is a follow-up that needs stable dictionaries.
+ * block's IPC bytes straight from the shuffle file the slice-2 writer produced, as chunks of a
+ * one-column binary stream (#338: Flight's own record-batch framing sends dictionaries once per
+ * stream, and our blocks carry a replacement dictionary per record batch). Each block is one Flight
+ * stream; coalescing an executor's blocks into one stream is a follow-up.
  *
  * Locations travel through the plugin: the executor plugin starts the server and registers
  * `executorId -> host:port` with the driver plugin; reducers look a location up once per executor
@@ -80,26 +78,34 @@ object FlightShuffle extends Logging {
     }
   }
 
-  /** The producer: one block's IPC stream per `DoGet`, served from the shuffle file, decoded once and re-framed by Flight. */
-  final class Producer(resolver: () => IndexShuffleBlockResolver, allocator: BufferAllocator) extends NoOpFlightProducer {
+  /**
+   * The producer: one block per `DoGet`, its IPC stream sent **as bytes** -- a one-column binary
+   * root, one row per chunk of [[ChunkBytes]]. Not as Flight record batches: Flight writes a
+   * stream's dictionaries once, at its start, while our blocks carry one *replacement* dictionary
+   * per record batch (the slice's distinct strings), so a block decoded and re-framed by Flight
+   * reached the client with batches 2..n indexed against batch 1's dictionary -- out-of-bounds reads
+   * or the wrong string silently (#338). As bytes, the client reads the block with the same
+   * [[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader]] a local block goes through, and the
+   * server neither decodes nor re-encodes anything.
+   */
+  final class Producer(blockData: (Int, Long, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) extends NoOpFlightProducer {
     override def getStream(context: FlightProducer.CallContext, ticket: Ticket, listener: FlightProducer.ServerStreamListener): Unit = {
       val (shuffleId, mapId, reduce) = parseTicket(ticket)
-      val buf = resolver().getBlockData(ShuffleBlockId(shuffleId, mapId, reduce), None)
-      val in = Channels.newChannel(buf.createInputStream())
-      val reader = new ArrowStreamReader(in, allocator, org.apache.arrow.compression.CommonsCompressionFactory.INSTANCE)
+      val buf = blockData(shuffleId, mapId, reduce)
+      val in = buf.createInputStream()
+      val root = VectorSchemaRoot.create(BytesSchema, allocator)
+      val vector = root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector]
       try {
-        var started = false
-        while (reader.loadNextBatch()) {
-          val root: VectorSchemaRoot = reader.getVectorSchemaRoot
-          if (!started) {
-            listener.start(root, reader)
-            started = true
-          }
+        listener.start(root)
+        val chunk = new Array[Byte](ChunkBytes)
+        var n = readFully(in, chunk)
+        while (n > 0) {
+          vector.reset()
+          vector.setSafe(0, chunk, 0, n)
+          vector.setValueCount(1)
+          root.setRowCount(1)
           listener.putNext()
-        }
-        if (!started) {
-          // An empty block still has a schema: send it so the client sees a well-formed empty stream.
-          listener.start(reader.getVectorSchemaRoot, reader)
+          n = readFully(in, chunk)
         }
         listener.completed()
       } catch {
@@ -107,11 +113,29 @@ object FlightShuffle extends Logging {
           logWarning(s"flight shuffle: serving $shuffleId/$mapId/$reduce failed", e)
           listener.error(CallStatus.INTERNAL.withCause(e).withDescription(e.toString).toRuntimeException)
       } finally {
-        reader.close()
+        root.close()
+        in.close()
         buf.release()
       }
     }
+
+    /** Fills `dst` as far as the stream goes; the count read (0 at end of stream). */
+    private def readFully(in: java.io.InputStream, dst: Array[Byte]): Int = {
+      var off = 0
+      while (off < dst.length) {
+        val r = in.read(dst, off, dst.length - off)
+        if (r < 0) return off
+        off += r
+      }
+      off
+    }
   }
+
+  /** The wire schema of a block: its IPC bytes, chunked. */
+  val BytesSchema: org.apache.arrow.vector.types.pojo.Schema = new org.apache.arrow.vector.types.pojo.Schema(
+    java.util.List.of(org.apache.arrow.vector.types.pojo.Field.nullable("ipc", org.apache.arrow.vector.types.pojo.ArrowType.Binary.INSTANCE)))
+  /** One Flight message per this many bytes of the block. */
+  val ChunkBytes: Int = 4 << 20
 
   /** The server of this executor; started once, stopped by the executor plugin. */
   final class Service(conf: SparkConf, hostname: String, resolver: () => IndexShuffleBlockResolver) extends AutoCloseable {
@@ -125,7 +149,7 @@ object FlightShuffle extends Logging {
           "spark.ssl.rpc.enabled is on but the Flight shuffle server has no TLS material yet (#288): " +
             "use spark.vector.shuffle.backend=block or turn RPC TLS off")
       }
-      val builder = FlightServer.builder(allocator, Location.forGrpcInsecure(host, 0), new Producer(resolver, allocator)).executor(executor)
+      val builder = FlightServer.builder(allocator, Location.forGrpcInsecure(host, 0), new Producer((s, m, r) => resolver().getBlockData(ShuffleBlockId(s, m, r), None), allocator)).executor(executor)
       secret(conf) match {
         case Some(s) => builder.headerAuthenticator(new SecretAuthenticator(s))
         case None if conf.getBoolean("spark.authenticate", false) =>
@@ -263,36 +287,60 @@ final class FlightBlockStream(
     metrics.incFetchWaitTime((System.nanoTime() - start) / 1000000)
     s
   }
-  private var nextBatch: org.apache.spark.sql.vectorized.ColumnarBatch = _
-  private var types: Array[org.apache.spark.sql.types.DataType] = _
-  private var last: org.apache.spark.sql.vectorized.ColumnarBatch = _
-  private var done = false
 
-  private def advance(): Unit = if (!done && nextBatch == null) {
-    if (!stream.next()) done = true
-    else {
-      val root = stream.getRoot
-      metrics.incRemoteBytesRead(root.getFieldVectors.asScala.map(_.getBufferSize.toLong).sum)
-      if (types == null) types = io.sparkvector.shuffle.PartitionedIpcFile.sparkTypes(root)
-      nextBatch = io.sparkvector.shuffle.PartitionedIpcFile.toBatch(
-        root, id => stream.getDictionaryProvider.lookup(id).getVector.asInstanceOf[org.apache.arrow.vector.VarCharVector], allocator, types)
+  /**
+   * The block's IPC bytes, pulled from the Flight stream one chunk at a time as the reader asks for
+   * them (#338: the block travels as bytes, so every record batch keeps its own dictionary).
+   */
+  private final class ChunkChannel extends java.nio.channels.ReadableByteChannel {
+    private var current: java.nio.ByteBuffer = _
+    private var ended = false
+    private var open = true
+    private def fill(): Boolean = {
+      while ((current == null || !current.hasRemaining) && !ended) {
+        if (!stream.next()) ended = true
+        else {
+          val root = stream.getRoot
+          if (root.getRowCount > 0) {
+            val v = root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector]
+            val bytes = v.get(0) // a copy: the root's buffers are reused by the next message
+            metrics.incRemoteBytesRead(bytes.length.toLong)
+            current = java.nio.ByteBuffer.wrap(bytes)
+          }
+        }
+      }
+      current != null && current.hasRemaining
     }
+    override def read(dst: java.nio.ByteBuffer): Int = {
+      if (!fill()) return -1
+      val n = math.min(dst.remaining(), current.remaining())
+      val lim = current.limit()
+      current.limit(current.position() + n)
+      dst.put(current)
+      current.limit(lim)
+      n
+    }
+    /** Whether any byte is left, without consuming one. */
+    def isEmpty: Boolean = !fill()
+    override def isOpen: Boolean = open
+    override def close(): Unit = open = false
   }
 
-  override def hasNext: Boolean = { advance(); nextBatch != null }
+  private val channel = new ChunkChannel
+  /** The local path's decoder over the remote bytes; None for an empty block. */
+  private val reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] =
+    if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator))
+
+  override def hasNext: Boolean = reader.exists(_.hasNext)
 
   override def next(): org.apache.spark.sql.vectorized.ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException
-    val b = nextBatch
-    nextBatch = null
-    if (last != null) last.close()
-    last = b
-    b
+    reader.get.next()
   }
 
   override def close(): Unit = {
-    if (nextBatch != null) { nextBatch.close(); nextBatch = null }
-    if (last != null) { last.close(); last = null }
+    reader.foreach(_.close())
+    channel.close()
     stream.close()
   }
 }
