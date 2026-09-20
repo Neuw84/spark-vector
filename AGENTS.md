@@ -758,9 +758,15 @@ is configured. Four pieces, in the `shuffle` module except the kernel:
   from 285 ms to 5.7 s; it now gathers through the codes into the dictionary.
 - The data plane: one `FlightServer` per executor (started by the executor plugin, registered with
   the driver plugin as executor id to host and port), one `DoGet` per map output block, the block's
-  stream re-framed by Flight straight from the file; `spark.authenticate`'s secret is the bearer
-  token, TLS refuses to start rather than serve in the clear. One stream per block because Flight
-  sends dictionaries once per stream. gRPC 1.71 runs on the Netty 4.2 Spark bundles.
+  IPC bytes streamed straight from the file as chunks of a one-column binary stream; the client
+  decodes them with the same `PartitionedIpcFile.StreamReader` a local block goes through.
+  **Not** re-framed as Flight record batches (#338): Flight writes a stream's dictionaries once, at
+  its start, while our blocks carry a replacement dictionary per record batch, so a re-framed block
+  reached the client with batches 2..n indexed against batch 1's dictionary -- out-of-bounds string
+  reads, or the wrong string silently (ten TPC-DS queries at SF100 disagreed with Spark). One machine
+  never shows it: a local block is read from the file. `spark.authenticate`'s secret is the bearer
+  token, TLS refuses to start rather than serve in the clear. gRPC 1.71 runs on the Netty 4.2 Spark
+  bundles.
 - The reduce side: `VectorShuffleReader` decodes each block's stream with `PartitionedIpcFile.StreamReader`
   (which also decodes several streams concatenated) and owns batch memory -- a batch is closed when
   the next one is produced. Where blocks come from is the `VectorShuffleBackend` seam: `flight`
