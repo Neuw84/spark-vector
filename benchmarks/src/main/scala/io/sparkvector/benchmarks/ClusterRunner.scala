@@ -56,8 +56,7 @@ object ClusterRunner {
       shuffleReadBytes: Long,
       shuffleWriteBytes: Long,
       spillBytes: Long,
-      peakExecutionMemory: Long
-  ) {
+      peakExecutionMemory: Long) {
     def json: String =
       s""""stages":$stages,"executorRunTimeMs":$executorRunTimeMs,"gcTimeMs":$jvmGcTimeMs,"shuffleReadBytes":$shuffleReadBytes,""" +
         s""""shuffleWriteBytes":$shuffleWriteBytes,"spillBytes":$spillBytes,"peakExecutionMemory":$peakExecutionMemory"""
@@ -86,25 +85,13 @@ object ClusterRunner {
       val info = stageCompleted.stageInfo
       stageGroup.get(info.stageId).foreach { group =>
         val m = info.taskMetrics
-        val add = StageMetrics(
-          1,
-          m.executorRunTime,
-          m.jvmGCTime,
-          m.shuffleReadMetrics.totalBytesRead,
-          m.shuffleWriteMetrics.bytesWritten,
-          m.memoryBytesSpilled + m.diskBytesSpilled,
-          m.peakExecutionMemory
-        )
+        val add = StageMetrics(1, m.executorRunTime, m.jvmGCTime, m.shuffleReadMetrics.totalBytesRead,
+          m.shuffleWriteMetrics.bytesWritten, m.memoryBytesSpilled + m.diskBytesSpilled, m.peakExecutionMemory)
         val prev = byGroup.getOrElse(group, StageMetrics.Empty)
-        byGroup(group) = StageMetrics(
-          prev.stages + add.stages,
-          prev.executorRunTimeMs + add.executorRunTimeMs,
-          prev.jvmGcTimeMs + add.jvmGcTimeMs,
-          prev.shuffleReadBytes + add.shuffleReadBytes,
-          prev.shuffleWriteBytes + add.shuffleWriteBytes,
-          prev.spillBytes + add.spillBytes,
-          math.max(prev.peakExecutionMemory, add.peakExecutionMemory)
-        )
+        byGroup(group) = StageMetrics(prev.stages + add.stages, prev.executorRunTimeMs + add.executorRunTimeMs,
+          prev.jvmGcTimeMs + add.jvmGcTimeMs, prev.shuffleReadBytes + add.shuffleReadBytes,
+          prev.shuffleWriteBytes + add.shuffleWriteBytes, prev.spillBytes + add.spillBytes,
+          math.max(prev.peakExecutionMemory, add.peakExecutionMemory))
       }
     }
 
@@ -156,17 +143,13 @@ object ClusterRunner {
       val p = new HPath(s"${dir.stripSuffix("/")}/$n.sql")
       if (fs.exists(p)) {
         val in = fs.open(p)
-        try Some(n -> new String(in.readAllBytes(), StandardCharsets.UTF_8))
-        finally in.close()
+        try Some(n -> new String(in.readAllBytes(), StandardCharsets.UTF_8)) finally in.close()
       } else None
     }
   }
 
   private def fileSystem(spark: SparkSession, uriOrPath: String): FileSystem =
-    FileSystem.get(
-      new URI(if (uriOrPath.contains("://")) uriOrPath else new java.io.File(uriOrPath).toURI.toString),
-      hadoopConf(spark)
-    )
+    FileSystem.get(new URI(if (uriOrPath.contains("://")) uriOrPath else new java.io.File(uriOrPath).toURI.toString), hadoopConf(spark))
 
   private def hadoopConf(spark: SparkSession): Configuration = spark.sparkContext.hadoopConfiguration
 
@@ -181,30 +164,23 @@ object ClusterRunner {
     val fs = fileSystem(spark, out)
     val dir = new HPath(out)
     fs.mkdirs(dir)
-    new java.io.PrintWriter(new java.io.OutputStreamWriter(
-      fs.create(new HPath(dir, name), true),
-      StandardCharsets.UTF_8
-    ))
+    new java.io.PrintWriter(new java.io.OutputStreamWriter(fs.create(new HPath(dir, name), true), StandardCharsets.UTF_8))
   }
 
   /** Writes `text` to a path on any Hadoop file system (the report beside the rows). */
   def write(spark: SparkSession, path: String, text: String): Unit = {
     val fs = fileSystem(spark, path)
     val out = fs.create(new HPath(path), true)
-    try out.write(text.getBytes(StandardCharsets.UTF_8))
-    finally out.close()
+    try out.write(text.getBytes(StandardCharsets.UTF_8)) finally out.close()
   }
 
   /** Every `.jsonl` line under `dir` on any Hadoop file system. */
   def readRows(spark: SparkSession, dir: String): Seq[String] = {
     val fs = fileSystem(spark, dir)
-    val files = fs.listStatus(
-      new HPath(dir)
-    ).filter(s => s.isFile && s.getPath.getName.endsWith(".jsonl")).sortBy(_.getPath.getName)
+    val files = fs.listStatus(new HPath(dir)).filter(s => s.isFile && s.getPath.getName.endsWith(".jsonl")).sortBy(_.getPath.getName)
     files.toSeq.flatMap { s =>
       val in = fs.open(s.getPath)
-      try new String(in.readAllBytes(), StandardCharsets.UTF_8).linesIterator.filter(_.nonEmpty).toSeq
-      finally in.close()
+      try new String(in.readAllBytes(), StandardCharsets.UTF_8).linesIterator.filter(_.nonEmpty).toSeq finally in.close()
     }
   }
 
@@ -216,39 +192,18 @@ object ClusterRunner {
   object Environment {
     val Unknown: Environment = Environment("", "", "")
 
-    private val EngineKeys = Seq(
-      "spark.plugins",
-      "spark.shuffle.manager",
-      "spark.comet.",
-      "spark.vector.",
-      "spark.memory.offHeap",
-      "spark.sql.adaptive.enabled"
-    )
+    private val EngineKeys = Seq("spark.plugins", "spark.shuffle.manager", "spark.comet.", "spark.vector.", "spark.memory.offHeap", "spark.sql.adaptive.enabled")
 
     def of(spark: SparkSession): Environment = {
       val sc = spark.sparkContext
       val conf = sc.getConf
       // The driver is one of the memory-status entries; local mode has only it.
       val live = math.max(0, sc.getExecutorMemoryStatus.size - 1)
-      val shape = Seq(
-        "spark.executor.instances",
-        "spark.executor.cores",
-        "spark.executor.memory",
-        "spark.executor.memoryOverhead",
-        "spark.driver.memory"
-      )
+      val shape = Seq("spark.executor.instances", "spark.executor.cores", "spark.executor.memory", "spark.executor.memoryOverhead", "spark.driver.memory")
         .flatMap(k => conf.getOption(k).map(v => s"$k=$v"))
-      val executors =
-        (if (conf.get("spark.master", "").startsWith("local")) Seq(s"master=${conf.get("spark.master")}")
-         else Seq(s"live=$live")) ++ shape
-      val engine = conf.getAll.filter { case (k, _) => EngineKeys.exists(k.startsWith) }.sortBy(_._1).map {
-        case (k, v) => s"$k=$v"
-      }
-      Environment(
-        s"${sc.version} / JDK ${System.getProperty("java.version")}",
-        executors.mkString(" "),
-        engine.mkString("; ")
-      )
+      val executors = (if (conf.get("spark.master", "").startsWith("local")) Seq(s"master=${conf.get("spark.master")}") else Seq(s"live=$live")) ++ shape
+      val engine = conf.getAll.filter { case (k, _) => EngineKeys.exists(k.startsWith) }.sortBy(_._1).map { case (k, v) => s"$k=$v" }
+      Environment(s"${sc.version} / JDK ${System.getProperty("java.version")}", executors.mkString(" "), engine.mkString("; "))
     }
   }
 
@@ -256,19 +211,9 @@ object ClusterRunner {
 
   /** One row as the report reads it (a subset of [[TpchRunner]]'s record plus the cluster fields). */
   final case class ReportRow(
-      config: String,
-      query: String,
-      dataset: String,
-      medianMs: Double,
-      rows: Int,
-      checksum: String,
-      accelerated: Option[(Int, Int)],
-      fallbacks: Seq[String],
-      metrics: Option[StageMetrics],
-      sparkVersion: String,
-      executors: String,
-      engineConf: String
-  ) {
+      config: String, query: String, dataset: String, medianMs: Double, rows: Int, checksum: String,
+      accelerated: Option[(Int, Int)], fallbacks: Seq[String], metrics: Option[StageMetrics],
+      sparkVersion: String, executors: String, engineConf: String) {
     def seconds: Double = medianMs / 1000.0
   }
 
@@ -277,8 +222,7 @@ object ClusterRunner {
     ("10-20% improvement", s => s >= 1.111 && s < 1.25),
     ("within +/-10%", s => s > 0.909 && s < 1.111),
     ("10-20% degradation", s => s > 0.8 && s <= 0.909),
-    (">= 20% degradation", s => s <= 0.8)
-  )
+    (">= 20% degradation", s => s <= 0.8))
 
   /**
    * The six sections of the reference report, per dataset, for every configuration against
@@ -288,24 +232,15 @@ object ClusterRunner {
   def report(suiteTitle: String, queryOrder: Seq[String], rows: Seq[ReportRow]): String = {
     val sb = new StringBuilder
     sb.append(s"# $suiteTitle cluster results\n\n")
-    sb.append(
-      "Layout of the data-on-EKS Comet benchmark report: total completion time and speedup against plain Spark, the\n"
-    )
+    sb.append("Layout of the data-on-EKS Comet benchmark report: total completion time and speedup against plain Spark, the\n")
     sb.append("distribution of per-query speedups, the largest improvements and every regression, the analysis table\n")
-    sb.append(
-      "(stage evidence pre-filled, cause to be written from the profile -- see the JFR-first protocol), the per-query\n"
-    )
+    sb.append("(stage evidence pre-filled, cause to be written from the profile -- see the JFR-first protocol), the per-query\n")
     sb.append("table and the environment. One pass per query; speedups are spark seconds over ours.\n")
     rows.groupBy(_.dataset).toSeq.sortBy(_._1).foreach { case (dataset, rs) =>
       val latest = rs.groupBy(r => (r.config, r.query)).view.mapValues(_.last).toMap
-      val configs = TpchRunner.ConfigOrder.filter(c => latest.keys.exists(_._1 == c)) ++ latest.keys.map(
-        _._1
-      ).filterNot(TpchRunner.ConfigOrder.contains).toSeq.distinct.sorted
-      val queries = latest.keys.map(_._2).toSeq.distinct.sortBy(q =>
-        (queryOrder.indexOf(q) match { case -1 => Int.MaxValue; case i => i }, q)
-      )
-      val mismatched =
-        queries.filter(q => configs.flatMap(c => latest.get((c, q)).map(_.checksum)).distinct.size > 1).toSet
+      val configs = TpchRunner.ConfigOrder.filter(c => latest.keys.exists(_._1 == c)) ++ latest.keys.map(_._1).filterNot(TpchRunner.ConfigOrder.contains).toSeq.distinct.sorted
+      val queries = latest.keys.map(_._2).toSeq.distinct.sortBy(q => (queryOrder.indexOf(q) match { case -1 => Int.MaxValue; case i => i }, q))
+      val mismatched = queries.filter(q => configs.flatMap(c => latest.get((c, q)).map(_.checksum)).distinct.size > 1).toSet
       val comparable = queries.filterNot(mismatched.contains).filter(q => configs.forall(c => latest.contains((c, q))))
       def sec(c: String, q: String): Double = latest((c, q)).seconds
       def speedup(c: String, q: String): Double = sec("spark", q) / math.max(sec(c, q), 1e-9)
@@ -313,20 +248,26 @@ object ClusterRunner {
       if (!configs.contains("spark")) {
         sb.append("No `spark` baseline in these rows: nothing to compare against.\n")
       } else {
-        sb.append(
-          s"${comparable.size} of ${queries.size} queries are comparable (every configuration ran them and agreed on the result)"
-        )
-        if (mismatched.nonEmpty)
-          sb.append(s"; excluded as correctness bugs, checksums differ: ${mismatched.toSeq.sorted.mkString(", ")}")
-        sb.append(
-          ".\n\n### 1. Summary\n\n| configuration | total completion time (s) | speedup vs spark | % less runtime |\n|---|---:|---:|---:|\n"
-        )
+        sb.append(s"${comparable.size} of ${queries.size} queries are comparable (every configuration ran them and agreed on the result)")
+        if (mismatched.nonEmpty) sb.append(s"; excluded as correctness bugs, checksums differ: ${mismatched.toSeq.sorted.mkString(", ")}")
+        sb.append(".\n")
+        if (mismatched.nonEmpty) {
+          // Which configurations disagree with the baseline: the reader needs the culprit, not just the list.
+          sb.append("\n| query | checksum differs from spark in | rows (spark / theirs) |\n|---|---|---|\n")
+          mismatched.toSeq.sorted.foreach { q =>
+            val base = latest.get(("spark", q))
+            val others = configs.filter(_ != "spark").flatMap { c =>
+              latest.get((c, q)).filter(r => base.exists(_.checksum != r.checksum)).map(r => (c, r))
+            }
+            val rowsNote = base.map(b => s"${b.rows} / " + others.map(_._2.rows).distinct.mkString(",")).getOrElse("no spark row")
+            sb.append(s"| $q | ${if (base.isEmpty) "(no spark row)" else others.map(_._1).mkString(", ")} | $rowsNote |\n")
+          }
+        }
+        sb.append("\n### 1. Summary\n\n| configuration | total completion time (s) | speedup vs spark | % less runtime |\n|---|---:|---:|---:|\n")
         val sparkTotal = comparable.map(sec("spark", _)).sum
         configs.foreach { c =>
           val total = comparable.map(sec(c, _)).sum
-          sb.append(
-            f"| $c | $total%.1f | ${sparkTotal / math.max(total, 1e-9)}%.2fx | ${(1 - total / math.max(sparkTotal, 1e-9)) * 100}%.1f%% |\n"
-          )
+          sb.append(f"| $c | $total%.1f | ${sparkTotal / math.max(total, 1e-9)}%.2fx | ${(1 - total / math.max(sparkTotal, 1e-9)) * 100}%.1f%% |\n")
         }
         configs.filter(_ != "spark").foreach { c =>
           val speedups = comparable.map(q => q -> speedup(c, q))
@@ -335,57 +276,32 @@ object ClusterRunner {
             val n = speedups.count { case (_, s) => in(s) }
             sb.append(f"| $name | $n | ${if (speedups.isEmpty) 0.0 else 100.0 * n / speedups.size}%.1f%% |\n")
           }
-          sb.append(
-            s"\n### 3. Top improvements and every regression: $c\n\n| query | spark (s) | $c (s) | result |\n|---|---:|---:|---|\n"
-          )
+          sb.append(s"\n### 3. Top improvements and every regression: $c\n\n| query | spark (s) | $c (s) | result |\n|---|---:|---:|---|\n")
           val improvements = speedups.filter(_._2 > 1.0).sortBy(-_._2).take(10)
-          improvements.foreach { case (q, s) =>
-            sb.append(f"| $q | ${sec("spark", q)}%.2f | ${sec(c, q)}%.2f | $s%.2fx faster |\n")
-          }
+          improvements.foreach { case (q, s) => sb.append(f"| $q | ${sec("spark", q)}%.2f | ${sec(c, q)}%.2f | $s%.2fx faster |\n") }
           if (improvements.isEmpty) sb.append("| - | | | no query is faster than spark |\n")
           val regressions = speedups.filter(_._2 < 1.0).sortBy(_._2)
-          regressions.foreach { case (q, s) =>
-            sb.append(f"| $q | ${sec("spark", q)}%.2f | ${sec(c, q)}%.2f | ${(1 / s - 1) * 100}%.0f%% slower |\n")
-          }
+          regressions.foreach { case (q, s) => sb.append(f"| $q | ${sec("spark", q)}%.2f | ${sec(c, q)}%.2f | ${(1 / s - 1) * 100}%.0f%% slower |\n") }
           sb.append(s"\n### 4. Performance analysis: $c (cause and evidence to be completed from the profile)\n\n")
-          sb.append(
-            "| query | result | main cause | key evidence (stage metrics: ours vs spark) |\n|---|---|---|---|\n"
-          )
+          sb.append("| query | result | main cause | key evidence (stage metrics: ours vs spark) |\n|---|---|---|---|\n")
           regressions.foreach { case (q, s) =>
-            val ev = for (m <- latest((c, q)).metrics; b <- latest(("spark", q)).metrics)
-              yield f"GC ${m.jvmGcTimeMs / 1000.0}%.1f s vs ${b.jvmGcTimeMs / 1000.0}%.1f s; shuffle read ${gb(m.shuffleReadBytes)} vs ${gb(b.shuffleReadBytes)}; executor time ${m.executorRunTimeMs / 1000.0}%.0f s vs ${b.executorRunTimeMs / 1000.0}%.0f s; spill ${gb(m.spillBytes)} vs ${gb(b.spillBytes)}"
+            val ev = for (m <- latest((c, q)).metrics; b <- latest(("spark", q)).metrics) yield
+              f"GC ${m.jvmGcTimeMs / 1000.0}%.1f s vs ${b.jvmGcTimeMs / 1000.0}%.1f s; shuffle read ${gb(m.shuffleReadBytes)} vs ${gb(b.shuffleReadBytes)}; executor time ${m.executorRunTimeMs / 1000.0}%.0f s vs ${b.executorRunTimeMs / 1000.0}%.0f s; spill ${gb(m.spillBytes)} vs ${gb(b.spillBytes)}"
             val fb = latest((c, q)).fallbacks
             val hint = if (fb.nonEmpty) s"operator fell back: ${fb.head}" else "(profile first: JFR-first protocol)"
-            sb.append(
-              f"| $q | ${(1 / s - 1) * 100}%.0f%% slower | $hint | ${ev.getOrElse("no stage metrics recorded")} |\n"
-            )
+            sb.append(f"| $q | ${(1 / s - 1) * 100}%.0f%% slower | $hint | ${ev.getOrElse("no stage metrics recorded")} |\n")
           }
           if (regressions.isEmpty) sb.append("| - | no regressions | | |\n")
         }
-        sb.append("\n### 5. Per-query results\n\n| query | " + configs.map(c => s"$c (s)").mkString(
-          " | "
-        ) + " | " + configs.filter(_ != "spark").map(c => s"$c accel.").mkString(" | ") + " |\n")
-        sb.append("|---|" + configs.map(_ => "---:").mkString("|") + "|" + configs.filter(_ != "spark").map(_ =>
-          "---:"
-        ).mkString("|") + "|\n")
+        sb.append("\n### 5. Per-query results\n\n| query | " + configs.map(c => s"$c (s)").mkString(" | ") + " | " + configs.filter(_ != "spark").map(c => s"$c accel.").mkString(" | ") + " |\n")
+        sb.append("|---|" + configs.map(_ => "---:").mkString("|") + "|" + configs.filter(_ != "spark").map(_ => "---:").mkString("|") + "|\n")
         queries.foreach { q =>
-          val times = configs.map(c =>
-            latest.get((c, q)).map(r =>
-              f"${r.seconds}%.2f" + (if (c != "spark" && latest.contains(("spark", q))) f" (${speedup(c, q)}%.2fx)"
-                                     else "")
-            ).getOrElse("-")
-          )
-          val accel = configs.filter(_ != "spark").map(c =>
-            latest.get((c, q)).flatMap(_.accelerated).map { case (a, t) => s"$a/$t" }.getOrElse("-")
-          )
-          sb.append(s"| $q${if (mismatched.contains(q)) " (checksum differs)" else ""} | " + times.mkString(
-            " | "
-          ) + " | " + accel.mkString(" | ") + " |\n")
+          val times = configs.map(c => latest.get((c, q)).map(r => f"${r.seconds}%.2f" + (if (c != "spark" && latest.contains(("spark", q))) f" (${speedup(c, q)}%.2fx)" else "")).getOrElse("-"))
+          val accel = configs.filter(_ != "spark").map(c => latest.get((c, q)).flatMap(_.accelerated).map { case (a, t) => s"$a/$t" }.getOrElse("-"))
+          sb.append(s"| $q${if (mismatched.contains(q)) " (checksum differs)" else ""} | " + times.mkString(" | ") + " | " + accel.mkString(" | ") + " |\n")
         }
       }
-      sb.append(
-        "\n### 6. Environment\n\n| configuration | Spark | executors | engine configuration |\n|---|---|---|---|\n"
-      )
+      sb.append("\n### 6. Environment\n\n| configuration | Spark | executors | engine configuration |\n|---|---|---|---|\n")
       configs.foreach { c =>
         val r = latest.collectFirst { case ((cc, _), row) if cc == c => row }.get
         sb.append(s"| $c | ${r.sparkVersion} | ${r.executors} | ${r.engineConf} |\n")
@@ -394,6 +310,5 @@ object ClusterRunner {
     sb.toString
   }
 
-  private def gb(bytes: Long): String =
-    if (bytes >= (1L << 30)) f"${bytes / (1024.0 * 1024 * 1024)}%.1f GB" else f"${bytes / (1024.0 * 1024)}%.0f MB"
+  private def gb(bytes: Long): String = if (bytes >= (1L << 30)) f"${bytes / (1024.0 * 1024 * 1024)}%.1f GB" else f"${bytes / (1024.0 * 1024)}%.0f MB"
 }
