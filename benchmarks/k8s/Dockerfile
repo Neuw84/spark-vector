@@ -28,6 +28,11 @@ COPY . /src
 # The shaded benchmarks.jar carries io.sparkvector:* (kernels, spark, shuffle, benchmarks); Spark, Comet
 # and Iceberg are provided by the image's jars directory.
 RUN mvn -B -q -Pcomet,iceberg -DskipTests -pl benchmarks -am package
+# The Flight shuffle's runtime jars: the shaded benchmarks.jar carries only io.sparkvector:*, and Spark's
+# distribution has Arrow and guava but no flight-core, gRPC or protobuf-java (the Netty classes are Spark's).
+RUN mvn -B -q -o -pl shuffle dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/src/flight-jars \
+      -DincludeArtifactIds=flight-core,grpc-api,grpc-core,grpc-context,grpc-netty,grpc-protobuf,grpc-protobuf-lite,grpc-stub,grpc-util,perfmark-api,proto-google-common-protos,protobuf-java,protobuf-java-util,animal-sniffer-annotations,error_prone_annotations,annotations,j2objc-annotations,jspecify \
+ && ls /src/flight-jars
 RUN git clone --depth 1 https://github.com/databricks/tpcds-kit /opt/tpcds-kit \
     && make -C /opt/tpcds-kit/tools OS=LINUX LINUX_CFLAGS="-O3 -std=gnu89 -Wno-implicit-int -Wno-implicit-function-declaration -Wno-return-mismatch" -j"$(nproc)" >/dev/null
 
@@ -76,6 +81,7 @@ RUN cd /opt/spark/jars \
     && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/spark/spark-hadoop-cloud_2.13/${SPARK_VERSION}/spark-hadoop-cloud_2.13-${SPARK_VERSION}.jar"
 
 COPY --from=build /src/benchmarks/target/benchmarks.jar /opt/spark/jars/benchmarks.jar
+COPY --from=build /src/flight-jars/*.jar /opt/spark/jars/
 COPY --from=build /opt/tpcds-kit/tools/dsdgen /opt/tpcds-kit/tools/tpcds.idx /opt/tpcds-kit/tools/
 
 ENV SPARK_HOME=/opt/spark
