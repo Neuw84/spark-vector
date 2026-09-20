@@ -186,6 +186,7 @@ object TpchRunner {
       report: Option[String] = None,
       label: String = "",
       show: Boolean = false,
+      explain: Boolean = false,
       keepAlive: Boolean = false,
       extraConf: Map[String, String] = Map.empty,
       /** Cluster mode (#246): take the session spark-submit built, tables from `--tables`, rows to any Hadoop file system. */
@@ -228,6 +229,7 @@ object TpchRunner {
     case "--label" :: v :: rest => parse(rest, a.copy(label = v))
     case "--report" :: v :: rest => parse(rest, a.copy(report = Some(v)))
     case "--show" :: rest => parse(rest, a.copy(show = true))
+    case "--explain" :: rest => parse(rest, a.copy(explain = true))
     case "--keep-alive" :: rest => parse(rest, a.copy(keepAlive = true))
     case "--cluster" :: rest => parse(rest, a.copy(cluster = true))
     case "--tables" :: v :: rest => parse(rest, a.copy(tables = Some(v), cluster = true))
@@ -470,6 +472,15 @@ object TpchRunner {
       case v => String.valueOf(v)
     }.mkString("|")).sorted.mkString("\n").hashCode.toHexString
     val nodes = allNodes(plan)
+    if (args.explain) {
+      // The plan as executed (AQE's final stages) and every exchange's metrics: where a configuration
+      // shuffles more bytes than another, this names the exchange and its columns.
+      println(s"[${args.suite.name}]   plan of $name:\n${plan.treeString}")
+      nodes.collect { case e: org.apache.spark.sql.execution.exchange.ShuffleExchangeLike => e }.foreach { e =>
+        val m = e.metrics.toSeq.sortBy(_._1).map { case (k, v) => s"$k=${v.value}" }.mkString(" ")
+        println(s"[${args.suite.name}]   exchange ${e.getClass.getSimpleName} columns=${e.output.map(a => s"${a.name}:${a.dataType.simpleString}").mkString(",")} $m")
+      }
+    }
     val ops = nodes.map(_.getClass.getSimpleName).filter(n => n.startsWith("Vector") || n.startsWith("Comet"))
       .groupBy(identity).view.mapValues(_.size).toSeq.sortBy(_._1).map { case (n, c) => s"$n x$c" }.mkString(", ")
     // Per-operator kernel time of the last run (summed over tasks, so it exceeds wall clock).
