@@ -16,6 +16,7 @@
 #   EXECUTORS (8) EXEC_CORES (14) EXEC_MEM (40g) EXEC_OVERHEAD (10g) DRIVER_CORES (2) DRIVER_MEM (8g)
 #   NODE_SELECTOR (workload=spark-xl; empty for none) OFFHEAP (32g, the comet configurations)
 #   KEEP_EXECUTORS (unset; set to 1 to keep dead executor pods for their logs)
+#   DIRECT_MEM (EXEC_OVERHEAD minus 2g; the executors' -XX:MaxDirectMemorySize)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CONFIG="${1:?config}"; TABLES="${2:?tables}"; DATASET="${3:?dataset}"; OUT="${4:?out}"; IMAGE="${5:?image}"; shift 5
@@ -23,6 +24,7 @@ NAMESPACE="${NAMESPACE:-bench}"; SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-sfi-engine}
 EXECUTORS="${EXECUTORS:-8}"; EXEC_CORES="${EXEC_CORES:-14}"; EXEC_MEM="${EXEC_MEM:-40g}"; EXEC_OVERHEAD="${EXEC_OVERHEAD:-10g}"
 DRIVER_CORES="${DRIVER_CORES:-2}"; DRIVER_MEM="${DRIVER_MEM:-8g}"; NODE_SELECTOR="${NODE_SELECTOR-workload=spark-xl}"
 MAIN=io.sparkvector.benchmarks.TpcdsRunner; [ "$SUITE" = tpch ] && MAIN=io.sparkvector.benchmarks.TpchRunner
+DIRECT_MEM="${DIRECT_MEM:-$(( ${EXEC_OVERHEAD%g} - 2 ))g}"
 
 # The engine's --conf pairs, from the submit script's dry run (the Comet jar is on the image: no --jars).
 eval "SUBMIT=($(DRY_RUN=1 BENCH_JAR=/opt/spark/jars/benchmarks.jar SUITE="$SUITE" OFFHEAP="${OFFHEAP:-32g}" \
@@ -76,6 +78,14 @@ cat <<EOF
     # A query that kills executors (native memory past the container limit) must not end the whole run:
     # the runner records the failure and moves on; Spark's default gives up after 16 executor losses.
     spark.executor.maxNumFailures: "200"
+    # Spark 4.1 on JDK 24+: SerializationDebugger's initialiser fails (SPARK-55679, fixed in 4.2.0), which
+    # turns a non-serializable task failure into an executor death; off, the plain exception is reported.
+    # See upstream/spark-55679-serialization-debugger-jdk25/.
+    spark.serializer.extraDebugInfo: "false"
+    # Arrow's Netty allocator is bounded by the JVM's direct-memory limit, which defaults to the heap size:
+    # give it the overhead instead (DIRECT_MEM; default EXEC_OVERHEAD less 2g), or our kernels' and the
+    # shuffle's buffers hit a 20 GiB wall inside a 50 GiB container.
+    spark.executor.extraJavaOptions: "-XX:MaxDirectMemorySize=$DIRECT_MEM"
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://sfi-iceberg-wh-378683551918/spark-events"
     spark.hadoop.fs.s3a.connection.maximum: "200"
