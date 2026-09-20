@@ -839,30 +839,34 @@ queries (the driver's `ContextCleaner` removes them after a GC, every 30 min by 
 evicted an executor at query 95 -- `spark.cleaner.periodicGC.interval=2min` in the manifests), and
 hadoop-aws 3.4's default credential chain has no IRSA (`WebIdentityTokenFileCredentialsProvider` set).
 
-**v6 (the five fixes in), spark and vector-shuffle, 102 of 103 queries comparable:**
+**v7 (the five fixes and the writer rework: #349 plain slices encoded once, #351 per-partition
+builders), 101 of 103 queries comparable, no failures in any configuration:**
 
-| configuration | suite wall (s) | failed | comparable total (s, 102 queries) | vs Spark |
+| configuration | suite wall (s) | failed | comparable total (s, 101 queries) | vs Spark |
 |---|---:|---:|---:|---:|
-| spark | 644 | 0 | 569.6 | 1.00x |
-| vector-shuffle | 858 | 0 | 782.1 | 0.73x |
+| spark | 675 | 0 | 552.8 | 1.00x |
+| vector-shuffle | 735 | 0 | 638.9 | 0.87x |
+| comet-scan-vector-ourshuffle | 674 | 0 | 593.4 | 0.93x |
 
-The runs before it: v2 (the first, 87 comparable) vector-shuffle 878.5 s to Spark's 398.0, 0.45x with 9
-failures; v3 after #338: 0.33x, 2 failures; v4 after #340: 0.35x, 5 failures all one evicted executor;
-v5 after #343 and #345: 0.58x, none. `vector-shuffle-strict` in v2 cost **0.6%** over `vector-shuffle`
-(873.0 s against 878.5), within noise: the same failures, the same checksums. The other configurations
-of v2: comet-scan-vector-ourshuffle 0.78x (3 failures), hybrid 1.20x, comet 1.29x -- to be rerun on the
+`comet-scan-vector-ourshuffle` is Comet's native Parquet scan feeding our operators over our shuffle
+(its v2 reading: 0.78x with 3 failures). The runs before: v2 (the first, 87 comparable) vector-shuffle
+0.45x with 9 failures; v3 after #338: 0.33x, 2 failures; v4 after #340: 0.35x, 5 failures all one
+evicted executor; v5 after #343 and #345: 0.58x, none; v6 after #347: 0.73x. `vector-shuffle-strict`
+in v2 cost **0.6%** over `vector-shuffle` (873.0 s against 878.5), within noise: the same failures, the
+same checksums. The other configurations of v2 -- hybrid 1.20x, comet 1.29x -- are to be rerun on the
 fixed engine.
 
-Where the 0.73x now lives: 14 queries faster than Spark (q29 1.69x, q42 1.51x, q97 1.49x, q50 and q66
-and q93 1.4x, q80 1.33x), 27 within 10%, and the string-heavy exchanges at 2-4x: q30 (4.6 -> 18.5 s),
-q39b, q81, q82, q67 (14.4 -> 36.4 s), q39a, q8, q72 (22.0 -> 47.0 s), q4 (21.1 -> 44.1 s), q79, q1, q53,
-q51. A JFR of q30 at SF10 puts 63% of its CPU in the shuffle write: at 200 partitions a slice is ~41
-rows, and every slice allocated a vector per column and, per plain string column, built a hash-map
-dictionary -- 2,600 per 8192-row batch for `customer` (#349, the writer encoding a record batch's
-strings once: q30 at SF10 4.1 -> 2.7 s; the per-slice allocations are the item after). q65's checksum
-differs from Spark's in every configuration but Spark (100 rows each: a tie in its `LIMIT` order, to be
-confirmed); q64 returns 0 rows under Comet (a Comet 1.0 issue). Per-query tables:
-`results/sf100-parquet-v6/cluster-results.md` on the results bucket.
+Where the numbers now live (v7): under `vector-shuffle` 30 queries are faster than Spark (q97 1.96x,
+q94 1.77x, q52, q82, q51, q42 1.5-1.6x, q29, q93 1.44x), 27 within 10%, 32 more than 20% slower --
+q30 (4.35 -> 9.88 s) and q8 (2.71 -> 6.06) at the top, then q1, q39a/b, q46, q67, q72, q4 around 1.5-2x.
+Under the Comet-scan mix 35 are faster (q97 2.25x, q94 1.90x, q82 1.86x, q42, q52, q41 1.75-1.84x),
+27 within 10%, 26 more than 20% slower -- q22 (5.1 -> 14.3 s, the inventory rollup), q8, q39b, q46,
+q30, q1. A JFR of q30 at SF10 after these changes has the shuffle write at a third of the query's CPU
+(from 63% before #349) with the Parquet-to-Arrow adapter and the joins the rest; #353 (index-list
+gathers, in main after this run: q30 at SF10 2377 -> 1963 ms) is not in this image. q65's checksum
+differs from Spark's in every configuration but Spark (100 rows each: a tie in its `LIMIT` order, to
+be confirmed); q64 returns 0 rows under Comet's scan (a Comet 1.0 issue). Per-query tables:
+`results/sf100-parquet-v7/cluster-results.md` on the results bucket.
 The 1 TB baselines (#248, `results/sf1000-parquet`): spark 3029.9 s, hybrid 2246.3 (1.35x), comet
 2091.3 (1.45x), 100 comparable, no failures; our shuffle's 1 TB run follows the speed work.
 
