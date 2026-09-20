@@ -44,6 +44,9 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
   private def nulls(n: Int) = Array.fill(n)(rnd.nextDouble() < 0.15)
 
   /** Builds a batch of `n` rows and the rows it should read back as; `dictStrings` picks the encoding of `sd`. */
+  /** The dictionary of the encoded string column: five words, or thousands of names (#345, a slice far smaller than its dictionary). */
+  private var bigDictionary = false
+
   private def batch(n: Int, arena: Arena, dictStrings: Boolean): (ColumnarBatch, IndexedSeq[Row]) = {
     val ni = nulls(n); val vi = Array.fill(n)(rnd.nextInt())
     val nd = nulls(n); val vd = Array.fill(n)(rnd.nextInt(20000))
@@ -52,7 +55,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     val nx = nulls(n); val vx = Array.fill(n)(rnd.nextGaussian())
     val nb = nulls(n); val vb = Array.fill(n)(rnd.nextBoolean())
     val vs = Array.fill[String](n)(if (rnd.nextDouble() < 0.15) null else rnd.alphanumeric.take(rnd.nextInt(9)).mkString)
-    val dict = Array("alpha", "beta", "gamma", "δέλτα", "😀")
+    val dict = if (bigDictionary) Array.tabulate(3000)(i => s"name-$i-${rnd.alphanumeric.take(6).mkString}") else Array("alpha", "beta", "gamma", "δέλτα", "😀")
     val nsd = nulls(n); val ids = Array.fill(n)(rnd.nextInt(dict.length))
     val ndec = nulls(n); val vdec = Array.fill(n)(rnd.nextLong() % 1000000000000L)
     val nw = nulls(n); val vw = Array.fill(n)(new BigInteger(90, rnd.self).subtract(BigInteger.ONE.shiftLeft(89)))
@@ -103,7 +106,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
 
   private def roundTrip(numPartitions: Int, batches: Seq[(Int, Boolean)], flushBytes: Long, batchRows: Int = 8192, bufferBytes: Long = 64L << 20,
       writerAllocator: org.apache.arrow.memory.BufferAllocator = allocator,
-      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] = Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)): Unit = {
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] = Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)): Long = {
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val expected = Array.fill(numPartitions)(mutable.ArrayBuffer.empty[Row])
@@ -128,6 +131,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
       val index = writer.finish()
       assert(index.rows.toSeq === expected.map(_.size.toLong).toSeq)
+      val fileBytes = Files.size(path)
       for (p <- 0 until numPartitions) {
         val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator)
         try {
@@ -139,11 +143,23 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           assert(got === expected(p), s"partition $p")
         } finally reader.close()
       }
+      fileBytes
     } finally {
       writer.close()
       Files.deleteIfExists(path)
       Files.deleteIfExists(dir)
     }
+  }
+
+  test("#345: a slice smaller than its dictionary carries only the entries it uses -- 200 partitions, a 3000-name dictionary") {
+    bigDictionary = true
+    try {
+      // 4 x 8192 rows over 200 partitions: ~41 rows per slice against 3000 entries. With the whole
+      // dictionary copied per slice the file was ~800 bytes per row; the used entries make it ~100.
+      val bytes = roundTrip(numPartitions = 200, batches = Seq.fill(4)((8192, true)), flushBytes = 1L << 20)
+      val rows = 4 * 8192
+      assert(bytes < rows * 250L, s"$bytes bytes for $rows rows: ${bytes / rows} per row")
+    } finally bigDictionary = false
   }
 
   test("every lane type round-trips per partition, in order, dictionary strings staying encoded") {
