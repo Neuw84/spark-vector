@@ -7,7 +7,7 @@ import java.nio.channels.{Channels, FileChannel}
 import java.nio.file.{Files, Path, StandardOpenOption}
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.kernels.{CompactKernels, Bitmap, PartitionKernels, VectorBuffers}
+import io.sparkvector.kernels.{Bitmap, CompactKernels, GatherKernels, PartitionKernels, VectorBuffers}
 import io.sparkvector.spark.adapter.ColumnVectorAdapters
 import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
 import org.apache.arrow.memory.BufferAllocator
@@ -133,6 +133,33 @@ final class PartitionedIpcWriter(
       if (isString) bytes + (count.toLong << 2) else count.toLong * math.max(width, 1)
     }
 
+    /** Appends rows `idx(from until to)` of `in` (the index-list path, #353). */
+    def appendIndexed(in: VectorBuffers, idx: Array[Int], from: Int, to: Int, scratch: Arena): Long = {
+      val count = to - from
+      val bytes = if (isString) GatherKernels.gatherUtf8Bytes(in, idx, from, to) else 0L
+      ensure(count, bytes)
+      val validityScratch = if (in.validity() != null) Bitmap.allocate(scratch, count) else null
+      if (isString) {
+        val offsets = buffers.offsets().asSlice(rows.toLong << 2)
+        GatherKernels.gatherUtf8(in, idx, from, to, offsets, buffers.data().asSlice(dataBytes), validityScratch)
+        if (dataBytes > 0) {
+          var i = 0
+          while (i <= count) { offsets.set(VectorBuffers.LE_INT, i.toLong << 2, offsets.get(VectorBuffers.LE_INT, i.toLong << 2) + dataBytes.toInt); i += 1 }
+        }
+      } else if (isBool) {
+        val bits = Bitmap.allocate(scratch, count)
+        GatherKernels.gatherFixed(in, idx, from, to, bits, validityScratch)
+        Bitmap.copyBits(bits, buffers.data(), rows, count)
+      } else {
+        GatherKernels.gatherFixed(in, idx, from, to, buffers.data().asSlice(rows.toLong * width), validityScratch)
+      }
+      if (validityScratch != null) Bitmap.copyBits(validityScratch, buffers.validity(), rows, count)
+      else Bitmap.fillRange(buffers.validity(), rows, count, true)
+      rows += count
+      dataBytes += bytes
+      if (isString) bytes + (count.toLong << 2) else count.toLong * math.max(width, 1)
+    }
+
     /** The finished vector (value count set), the builder emptied for the next batch. */
     def take(): FieldVector = {
       val v = vector
@@ -248,14 +275,39 @@ final class PartitionedIpcWriter(
     // A dictionary-encoded string column is decoded once here and appended plain: the batch's strings
     // are dictionary-encoded again at the flush, once per record batch (#349, #351).
     val plain = buffers.map(b => if (b.`type`() == io.sparkvector.kernels.VecType.UTF8 && b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, scratch) else b)
-    val masks = Array.tabulate(numPartitions)(_ => scratch.allocate(Bitmap.bytesFor(n), 8))
-    val counts = new Array[Int](numPartitions)
-    PartitionKernels.partitionMasks(ids, n, masks, counts)
-    var p = 0
-    while (p < numPartitions) {
-      if (counts(p) > 0) appendPartition(segments(p), plain, masks(p), counts(p), scratch)
-      p += 1
+    if (numPartitions > PartitionedIpcWriter.IndexListPartitions) {
+      // Many partitions: the rows grouped by partition once, a gather per partition of its own rows
+      // (#353). A mask per partition cost a scan of the batch's words per partition and column.
+      if (order.length < n) order = new Array[Int](n)
+      PartitionKernels.partitionOrder(ids, n, numPartitions, starts, order)
+      var p = 0
+      while (p < numPartitions) {
+        if (starts(p + 1) > starts(p)) appendIndexed(segments(p), plain, order, starts(p), starts(p + 1), scratch)
+        p += 1
+      }
+    } else {
+      val masks = Array.tabulate(numPartitions)(_ => scratch.allocate(Bitmap.bytesFor(n), 8))
+      val counts = new Array[Int](numPartitions)
+      PartitionKernels.partitionMasks(ids, n, masks, counts)
+      var p = 0
+      while (p < numPartitions) {
+        if (counts(p) > 0) appendPartition(segments(p), plain, masks(p), counts(p), scratch)
+        p += 1
+      }
     }
+  }
+
+  private val starts = new Array[Int](numPartitions + 1)
+  private var order = new Array[Int](0)
+
+  private def appendIndexed(seg: Segment, buffers: Array[VectorBuffers], idx: Array[Int], from: Int, to: Int, scratch: Arena): Unit = {
+    var size = 0L
+    var c = 0
+    while (c < buffers.length) {
+      size += seg.builders(c).appendIndexed(buffers(c), idx, from, to, scratch)
+      c += 1
+    }
+    afterAppend(seg, to - from, size)
   }
 
   private def appendPartition(seg: Segment, buffers: Array[VectorBuffers], mask: MemorySegment, count: Int, scratch: Arena): Unit = {
@@ -265,6 +317,10 @@ final class PartitionedIpcWriter(
       size += seg.builders(c).append(buffers(c), mask, count, scratch)
       c += 1
     }
+    afterAppend(seg, count, size)
+  }
+
+  private def afterAppend(seg: Segment, count: Int, size: Long): Unit = {
     seg.pendingRows += count
     seg.pendingBytes += size
     heldBytes += size
@@ -386,6 +442,8 @@ object PartitionedIpcWriter {
   val InitialRows: Int = 256
   /** A string builder's first data capacity per row, in bytes. */
   val InitialBytesPerRow: Int = 16
+  /** Above this many partitions the writer groups rows by index lists and gathers; below, it compacts by masks. */
+  val IndexListPartitions: Int = 32
 
   /** The data width of a fixed-width lane as the writer lays it out (a small decimal is int64). */
   def byteWidth(dt: org.apache.spark.sql.types.DataType): Int = dt match {
