@@ -47,6 +47,8 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.vector.shuffle.enabled", "true")
       .config("spark.vector.shuffle.backend", "flight")
       .config("spark.vector.exec.strictFloatingPoint", "true")
+      // Small record batches: a block holds several, each with its own string dictionary (#338).
+      .config("spark.vector.shuffle.batchBytes", "16k")
     if (authenticate) b.config("spark.authenticate", "true").config("spark.authenticate.secret", "flight-shuffle-test-secret")
     b.getOrCreate()
   }
@@ -105,6 +107,25 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally {
       client.close()
       allocator.close()
+    }
+  }
+
+  test("#338: a remote block of several record batches, each with its own string dictionary, decodes every batch right") {
+    // A block is one record batch per `batchBytes` of held rows; with a small cap a reduce partition's
+    // block holds many, and the writer gives each its own replacement dictionary (the slice's distinct
+    // strings). Flight writes a stream's dictionaries once, at its start: before #338 the client decoded
+    // batches 2..n against batch 1's dictionary -- out-of-bounds indices, or the wrong string silently.
+    // Strings unique per row make every batch's dictionary different (batchBytes is set on the session).
+    {
+      val df = spark.range(0, 200000, 1, 8).selectExpr("id", "cast(id % 7 as int) as k", "concat('s-', cast(id as string)) as s")
+      df.createOrReplaceTempView("u")
+      // The shuffle carries s; the aggregate reads it back on the other executor.
+      val sql = "select k, count(distinct s) ds, max(s) ms, min(s) mn from u group by k order by k"
+      val ours = spark.sql(sql).collect().toSeq
+      spark.sessionState.conf.setConfString("spark.vector.enabled", "false")
+      val expected = try spark.sql(sql).collect().toSeq finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
+      assert(ours === expected)
+      assert(ours.map(_.getLong(1)).sum === 200000L)
     }
   }
 }
