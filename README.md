@@ -158,6 +158,24 @@ their footprint by the same factor -- strict mode is the cheapest in memory as w
 The sort and the window hold their whole partition (Arrow memory, plus an `int` permutation per row on
 the heap) and do not spill; a partition that cannot fit should keep Spark's sort
 (`spark.vector.exec.sort.enabled=false`).
+
+**Disk.** Everything we write lands under `spark.local.dir`, through Spark's own block manager, so it
+is sized and cleaned like Spark's shuffle files -- and on Kubernetes that is the node's disk or the
+`emptyDir` the manifest mounts, not the container's image layer.
+
+| what | when | where | how big |
+|---|---|---:|---|
+| a final aggregate's spill | its table passes the budget: the whole table goes out as `spillBuckets` Arrow IPC streams, hash-partitioned by key; later merged one bucket at a time | a temp local block per bucket | the table's size; freed at the operator's close |
+| a partial aggregate's overflow | never to disk -- it emits its table to the exchange and starts over | -- | -- |
+| a map task's shuffle output | always: one data file per map task with a partition index (Spark's layout, our IPC record batches, `zstd` by default) | the shuffle block resolver's data file | the task's compressed output; deleted when the shuffle is unregistered (#358 -- before it, never) |
+| a map task's overflow | a reduce partition's serialised bytes pass `spark.vector.shuffle.flushBytes` (1 MB) before the batch is closed | a temporary file beside the data file, merged into it at commit | at most the task's output |
+| a reducer's fetched blocks | never to disk: one `DoGet` per remote executor streams its blocks back to back, decoded batch by batch, the previous batch freed as the next is produced | -- | a batch per open stream (one stream per remote executor), in direct memory; the `block` backend follows Spark's fetch rules |
+
+Two numbers to keep in mind at scale. The node disk holds every live shuffle of the job -- at 1 TB with
+eight executors the first run filled 20 GB nodes within minutes because map outputs were never deleted
+(#358); with deletion in place the high-water mark is the largest stage's output. And an aggregate's
+spill is written once and read once per bucket, so its cost is one extra pass of Arrow IPC over the
+table, not a re-sort: q78's aggregate at 1 TB spilled and finished in 99 s against Spark's 114.
 What went wrong at 1 TB and how each was fixed is in `docs/results.md`: map outputs never deleted
 (#358, the node disks), an aggregate that never spilled (#363), a budget that undercounted the
 accumulators four to eight times (#367), and a budget that then overcounted them and emptied tables
