@@ -85,6 +85,13 @@ final class VectorShuffleHandle(shuffleId: Int, val dependency: VectorShuffleDep
  */
 final class VectorShuffleManager(conf: SparkConf) extends ShuffleManager {
   private val sort = new SortShuffleManager(conf)
+  /**
+   * The map task ids written for each of our shuffles, as `SortShuffleManager` keeps for its own:
+   * `unregisterShuffle` removes their data and index files by these. Without it every map output
+   * stayed on the executor's disk until the executor died -- the 20 GB node disks of the bench
+   * cluster filled within minutes at 1 TB (#358).
+   */
+  private val taskIdMapsForShuffle = new java.util.concurrent.ConcurrentHashMap[Int, org.apache.spark.util.collection.OpenHashSet[Long]]()
 
   override def registerShuffle[K, V, C](shuffleId: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle =
     dependency match {
@@ -95,6 +102,8 @@ final class VectorShuffleManager(conf: SparkConf) extends ShuffleManager {
   override def getWriter[K, V](handle: ShuffleHandle, mapId: Long, context: TaskContext, metrics: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] =
     handle match {
       case v: VectorShuffleHandle =>
+        val mapTaskIds = taskIdMapsForShuffle.computeIfAbsent(v.shuffleId, _ => new org.apache.spark.util.collection.OpenHashSet[Long](16))
+        mapTaskIds.synchronized { mapTaskIds.add(mapId) }
         new VectorShuffleWriter(v, mapId, context, metrics, sort.shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver]).asInstanceOf[ShuffleWriter[K, V]]
       case other => sort.getWriter(other, mapId, context, metrics)
     }
@@ -110,6 +119,10 @@ final class VectorShuffleManager(conf: SparkConf) extends ShuffleManager {
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
     VectorShuffleBackend(conf).unregisterShuffle(shuffleId)
+    Option(taskIdMapsForShuffle.remove(shuffleId)).foreach { mapTaskIds =>
+      val resolver = sort.shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver]
+      mapTaskIds.iterator.foreach(mapTaskId => resolver.removeDataByMap(shuffleId, mapTaskId))
+    }
     sort.unregisterShuffle(shuffleId)
   }
   override def shuffleBlockResolver: ShuffleBlockResolver = sort.shuffleBlockResolver

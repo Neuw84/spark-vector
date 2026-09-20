@@ -166,6 +166,20 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally spark.sparkContext.removeSparkListener(listener)
   }
 
+  test("#358: unregistering a shuffle deletes our map outputs' data and index files") {
+    val df = spark.sql("select k, count(*) c from t group by k")
+    val plan = collectPlan(df)
+    val ex = exchanges(plan).collectFirst { case e: VectorShuffleExchangeExec => e }.get
+    val shuffleId = ex.shuffleDependency.shuffleId
+    val disk = org.apache.spark.SparkEnv.get.blockManager.diskBlockManager
+    def files() = disk.getAllFiles().filter(_.getName.startsWith(s"shuffle_${shuffleId}_")).map(_.getName).sorted
+    val before = files()
+    assert(before.exists(_.endsWith(".data")) && before.exists(_.endsWith(".index")), s"map outputs on disk: $before")
+    // What the ContextCleaner does on every executor once the dependency is unreachable.
+    assert(org.apache.spark.SparkEnv.get.shuffleManager.unregisterShuffle(shuffleId))
+    assert(files().isEmpty, s"left behind: ${files()}")
+  }
+
   test("a shuffled hash join and a merge join read both sides from our exchanges") {
     spark.sessionState.conf.setConfString("spark.sql.autoBroadcastJoinThreshold", "-1")
     try {
