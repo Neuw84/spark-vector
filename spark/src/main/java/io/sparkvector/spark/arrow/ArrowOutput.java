@@ -212,8 +212,80 @@ public final class ArrowOutput {
       Bitmap.fill(out.validity(), outCount, true);
     }
     indices.setValueCount(outCount);
-    VarCharVector dictionary = copyDictionary(name + ".dictionary", in.dictionary(), allocator);
+    VectorBuffers dict = in.dictionary();
+    VarCharVector dictionary = outCount < dict.length()
+        ? usedDictionary(name + ".dictionary", dict, out, outCount, allocator)
+        : copyDictionary(name + ".dictionary", dict, allocator);
     return new VectorDictionaryColumnVector(indices, dictionary);
+  }
+
+  /** Scratch of the used-entries remap, per thread: old id to new id (-1 unused), and the used ids in order. */
+  private static final ThreadLocal<int[][]> REMAP = ThreadLocal.withInitial(() -> new int[][] {new int[0], new int[0]});
+
+  /**
+   * The dictionary of the entries the compacted ids actually use, the ids rewritten to it (#345). A
+   * slice of a few dozen rows out of a dictionary of thousands otherwise carried the whole dictionary
+   * -- at 200 shuffle partitions that was ~800 bytes per row on the wire (31x Spark's bytes for
+   * customer names) and one dictionary copy per slice in the writer's memory. Null rows get id 0.
+   */
+  private static VarCharVector usedDictionary(
+      String name, VectorBuffers dict, ArrowVectorBuffers ids, int outCount, BufferAllocator allocator) {
+    int n = dict.length();
+    int[][] scratch = REMAP.get();
+    if (scratch[0].length < n) {
+      scratch[0] = new int[Math.max(n, 2 * scratch[0].length)];
+      java.util.Arrays.fill(scratch[0], -1);
+    }
+    if (scratch[1].length < outCount) {
+      scratch[1] = new int[Math.max(outCount, 2 * scratch[1].length)];
+    }
+    int[] remap = scratch[0];
+    int[] used = scratch[1];
+    MemorySegment idData = ids.data();
+    MemorySegment idValidity = ids.validity();
+    MemorySegment offsets = dict.offsets();
+    int next = 0;
+    long bytes = 0;
+    for (int i = 0; i < outCount; i++) {
+      if (!Bitmap.isSet(idValidity, i)) {
+        idData.set(VectorBuffers.LE_INT, (long) i << 2, 0);
+        continue;
+      }
+      int id = idData.get(VectorBuffers.LE_INT, (long) i << 2);
+      int mapped = remap[id];
+      if (mapped < 0) {
+        mapped = next++;
+        remap[id] = mapped;
+        used[mapped] = id;
+        bytes += offsets.get(VectorBuffers.LE_INT, (long) (id + 1) << 2) - offsets.get(VectorBuffers.LE_INT, (long) id << 2);
+      }
+      idData.set(VectorBuffers.LE_INT, (long) i << 2, mapped);
+    }
+    ArrowVectorBuffers out = allocateUtf8(name, next, bytes, allocator);
+    MemorySegment outOffsets = out.offsets();
+    MemorySegment outData = out.data();
+    boolean dictNulls = dict.hasNulls();
+    int pos = 0;
+    outOffsets.set(VectorBuffers.LE_INT, 0, 0);
+    for (int k = 0; k < next; k++) {
+      int id = used[k];
+      remap[id] = -1; // the scratch back to unused for the next slice
+      int start = offsets.get(VectorBuffers.LE_INT, (long) id << 2);
+      int len = offsets.get(VectorBuffers.LE_INT, (long) (id + 1) << 2) - start;
+      MemorySegment.copy(dict.data(), start, outData, pos, len);
+      pos += len;
+      outOffsets.set(VectorBuffers.LE_INT, (long) (k + 1) << 2, pos);
+      if (dictNulls) {
+        Bitmap.setTo(out.validity(), k, Bitmap.isSet(dict.validity(), id));
+      }
+    }
+    if (!dictNulls) {
+      Bitmap.fill(out.validity(), next, true);
+    }
+    VarCharVector v = (VarCharVector) out.vector();
+    v.setLastSet(next - 1);
+    v.setValueCount(next);
+    return v;
   }
 
   private static VarCharVector copyDictionary(String name, VectorBuffers dict, BufferAllocator allocator) {
