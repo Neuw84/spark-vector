@@ -136,33 +136,24 @@ public final class PartitionKernels {
   /**
    * Mixes one key column into the running hashes: {@code hashes[i] = hashX(value_i, hashes[i])} for
    * every valid row; a null row leaves its hash as it was, which is Spark's rule.
+   *
+   * <p>One loop per key kind and per validity shape, and the null rows handled by a mask rather than
+   * a branch (#343): a single loop with {@code validity == null || isSet(validity, i)} inside was
+   * speculated by C2 from the branch profile of whatever column came first, trapped on the next
+   * column of a different shape ({@code profile_predicate}), ran interpreted until recompiled, and
+   * did so a hundred times per JVM -- 37% of TPC-DS q79's CPU went into hashing 3 million ints.
    */
   public static void mixColumn(VectorBuffers col, KeyKind kind, int[] hashes, int n) {
     MemorySegment validity = col.validity();
     switch (kind) {
       case INT -> {
-        MemorySegment d = col.data();
-        for (int i = 0; i < n; i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
-            hashes[i] = hashInt(d.get(VectorBuffers.LE_INT, (long) i << 2), hashes[i]);
-          }
-        }
+        if (validity == null) mixInt(col.data(), hashes, n); else mixInt(col.data(), validity, hashes, n);
       }
       case LONG -> {
-        MemorySegment d = col.data();
-        for (int i = 0; i < n; i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
-            hashes[i] = hashLong(d.get(VectorBuffers.LE_LONG, (long) i << 3), hashes[i]);
-          }
-        }
+        if (validity == null) mixLong(col.data(), hashes, n); else mixLong(col.data(), validity, hashes, n);
       }
       case DOUBLE -> {
-        MemorySegment d = col.data();
-        for (int i = 0; i < n; i++) {
-          if (validity == null || Bitmap.isSet(validity, i)) {
-            hashes[i] = hashLong(doubleBits(d.get(VectorBuffers.LE_DOUBLE, (long) i << 3)), hashes[i]);
-          }
-        }
+        if (validity == null) mixDouble(col.data(), hashes, n); else mixDouble(col.data(), validity, hashes, n);
       }
       case BOOL -> {
         for (int i = 0; i < n; i++) {
@@ -184,31 +175,104 @@ public final class PartitionKernels {
     }
   }
 
+  /** All ones when row {@code i} is valid, zero when it is null: the blend mask for a null-keeping update. */
+  private static int validMask(MemorySegment validity, int i) {
+    return -((validity.get(ValueLayout.JAVA_BYTE, i >>> 3) >>> (i & 7)) & 1);
+  }
+
+  private static void mixInt(MemorySegment d, int[] hashes, int n) {
+    for (int i = 0; i < n; i++) {
+      hashes[i] = hashInt(d.get(VectorBuffers.LE_INT, (long) i << 2), hashes[i]);
+    }
+  }
+
+  private static void mixInt(MemorySegment d, MemorySegment validity, int[] hashes, int n) {
+    for (int i = 0; i < n; i++) {
+      int old = hashes[i];
+      int h = hashInt(d.get(VectorBuffers.LE_INT, (long) i << 2), old);
+      int m = validMask(validity, i);
+      hashes[i] = (h & m) | (old & ~m);
+    }
+  }
+
+  private static void mixLong(MemorySegment d, int[] hashes, int n) {
+    for (int i = 0; i < n; i++) {
+      hashes[i] = hashLong(d.get(VectorBuffers.LE_LONG, (long) i << 3), hashes[i]);
+    }
+  }
+
+  private static void mixLong(MemorySegment d, MemorySegment validity, int[] hashes, int n) {
+    for (int i = 0; i < n; i++) {
+      int old = hashes[i];
+      int h = hashLong(d.get(VectorBuffers.LE_LONG, (long) i << 3), old);
+      int m = validMask(validity, i);
+      hashes[i] = (h & m) | (old & ~m);
+    }
+  }
+
+  private static void mixDouble(MemorySegment d, int[] hashes, int n) {
+    for (int i = 0; i < n; i++) {
+      hashes[i] = hashLong(doubleBits(d.get(VectorBuffers.LE_DOUBLE, (long) i << 3)), hashes[i]);
+    }
+  }
+
+  private static void mixDouble(MemorySegment d, MemorySegment validity, int[] hashes, int n) {
+    for (int i = 0; i < n; i++) {
+      int old = hashes[i];
+      int h = hashLong(doubleBits(d.get(VectorBuffers.LE_DOUBLE, (long) i << 3)), old);
+      int m = validMask(validity, i);
+      hashes[i] = (h & m) | (old & ~m);
+    }
+  }
+
   private static void mixUtf8(VectorBuffers col, int[] hashes, int n, MemorySegment validity) {
     VectorBuffers dict = col.dictionary();
     if (dict != null) {
-      // Hash each dictionary entry once with the seed folded in per row? No: the seed differs per row
-      // (it is the running hash), so the entry is hashed per row; the win is the offsets/data locality.
+      // The seed differs per row (it is the running hash), so an entry is hashed per row; the win is
+      // the offsets/data locality of the dictionary.
       MemorySegment ids = col.data();
       MemorySegment off = dict.offsets();
       MemorySegment data = dict.data();
-      for (int i = 0; i < n; i++) {
-        if (validity == null || Bitmap.isSet(validity, i)) {
+      if (validity == null) {
+        for (int i = 0; i < n; i++) {
           int id = ids.get(VectorBuffers.LE_INT, (long) i << 2);
           int start = off.get(VectorBuffers.LE_INT, (long) id << 2);
           int end = off.get(VectorBuffers.LE_INT, (long) (id + 1) << 2);
           hashes[i] = hashUnsafeBytes(data, start, end - start, hashes[i]);
+        }
+      } else {
+        // A null row's id is whatever the encoder left there: read entry 0 for it and blend the hash
+        // away. No entry at all means every row is null, and nothing changes.
+        if (dict.length() == 0) return;
+        for (int i = 0; i < n; i++) {
+          int old = hashes[i];
+          int m = validMask(validity, i);
+          int id = ids.get(VectorBuffers.LE_INT, (long) i << 2) & m;
+          int start = off.get(VectorBuffers.LE_INT, (long) id << 2);
+          int end = off.get(VectorBuffers.LE_INT, (long) (id + 1) << 2);
+          int h = hashUnsafeBytes(data, start, end - start, old);
+          hashes[i] = (h & m) | (old & ~m);
         }
       }
       return;
     }
     MemorySegment off = col.offsets();
     MemorySegment data = col.data();
-    for (int i = 0; i < n; i++) {
-      if (validity == null || Bitmap.isSet(validity, i)) {
+    if (validity == null) {
+      for (int i = 0; i < n; i++) {
         int start = off.get(VectorBuffers.LE_INT, (long) i << 2);
         int end = off.get(VectorBuffers.LE_INT, (long) (i + 1) << 2);
         hashes[i] = hashUnsafeBytes(data, start, end - start, hashes[i]);
+      }
+    } else {
+      // A null row spans no bytes (its offsets are equal), so hashing it is a seed-only fmix; blended away.
+      for (int i = 0; i < n; i++) {
+        int old = hashes[i];
+        int start = off.get(VectorBuffers.LE_INT, (long) i << 2);
+        int end = off.get(VectorBuffers.LE_INT, (long) (i + 1) << 2);
+        int h = hashUnsafeBytes(data, start, end - start, old);
+        int m = validMask(validity, i);
+        hashes[i] = (h & m) | (old & ~m);
       }
     }
   }
