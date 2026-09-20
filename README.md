@@ -23,8 +23,9 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 | Module | Language | Contents |
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), SIMD kernels: compare, bitmap logic, compaction, arithmetic, decimal rescaling and division, casts, reductions (plain and overflow-checked), group hashing and key table, grouped accumulators, sort, gather, column builder; scalar references used as test oracles |
-| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, `VectorFilterExec` / `VectorProjectExec` / `VectorHashAggregateExec` / `VectorSortExec` / `VectorTakeOrderedAndProjectExec` / `VectorLocalLimitExec` / `VectorGlobalLimitExec` / `VectorCollectLimitExec` / `VectorUnionExec` / `VectorCoalesceExec` / `VectorExpandExec` / `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec`, Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
-| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H runner (all 22 queries) |
+| `spark/` | Scala 2.13 + Java | `VectorPlugin`, session extension, `VectorColumnarRule`, expression compiler, the operators (`VectorFilterExec`, `VectorProjectExec`, `VectorHashAggregateExec` with its spill, `VectorSortExec`, `VectorTakeOrderedAndProjectExec`, the limit family, `VectorUnionExec` / `VectorCoalesceExec`, `VectorExpandExec`, `VectorWindowExec`, `VectorGenerateExec`, `VectorSampleExec`, `VectorMergeRowsExec`, `VectorBroadcastHashJoinExec` / `VectorShuffledHashJoinExec` / `VectorBroadcastNestedLoopJoinExec` / `VectorSortMergeJoinExec`, `VectorShuffleExchangeExec`, `VectorToCometExec`), Arrow output, input adapters (Spark vectors, Arrow, Comet, Iceberg), the Vector Acceleration UI tab |
+| `shuffle/` | Scala 2.13 | the columnar shuffle (#288): `VectorShuffleManager` (writer, reader, file cleanup), `PartitionedIpcWriter` / `PartitionedIpcFile` (Arrow IPC record batches per reduce partition in Spark's data-file layout, adaptive dictionaries, zstd), the Flight data plane (`FlightShuffle`: one server per executor, one `DoGet` per executor and reducer) and the `block` backend over Spark's block transfer |
+| `benchmarks/` | Java + Scala | JMH kernel microbenchmarks; the TPC-H (22 queries) and TPC-DS (103 queries) runners, local and on a cluster; `submit-cluster.sh` and the Kubernetes `SparkApplication` manifest under `benchmarks/k8s/` (the image build and the run matrix of the EKS campaign arrive with #247); `profile-query.sh` (one query under JFR) |
 | `spark-sql-tests/` | Scala 2.13 | Spark's own SQL golden-file suite run with the plugin (profile `spark-sql-tests`, on demand only; see below) |
 
 ## Building
@@ -64,7 +65,10 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.project.enabled` | convert `ProjectExec` |
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
-| `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (in memory, no spill) |
+| `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (in memory, no spill; #380 designs the external sort) |
+| `spark.vector.agg.spillThreshold` | hard cap on one grouped aggregate table (default `512m`; `0` = never spill). Below it the operator acquires its real footprint from Spark's task memory manager as the table grows and acts on a refusal: a partial aggregate emits its table and starts over, a final one spills into hash buckets and merges them one at a time (#363, #367) |
+| `spark.vector.agg.spillBuckets` | buckets a final aggregate spills into (default `16`) |
+| `spark.vector.agg.passThroughRatio` | a partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on (default `1.5`, `0` = never; #376) |
 | `spark.vector.sort.runRows` | rows per sorted run (default 1048576): the sort orders each run as the partition arrives and k-way merges the runs on output, bounding its scratch to the run (#285) |
 | `spark.vector.exec.takeOrdered.enabled` | convert `TakeOrderedAndProjectExec` (`ORDER BY ... LIMIT`) over a columnar child; the per-partition top-N is columnar, the final merge of at most `limit` rows per partition goes through Spark's single-partition shuffle |
 | `spark.vector.exec.limit.enabled` | convert `LocalLimitExec` / `GlobalLimitExec` / `CollectLimitExec` over a columnar child (no offset); batches pass through until the boundary, the collect limit's final take goes through Spark's single-partition shuffle |
@@ -93,6 +97,8 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.shuffle.compression` | body compression of the shuffle's record batches: `zstd` (default; native), `lz4` (Arrow's codec is pure Java and an order of magnitude slower) or `none` |
 | `spark.vector.shuffle.batchRows`, `spark.vector.shuffle.batchBytes`, `spark.vector.shuffle.bufferBytes` | a map task holds each reduce partition's rows until `batchRows` (default `8192`) or `batchBytes` (default `1m`) and writes them as one record batch; `bufferBytes` (default `64m`) caps what one task holds across partitions |
 | `spark.vector.shuffle.flushBytes` | serialised bytes a map task keeps in memory per reduce partition before spilling to a temporary file (default `1m`) |
+| `spark.vector.shuffle.writer.memoryLimit` | the map task's Arrow allocator limit (default `1g`), the backstop behind `bufferBytes` |
+| `spark.vector.shuffle.writer.dictionaryMaxRatio` | a string column is dictionary-encoded on the wire only when distinct values / rows in the record batch is at most this (default `0.5`, #356); `1` always encodes, `0` never |
 | `spark.vector.shuffle.flight.bindHost`, `spark.vector.shuffle.flight.threads` | the Flight server's bind address (default: the executor's host name) and serving threads (default: the core count, at least 4) |
 | `spark.vector.ui.enabled` | attach the Vector Acceleration tab to the Spark UI (default `true`) |
 | `spark.vector.ui.retainedExecutions` | queries kept by that tab (default `100`) |
@@ -202,6 +208,10 @@ FilterExec        -> VectorFilterExec            ColumnarBatch -> VectorBuffers 
 ProjectExec       -> VectorProjectExec           kernels over MemorySegment (compare, arith, reduce)
 HashAggregateExec -> VectorHashAggregateExec     Arrow vectors -> ArrowColumnVector -> next operator
 (Partial and Final)                              or a selection bitmap over the child's columns
+Sort, Window, Expand, Generate, Limit, Sample,   the same contract: columnar child in, Arrow out
+Union, joins (hash, nested loop, sort-merge)     (see "Supported today")
+ShuffleExchange   -> VectorShuffleExchange       Arrow IPC record batches per reduce partition ->
+(spark-vector-shuffle jar)                       Spark's data file; reducers fetch over Arrow Flight
 ShuffleExchange   -> CometShuffleExchange        Arrow C Data export -> CometVector (zero copy)
 (with Comet)         over VectorToComet
 ```
@@ -291,10 +301,61 @@ task's batches. When every key is a dictionary-encoded string (the usual case fo
 Parquet columns) the ids are memoised per combination of dictionary indices, so a batch probes the
 table at most once per distinct key tuple. Rows are then scattered into per-group accumulators;
 the alternative, one masked SIMD reduction per group, only wins for one group on 128-bit vectors
-(`sparkvector.agg.maskPathMaxGroups` sets the cut-over, default 1 for ≤4 lanes and 8 above). The
-scatter rotates over four independent accumulator copies so consecutive rows of the same group do
-not serialise on one `sum[g] += x` chain (+40% at 4 groups); the price is that double sums are
-rounded in a different order than Spark's sequential loop (12th significant digit on TPC-H Q1).
+(`sparkvector.agg.maskPathMaxGroups` sets the cut-over: default 4 where the platform has mask
+registers and the double species has at least 4 lanes, 1 otherwise). The scatter rotates over
+`sparkvector.agg.interleave` independent accumulator copies (default 1 on AVX-512, 4 elsewhere) so
+consecutive rows of the same group do not serialise on one `sum[g] += x` chain (+40% at 4 groups);
+the price is that double sums are rounded in a different order than Spark's sequential loop (12th
+significant digit on TPC-H Q1) -- strict mode uses one copy -- and that the accumulators take that
+many times the memory (see "Memory tuning").
+
+### Columnar shuffle (Arrow IPC over Arrow Flight)
+
+With the `spark-vector-shuffle` jar on the classpath and
+`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`, the rule replaces
+a `ShuffleExchangeExec` above one of our operators with `VectorShuffleExchangeExec` (#288) -- a
+`ShuffleExchangeLike`, so AQE's coalescing, skew splitting and local reads apply -- for hash,
+round-robin, single and range partitioning (range samples the child once with Spark's own
+`RangePartitioner`), whenever every output column has a lane. Stage boundaries stop going through
+`ColumnarToRowExec` / `RowToColumnarExec`, and the final aggregate, the sort and the merge join read
+columns straight from the exchange.
+
+**Write.** A map task computes the partition id per row with Spark's exact hash (`Pmod(Murmur3, n)`,
+so a hash-partitioned side matches what Spark's own exchange would produce) and appends rows into one
+Arrow builder per reduce partition and column. A partition is flushed as one IPC record batch at
+`batchRows` (8192) or `batchBytes` (1 MB), or when the task holds more than `bufferBytes` (64 MB)
+across partitions -- measured on the allocator, not estimated (#340). Each record batch is its own
+IPC stream, so a string column is dictionary-encoded per batch and only when the dictionary pays
+(`writer.dictionaryMaxRatio`, #356); a partition's batches may alternate between encodings. Bodies
+are compressed with zstd through zstd-jni (native; Arrow's own zstd codec overran its buffer by up
+to 8 bytes, GH-1116, hence `SafeZstdCodec`), or LZ4, or not at all. Up to 200 partitions each write
+straight to a file; above that a heap staging buffer of `flushBytes` per partition is used. At the
+end the streams are concatenated into Spark's data file with an index of `(offset, length, rows)`
+per partition and committed through `IndexShuffleBlockResolver`, so `MapStatus`, the index file and
+Spark's block transfer all work as they do for a row shuffle. AQE's `dataSize` is fed the
+uncompressed Arrow bytes (compressed sizes made it mis-size broadcast sides, #355), and the write
+time counts only the writer's own work. Byte and short columns travel as `Int(32)`, decimals up to
+18 digits as `Int(64)`, wider ones as `Decimal128`; every field carries its Spark type as metadata.
+
+**Read.** A reducer reads local blocks straight from the files into Arrow memory and remote ones
+through the backend: `flight` (default) opens one `DoGet` per remote executor carrying all of that
+executor's blocks for the reducer (#347), and the executor's Flight server streams the blocks' IPC
+bytes back to back as raw 4 MB chunks (Flight's own record-batch framing would break the per-batch
+dictionaries, #338); the client decodes them with the same reader the local path uses, one batch
+live at a time. `block` uses Spark's block transfer over the same files. A remote fetch that fails is
+raised as Spark's `FetchFailedException` with the block's map index, so the scheduler recomputes the
+lost executor's map outputs instead of failing the query (#364); an Arrow out-of-memory stays a memory
+error. Files are deleted when the shuffle is unregistered (#358 -- before it, never).
+
+**The Flight server.** One per executor, started by the executor plugin on the block manager's host
+and an ephemeral port (`flight.bindHost`, `flight.threads`), registered with the driver plugin and
+looked up once per executor. Its security is described under the configuration table above: with
+`spark.authenticate` the shuffle secret is a bearer token on every call; TLS is not wired (the server
+refuses to start under `spark.ssl.rpc.enabled` -- use `backend=block` there). Both backends assume
+executors that stay up for the job; a push-based service for disposable executors plugs into the
+`VectorShuffleBackend` seam. Numbers: TPC-H SF10 0.59x the row shuffle over 22 queries; TPC-DS at
+1 TB, all 103 queries, 1.08x Spark with our operators on Spark's Parquet reader and 1.19x with
+Comet's scan feeding our operators and shuffle (`docs/results.md`).
 
 ### Comet shuffle
 
@@ -315,7 +376,7 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 
 | Area | Supported | Falls back |
 |---|---|---|
-| Types | Int, Long, Double, Date, Timestamp, Boolean, String (strings pass through and serve as group keys), Decimal of at most 18 digits (unscaled long lanes); Decimal of 19 to 38 digits as a two-limb DECIMAL128 lane that filters compact and projections forward (#257; arithmetic and keys follow in #258/#259); columns of any other type pass through a filter or projection untouched as Spark's vectors | Float, Short/Byte, Binary, nested -- as computed values or keys; Decimal above 18 digits as a computed value or key (yet) |
+| Types | Int, Long, Double, Date, Timestamp, Boolean, String (strings pass through and serve as group keys), Decimal of at most 18 digits (unscaled long lanes); Decimal of 19 to 38 digits as a two-limb DECIMAL128 lane: filtered, projected, `+ - * /`, abs, negation and casts (#257/#258), grouping and join keys (#259), `CASE WHEN` results, scalar-subquery literals and `round` (#326); Byte and Short (TINYINT/SMALLINT) on INT32 lanes with the declared type on output -- casts in every mode, arithmetic narrowed, keys, the shuffle (#327); columns of any other type pass through a filter or projection untouched as Spark's vectors | Float, Binary, nested -- as computed values or keys |
 | Strings | `instr`/`locate`/`position`, `replace`, `translate`, `substring_index`, `split_part`, `find_in_set` (one byte-search primitive); `upper`/`lower`/`initcap` (ASCII in lanes, the rest through Spark's own case mapping), `trim`/`ltrim`/`rtrim`/`btrim` with a literal trim set; `concat`, `concat_ws`, `elt` (lengths summed across the inputs, one buffer); `length`/`len`/`char_length`, `octet_length`, `bit_length`, `ascii`, `chr`/`char` (measured once per dictionary entry); `substring`/`substr`, `left`, `right`, `lpad`, `rpad`, `repeat`, `space`, `overlay` with Spark's code-point semantics (a two-pass UTF8 writer: lengths and source ranges, then one sized buffer); literals or lanes as arguments; a per-batch output cap declines a runaway `repeat`/`space` | collated columns; column trim sets and `translate` tables; regular expressions; binary and array subjects |
 | Nested columns | struct, array and map columns pass through filters and projections as Spark's own vectors; struct fields (`st.a`, `st.c.d`) are read from the struct vector's children, with the struct's nulls | `arr[i]`, `map[key]`, building a struct/array/map, the array/map/lambda function families (#50) |
 | Hashes | `hash` (Spark's exact Murmur3 chain), `xxhash64`, `md5`, `sha1`, `sha2`, `crc32` (per-row digests inside the operator) | binary columns; non-literal `sha2` bit lengths |
@@ -323,11 +384,11 @@ Comet's shuffle manager and `spark.comet.exec.shuffle.enabled=true`; see [docs/c
 | Arithmetic | `+ - *` on Int/Long/Double/Decimal (integers overflow-checked in ANSI mode, raising Spark's error only for rows that survive earlier filters), `/` on Double and Decimal (Spark's half-up rounding; null or ANSI error past the precision), wide decimals (`decimal(p > 18)`, #257 / #258) as two `long` limbs: comparisons, `IN`, `+ - * /`, `abs`, negation and casts to and from the lane with Spark's rescale and overflow semantics, the exact `BigInteger` path for a row whose intermediate leaves 128 bits, unary minus (ANSI-checked on integers), casts: widening, narrowing (Spark's truncation and saturation; ANSI `CAST_OVERFLOW` on active rows), decimals, booleans both ways, date <-> timestamp under a fixed offset, number/boolean/date/timestamp -> string and string -> number/boolean/date/timestamp with Spark's own parsers and formatters per row (ANSI `CAST_INVALID_INPUT` on active rows); `abs`, `sign`, the transcendental and trigonometric family (`exp`/`log*`/`pow`/`sqrt`/`cbrt`, trig, hyperbolic, `atan2`, `hypot`, `degrees`/`radians` -- bit-identical to Spark: the kernel makes exactly Spark's `Math`/`StrictMath` call per lane), `%` / `pmod` / `div` on Int/Long/Double (zero divisors raise in ANSI mode, null otherwise, active rows only), `try_add` / `try_subtract` / `try_multiply` / `try_divide` / `try_mod` / `try_cast` (the ANSI masks null the row instead of raising), `try_sum` (the whole group nulled on overflow, as Spark) and `try_avg`, `greatest` / `least`, `nanvl`, `ceil` / `floor` / `rint` / `round` / `bround` with Spark's exact definitions (incl. negative scales and decimals on the unscaled value), bitwise `& | ^ ~`, the three shifts and `bit_count` on Int/Long, widening casts, casts between decimals, integers and doubles, literal columns | `try_*` on decimals, `try_to_number` / `try_to_binary`, `%` / `div` on decimals, `round`-family functions and a string source for a cast over a wide decimal, casts to binary, intervals, nested types and the lane-less tinyint/smallint/float |
 | Dates | `year`, `month`, `dayofmonth`, `dayofyear`, `quarter`, `dayofweek`, `weekday`, `extract`, `trunc(date, year/quarter/month/week)`, `date_add`, `date_sub`, `datediff`, `last_day`, `add_months`, `next_day`, `weekofyear`, `make_date`, `unix_date`/`date_from_unix_date`, `timestamp_seconds`/`millis`/`micros` and `unix_seconds`/`millis`/`micros`; `date_format`/`from_unixtime` with literal patterns (Spark's own formatter per row); `cast(timestamp AS date)`, `hour`, `minute`, `second`, `months_between`, `date_trunc`, `unix_timestamp`/`to_unix_timestamp` under a UTC or fixed-offset session zone | zone-dependent arithmetic under a zone with rules (DST) -- see the Not planned table in `docs/expressions.md` |
 | Conditionals | `CASE WHEN ... [ELSE] END`, `IF`, `COALESCE`, `NVL`, `NVL2`, `NULLIF`, `IFNULL` over any supported type, with `NULL`, numeric, string and boolean literal branches; a null condition counts as false, later branches are evaluated only where earlier ones did not match | conditionals producing wide decimals or nested types |
-| Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `count_if`, `min`, `max` (incl. booleans and strings), `avg`, `first`/`last`, `bool_and`/`bool_or`, `bit_and`/`bit_or`/`bit_xor`, `max_by`/`min_by`, the statistical family (`stddev`/`variance` pop and samp, `skewness`, `kurtosis`, `covar_*`, `corr`, `regr_*`; Spark's Welford update and merge, agreement to a relative tolerance) in every aggregate mode (`Partial`, `PartialMerge`, `Final`, `Complete`), with `FILTER` clauses, `DISTINCT` (Spark's rewrites, incl. TPC-H Q16's `count(distinct)`) and keys-only aggregates (`SELECT DISTINCT`, `UNION`); `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums, wider ones through 128-bit accumulators emitting Spark's own wide buffers (a decimal `avg`'s result is Spark's own division over the merged buffer); keys of Int/Long/Boolean/String/Date/Decimal; Spark's `SortAggregateExec` for string buffers converted too | double keys, `stddev`/`variance`, `ObjectHashAggregateExec` functions (`collect_*`, `percentile_*`) |
+| Aggregates | `sum` (ANSI bigint sums overflow-checked), `count`, `count_if`, `min`, `max` (incl. booleans and strings), `avg`, `first`/`last`, `bool_and`/`bool_or`, `bit_and`/`bit_or`/`bit_xor`, `max_by`/`min_by`, the statistical family (`stddev`/`variance` pop and samp, `skewness`, `kurtosis`, `covar_*`, `corr`, `regr_*`; Spark's Welford update and merge, agreement to a relative tolerance) in every aggregate mode (`Partial`, `PartialMerge`, `Final`, `Complete`), with `FILTER` clauses, `DISTINCT` (Spark's rewrites, incl. TPC-H Q16's `count(distinct)`) and keys-only aggregates (`SELECT DISTINCT`, `UNION`); `sum`/`avg` of decimals up to 8/11 digits through Spark's own rewrite to long/double sums, wider ones through 128-bit accumulators emitting Spark's own wide buffers (a decimal `avg`'s result is Spark's own division over the merged buffer); keys of Int/Long/Boolean/String/Date/Byte/Short/Decimal (wide DECIMAL128 included) and Double (compared by bits, as Spark's `NormalizeNaNAndZero` makes them); Spark's `SortAggregateExec` for string buffers converted too. Past `spark.vector.agg.spillThreshold` a partial aggregate emits its table and starts over, a final one spills hash-partitioned and merges bucket by bucket, the budget arbitrated by Spark's task memory manager (#363, #367, #376) | `ObjectHashAggregateExec` functions (`collect_*`, `percentile_*`) |
 | Sort | `SORT BY`/`ORDER BY` over a columnar child, every supported type as key, in memory | sorts over Spark's row shuffle (kept by Spark), spilling |
 | Generate | `explode`, `posexplode`, `explode_outer`, `posexplode_outer` over an array column or a struct field of one (elements of any lane type; nulls, empty arrays and arrays longer than a batch) | `inline`, `stack`, `json_tuple`, generators over maps, user-defined generators, computed arrays |
 | Windows | `row_number`, `rank`, `dense_rank` over `PARTITION BY ... ORDER BY ...` (one walk over the sorted input; a partition longer than a batch is one partition); whole-partition `sum`/`avg`/`count`/`min`/`max` and the rest of the aggregate family over non-decimal inputs (the default frame without `ORDER BY`, or `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`); running `sum`/`avg`/`count`/`min`/`max` (`ROWS` or `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, the latter the default with `ORDER BY`); the child may be Spark's row sort; the per-partition top-k Spark inserts under a `rank <= k` filter (`WindowGroupLimitExec`, both modes) ; `lag`/`lead` (literal offset and default), `first_value`/`last_value`/`nth_value` over the same frames ; `percent_rank`/`cume_dist`/`ntile`; sliding `sum`/`avg`/`count`/`min`/`max` over `ROWS BETWEEN a AND b` | `RANGE` frames with value offsets, decimal window aggregates (#28), `IGNORE NULLS` (#58) |
-| Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti (including the null-aware anti join Spark plans for `NOT IN (subquery)` over nullable columns), existence (`EXISTS` as a value), each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Decimal | sort-merge joins, existence and null-aware anti joins, double keys |
+| Joins | broadcast and shuffled hash joins: inner, left/right/full outer, left semi, left anti (including the null-aware anti join Spark plans for `NOT IN (subquery)` over nullable columns), existence (`EXISTS` as a value), each with an optional non-equi condition; keys of Int/Long/Boolean/String/Date/Byte/Short/Decimal (wide included) and Double (by bits); sort-merge joins as an order-preserving merge join over Spark's sorted inputs (`spark.vector.exec.sortMergeJoin.mode`, `auto` by default, #286/#311); broadcast nested-loop joins | a columnar broadcast exchange (the build side is read from Spark's `HashedRelation`, once per executor) |
 
 ## Benchmarks
 
@@ -587,14 +648,17 @@ and only then decide what the row becomes (kept or dropped, its passing pairs or
 a full outer join remembers which build rows were paired and emits the rest after the last
 streamed batch. Null keys never match. Double
 keys are refused because Spark compares them after NaN/zero normalisation and the key table by bits.
-Sort-merge joins -- Spark's default for large equi joins -- are re-expressed as the shuffled hash
-join when `spark.vector.exec.sortMergeJoin.enabled` is set (off by default): the smaller side by the
-AQE stages' statistics becomes the per-task build table, it must fit `spark.vector.join.maxBuildSize`,
-the sorts Spark placed for the merge are dropped, and a merge join whose ordering a parent relies on
-(a window over the join key, a merge join above on the same key) stays Spark's. Same rows; tied rows
-under `ORDER BY` and unordered `LIMIT`s can come out in another order than Spark's order-preserving
-merge, so it is opt-in. Without it, `spark.sql.join.preferSortMergeJoin=false` or a `SHUFFLE_HASH`
-hint make Spark plan the hash join directly.
+Sort-merge joins -- Spark's default for large equi joins -- have two columnar forms, chosen by
+`spark.vector.exec.sortMergeJoin.mode`. `merge` (the default under `auto`, #286/#311) is a real,
+order-preserving merge join over the sorted inputs Spark already placed: the right side is read run
+by run (the rows sharing one key), the current run is the only buffered state, equal runs emit their
+cross product in Spark's order, every join type is covered and no statistics are needed. `hash`
+(#10) re-expresses the join as the shuffled hash join when AQE statistics say the smaller side fits
+`spark.vector.join.maxBuildSize`, dropping the sorts -- same rows, but tied rows can come out in
+another order than Spark's, so it is never chosen automatically. Under `auto` the merge join is taken
+up to `spark.vector.exec.sortMergeJoin.maxInputSize`; above it, or without statistics, the join stays
+Spark's, which beats ours on very large inputs while Spark's row shuffle feeds it (#361 studies the
+estimate that keeps q35's join at Spark's).
 
 ### Spark's SQL test suite
 
@@ -640,11 +704,8 @@ own operators, not ours).
 
 ## Not in scope (yet)
 
-- A columnar shuffle of our own. Without Comet, every stage boundary goes through Spark's row
-  shuffle (`ColumnarToRowExec` above, `RowToColumnarExec` below); a `ShuffleExchangeLike` with a
-  serializer that dumps the Arrow buffers would remove both.
 - A Parquet-to-Arrow reader of our own; Comet's reader covers the zero-copy case.
 - A columnar broadcast exchange of our own (the build side of a broadcast join is read from Spark's
-  `HashedRelation` once per task), a merge join of our own (the opt-in rewrite above is a hash join), a spilling sort or join, decimals wider than 18
-  digits (two 64-bit lanes per value would be the next step), and TPC-H on real decimals: the
-  benchmark data keeps decimals as doubles because `Decimal(12,2)` arithmetic exceeds 18 digits.
+  `HashedRelation` once per executor, #325), a spilling sort or join (#380: an external merge sort
+  under Spark's memory arbitration is designed), TLS for the Flight shuffle server, and a push-based
+  shuffle service for disposable executors (the `VectorShuffleBackend` seam is where it plugs in).
