@@ -235,7 +235,20 @@ object ClusterRunner {
       } else {
         sb.append(s"${comparable.size} of ${queries.size} queries are comparable (every configuration ran them and agreed on the result)")
         if (mismatched.nonEmpty) sb.append(s"; excluded as correctness bugs, checksums differ: ${mismatched.toSeq.sorted.mkString(", ")}")
-        sb.append(".\n\n### 1. Summary\n\n| configuration | total completion time (s) | speedup vs spark | % less runtime |\n|---|---:|---:|---:|\n")
+        sb.append(".\n")
+        if (mismatched.nonEmpty) {
+          // Which configurations disagree with the baseline: the reader needs the culprit, not just the list.
+          sb.append("\n| query | checksum differs from spark in | rows (spark / theirs) |\n|---|---|---|\n")
+          mismatched.toSeq.sorted.foreach { q =>
+            val base = latest.get(("spark", q))
+            val others = configs.filter(_ != "spark").flatMap { c =>
+              latest.get((c, q)).filter(r => base.exists(_.checksum != r.checksum)).map(r => (c, r))
+            }
+            val rowsNote = base.map(b => s"${b.rows} / " + others.map(_._2.rows).distinct.mkString(",")).getOrElse("no spark row")
+            sb.append(s"| $q | ${if (base.isEmpty) "(no spark row)" else others.map(_._1).mkString(", ")} | $rowsNote |\n")
+          }
+        }
+        sb.append("\n### 1. Summary\n\n| configuration | total completion time (s) | speedup vs spark | % less runtime |\n|---|---:|---:|---:|\n")
         val sparkTotal = comparable.map(sec("spark", _)).sum
         configs.foreach { c =>
           val total = comparable.map(sec(c, _)).sum
