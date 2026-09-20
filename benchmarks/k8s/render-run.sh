@@ -90,7 +90,6 @@ cat <<EOF
     # Arrow's Netty allocator is bounded by the JVM's direct-memory limit, which defaults to the heap size:
     # give it the overhead instead (DIRECT_MEM; default EXEC_OVERHEAD less 2g), or our kernels' and the
     # shuffle's buffers hit a 20 GiB wall inside a 50 GiB container.
-    spark.executor.extraJavaOptions: "-XX:MaxDirectMemorySize=$DIRECT_MEM${EXEC_JAVA_OPTS:+ $EXEC_JAVA_OPTS}"
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://sfi-iceberg-wh-378683551918/spark-events"
     spark.hadoop.fs.s3a.connection.maximum: "200"
@@ -103,6 +102,13 @@ for kv in "${CONFS[@]}"; do
   if [ -z "${SEEN[$k]+x}" ]; then ORDER+=("$k"); fi
   SEEN[$k]="$v"
 done
+# The executor's JVM options are one key: the engine's module flags, the direct-memory bound and any
+# EXEC_JAVA_OPTS appended -- a second `spark.executor.extraJavaOptions` line would silently win over
+# the first in the YAML map (it did: the direct-memory bound never reached the executors before this).
+EXEC_OPTS="${SEEN[spark.executor.extraJavaOptions]:-}"
+EXEC_OPTS="${EXEC_OPTS:+$EXEC_OPTS }-XX:MaxDirectMemorySize=$DIRECT_MEM${EXEC_JAVA_OPTS:+ $EXEC_JAVA_OPTS}"
+if [ -z "${SEEN[spark.executor.extraJavaOptions]+x}" ]; then ORDER+=("spark.executor.extraJavaOptions"); fi
+SEEN[spark.executor.extraJavaOptions]="$EXEC_OPTS"
 for k in "${ORDER[@]}"; do
   v="${SEEN[$k]}"
   v="${v//\"/\\\"}"   # YAML: the value quoted, embedded double quotes escaped
