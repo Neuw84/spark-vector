@@ -16,7 +16,9 @@ import org.apache.spark.sql.execution.vectorized.Dictionary;
 import org.apache.spark.sql.execution.vectorized.OffHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector;
+import org.apache.spark.sql.types.ByteType;
 import org.apache.spark.sql.types.Decimal;
+import org.apache.spark.sql.types.ShortType;
 import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.unsafe.types.UTF8String;
@@ -72,6 +74,18 @@ public final class SparkColumnVectorBuffers {
     MemorySegment validity = copyValidity(cv, numRows, arena);
     if (cv.dataType() instanceof DecimalType dec) {
       return copyDecimal(cv, dec, numRows, arena, validity);
+    }
+    if (cv.dataType() instanceof ByteType || cv.dataType() instanceof ShortType) {
+      // TINYINT / SMALLINT widen into the INT32 lane (#327); the per-row getters decode a Parquet
+      // dictionary, which the bulk ones do not, and the int fast paths below would read the wrong array.
+      MemorySegment data = ArrowLayout.allocateData(arena, VecType.INT32, numRows);
+      boolean bytes = cv.dataType() instanceof ByteType;
+      for (int i = 0; i < numRows; i++) {
+        if (validity == null || Bitmap.isSet(validity, i)) {
+          data.setAtIndex(VectorBuffers.LE_INT, i, bytes ? cv.getByte(i) : cv.getShort(i));
+        }
+      }
+      return SegmentVectorBuffers.fixedWidth(VecType.INT32, numRows, validity, data);
     }
     if (type.isFixedWidth() && cv instanceof WritableColumnVector w) {
       Dictionary dict = w.hasDictionary() ? dictionaryOf(w) : null;

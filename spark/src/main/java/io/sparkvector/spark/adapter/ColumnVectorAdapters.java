@@ -5,6 +5,7 @@ import io.sparkvector.spark.arrow.ArrowVectorBuffers;
 import io.sparkvector.spark.arrow.BorrowedColumnVector;
 import io.sparkvector.spark.arrow.VectorArrowColumnVector;
 import io.sparkvector.spark.arrow.VectorDecimalColumnVector;
+import io.sparkvector.spark.arrow.VectorNarrowIntColumnVector;
 import io.sparkvector.spark.arrow.VectorDictionaryColumnVector;
 import java.lang.foreign.Arena;
 import java.util.List;
@@ -71,6 +72,9 @@ public final class ColumnVectorAdapters {
     if (cv instanceof VectorDecimalColumnVector d) {
       return ArrowVectorBuffers.forRead(d.vector());
     }
+    if (cv instanceof VectorNarrowIntColumnVector n) {
+      return ArrowVectorBuffers.forRead(n.vector()); // an INT32 lane under a TINYINT / SMALLINT type (#327)
+    }
     for (Adapter adapter : ADAPTERS) {
       VectorBuffers vb = adapter.adapt(cv, numRows, scratch);
       if (vb != null) {
@@ -88,7 +92,7 @@ public final class ColumnVectorAdapters {
       return isZeroCopy(b.inner(), numRows);
     }
     if (cv instanceof VectorArrowColumnVector || cv instanceof VectorDictionaryColumnVector
-        || cv instanceof VectorDecimalColumnVector) {
+        || cv instanceof VectorDecimalColumnVector || cv instanceof VectorNarrowIntColumnVector) {
       return true;
     }
     try (Arena scratch = Arena.ofConfined()) {

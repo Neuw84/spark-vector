@@ -10,7 +10,7 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, UnsafeRowSerializer}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
-import org.apache.spark.sql.types.{BooleanType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, StructType, TimestampType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DateType, DecimalType, DoubleType, IntegerType, LongType, ShortType, StringType, StructType, TimestampType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -59,6 +59,8 @@ object VectorRowStages {
         else dt match {
           case BooleanType => v.putBoolean(i, row.getBoolean(c))
           case IntegerType | DateType => v.putInt(i, row.getInt(c))
+          case ByteType => v.putByte(i, row.getByte(c))
+          case ShortType => v.putShort(i, row.getShort(c))
           case LongType | TimestampType => v.putLong(i, row.getLong(c))
           case DoubleType => v.putDouble(i, row.getDouble(c))
           case d: DecimalType => v.putDecimal(i, row.getDecimal(c, d.precision, d.scale), d.precision)
