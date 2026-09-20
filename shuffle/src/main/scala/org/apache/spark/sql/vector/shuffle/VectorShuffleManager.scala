@@ -13,7 +13,7 @@ import io.sparkvector.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
 import io.sparkvector.spark.adapter.ColumnVectorAdapters
 import io.sparkvector.spark.arrow.VectorAllocators
 import org.apache.arrow.memory.BufferAllocator
-import org.apache.spark.{Partitioner, ShuffleDependency, SparkConf, SparkEnv, TaskContext}
+import org.apache.spark.{Partitioner, ShuffleDependency, SparkConf, SparkEnv, SparkException, TaskContext}
 import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager}
 import org.apache.spark.rdd.RDD
@@ -139,7 +139,10 @@ final class VectorShuffleWriter(
   private val blockManager = SparkEnv.get.blockManager
   private val dataFile: File = resolver.getDataFile(handle.shuffleId, mapId)
   private val tmp: File = Utils.tempFileWith(dataFile)
-  private val allocator: BufferAllocator = VectorAllocators.newChild(s"shuffle-write-${handle.shuffleId}-$mapId")
+  // A limit as the backstop behind the writer's own flushing (#340): a runaway task fails on its own
+  // instead of exhausting the executor's direct memory for every task on it.
+  private val allocator: BufferAllocator = VectorAllocators.root().newChildAllocator(
+    s"shuffle-write-${handle.shuffleId}-$mapId", 0L, VectorShuffleWriter.memoryLimit(SparkEnv.get.conf))
   private val writer = {
     val conf = SparkEnv.get.conf
     new PartitionedIpcWriter(dep.schema, numPartitions, allocator, tmp.toPath,
@@ -156,7 +159,7 @@ final class VectorShuffleWriter(
     case _ => null
   }
 
-  override def write(records: Iterator[Product2[Int, ColumnarBatch]]): Unit = {
+  override def write(records: Iterator[Product2[Int, ColumnarBatch]]): Unit = try {
     val start = System.nanoTime()
     while (records.hasNext) {
       val batch = records.next()._2
@@ -172,6 +175,8 @@ final class VectorShuffleWriter(
       }
     }
     metrics.incWriteTime(System.nanoTime() - start)
+  } catch {
+    case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("write", allocator, e)
   }
 
   private def partitionIds(batch: ColumnarBatch, buffers: Array[VectorBuffers], n: Int): Array[Int] = {
@@ -226,6 +231,21 @@ final class VectorShuffleWriter(
 }
 
 object VectorShuffleWriter {
+  /** The hard limit of one map task's writer allocator; the writer flushes long before it, this is the backstop. */
+  val MemoryLimitKey = "spark.vector.shuffle.writer.memoryLimit"
+  def memoryLimit(conf: SparkConf): Long = conf.getSizeAsBytes(MemoryLimitKey, "1g")
+
+  /**
+   * Arrow's `OutOfMemoryException` is not `Serializable` (it carries an `Optional`); a task failing with
+   * it cannot be reported and, on Spark 4.1 + JDK 24+, ends the executor instead (SPARK-55679, see
+   * `upstream/`). The task fails with this serializable exception carrying the allocator's state.
+   */
+  def serializable(side: String, allocator: BufferAllocator, e: org.apache.arrow.memory.OutOfMemoryException): SparkException =
+    new SparkException(
+      s"columnar shuffle $side ran out of Arrow memory: ${e.getMessage}; allocator ${allocator.getName} " +
+        s"allocated ${allocator.getAllocatedMemory} peak ${allocator.getPeakMemoryAllocation} limit ${allocator.getLimit}" +
+        (if (e.getCause != null) s"; cause: ${e.getCause}" else ""))
+
   /** A partition's held rows / bytes before they become one record batch, and the task-wide cap on held bytes. */
   val BatchRowsKey = "spark.vector.shuffle.batchRows"
   val BatchBytesKey = "spark.vector.shuffle.batchBytes"
@@ -289,12 +309,16 @@ final class VectorShuffleReader(
         private var live = true
         override def hasNext: Boolean = {
           if (!live) return false
-          val more = reader.hasNext
+          val more = try reader.hasNext catch {
+            case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("read", allocator, e)
+          }
           if (!more) { reader.close(); open.remove(reader); live = false }
           more
         }
         override def next(): Product2[Int, ColumnarBatch] = {
-          val b = reader.next()
+          val b = try reader.next() catch {
+            case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("read", allocator, e)
+          }
           metrics.incRecordsRead(b.numRows())
           (0, b)
         }

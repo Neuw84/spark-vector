@@ -10,7 +10,6 @@ import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector}
-import org.apache.arrow.compression.CommonsCompressionFactory
 import org.apache.arrow.vector.ipc.ArrowStreamReader
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, Field, FieldType, Schema}
@@ -178,7 +177,7 @@ object PartitionedIpcFile {
    */
   final class StreamReader(channel: ReadableByteChannel, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
     private val input = new PeekableChannel(channel)
-    private var reader: ArrowStreamReader = new ArrowStreamReader(input, allocator, CommonsCompressionFactory.INSTANCE)
+    private var reader: ArrowStreamReader = new ArrowStreamReader(input, allocator, io.sparkvector.shuffle.ShuffleCompression.Factory)
     private var nextBatch: ColumnarBatch = _
     private var types: Array[DataType] = _
     /** The batch last handed out: the consumers do not close their input, so it is closed when the next one is produced (or at close). */
@@ -198,7 +197,7 @@ object PartitionedIpcFile {
         done = true
       } else {
         reader.close(false)
-        reader = new ArrowStreamReader(input, allocator, CommonsCompressionFactory.INSTANCE)
+        reader = new ArrowStreamReader(input, allocator, io.sparkvector.shuffle.ShuffleCompression.Factory)
       }
     }
 

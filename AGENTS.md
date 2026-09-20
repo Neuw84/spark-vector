@@ -746,9 +746,25 @@ is configured. Four pieces, in the `shuffle` module except the kernel:
   and their string dictionaries concatenated with index offsets into one replacement dictionary.
   The first SF10 run wrote one record batch per (input batch, partition) -- 512 rows at 8 partitions,
   20 at 200 -- and the per-message costs made shuffled joins 2x slower than the row shuffle; sized
-  batches made them faster. Bodies are zstd-compressed (`spark.vector.shuffle.compression`): raw IPC
+  batches made them faster. Each record batch is its own IPC stream (#340): an `ArrowStreamWriter`
+  keeps a copy of every dictionary it wrote and the root keeps the batch's buffers until it closes,
+  so a stream per partition held most of a map task's memory across 200 partitions -- the reader
+  decodes concatenated streams anyway. Flushes are decided by the writer allocator's *real*
+  allocation as well as the slices' used bytes (`setSafe`-grown vectors and per-slice dictionaries
+  ran the estimate 10-20x under the truth: 1.1 GB against a 64 MB `bufferBytes`), the allocator is
+  limited by `spark.vector.shuffle.writer.memoryLimit` (1g), and Arrow's `OutOfMemoryException`
+  is rethrown as a serializable `SparkException` at the writer and reader (`VectorShuffleWriter
+  .serializable`): Arrow's own is not serializable, and on JDK 25 Spark's `SerializationDebugger`
+  then dies in its static initializer (SPARK-55679, fixed in 4.2.0 only) and the executor exits 50.
+  Bodies are zstd-compressed (`spark.vector.shuffle.compression`): raw IPC
   wrote 1.8x Spark's lz4 bytes, and Arrow's own lz4 codec is commons-compress pure Java, an order of
-  magnitude too slow (Q3 crawled for minutes under it). The exchange's `dataSize` metric -- AQE's
+  magnitude too slow (Q3 crawled for minutes under it). The codecs come from `ShuffleCompression
+  .Factory`, never `CommonsCompressionFactory` directly: arrow-java 18.3.0's zstd codec hands zstd
+  the whole buffer's size as the destination capacity after an 8-byte offset, so zstd may write 8
+  bytes past the compressed buffer into the pool's next chunk -- a neighbouring column's first value,
+  silently, with every reference count intact (apache/arrow-java GH-1116, fixed for 20.0.0, unreleased;
+  `PartitionedIpcSuite`'s #340 test reproduced it). `SafeZstdCodec` passes the right capacity.
+  The exchange's `dataSize` metric -- AQE's
   runtime statistic -- is the *uncompressed* Arrow bytes of the record batches written (never below
   the file bytes), added by every map task: Spark's is its rows' pre-compression size, so a zero there
   turned every shuffled join into a broadcast join and the compressed file bytes made AQE broadcast

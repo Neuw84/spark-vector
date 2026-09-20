@@ -101,12 +101,14 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  private def roundTrip(numPartitions: Int, batches: Seq[(Int, Boolean)], flushBytes: Long, batchRows: Int = 8192, bufferBytes: Long = 64L << 20): Unit = {
+  private def roundTrip(numPartitions: Int, batches: Seq[(Int, Boolean)], flushBytes: Long, batchRows: Int = 8192, bufferBytes: Long = 64L << 20,
+      writerAllocator: org.apache.arrow.memory.BufferAllocator = allocator,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] = Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)): Unit = {
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val expected = Array.fill(numPartitions)(mutable.ArrayBuffer.empty[Row])
-    val writer = new PartitionedIpcWriter(schema, numPartitions, allocator, path, flushBytes,
-      Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), batchRows, 1L << 20, bufferBytes)
+    val writer = new PartitionedIpcWriter(schema, numPartitions, writerAllocator, path, flushBytes,
+      compression, batchRows, 1L << 20, bufferBytes)
     try {
       batches.foreach { case (n, dictStrings) =>
         val arena = Arena.ofConfined()
@@ -200,6 +202,22 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 3, batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)), flushBytes = 1L << 20, batchRows = 150)
     // A tiny task-wide buffer: the fullest partition is written out whenever the cap is passed.
     roundTrip(numPartitions = 5, batches = Seq((500, true), (500, false), (500, true)), flushBytes = 1L << 20, bufferBytes = 4096)
+  }
+
+  test("#340: the writer's real allocation stays within bufferBytes -- 200 partitions of string-heavy batches under a 24 MB limit") {
+    // Before #340 the flush decision counted the slices' used bytes while the allocator held their
+    // doubled capacity, the per-slice string dictionaries and every partition's last record batch in
+    // its root: a 64 MB budget was 1.1 GB in an executor. With the cap on the allocator's own figure
+    // and the roots emptied after each batch, a limited allocator is enough for many partitions.
+    // This is also the regression test for ShuffleCompression.SafeZstdCodec: with arrow-java 18.3.0's zstd
+    // codec the dense flushing here put a compressed buffer next to a pending slice and zstd's 8-byte
+    // overrun zeroed the first value of that slice's BigInt column (partition 26, row 85).
+    val limited = allocator.newChildAllocator("writer-340", 0L, 24L << 20)
+    try {
+      roundTrip(numPartitions = 200, batches = Seq.fill(40)((8192, false)), flushBytes = 1L << 20, bufferBytes = 8L << 20, writerAllocator = limited)
+      assert(limited.getPeakMemoryAllocation <= (24L << 20), s"peak ${limited.getPeakMemoryAllocation}")
+      assert(limited.getAllocatedMemory === 0L, "everything released at close")
+    } finally limited.close()
   }
 
   test("a partition with no rows reads as empty and one partition takes everything") {
