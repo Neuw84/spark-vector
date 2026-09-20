@@ -79,6 +79,21 @@ class VectorAggregateSuite extends VectorQuerySuite {
     }
   }
 
+  test("#376: a partial aggregate that does not reduce passes the rest of its input through after one emit") {
+    // i is unique: a full table reduces nothing. With the ratio on, the partial emits its first table (one
+    // spill counted) and then hands every batch on; with it off, it keeps filling and emitting. Same answer.
+    def partialSpills(df: org.apache.spark.sql.DataFrame): Seq[Long] =
+      nodesOf[VectorHashAggregateExec](df).filterNot(_.isFinal).map(_.metrics("spills").value)
+    withConf(AggSpillPolicy.ThresholdKey -> "8k", AggSpillPolicy.BucketsKey -> "4") {
+      val on = partialSpills(checkVectorized("SELECT i, sum(l) AS sl, count(*) AS n FROM t GROUP BY i", Seq(Agg)))
+      assert(on.nonEmpty && on.sum >= 1L, s"the first table is emitted and counted: $on")
+      withConf(AggSpillPolicy.PassThroughKey -> "0") {
+        val off = partialSpills(checkVectorized("SELECT i, sum(l) AS sl, count(*) AS n FROM t GROUP BY i", Seq(Agg)))
+        assert(off.sum > on.sum, s"without pass-through the partial emits many more tables: $off vs $on")
+      }
+    }
+  }
+
   test("final aggregation merges the partial buffers over the shuffle") {
     // Ungrouped: one partial row per partition, one final row; avg is sum / count of the merged buffers.
     val df = checkVectorized("SELECT sum(d2), count(*), count(l), min(d), max(i), avg(d2), avg(i) FROM t WHERE i >= 0", Seq(Agg))

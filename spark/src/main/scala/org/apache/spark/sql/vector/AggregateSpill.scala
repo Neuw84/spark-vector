@@ -195,13 +195,20 @@ sealed trait AggSpillPolicy extends Serializable
 object AggSpillPolicy {
   /** Everything stays in memory (the budget is off, or the modes cannot re-read their own output). */
   case object InMemory extends AggSpillPolicy
-  /** Buffer-emitting modes (Partial, PartialMerge): emit the table as output and start over -- the next stage merges. */
-  final case class EmitAndReset(thresholdBytes: Long) extends AggSpillPolicy
+  /**
+   * Buffer-emitting modes (Partial, PartialMerge): emit the table as output and start over -- the next stage
+   * merges. `passThroughRatio` (#376): once a full table has reduced its input by less than this factor, the
+   * rest of the input goes out one batch at a time -- a partial aggregate that does not reduce only costs
+   * memory and copies; 0 keeps aggregating whatever the ratio.
+   */
+  final case class EmitAndReset(thresholdBytes: Long, passThroughRatio: Double = DefaultPassThroughRatio) extends AggSpillPolicy
   /** Result modes merging buffers (Final): spill the table into `buckets` and merge one bucket at a time. */
   final case class GraceHash(thresholdBytes: Long, buckets: Int) extends AggSpillPolicy
 
   val ThresholdKey = "spark.vector.agg.spillThreshold"
   val BucketsKey = "spark.vector.agg.spillBuckets"
+  val PassThroughKey = "spark.vector.agg.passThroughRatio"
   val DefaultThreshold = "512m"
   val DefaultBuckets = 16
+  val DefaultPassThroughRatio = 1.5
 }
