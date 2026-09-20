@@ -789,6 +789,52 @@ The priorities the two suites agree on: the hash join's residual condition (#332
 fixed cost (#331), the columnar broadcast exchange (#325); then q19's string filter and the merge join
 at scale (#329).
 
+### On the cluster (#247, #248): TPC-DS SF100 Parquet on S3, eight executors
+
+The first distributed reading: TPC-DS SF100 (27 GB ZSTD Parquet on S3, generated on the cluster),
+`sfi-iceberg-bench` EKS, node group `bench-xl` (m5.4xlarge), **eight executors of 13 cores and ~50 GiB
+each**, the memory placed where each engine uses it (Spark and our shuffle: 20 GiB heap + 30 GiB overhead
+for our native allocations; Comet: 20 GiB heap + 24 GiB off-heap; the Comet-scan mix over our shuffle:
+20 + 14 + 16), driver 4 GiB, one iteration per query, no warm-up. Image `benchmarks/k8s/Dockerfile`,
+manifests from `render-run.sh`, report `TpcdsRunner --cluster-report` over the rows on S3.
+
+| configuration | suite wall (s) | failed | comparable total (s, 87 queries) | vs Spark |
+|---|---:|---:|---:|---:|
+| spark | 643 | 0 | 398.0 | 1.00x |
+| vector-shuffle | 1898 | 9 | 878.5 | 0.45x |
+| vector-shuffle-strict | 1897 | 9 | 873.0 | 0.46x |
+| comet-scan-vector-ourshuffle | 888 | 3 | 512.4 | 0.78x |
+| hybrid | 551 | 0 | 331.9 | 1.20x |
+| comet | 521 | 0 | 308.3 | 1.29x |
+
+`vector-shuffle-strict` is `vector-shuffle` with `spark.vector.exec.strictFloatingPoint=true`: the cost
+of bit-identical floating-point results against the benchmarks' default is **0.6%** of the comparable
+total (873.0 s versus 878.5 s), within run-to-run noise -- the same failure set, the same checksums.
+
+What the cluster showed that one machine never did:
+
+1. **The Flight shuffle loses dictionary replacements.** `FlightShuffle.Producer` starts a stream with
+   the block's first dictionaries and Arrow Flight writes dictionaries only at a stream's start; our
+   blocks carry one replacement dictionary per record batch. A remote block with several batches is
+   decoded against the first batch's dictionary: indices past its size fail with
+   `IndexOutOfBoundsException` in every string consumer (q4, q11, q23b, q24b, q38, q74, q87 under
+   `vector-shuffle`), indices within it decode to the wrong string silently -- **the checksums of q1,
+   q6, q23b, q24a, q24b, q38, q39a, q39b, q74 and q87 disagree with Spark's in the configurations that
+   use our shuffle** (q39a returns 7,746 rows to Spark's 7,475). Local reads take the file reader,
+   which handles replacement, so SF1 on one executor passes.
+2. **Our native memory is not bounded.** The kernels and the shuffle allocate outside Spark's memory
+   manager; q67 (window/rollup over `store_sales`) grows an executor past its 50 GiB container and the
+   container is OOM-killed under every configuration that uses our operators over our shuffle. With
+   `spark.executor.maxNumFailures` raised the run survives it (q67 fails, the suite continues), and the
+   executors that relaunch during a dictionary-bug query die again with exit code 50 -- q81 then lost
+   shuffle outputs. Accounting and spilling for the native side is the engineering item.
+3. **q64 returns 0 rows under Comet** (`comet`, `hybrid`, and the Comet-scan mix; Spark 453) -- a Comet
+   1.0 issue, not ours; q65's checksum differs in every configuration including the other Spark-only
+   settings (a tie in its `LIMIT` order).
+
+Per-query and environment tables: `results/sf100-parquet-v2/cluster-results.md` on the results bucket.
+The 1 TB runs (#248) follow the shuffle fix.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
