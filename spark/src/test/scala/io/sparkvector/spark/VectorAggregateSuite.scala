@@ -2,6 +2,7 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+import org.apache.spark.sql.vector.AggSpillPolicy
 import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec}
 
 class VectorAggregateSuite extends VectorQuerySuite {
@@ -49,6 +50,33 @@ class VectorAggregateSuite extends VectorQuerySuite {
 
   test("count(*) over a scan with no projected columns") {
     checkVectorized("SELECT count(*) FROM t", Seq(Agg))
+  }
+
+  test("#363: past its budget the aggregate spills -- the partial emits and restarts, the final merges bucket by bucket") {
+    // 20000 distinct keys of every lane kind, an 8 KB budget: the partial emits many times, the final spills into buckets.
+    withConf(AggSpillPolicy.ThresholdKey -> "8k", AggSpillPolicy.BucketsKey -> "4") {
+      def spilled(df: org.apache.spark.sql.DataFrame): Unit = {
+        val aggs = nodesOf[VectorHashAggregateExec](df)
+        val fin = aggs.filter(_.isFinal)
+        assert(fin.nonEmpty, df.queryExecution.executedPlan.treeString)
+        assert(fin.exists(_.metrics("spills").value > 0L), s"the final should have spilled: ${fin.map(_.metrics("spills").value)}")
+        assert(aggs.filterNot(_.isFinal).exists(_.metrics("spills").value > 0L), "the partial should have emitted early")
+      }
+      spilled(checkVectorized("SELECT i, count(*) AS n, sum(l) AS sl, min(d) AS mn, max(d2) AS mx, avg(d2) AS av FROM t GROUP BY i", Seq(Agg)))
+      spilled(checkVectorized("SELECT l, dt, count(*) AS n, sum(d2) AS s FROM t GROUP BY l, dt", Seq(Agg)))
+      spilled(checkVectorized("SELECT s, i % 400 AS k, count(*) AS n, sum(i) AS si FROM t GROUP BY s, i % 400", Seq(Agg)))
+      spilled(checkVectorized("SELECT b, d, count(*) AS n, min(l) AS ml FROM t GROUP BY b, d", Seq(Agg)))
+      // Keys only (a distinct): no Final mode to look for -- both of its aggregates must have spilled.
+      val distinct = checkVectorized("SELECT DISTINCT i, s FROM t", Seq(Agg))
+      val distinctAggs = nodesOf[VectorHashAggregateExec](distinct)
+      assert(distinctAggs.size === 2 && distinctAggs.forall(_.metrics("spills").value > 0L), distinctAggs.map(_.metrics("spills").value).toString)
+      spilled(checkVectorized("SELECT i, sum(l) AS sl FROM t WHERE i % 3 <> 1 GROUP BY i", Seq(Filter, Agg)))
+    }
+    // The budget off: nothing spills.
+    withConf(AggSpillPolicy.ThresholdKey -> "0") {
+      val df = checkVectorized("SELECT i, count(*) AS n FROM t GROUP BY i", Seq(Agg))
+      assert(nodesOf[VectorHashAggregateExec](df).forall(_.metrics("spills").value === 0L))
+    }
   }
 
   test("final aggregation merges the partial buffers over the shuffle") {

@@ -113,7 +113,7 @@ public final class ArrowOutput {
   }
 
   /** The Spark-facing column over a finished vector: decimals need their own wrapper. */
-  private static ColumnVector wrap(FieldVector v, DataType sparkType) {
+  public static ColumnVector wrap(FieldVector v, DataType sparkType) {
     if (sparkType instanceof DecimalType d && v instanceof BigIntVector lv) {
       return new VectorDecimalColumnVector(lv, d);
     }

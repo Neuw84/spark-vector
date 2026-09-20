@@ -13,7 +13,7 @@ import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression,
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.{PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, HashAggregateExec}
-import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.{DataType, DecimalType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -116,11 +116,46 @@ case class VectorHashAggregateExec(
     }
   }.toArray
 
+  override lazy val metrics: Map[String, SQLMetric] = Map(
+    "numInputBatches" -> SQLMetrics.createMetric(sparkContext, "number of input batches"),
+    "numOutputBatches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"),
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels"),
+    "spills" -> SQLMetrics.createMetric(sparkContext, "number of spills (#363)"),
+    "spilledGroups" -> SQLMetrics.createMetric(sparkContext, "groups spilled or emitted early"))
+
+  /**
+   * Past the budget (`spark.vector.agg.spillThreshold`, 0 = never): buffer-emitting modes emit the
+   * table and start over; a Final whose buffers are re-mergeable as emitted spills hash-partitioned
+   * (#363). A Final that emits a result in a buffer slot (the wide decimal average) or a Complete
+   * aggregate, whose input is not buffers, keeps everything in memory.
+   */
+  private def spillPolicy(aggs: Array[VectorAggFunction]): AggSpillPolicy = {
+    val conf = org.apache.spark.sql.internal.SQLConf.get
+    val threshold = org.apache.spark.network.util.JavaUtils.byteStringAsBytes(conf.getConfString(AggSpillPolicy.ThresholdKey, AggSpillPolicy.DefaultThreshold))
+    if (threshold <= 0 || groupingExpressions.isEmpty) AggSpillPolicy.InMemory
+    else if (aggregateExpressions.isEmpty) {
+      // Keys only (a distinct): before the exchange it emits keys, after it it merges them -- either way re-readable.
+      if (requiredChildDistributionExpressions.isDefined && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType))) {
+        val buckets = conf.getConfString(AggSpillPolicy.BucketsKey, AggSpillPolicy.DefaultBuckets.toString).toInt
+        AggSpillPolicy.GraceHash(threshold, math.max(2, buckets))
+      } else AggSpillPolicy.EmitAndReset(threshold)
+    }
+    else if (VectorAggregatePlanner.emitsBuffers(modes)) AggSpillPolicy.EmitAndReset(threshold)
+    else if (VectorAggregatePlanner.mergesBuffers(modes) && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType)) &&
+      aggregateExpressions.zip(aggs).forall { case (a, f) => val d = a.aggregateFunction.aggBufferAttributes.map(_.dataType); f.emittedTypes(d) == d }) {
+      val buckets = conf.getConfString(AggSpillPolicy.BucketsKey, AggSpillPolicy.DefaultBuckets.toString).toInt
+      AggSpillPolicy.GraceHash(threshold, math.max(2, buckets))
+    } else AggSpillPolicy.InMemory
+  }
+
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val aggs = compiled
     val keys = compiledKeys
     val l = layout
     val finalMode = emitsResults
+    val policy = spillPolicy(aggs)
+    val spillMetrics = (longMetric("spills"), longMetric("spilledGroups"))
     // In result modes a function may emit its result in a buffer slot under the result's type
     // (the wide decimal average), so the batch's column types are the functions' emitted types.
     val bufferAttrs =
@@ -135,7 +170,7 @@ case class VectorHashAggregateExec(
     child.executeColumnar().mapPartitionsInternal { iter =>
       val buffers: Iterator[ColumnarBatch] =
         if (keys.isEmpty) new VectorUngroupedAggregateIterator(iter, aggs, l, bufferAttrs, m)
-        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m)
+        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics))
       if (finalMode) {
         // The projection's own bookkeeping goes to unregistered metrics so rows are not counted twice.
         val scratch = new VectorMetrics(new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("timing"))
@@ -218,65 +253,156 @@ private[vector] class VectorUngroupedAggregateIterator(
   }
 }
 
-/** Drains the partition into a group table, then emits the groups in batches. */
+/**
+ * Drains the partition into a group table, then emits the groups in batches. Past its memory budget
+ * (#363) it either emits the table and starts over (buffer-emitting modes: the next stage merges)
+ * or spills the table hash-partitioned and merges one bucket at a time (Final: [[AggregateSpill]]).
+ */
 private[vector] class VectorGroupedAggregateIterator(
     input: Iterator[ColumnarBatch],
     keyExprs: Array[VectorExpr],
     aggs: Array[VectorAggFunction],
     layout: Array[OutputSlot],
     outputAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
+    metrics: VectorMetrics,
+    policy: AggSpillPolicy = AggSpillPolicy.InMemory,
+    spillMetrics: Option[(SQLMetric, SQLMetric)] = None)
     extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
   private val OutputBatchSize = 4096
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
-  private val table = new GroupKeyTable(keyExprs.map(_.vecType))
-  private val states: Array[GroupedAggState] = aggs.map(_.newGroupedState())
+  private var table = new GroupKeyTable(keyExprs.map(_.vecType))
+  private var states: Array[GroupedAggState] = aggs.map(_.newGroupedState())
   private var idScratch = new Array[Int](0)
-  private var drained = false
+  private var inputDone = false
   private var emittedGroups = 0
   private var current: ColumnarBatch = _
   private var closed = false
 
+  // Grace hash (Final past the budget): the spill, the bucket being merged and its batches.
+  private var spill: AggregateSpill = _
+  private var bucket = -1
+  private var bucketInput: Iterator[ColumnarBatch] with AutoCloseable = _
+
+  /** Bytes per group besides string keys: the table's slots and hashes, a long per key, two per buffer slot. */
+  private val fixedBytesPerGroup: Long = 32L + layout.map {
+    case KeySlot(k) => if (keyExprs(k).vecType == VecType.DECIMAL128) 16L else 8L
+    case BufferSlot(_, _) => 16L
+  }.sum
+  private val utf8Keys: Array[Int] = keyExprs.indices.filter(k => keyExprs(k).vecType == VecType.UTF8).toArray
+
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
-  private def drain(): Unit = {
-    if (drained) return
-    drained = true
-    val keys = new Array[VectorBuffers](keyExprs.length)
-    while (input.hasNext) {
-      val batch = input.next()
-      if (batch.numRows() > 0) {
-        metrics.timed {
-          metrics.numInputBatches += 1
-          EvalContexts.withBatch(batch) { ctx =>
-            // Physical rows: a normalized foreign batch reports its live count as numRows.
-            val n = ctx.numRows
-            if (idScratch.length < n) idScratch = new Array[Int](n)
-            var k = 0
-            while (k < keys.length) { keys(k) = keyExprs(k).eval(ctx); k += 1 }
-            val numGroups = table.assign(keys, n, idScratch, ctx.selection)
-            val assignment = GroupAssignment.of(idScratch, n, numGroups, ctx.arena, ctx.selection)
-            var i = 0
-            while (i < states.length) { states(i).update(ctx, assignment); i += 1 }
-          }
-        }
+  private def estimatedBytes: Long = {
+    var bytes = table.size().toLong * fixedBytesPerGroup
+    var i = 0
+    while (i < utf8Keys.length) { bytes += table.utf8Bytes(utf8Keys(i), 0, table.size()); i += 1 }
+    bytes
+  }
+
+  private def consume(batch: ColumnarBatch): Unit = if (batch.numRows() > 0) {
+    metrics.timed {
+      metrics.numInputBatches += 1
+      EvalContexts.withBatch(batch) { ctx =>
+        // Physical rows: a normalized foreign batch reports its live count as numRows.
+        val n = ctx.numRows
+        if (idScratch.length < n) idScratch = new Array[Int](n)
+        val keys = new Array[VectorBuffers](keyExprs.length)
+        var k = 0
+        while (k < keys.length) { keys(k) = keyExprs(k).eval(ctx); k += 1 }
+        val numGroups = table.assign(keys, n, idScratch, ctx.selection)
+        val assignment = GroupAssignment.of(idScratch, n, numGroups, ctx.arena, ctx.selection)
+        var i = 0
+        while (i < states.length) { states(i).update(ctx, assignment); i += 1 }
       }
     }
   }
 
-  override def hasNext: Boolean = {
-    drain()
-    emittedGroups < table.size()
+  /** Consumes `source` into the table until it is exhausted (true) or the table passes `budget` (false; 0 = no budget). */
+  private def fill(source: Iterator[ColumnarBatch], budget: Long): Boolean = {
+    while (source.hasNext) {
+      consume(source.next())
+      if (budget > 0 && estimatedBytes > budget) return false
+    }
+    true
   }
+
+  private def reset(): Unit = {
+    table = new GroupKeyTable(keyExprs.map(_.vecType))
+    states = aggs.map(_.newGroupedState())
+    emittedGroups = 0
+  }
+
+  /** The whole table into the spill, as the batches the operator would emit. */
+  private def spillTable(buckets: Int): Unit = {
+    if (spill == null) {
+      val keyOrdinals = layout.zipWithIndex.collect { case (KeySlot(_), i) => i }
+      spill = new AggregateSpill(buckets, outputAttrs, keyOrdinals, allocator)
+    }
+    var from = 0
+    while (from < table.size()) {
+      val to = math.min(table.size(), from + OutputBatchSize)
+      val b = buildBatch(from, to)
+      try spill.write(b) finally b.close()
+      from = to
+    }
+    spillMetrics.foreach { case (spills, rows) => spills += 1; rows += table.size() }
+  }
+
+  /** Makes groups available to emit; false when the iterator is exhausted. */
+  private def advance(): Boolean = {
+    while (emittedGroups >= table.size()) {
+      policy match {
+        case AggSpillPolicy.InMemory =>
+          if (inputDone) return false
+          fill(input, 0L)
+          inputDone = true
+        case AggSpillPolicy.EmitAndReset(budget) =>
+          if (inputDone) return false
+          reset()
+          inputDone = fill(input, budget)
+          // Past the budget: this table goes out now and the next stage merges it with the rest.
+          if (!inputDone) spillMetrics.foreach { case (spills, groups) => spills += 1; groups += table.size() }
+          if (table.size() == 0 && inputDone) return false
+        case AggSpillPolicy.GraceHash(budget, buckets) =>
+          if (!inputDone) {
+            // Phase 1: the input, the whole table spilled whenever it passes the budget.
+            while (!fill(input, budget)) { spillTable(buckets); reset() }
+            inputDone = true
+            if (spill == null) return table.size() > 0 // never spilled: the table is the answer
+            spillTable(buckets); reset() // the remainder joins its buckets
+          } else {
+            // Phase 2: one bucket at a time, merged through the same path as the exchange's batches.
+            if (spill == null) return false
+            if (bucketInput != null) { bucketInput.close(); bucketInput = null }
+            bucket += 1
+            if (bucket >= buckets) return false
+            reset()
+            bucketInput = spill.read(bucket)
+            fill(bucketInput, 0L)
+          }
+      }
+    }
+    true
+  }
+
+  override def hasNext: Boolean = advance()
 
   override def next(): ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException("no more groups")
     releaseCurrent()
     val from = emittedGroups
     val to = math.min(table.size(), from + OutputBatchSize)
+    current = buildBatch(from, to)
+    emittedGroups = to
+    metrics.numOutputBatches += 1
+    metrics.numOutputRows += (to - from)
+    current
+  }
+
+  private def buildBatch(from: Int, to: Int): ColumnarBatch = {
     val count = to - from
     val columns = new Array[ColumnVector](layout.length)
     var c = 0
@@ -288,11 +414,7 @@ private[vector] class VectorGroupedAggregateIterator(
       }
       c += 1
     }
-    emittedGroups = to
-    metrics.numOutputBatches += 1
-    metrics.numOutputRows += count
-    current = new ColumnarBatch(columns, count)
-    current
+    new ColumnarBatch(columns, count)
   }
 
   private def keyColumn(name: String, dt: DataType, k: Int, from: Int, to: Int): ColumnVector = {
@@ -319,6 +441,8 @@ private[vector] class VectorGroupedAggregateIterator(
     if (!closed) {
       closed = true
       releaseCurrent()
+      if (bucketInput != null) { try bucketInput.close() catch { case _: Exception => }; bucketInput = null }
+      if (spill != null) { try spill.close() catch { case _: Exception => }; spill = null }
       allocator.close()
     }
   }
