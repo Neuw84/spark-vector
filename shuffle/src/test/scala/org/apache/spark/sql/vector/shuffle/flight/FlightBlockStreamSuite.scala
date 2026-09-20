@@ -83,4 +83,50 @@ class FlightBlockStreamSuite extends AnyFunSuite {
       allocator.close()
     }
   }
+  test("#347: one DoGet carries several map outputs for a reducer, back to back, an empty one included") {
+    val allocator = new RootAllocator()
+    val dir = Files.createTempDirectory("svflight")
+    val arena = Arena.ofConfined()
+    // Three map outputs of one reduce partition, each its own file; map 1 wrote nothing.
+    val blocks = mutable.Map.empty[Long, Array[Byte]]
+    val expected = mutable.Map.empty[Long, IndexedSeq[(Int, String)]]
+    try {
+      Seq(0L, 2L, 5L).foreach { mapId =>
+        val path = dir.resolve(s"map$mapId.ipc")
+        val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchBytes = 1L)
+        try {
+          val (b, rows) = batch(arena, allocator, 300 + mapId.toInt, s"m$mapId")
+          try { writer.write(b, new Array[Int](b.numRows())); expected(mapId) = rows } finally b.close()
+          writer.finish()
+        } finally writer.close()
+        val index = { val ch = java.nio.channels.FileChannel.open(path); try PartitionedIpcFile.readIndex(ch) finally ch.close() }
+        val all = Files.readAllBytes(path)
+        blocks(mapId) = java.util.Arrays.copyOfRange(all, index.offsets(0).toInt, (index.offsets(0) + index.lengths(0)).toInt)
+      }
+      blocks(1L) = Array.emptyByteArray
+      expected(1L) = IndexedSeq.empty
+    } finally arena.close()
+
+    val served = mutable.ArrayBuffer.empty[Long]
+    val producer = new FlightShuffle.Producer((_, mapId, _) => { served += mapId; new NioManagedBuffer(ByteBuffer.wrap(blocks(mapId))) }, allocator)
+    val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer).build()
+    server.start()
+    try {
+      val mapIds = Seq(0L, 1L, 2L, 5L)
+      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, mapIds, 0, new SparkConf(false),
+        FlightShuffle.Clients.allocatorForReads, new org.apache.spark.executor.TempShuffleReadMetrics())
+      try {
+        val got = mutable.ArrayBuffer.empty[(Int, String)]
+        while (stream.hasNext) {
+          val b = stream.next()
+          (0 until b.numRows()).foreach(r => got += ((b.column(0).getInt(r), b.column(1).getUTF8String(r).toString)))
+        }
+        assert(got === mapIds.flatMap(expected), "the blocks' rows in map-id order")
+        assert(served.toSeq === mapIds, "each block asked of the resolver once, in the ticket's order")
+      } finally stream.close()
+    } finally {
+      server.close()
+      allocator.close()
+    }
+  }
 }

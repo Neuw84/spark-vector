@@ -49,16 +49,21 @@ trait VectorShuffleBackend {
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] = {
     val env = SparkEnv.get
     val local = env.blockManager.blockManagerId.executorId
-    blocksByAddress.iterator.flatMap { case (address, blocks) =>
-      if (blocks.isEmpty) Iterator.empty
-      else if (address.executorId == local) blocks.iterator.map { case (id, _) =>
-        metrics.incLocalBlocksFetched(1)
-        val buf = env.blockManager.getLocalBlockData(id)
-        metrics.incLocalBytesRead(buf.size())
-        VectorShuffleReader.blockStream(buf, allocator)
-      }
-      else remoteBlocks(address, blocks, allocator, metrics)
+    // The remote streams are opened up front (one per executor and reducer, #347) so that the
+    // executors send concurrently while the reducer decodes the first; gRPC's flow control bounds
+    // what each stream buffers. The local blocks are read as they are reached.
+    val remote = blocksByAddress.iterator.collect {
+      case (address, blocks) if blocks.nonEmpty && address.executorId != local => remoteBlocks(address, blocks, allocator, metrics).toIndexedSeq
+    }.toIndexedSeq.flatten
+    val localBlocks = blocksByAddress.iterator.collect {
+      case (address, blocks) if blocks.nonEmpty && address.executorId == local => blocks
+    }.flatten.map { case (id, _) =>
+      metrics.incLocalBlocksFetched(1)
+      val buf = env.blockManager.getLocalBlockData(id)
+      metrics.incLocalBytesRead(buf.size())
+      VectorShuffleReader.blockStream(buf, allocator)
     }
+    localBlocks ++ remote.iterator
   }
 }
 
@@ -75,16 +80,21 @@ object VectorShuffleBackend {
   }
 }
 
-/** Slice 3: one `DoGet` per remote block against the executor's Flight server. */
+/**
+ * Slice 3: Flight against the executor's server -- one `DoGet` per (executor, reducer) carrying all of
+ * that executor's blocks for the reducer (#347). A reduce task's input is a block per map task; a
+ * `DoGet` per block, opened one after another, was a round trip per map output.
+ */
 object FlightBackend extends VectorShuffleBackend {
   override def name: String = "flight"
   override def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], allocator: BufferAllocator,
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] = {
     val conf = SparkEnv.get.conf
     val location = flight.FlightRegistry.locationOf(address.executorId)
-    blocks.iterator.map { case (ShuffleBlockId(shuffleId, mapId, reduceId), _) =>
-      metrics.incRemoteBlocksFetched(1)
-      new flight.FlightBlockStream(location, shuffleId, mapId, reduceId, conf, allocator, metrics)
+    val byReducer = blocks.groupBy(_._1.reduceId).toSeq.sortBy(_._1)
+    byReducer.iterator.map { case (reduceId, group) =>
+      metrics.incRemoteBlocksFetched(group.size)
+      new flight.FlightBlockStream(location, group.head._1.shuffleId, group.map(_._1.mapId), reduceId, conf, allocator, metrics)
     }
   }
 }
