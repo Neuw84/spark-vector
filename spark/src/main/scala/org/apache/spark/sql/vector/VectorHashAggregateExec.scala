@@ -133,15 +133,16 @@ case class VectorHashAggregateExec(
   private def spillPolicy(aggs: Array[VectorAggFunction]): AggSpillPolicy = {
     val conf = org.apache.spark.sql.internal.SQLConf.get
     val threshold = org.apache.spark.network.util.JavaUtils.byteStringAsBytes(conf.getConfString(AggSpillPolicy.ThresholdKey, AggSpillPolicy.DefaultThreshold))
+    val passThrough = conf.getConfString(AggSpillPolicy.PassThroughKey, AggSpillPolicy.DefaultPassThroughRatio.toString).toDouble
     if (threshold <= 0 || groupingExpressions.isEmpty) AggSpillPolicy.InMemory
     else if (aggregateExpressions.isEmpty) {
       // Keys only (a distinct): before the exchange it emits keys, after it it merges them -- either way re-readable.
       if (requiredChildDistributionExpressions.isDefined && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType))) {
         val buckets = conf.getConfString(AggSpillPolicy.BucketsKey, AggSpillPolicy.DefaultBuckets.toString).toInt
         AggSpillPolicy.GraceHash(threshold, math.max(2, buckets))
-      } else AggSpillPolicy.EmitAndReset(threshold)
+      } else AggSpillPolicy.EmitAndReset(threshold, passThrough)
     }
-    else if (VectorAggregatePlanner.emitsBuffers(modes)) AggSpillPolicy.EmitAndReset(threshold)
+    else if (VectorAggregatePlanner.emitsBuffers(modes)) AggSpillPolicy.EmitAndReset(threshold, passThrough)
     else if (VectorAggregatePlanner.mergesBuffers(modes) && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType)) &&
       aggregateExpressions.zip(aggs).forall { case (a, f) => val d = a.aggregateFunction.aggBufferAttributes.map(_.dataType); f.emittedTypes(d) == d }) {
       val buckets = conf.getConfString(AggSpillPolicy.BucketsKey, AggSpillPolicy.DefaultBuckets.toString).toInt
@@ -288,9 +289,11 @@ private[vector] class VectorGroupedAggregateIterator(
 
   /**
    * The accumulators' heap per group at capacity (#367): each buffer slot is up to two arrays of
-   * longs (a sum and a count), interleaved `INTERLEAVE` ways for the vector kernels, at the doubled
-   * capacity they grow to; the table reports its own arrays as allocated. Both get half again for
-   * the copy a growth step holds.
+   * longs (a sum and a count), interleaved `INTERLEAVE` ways for the vector kernels, at the capacity
+   * they have grown to (64, doubling); the table reports its own arrays as allocated. The copy a
+   * growth step holds -- the new arrays at twice the capacity next to the old -- is counted only once
+   * a doubling is imminent (#376: counted always, the estimate ran two to three times the live
+   * footprint and the pool's answer emptied tables that fit).
    */
   private val accumulatorBytesPerGroup: Long =
     aggs.map(a => math.max(1, a.bufferTypes.length).toLong * 2L * 8L * io.sparkvector.kernels.GroupedAccumulators.INTERLEAVE).sum
@@ -298,7 +301,9 @@ private[vector] class VectorGroupedAggregateIterator(
     val groups = table.size()
     var capacity = 64L
     while (capacity < groups) capacity <<= 1
-    (table.memoryBytes() + capacity * accumulatorBytesPerGroup) * 3 / 2
+    val accumulators = capacity * accumulatorBytesPerGroup
+    val growth = if (groups * 8L >= capacity * 7L) 2L * accumulators else 0L
+    table.memoryBytes() + accumulators + growth
   }
 
   // Spark's execution memory as the arbiter (#367): the estimate is acquired from the task's share of the
@@ -346,10 +351,18 @@ private[vector] class VectorGroupedAggregateIterator(
     }
   }
 
+  // Rows consumed into the current table, for the reduction ratio a partial aggregate is judged by (#376).
+  private var fillRows = 0L
+  // Pass-through: the input has shown it does not reduce, so each batch goes out as its own table.
+  private var passThrough = false
+
   /** Consumes `source` into the table until it is exhausted (true) or the table passes `budget` (false; 0 = no budget). */
   private def fill(source: Iterator[ColumnarBatch], budget: Long): Boolean = {
     while (source.hasNext) {
-      consume(source.next())
+      val batch = source.next()
+      fillRows += batch.numRows()
+      consume(batch)
+      if (passThrough) return !source.hasNext
       if (budget > 0 && overBudget(budget)) return false
     }
     true
@@ -360,6 +373,7 @@ private[vector] class VectorGroupedAggregateIterator(
     table = new GroupKeyTable(keyExprs.map(_.vecType))
     states = aggs.map(_.newGroupedState())
     emittedGroups = 0
+    fillRows = 0L
   }
 
   /** The whole table into the spill, as the batches the operator would emit. */
@@ -386,12 +400,18 @@ private[vector] class VectorGroupedAggregateIterator(
           if (inputDone) return false
           fill(input, 0L)
           inputDone = true
-        case AggSpillPolicy.EmitAndReset(budget) =>
+        case AggSpillPolicy.EmitAndReset(budget, ratio) =>
           if (inputDone) return false
           reset()
           inputDone = fill(input, budget)
-          // Past the budget: this table goes out now and the next stage merges it with the rest.
-          if (!inputDone) spillMetrics.foreach { case (spills, groups) => spills += 1; groups += table.size() }
+          // Past the budget: this table goes out now and the next stage merges it with the rest. A table
+          // that reduced its rows by less than `ratio` says the input does not aggregate here: from now on
+          // every batch is its own table (#376) -- no growth, no copies, the exchange gets what it would
+          // have got anyway.
+          if (!inputDone && !passThrough) {
+            spillMetrics.foreach { case (spills, groups) => spills += 1; groups += table.size() }
+            if (ratio > 0 && table.size() > 0 && fillRows < ratio * table.size()) passThrough = true
+          }
           if (table.size() == 0 && inputDone) return false
         case AggSpillPolicy.GraceHash(budget, buckets) =>
           if (!inputDone) {

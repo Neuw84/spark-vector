@@ -121,6 +121,66 @@ surviving fraction below which a filter compacts instead of forwarding a selecti
 plain (non-dictionary) string group key stops being dictionary-encoded on the fly and is hashed and
 compared per row instead.
 
+### Memory tuning
+
+Two pools matter, and they are not the same one Spark's defaults assume.
+
+**Off-heap: the data.** Every batch our operators produce is Arrow memory from Netty's allocator,
+and so are the shuffle's record batches and the Flight server's buffers. That allocator is bounded by
+the JVM's direct-memory limit, which defaults to the heap size -- so an executor with a small heap and
+a large `spark.executor.memoryOverhead` still refuses Arrow allocations at the heap's size unless
+`-XX:MaxDirectMemorySize` is raised. Set it to the overhead less what the JVM itself needs (the
+cluster manifests use the overhead minus 2 GB), and size the overhead for the data in flight: a task's
+input batch, its output batch, the shuffle writer's `bufferBytes` (64 MB per task) and, on a reducer,
+the fetched blocks of the partition it is merging.
+
+**On-heap: the tables.** The grouped aggregate's key table and accumulators, and a hash join's build
+table and its heap mirrors, are Java arrays on the heap. The aggregate registers with Spark's task
+memory manager and asks for its real footprint as its table grows (#367), so it lives inside the
+executor's execution memory: each task is entitled to roughly `spark.executor.memory x
+spark.memory.fraction / cores`, more when its neighbours are idle. The join's build side is bounded by
+`spark.vector.join.maxBuildSize` instead. Two rules of thumb follow. The heap
+is not "just the JVM": with 13 tasks per executor and a 20 GB heap, an aggregate gets about 900 MB
+before it has to spill, whatever the overhead holds. And the accumulators are interleaved for the
+kernels (`sparkvector.agg.interleave`, 4 on NEON, 1 on AVX-512 and in strict mode), which multiplies
+their footprint by the same factor -- strict mode is the cheapest in memory as well as the exact one.
+
+| setting | what it bounds |
+|---|---|
+| `spark.executor.memory`, `spark.executor.memoryOverhead`, `-XX:MaxDirectMemorySize` | the tables (heap) and the data (direct); the 1 TB campaign ran 20 GB / 30 GB / 28 GB per 13-core executor |
+| `spark.vector.agg.spillThreshold` | a hard cap on one grouped aggregate table (default `512m`). Below it the operator asks Spark's task memory manager for the table's real footprint as it grows and acts on a refusal: a partial aggregate emits its table and starts over, a final aggregate spills into hash buckets and merges them one at a time (#363, #367). `0` disables both |
+| `spark.vector.agg.spillBuckets` | buckets a final aggregate spills into (default `16`); each is merged in memory, so the buckets, not the input, must fit |
+| `spark.vector.agg.passThroughRatio` | a partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on (default `1.5`, `0` = never; #376). The exchange receives the same rows either way |
+| `spark.vector.join.maxBuildSize` | the largest build side the hash joins take (per task, on the heap) |
+| `spark.vector.shuffle.bufferBytes`, `spark.vector.shuffle.flushBytes`, `spark.vector.shuffle.batchBytes` | what a map task holds before writing (direct memory): across all partitions, per partition before its temporary file, per record batch |
+| `spark.sql.shuffle.partitions` | the size of a reduce task's input, hence of every table built from it: at 1 TB with 200 partitions a wide exchange hands a reducer several hundred MB of compressed input, and the final aggregate over it is the one that spills (#368 measures 1000 partitions with a 128 MB advisory size) |
+
+The sort and the window hold their whole partition (Arrow memory, plus an `int` permutation per row on
+the heap) and do not spill; a partition that cannot fit should keep Spark's sort
+(`spark.vector.exec.sort.enabled=false`).
+
+**Disk.** Everything we write lands under `spark.local.dir`, through Spark's own block manager, so it
+is sized and cleaned like Spark's shuffle files -- and on Kubernetes that is the node's disk or the
+`emptyDir` the manifest mounts, not the container's image layer.
+
+| what | when | where | how big |
+|---|---|---:|---|
+| a final aggregate's spill | its table passes the budget: the whole table goes out as `spillBuckets` Arrow IPC streams, hash-partitioned by key; later merged one bucket at a time | a temp local block per bucket | the table's size; freed at the operator's close |
+| a partial aggregate's overflow | never to disk -- it emits its table to the exchange and starts over | -- | -- |
+| a map task's shuffle output | always: one data file per map task with a partition index (Spark's layout, our IPC record batches, `zstd` by default) | the shuffle block resolver's data file | the task's compressed output; deleted when the shuffle is unregistered (#358 -- before it, never) |
+| a map task's overflow | a reduce partition's serialised bytes pass `spark.vector.shuffle.flushBytes` (1 MB) before the batch is closed | a temporary file beside the data file, merged into it at commit | at most the task's output |
+| a reducer's fetched blocks | never to disk: one `DoGet` per remote executor streams its blocks back to back, decoded batch by batch, the previous batch freed as the next is produced | -- | a batch per open stream (one stream per remote executor), in direct memory; the `block` backend follows Spark's fetch rules |
+
+Two numbers to keep in mind at scale. The node disk holds every live shuffle of the job -- at 1 TB with
+eight executors the first run filled 20 GB nodes within minutes because map outputs were never deleted
+(#358); with deletion in place the high-water mark is the largest stage's output. And an aggregate's
+spill is written once and read once per bucket, so its cost is one extra pass of Arrow IPC over the
+table, not a re-sort: q78's aggregate at 1 TB spilled and finished in 99 s against Spark's 114.
+What went wrong at 1 TB and how each was fixed is in `docs/results.md`: map outputs never deleted
+(#358, the node disks), an aggregate that never spilled (#363), a budget that undercounted the
+accumulators four to eight times (#367), and a budget that then overcounted them and emptied tables
+that fit (#376).
+
 ### JDK 25 and Spark 4.1
 
 Spark 4.1 officially supports JDK 17 and 21. Running it on 25 needs two things beyond the usual
