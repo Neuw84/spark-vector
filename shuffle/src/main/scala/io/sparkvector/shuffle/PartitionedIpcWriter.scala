@@ -7,9 +7,9 @@ import java.nio.channels.{Channels, FileChannel}
 import java.nio.file.{Files, Path, StandardOpenOption}
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.kernels.{Bitmap, PartitionKernels, VectorBuffers}
+import io.sparkvector.kernels.{CompactKernels, Bitmap, PartitionKernels, VectorBuffers}
 import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
+import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
@@ -17,8 +17,7 @@ import org.apache.arrow.vector.compression.CompressionUtil
 import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.apache.arrow.vector.ipc.message.IpcOption
 import org.apache.arrow.vector.types.pojo.Schema
-import org.apache.arrow.vector.util.VectorAppender
-import org.apache.spark.sql.types.{StringType, StructType}
+import org.apache.spark.sql.types.{BooleanType, StringType, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -33,17 +32,19 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * type in the field metadata, which the reader uses to rebuild the same Spark column vectors the
  * operators produce.
  *
- * Record batches are sized on this side, not by the input: a batch of the map task is compacted per
- * partition into slices, and a partition's slices are held until they reach `batchRows` rows or
- * `batchBytes` bytes (or the task's held total passes `bufferBytes`, or `finish`), then written as
- * one record batch -- one IPC message, one compression call per buffer, one dictionary per batch.
- * Without this an input of 4096 rows over 200 partitions would give 20-row record batches, and the
- * per-message costs (Arrow object churn, metadata, compression) were 2x the row shuffle on TPC-H.
- * Slices are concatenated with Arrow's `VectorAppender`; the string slices' dictionaries are
- * concatenated too and each slice's indices shifted by the dictionaries before it, so a record batch
- * carries one replacement dictionary (duplicates across slices are harmless to a reader).
+ * Record batches are sized on this side, not by the input: every partition holds one builder per
+ * column (#351) -- an Arrow vector the input batches' rows for that partition are compacted into at
+ * the current row offset, grown by doubling from a small start -- and when a partition reaches
+ * `batchRows` rows or `batchBytes` bytes (or the task's held total passes `bufferBytes`, or
+ * `finish`) its builders become the record batch as they are: one IPC message, one compression
+ * call per buffer, one dictionary per batch. Without sizing, an input of 4096 rows over 200
+ * partitions would give 20-row record batches, and the per-message costs (Arrow object churn,
+ * metadata, compression) were 2x the row shuffle on TPC-H; with a set of vectors per (input batch,
+ * partition) slice, concatenated at the flush, the write was 63% of a string-heavy query's CPU at
+ * 200 partitions (#349, #351). Strings are plain in the builders whatever the input (a dictionary
+ * column is decoded once per input batch) and dictionary-encoded once per record batch.
  *
- * Memory: the held slices, at most `bufferBytes` across partitions; the serialised bytes of a
+ * Memory: the builders, at most about `bufferBytes` across partitions; the serialised bytes of a
  * partition stay in memory up to `flushBytes` and overflow to a per-partition temporary file,
  * concatenated into the data file at `finish` (the shape of Spark's bypass-merge writer).
  */
@@ -64,10 +65,86 @@ final class PartitionedIpcWriter(
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
 
-  /** One partition's rows out of one input batch, compacted; owned by the segment until written. */
-  private final class Slice(val columns: Array[ColumnVector], val extra: Seq[FieldVector],
-      val sources: Array[FieldVector], val dictionaries: Array[VarCharVector], val rows: Int, val bytes: Long) {
-    def close(): Unit = { columns.foreach(cv => if (cv != null) cv.close()); extra.foreach(_.close()) }
+  /**
+   * One column of one partition's pending record batch (#351): an Arrow vector the input batches'
+   * rows are compacted into at the current row offset, grown by doubling, and moved into the record
+   * batch whole at the flush. Strings are plain here whatever the input (a dictionary column is
+   * decoded once per input batch) and encoded once per record batch (#349). Before this every input
+   * batch made a set of vectors per partition -- allocated, filled, appended into the batch and freed
+   * for ~40 rows at 200 partitions, 3,600 vectors per batch for an 18-column table.
+   */
+  private final class Builder(val column: Int) {
+    private val field = schema.fields(column)
+    private val isString = field.dataType == StringType
+    private val isBool = field.dataType == BooleanType
+    private val width: Int = if (isString || isBool) 0 else PartitionedIpcWriter.byteWidth(field.dataType)
+    var vector: FieldVector = _
+    var buffers: ArrowVectorBuffers = _
+    var rows: Int = 0
+    var dataBytes: Long = 0L
+
+    private def allocate(rowCapacity: Int, byteCapacity: Long): Unit = {
+      buffers = if (isString) ArrowOutput.allocateUtf8(field.name, rowCapacity, math.max(byteCapacity, 1L), allocator)
+        else ArrowOutput.allocateFixed(field.name, field.dataType, rowCapacity, allocator)
+      vector = buffers.vector().asInstanceOf[FieldVector]
+      if (isString) buffers.offsets().set(VectorBuffers.LE_INT, 0L, 0)
+    }
+
+    /** Room for `count` more rows and `bytes` more string bytes, doubling the vector as needed. */
+    private def ensure(count: Int, bytes: Long): Unit = {
+      if (vector == null) {
+        val cap = math.max(PartitionedIpcWriter.InitialRows, Integer.highestOneBit(math.max(count, 1) - 1) << 1)
+        allocate(math.min(math.max(cap, count), math.max(batchRows, count)), if (isString) math.max(bytes, PartitionedIpcWriter.InitialBytesPerRow.toLong * cap) else 0L)
+        return
+      }
+      var grown = false
+      while (vector.getValueCapacity < rows + count) { vector.reAlloc(); grown = true }
+      if (isString) {
+        val v = vector.asInstanceOf[VarCharVector]
+        while (v.getDataBuffer.capacity() < dataBytes + bytes) { v.reallocDataBuffer(); grown = true }
+      }
+      if (grown) buffers = ArrowVectorBuffers.forWrite(vector, vector.getValueCapacity, field.dataType)
+    }
+
+    /** Appends the rows of `in` selected by `mask` (`count` of them). */
+    def append(in: VectorBuffers, mask: MemorySegment, count: Int, scratch: Arena): Long = {
+      val bytes = if (isString) CompactKernels.selectedUtf8Bytes(in, mask) else 0L
+      ensure(count, bytes)
+      val validityScratch = Bitmap.allocate(scratch, count)
+      if (isString) {
+        val offsets = buffers.offsets().asSlice(rows.toLong << 2)
+        CompactKernels.compactUtf8(in, mask, count, offsets, buffers.data().asSlice(dataBytes), if (in.validity() != null) validityScratch else null)
+        if (dataBytes > 0) {
+          // The kernel's offsets start at zero: rebase them on the bytes already there (count + 1 of them).
+          var i = 0
+          while (i <= count) { offsets.set(VectorBuffers.LE_INT, i.toLong << 2, offsets.get(VectorBuffers.LE_INT, i.toLong << 2) + dataBytes.toInt); i += 1 }
+        }
+      } else if (isBool) {
+        val bits = Bitmap.allocate(scratch, count)
+        CompactKernels.compactFixed(in, mask, count, bits, if (in.validity() != null) validityScratch else null)
+        Bitmap.copyBits(bits, buffers.data(), rows, count)
+      } else {
+        CompactKernels.compactFixed(in, mask, count, buffers.data().asSlice(rows.toLong * width), if (in.validity() != null) validityScratch else null)
+      }
+      if (in.validity() != null) Bitmap.copyBits(validityScratch, buffers.validity(), rows, count)
+      else Bitmap.fillRange(buffers.validity(), rows, count, true)
+      rows += count
+      dataBytes += bytes
+      if (isString) bytes + (count.toLong << 2) else count.toLong * math.max(width, 1)
+    }
+
+    /** The finished vector (value count set), the builder emptied for the next batch. */
+    def take(): FieldVector = {
+      val v = vector
+      v match {
+        case vw: VarCharVector => vw.setLastSet(rows - 1); vw.setValueCount(rows)
+        case other => other.setValueCount(rows)
+      }
+      vector = null; buffers = null; rows = 0; dataBytes = 0L
+      v
+    }
+
+    def close(): Unit = { if (vector != null) vector.close(); vector = null; buffers = null; rows = 0; dataBytes = 0L }
   }
 
   private final class Segment(val partition: Int) {
@@ -76,7 +153,7 @@ final class PartitionedIpcWriter(
     var root: VectorSchemaRoot = _
     var writer: ArrowStreamWriter = _
     var rows: Long = 0L
-    val pending = scala.collection.mutable.ArrayBuffer.empty[Slice]
+    val builders: Array[Builder] = Array.tabulate(schema.fields.length)(new Builder(_))
     var pendingRows: Int = 0
     var pendingBytes: Long = 0L
     var overflow: FileChannel = _
@@ -130,7 +207,7 @@ final class PartitionedIpcWriter(
     def end(): Unit = endStream()
 
     def release(): Unit = {
-      pending.foreach(sl => try sl.close() catch { case _: Exception => }); pending.clear()
+      builders.foreach(b => try b.close() catch { case _: Exception => })
       if (writer != null) { try writer.close() catch { case _: Exception => }; try root.close() catch { case _: Exception => } }
       if (overflow != null) { try overflow.close() catch { case _: Exception => }; try Files.deleteIfExists(overflowPath) catch { case _: Exception => } }
     }
@@ -168,53 +245,26 @@ final class PartitionedIpcWriter(
    */
   def write(buffers: Array[VectorBuffers], n: Int, ids: Array[Int], scratch: Arena): Unit = {
     if (n == 0) return
+    // A dictionary-encoded string column is decoded once here and appended plain: the batch's strings
+    // are dictionary-encoded again at the flush, once per record batch (#349, #351).
+    val plain = buffers.map(b => if (b.`type`() == io.sparkvector.kernels.VecType.UTF8 && b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, scratch) else b)
     val masks = Array.tabulate(numPartitions)(_ => scratch.allocate(Bitmap.bytesFor(n), 8))
     val counts = new Array[Int](numPartitions)
     PartitionKernels.partitionMasks(ids, n, masks, counts)
     var p = 0
     while (p < numPartitions) {
-      if (counts(p) > 0) appendPartition(segments(p), buffers, masks(p), counts(p))
+      if (counts(p) > 0) appendPartition(segments(p), plain, masks(p), counts(p), scratch)
       p += 1
     }
   }
 
-  private def appendPartition(seg: Segment, buffers: Array[VectorBuffers], mask: MemorySegment, count: Int): Unit = {
-    val columns = new Array[ColumnVector](buffers.length)
-    val sources = new Array[FieldVector](buffers.length)
-    val dictionaries = new Array[VarCharVector](buffers.length)
-    val extra = scala.collection.mutable.ArrayBuffer.empty[FieldVector]
-    var ok = false
-    try {
-      var c = 0
-      while (c < buffers.length) {
-        val f = schema.fields(c)
-        columns(c) = ArrowOutput.compact(f.name, f.dataType, buffers(c), mask, count, allocator)
-        sources(c) = columns(c) match {
-          case d: VectorDictionaryColumnVector =>
-            dictionaries(c) = d.dictionary()
-            d.indices()
-          case d: VectorDecimalColumnVector => d.vector()
-          case a: VectorArrowColumnVector if f.dataType == StringType =>
-            // A plain string batch (the source was not dictionary encoded) stays plain in the slice:
-            // the flush encodes a record batch's plain slices together, once (#349). Encoding each
-            // slice on its own was a hash map and a dictionary per ~40 rows at 200 partitions -- the
-            // shuffle write was 63% of q30's CPU, a third of it here.
-            a.getValueVector.asInstanceOf[VarCharVector]
-          case a: VectorArrowColumnVector => a.getValueVector.asInstanceOf[FieldVector]
-          case other => throw new IllegalStateException(s"unexpected compacted column ${other.getClass.getName}")
-        }
-        c += 1
-      }
-      ok = true
-    } finally if (!ok) { columns.foreach(cv => if (cv != null) cv.close()); extra.foreach(_.close()) }
+  private def appendPartition(seg: Segment, buffers: Array[VectorBuffers], mask: MemorySegment, count: Int, scratch: Arena): Unit = {
     var size = 0L
     var c = 0
-    while (c < sources.length) {
-      size += sources(c).getBufferSize
-      if (dictionaries(c) != null) size += dictionaries(c).getBufferSize
+    while (c < buffers.length) {
+      size += seg.builders(c).append(buffers(c), mask, count, scratch)
       c += 1
     }
-    seg.pending += new Slice(columns, extra.toSeq, sources, dictionaries, count, size)
     seg.pendingRows += count
     seg.pendingBytes += size
     heldBytes += size
@@ -238,105 +288,51 @@ final class PartitionedIpcWriter(
   def allocatedBytes: Long = allocator.getAllocatedMemory
 
   /** The partition's held slices become one record batch of its stream. */
-  private def flush(seg: Segment): Unit = if (seg.pending.nonEmpty) {
-    val slices = seg.pending
-    val single = slices.size == 1
+  private def flush(seg: Segment): Unit = if (seg.pendingRows > 0) {
+    val rows = seg.pendingRows
+    val taken = new Array[FieldVector](schema.fields.length)
     try {
+      var c = 0
+      while (c < schema.fields.length) { taken(c) = seg.builders(c).take(); c += 1 }
       // Pass 1: the record batch's dictionaries into the provider -- all of them before the stream
       // writer exists, since it converts the schema with the dictionaries' types at construction.
-      var c = 0
+      c = 0
       while (c < schema.fields.length) {
         val encoding = arrowSchema.getFields.get(c).getDictionary
         if (encoding != null) {
-          val plain = slices.count(_.dictionaries(c) == null)
-          if (plain == slices.size) {
-            // Every slice plain: one dictionary for the batch from the strings back to back, encoded once.
-            val strings = if (single) slices.head.sources(c).asInstanceOf[VarCharVector] else {
-              val all = new VarCharVector(schema.fields(c).name + ".plain", allocator)
-              all.allocateNew()
-              mergedDictionaries += all
-              val appender = new VectorAppender(all)
-              slices.foreach(sl => sl.sources(c).accept(appender, null))
-              all
-            }
-            val (ids, dictionary) = PartitionedIpcWriter.encodeStrings(strings, schema.fields(c).name, allocator)
-            mergedDictionaries += dictionary
-            encodedIds(c) = ids
-            seg.provider.put(new Dictionary(dictionary, encoding))
-          } else {
-            if (plain > 0) {
-              // A mix of encoded and plain slices in one batch (the source changed encoding between
-              // input batches): the plain ones are encoded on their own and merged like the others.
-              slices.filter(_.dictionaries(c) == null).foreach { sl =>
-                val (ids, dictionary) = PartitionedIpcWriter.encodeStrings(sl.sources(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator)
-                mergedDictionaries += ids; mergedDictionaries += dictionary
-                sl.sources(c) = ids; sl.dictionaries(c) = dictionary
-              }
-            }
-            if (single) {
-              seg.provider.put(new Dictionary(slices.head.dictionaries(c), encoding))
-            } else {
-            // One dictionary for the record batch: the slices' dictionaries back to back, each slice's
-            // indices shifted by the entries before its own.
-            val merged = new VarCharVector(schema.fields(c).name + ".dictionary", allocator)
-            merged.allocateNew() // the appender reads the target's buffers before growing them
-            mergedDictionaries += merged
-            val dictAppender = new VectorAppender(merged)
-            var offset = 0
-            slices.foreach { sl =>
-              val ids = sl.sources(c).asInstanceOf[IntVector]
-              if (offset > 0) {
-                var i = 0
-                while (i < ids.getValueCount) { if (!ids.isNull(i)) ids.set(i, ids.get(i) + offset); i += 1 }
-              }
-              sl.dictionaries(c).accept(dictAppender, null)
-              offset += sl.dictionaries(c).getValueCount
-            }
-            seg.provider.put(new Dictionary(merged, encoding))
-            }
-          }
+          val (ids, dictionary) = PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator)
+          taken(c).close()
+          taken(c) = ids
+          batchDictionaries += dictionary
+          seg.provider.put(new Dictionary(dictionary, encoding))
         }
         c += 1
       }
       seg.start()
-      // Pass 2: the columns into the root -- moved when there is one slice, appended otherwise.
+      // Pass 2: the columns move into the root (no copy).
       c = 0
       while (c < schema.fields.length) {
-        val target = seg.root.getVector(c)
-        if (encodedIds(c) != null) {
-          // The ids of a batch's plain string slices, encoded together in pass 1.
-          encodedIds(c).makeTransferPair(target).transfer()
-          encodedIds(c).close(); encodedIds(c) = null
-        } else if (single) {
-          // Buffers move into the root's vector (no copy); the compacted wrapper is left empty and closed below.
-          slices.head.sources(c).makeTransferPair(target).transfer()
-        } else {
-          target.clear()
-          target.allocateNew()
-          val appender = new VectorAppender(target)
-          slices.foreach(sl => sl.sources(c).accept(appender, null))
-        }
+        taken(c).makeTransferPair(seg.root.getVector(c)).transfer()
+        taken(c).close(); taken(c) = null
         c += 1
       }
-      seg.root.setRowCount(seg.pendingRows)
+      seg.root.setRowCount(rows)
       seg.writer.writeBatch()
       seg.endStream()
-      seg.rows += seg.pendingRows
+      seg.rows += rows
       rawBytesWritten += seg.pendingBytes
       seg.spillIfNeeded()
     } finally {
-      // Closes the slices' dictionaries too: the stream writer keeps its own copy of what it sent.
-      slices.foreach(_.close())
-      mergedDictionaries.foreach(_.close()); mergedDictionaries.clear()
-      java.util.Arrays.fill(encodedIds.asInstanceOf[Array[AnyRef]], null)
+      taken.foreach(v => if (v != null) v.close())
+      // The stream writer kept its own copy of what it sent.
+      batchDictionaries.foreach(_.close()); batchDictionaries.clear()
       heldBytes -= seg.pendingBytes
-      seg.pending.clear(); seg.pendingRows = 0; seg.pendingBytes = 0L
+      seg.pendingRows = 0; seg.pendingBytes = 0L
     }
   }
 
-  private val mergedDictionaries = scala.collection.mutable.ArrayBuffer.empty[FieldVector]
-  /** Per column, the ids of a batch whose plain string slices were encoded together (pass 1), moved into the root in pass 2. */
-  private val encodedIds = new Array[IntVector](schema.fields.length)
+  private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[VarCharVector]
+
 
   /**
    * Ends every stream and writes the data file: the streams back to back and, when `withFooter`,
@@ -386,6 +382,20 @@ final class PartitionedIpcWriter(
 }
 
 object PartitionedIpcWriter {
+  /** A builder's first capacity in rows, doubled as a partition fills (#351). */
+  val InitialRows: Int = 256
+  /** A string builder's first data capacity per row, in bytes. */
+  val InitialBytesPerRow: Int = 16
+
+  /** The data width of a fixed-width lane as the writer lays it out (a small decimal is int64). */
+  def byteWidth(dt: org.apache.spark.sql.types.DataType): Int = dt match {
+    case org.apache.spark.sql.types.IntegerType | org.apache.spark.sql.types.DateType => 4
+    case org.apache.spark.sql.types.LongType | org.apache.spark.sql.types.TimestampType | org.apache.spark.sql.types.DoubleType => 8
+    case d: org.apache.spark.sql.types.DecimalType if d.precision <= 18 => 8
+    case _: org.apache.spark.sql.types.DecimalType => 16
+    case other => throw new IllegalArgumentException(s"unsupported shuffle column type $other")
+  }
+
   /** A channel the stream writer may close without closing the file or buffer behind it (one stream per batch). */
   final class NonClosing(inner: java.nio.channels.WritableByteChannel) extends java.nio.channels.WritableByteChannel {
     override def write(src: ByteBuffer): Int = inner.write(src)
