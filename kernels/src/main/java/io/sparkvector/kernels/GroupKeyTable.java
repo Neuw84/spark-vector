@@ -758,6 +758,24 @@ public final class GroupKeyTable {
     }
   }
 
+  /**
+   * The heap the table holds right now, as allocated (#367): the slots and hashes at capacity, the
+   * key arrays at capacity, the string bytes as reserved. The next growth step doubles the array it
+   * touches and holds both copies for its duration -- the caller adds that headroom.
+   */
+  public long memoryBytes() {
+    long bytes = 4L * slots.length + 4L * groupHashes.length;
+    for (int c = 0; c < types.length; c++) {
+      switch (types[c]) {
+        case INT32, BOOL -> bytes += 4L * intKeys[c].length;
+        case INT64, FLOAT64 -> bytes += 8L * longKeys[c].length;
+        case DECIMAL128 -> bytes += 16L * longKeys[c].length;
+        case UTF8 -> bytes += 4L * strOffsets[c].length + (strBytes[c] == null ? 0L : strBytes[c].length);
+      }
+    }
+    return bytes;
+  }
+
   private void rehash() {
     int[] newSlots = new int[slots.length * 2];
     Arrays.fill(newSlots, -1);

@@ -286,21 +286,47 @@ private[vector] class VectorGroupedAggregateIterator(
   private var bucket = -1
   private var bucketInput: Iterator[ColumnarBatch] with AutoCloseable = _
 
-  /** Bytes per group besides string keys: the table's slots and hashes, a long per key, two per buffer slot. */
-  private val fixedBytesPerGroup: Long = 32L + layout.map {
-    case KeySlot(k) => if (keyExprs(k).vecType == VecType.DECIMAL128) 16L else 8L
-    case BufferSlot(_, _) => 16L
-  }.sum
-  private val utf8Keys: Array[Int] = keyExprs.indices.filter(k => keyExprs(k).vecType == VecType.UTF8).toArray
+  /**
+   * The accumulators' heap per group at capacity (#367): each buffer slot is up to two arrays of
+   * longs (a sum and a count), interleaved `INTERLEAVE` ways for the vector kernels, at the doubled
+   * capacity they grow to; the table reports its own arrays as allocated. Both get half again for
+   * the copy a growth step holds.
+   */
+  private val accumulatorBytesPerGroup: Long =
+    aggs.map(a => math.max(1, a.bufferTypes.length).toLong * 2L * 8L * io.sparkvector.kernels.GroupedAccumulators.INTERLEAVE).sum
+  private def estimatedBytes: Long = {
+    val groups = table.size()
+    var capacity = 64L
+    while (capacity < groups) capacity <<= 1
+    (table.memoryBytes() + capacity * accumulatorBytesPerGroup) * 3 / 2
+  }
+
+  // Spark's execution memory as the arbiter (#367): the estimate is acquired from the task's share of the
+  // pool as the table grows, and a refusal -- the executor's tasks share it fairly -- is what triggers the
+  // emit or the spill, with the configured threshold as a hard cap. Nothing is spilled on another
+  // consumer's request; the memory is returned on every reset and at close.
+  private val consumer: org.apache.spark.memory.MemoryConsumer = Option(TaskContext.get()).map { tc =>
+    val tmm = tc.taskMemoryManager()
+    new org.apache.spark.memory.MemoryConsumer(tmm, tmm.pageSizeBytes(), org.apache.spark.memory.MemoryMode.ON_HEAP) {
+      override def spill(size: Long, trigger: org.apache.spark.memory.MemoryConsumer): Long = 0L
+    }
+  }.orNull
+  private var reserved = 0L
+
+  /** Whether the table has outgrown its budget: the cap, or what Spark's pool grants this task. */
+  private def overBudget(budget: Long): Boolean = {
+    val estimate = estimatedBytes
+    if (estimate > budget) return true
+    if (consumer != null && estimate > reserved) {
+      reserved += consumer.acquireMemory(estimate - reserved)
+      if (reserved < estimate) return true
+    }
+    false
+  }
+
+  private def releaseMemory(): Unit = if (consumer != null && reserved > 0) { consumer.freeMemory(reserved); reserved = 0L }
 
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
-
-  private def estimatedBytes: Long = {
-    var bytes = table.size().toLong * fixedBytesPerGroup
-    var i = 0
-    while (i < utf8Keys.length) { bytes += table.utf8Bytes(utf8Keys(i), 0, table.size()); i += 1 }
-    bytes
-  }
 
   private def consume(batch: ColumnarBatch): Unit = if (batch.numRows() > 0) {
     metrics.timed {
@@ -324,12 +350,13 @@ private[vector] class VectorGroupedAggregateIterator(
   private def fill(source: Iterator[ColumnarBatch], budget: Long): Boolean = {
     while (source.hasNext) {
       consume(source.next())
-      if (budget > 0 && estimatedBytes > budget) return false
+      if (budget > 0 && overBudget(budget)) return false
     }
     true
   }
 
   private def reset(): Unit = {
+    releaseMemory()
     table = new GroupKeyTable(keyExprs.map(_.vecType))
     states = aggs.map(_.newGroupedState())
     emittedGroups = 0
@@ -443,6 +470,7 @@ private[vector] class VectorGroupedAggregateIterator(
       releaseCurrent()
       if (bucketInput != null) { try bucketInput.close() catch { case _: Exception => }; bucketInput = null }
       if (spill != null) { try spill.close() catch { case _: Exception => }; spill = null }
+      releaseMemory()
       allocator.close()
     }
   }
