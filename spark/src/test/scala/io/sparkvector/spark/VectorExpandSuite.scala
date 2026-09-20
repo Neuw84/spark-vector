@@ -42,6 +42,29 @@ class VectorExpandSuite extends VectorQuerySuite {
       Seq(Expand, Agg), tolerance = 1e-9)
   }
 
+  test("#383: a rollup aggregates the finest grouping once and rolls the partials up") {
+    // Three of our aggregates: the finest-set partial under the Expand, the merge of the copies above it, the final.
+    def aggregates(df: org.apache.spark.sql.DataFrame) = nodesOf[org.apache.spark.sql.vector.VectorHashAggregateExec](df)
+    def expandOverAggregate(df: org.apache.spark.sql.DataFrame): Boolean =
+      nodesOf[org.apache.spark.sql.vector.VectorExpandExec](df).exists(_.child.isInstanceOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+    val rollup = checkVectorized(
+      "SELECT s, b, count(*) AS c, sum(l) AS sl, avg(d2) AS ad, min(i) AS mi, grouping_id() AS gid FROM t GROUP BY ROLLUP(s, b)", Seq(Expand, Agg))
+    assert(aggregates(rollup).size === 3, rollup.queryExecution.executedPlan.treeString)
+    assert(expandOverAggregate(rollup), "the Expand should sit over the finest-set partial aggregate")
+    // A FILTER clause is applied by the finest-set partial; the merge carries none.
+    checkVectorized("SELECT s, b, count(*) FILTER (WHERE i % 2 = 0) AS ce, sum(l) AS sl FROM t GROUP BY CUBE(s, b)", Seq(Expand, Agg))
+    // Grouping sets with an expression key: the key is aliased into the project below, so it is still a column reference here.
+    checkVectorized("SELECT year(dt) AS y, s, sum(i) AS si, count(*) AS c FROM t GROUP BY GROUPING SETS ((year(dt), s), (year(dt)), ())", Seq(Expand, Agg))
+    // The distinct rewrite also uses an Expand, but nulls the aggregate inputs per projection: no rewrite, same answer.
+    val distinct = checkVectorized("SELECT s, count(DISTINCT i) AS di, sum(l) AS sl FROM t GROUP BY s", Seq(Agg))
+    assert(!expandOverAggregate(distinct), "the distinct rewrite's Expand must keep its plan")
+    // The switch.
+    withConf(io.sparkvector.spark.VectorConf.RollupRewriteEnabled -> "false") {
+      val off = checkVectorized("SELECT s, b, count(*) AS c, sum(l) AS sl FROM t GROUP BY ROLLUP(s, b)", Seq(Expand, Agg))
+      assert(aggregates(off).size === 2 && !expandOverAggregate(off))
+    }
+  }
+
   test("count(distinct) lowers to an expand; the expand and every aggregate stage are ours") {
     // RewriteDistinctAggregates: Expand with null literals per distinct group, then a keys-only
     // aggregate and a filtered one (see VectorAggregateSuite). Nothing of Spark's is left.

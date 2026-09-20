@@ -22,6 +22,7 @@ object VectorConf {
   val UnionEnabled = "spark.vector.exec.union.enabled"
   val CoalesceEnabled = "spark.vector.exec.coalesce.enabled"
   val ExpandEnabled = "spark.vector.exec.expand.enabled"
+  val RollupRewriteEnabled = "spark.vector.exec.aggregate.rollupRewrite.enabled"
   val SampleEnabled = "spark.vector.exec.sample.enabled"
   val GenerateEnabled = "spark.vector.exec.generate.enabled"
   val WindowEnabled = "spark.vector.exec.window.enabled"
@@ -74,6 +75,7 @@ object VectorConf {
   def coalesceEnabled(conf: SQLConf): Boolean = bool(conf, CoalesceEnabled, default = true)
   /** Convert ExpandExec (grouping sets, the distinct rewrite) over a columnar child. */
   def expandEnabled(conf: SQLConf): Boolean = bool(conf, ExpandEnabled, default = true)
+  def rollupRewriteEnabled(conf: SQLConf): Boolean = bool(conf, RollupRewriteEnabled, default = true)
   /** Convert SampleExec without replacement over a columnar child (Spark's own Bernoulli sequence per partition). */
   def sampleEnabled(conf: SQLConf): Boolean = bool(conf, SampleEnabled, default = true)
   /** Convert GenerateExec with explode/posexplode (and the outer forms) over an array column. */
