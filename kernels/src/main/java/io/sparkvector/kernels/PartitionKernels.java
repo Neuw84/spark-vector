@@ -315,6 +315,31 @@ public final class PartitionKernels {
   }
 
   /** One bitmap per partition from the id vector: {@code masks[p]} has bit {@code i} for {@code ids[i] == p}. */
+  /**
+   * Groups the rows by partition id: {@code order[starts[p] .. starts[p + 1])} are the rows of
+   * partition {@code p} in input order (a stable counting sort). {@code starts} has
+   * {@code numPartitions + 1} entries; {@code order} at least {@code n}. The writer's alternative to
+   * {@link #partitionMasks} at many partitions: a gather per partition costs its own rows, where a
+   * mask costs a scan of every word of the batch per partition and column (#353).
+   */
+  public static void partitionOrder(int[] ids, int n, int numPartitions, int[] starts, int[] order) {
+    java.util.Arrays.fill(starts, 0, numPartitions + 1, 0);
+    for (int i = 0; i < n; i++) {
+      starts[ids[i] + 1]++;
+    }
+    for (int p = 0; p < numPartitions; p++) {
+      starts[p + 1] += starts[p];
+    }
+    // starts[p] is now the first slot of p; fill and advance, then restore.
+    for (int i = 0; i < n; i++) {
+      order[starts[ids[i]]++] = i;
+    }
+    for (int p = numPartitions; p > 0; p--) {
+      starts[p] = starts[p - 1];
+    }
+    starts[0] = 0;
+  }
+
   public static void partitionMasks(int[] ids, int n, MemorySegment[] masks, int[] counts) {
     java.util.Arrays.fill(counts, 0);
     for (int i = 0; i < n; i++) {
