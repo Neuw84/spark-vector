@@ -829,8 +829,8 @@ What the cluster showed that one machine never did:
    executors that relaunch during a dictionary-bug query die again with exit code 50 -- q81 then lost
    shuffle outputs. Accounting and spilling for the native side is the engineering item.
 3. **q64 returns 0 rows under Comet** (`comet`, `hybrid`, and the Comet-scan mix; Spark 453) -- a Comet
-   1.0 issue, not ours; q65's checksum differs in every configuration including the other Spark-only
-   settings (a tie in its `LIMIT` order).
+   1.0 issue, not ours; q65's checksum differs from Spark's in all five other configurations, 100 rows
+   each -- a tie in its `LIMIT` order is the likely reason, to be confirmed.
 
 Per-query and environment tables: `results/sf100-parquet-v2/cluster-results.md` on the results bucket.
 The 1 TB runs (#248) follow the shuffle fix.
