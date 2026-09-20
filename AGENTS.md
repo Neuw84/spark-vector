@@ -7,8 +7,9 @@ considered done. `README.md` is the user-facing description, `docs/results.md` t
 
 ## 1. What this project is
 
-A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (all four modes), `Sort` and
-the two hash joins over
+A Spark SQL plugin that runs `Filter`, `Project`, `HashAggregate` (all four modes, spilling),
+`Sort`, `Window`, `Expand`, `Generate`, the limit family, `Sample`, `Union`/`Coalesce`, Iceberg's
+`MergeRows`, the hash, broadcast-nested-loop and sort-merge joins, and its own columnar shuffle over
 Arrow-layout columnar batches with the Java Vector API (`jdk.incubator.vector`), in the style of
 Apache DataFusion Comet but entirely on the JVM. It reads batches from Spark's vectorized Parquet
 reader or from Comet's native scan, and emits unshaded Arrow vectors that Spark's own
@@ -27,8 +28,8 @@ Comet-backed tests and benchmarks. Maven builds everything.
 |---|---|---|
 | `kernels/` | Java 25 | `VectorBuffers` (Arrow-layout `MemorySegment`s), `VecType`, `Species`, the SIMD kernels (compare, bitmap, compact, arith, decimal, cast, agg incl. overflow-checked sums, hash, grouped accumulators, group key table with lookup), the sort, gather and column-builder kernels, and `reference/` (`ScalarReference`, `SortReference`), the scalar oracles the tests compare against |
 | `spark-sql-tests/` | Scala 2.13 | Spark's `SQLQueryTestSuite` with the extension injected; profile `spark-sql-tests` only, run by `benchmarks/scripts/run-spark-sql-tests.sh` |
-| `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the four operators, Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
-| `shuffle/` | Scala 2.13 | the columnar shuffle (#288, in progress): `VectorShuffleExchangeExec` (a `ShuffleExchangeLike`, planned by the rule under `spark.vector.shuffle.enabled` when `spark.shuffle.manager` is `VectorShuffleManager`; hash, round-robin, single and range partitionings), `VectorShuffleManager` (ours by dependency type, Spark's sort shuffle for everything else), the map-side `VectorShuffleWriter` (`PartitionKernels` ids, `PartitionedIpcWriter`: one Arrow IPC stream per reduce partition in the resolver's data file, dictionary strings encoded on the wire) and the `VectorShuffleReader` (local file segments; remote map outputs over Arrow Flight -- `flight/FlightShuffle`: one `FlightServer` per executor started by the executor plugin and registered with the driver plugin, one `DoGet` per map output block served straight from the shuffle file, `spark.authenticate`'s secret as the bearer token; `spark.vector.shuffle.backend=block` keeps Spark's block transfer instead; both through the `VectorShuffleBackend` seam, whose class-name form is where a push-based shuffle service such as Celeborn would plug in -- future work, not part of #288); `flight-core` 18.3.0 runs on the gRPC transport over Spark's Netty 4.2 and lives here so the plugin jar never carries gRPC |
+| `spark/` | Scala 2.13 + Java | plugin, session extension, `VectorColumnarRule`, expression compiler, the operators (sections 3.5-3.6b), Arrow output, input adapters (Spark on-heap, Arrow, Comet), the Comet bridge, the Vector Acceleration UI tab |
+| `shuffle/` | Scala 2.13 | the columnar shuffle (#288; still open there: TLS and a push-based service): `VectorShuffleExchangeExec` (a `ShuffleExchangeLike`, planned by the rule under `spark.vector.shuffle.enabled` when `spark.shuffle.manager` is `VectorShuffleManager`; hash, round-robin, single and range partitionings), `VectorShuffleManager` (ours by dependency type, Spark's sort shuffle for everything else), the map-side `VectorShuffleWriter` (`PartitionKernels` ids, `PartitionedIpcWriter`: one Arrow IPC stream per record batch, several per reduce partition, concatenated into the resolver's data file with a per-partition index (#340); strings dictionary-encoded per batch only when the dictionary pays, `spark.vector.shuffle.writer.dictionaryMaxRatio` (#356); zstd through zstd-jni with `SafeZstdCodec`; data and index files deleted on `unregisterShuffle` by tracked map task id (#358)) and the `VectorShuffleReader` (local file segments; remote map outputs over Arrow Flight -- `flight/FlightShuffle`: one `FlightServer` per executor started by the executor plugin and registered with the driver plugin, one `DoGet` per executor and reducer carrying all of that executor's blocks for the reducer, their IPC bytes streamed back to back straight from the shuffle files (#347), `spark.authenticate`'s secret as the bearer token; a failed remote fetch is Spark's `FetchFailedException` with the block's map index, so the lost map outputs are recomputed (#364); `spark.vector.shuffle.backend=block` keeps Spark's block transfer instead; both through the `VectorShuffleBackend` seam, whose class-name form is where a push-based shuffle service such as Celeborn would plug in -- future work, not part of #288); `flight-core` 18.3.0 runs on the gRPC transport over Spark's Netty 4.2 and lives here so the plugin jar never carries gRPC |
 | `benchmarks/` | Java + Scala | JMH kernel microbenchmarks and the TPC-H / TPC-DS runners (`TpchQueries`: all 22 queries, `TpchRunner`; `TpcdsRunner`: the 103 queries from Spark's `tpcds/q*.sql` test resources, sharing `TpchRunner`'s engine through `TpchRunner.Suite`) with their markdown/HTML reports and per-query accelerated-operator counts |
 
 Commands that are known to work (always unset `JAVA_TOOL_OPTIONS` first; the IDE sets one that
@@ -410,8 +411,13 @@ that pin it.
 - Blocking and in memory: the partition's batches are appended to one `ColumnBuilder` per column
   in an operator-owned shared `Arena` (applying any forwarded selection; dictionary strings are
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
-  4096-row batches through `GatherKernels` (shared with the joins; `-1` indices pad outer joins). There is no spill; that is documented
-  and the reason the config key exists.
+  4096-row batches through `GatherKernels` (shared with the joins; `-1` indices pad outer joins). The sort does not spill (that is
+  documented, and the reason the config key exists; #380 designs the external merge sort). The
+  grouped aggregate does, since #363: past `spark.vector.agg.spillThreshold` (512m) or a refusal by
+  Spark's task memory manager -- the operator acquires its real footprint as the table grows (#367,
+  #376) -- a buffer-emitting mode emits its table and starts over (`EmitAndReset`, with a
+  pass-through once a full table shows the input does not reduce), a merging mode spills into hash
+  buckets and merges one at a time (`GraceHash`, `AggregateSpill`).
 - `SortKernels.sortIndices` is an LSD sort over order-preserving unsigned key passes; each pass is a
   stable LSD *radix* sort of the current positions by a 32- or 64-bit key -- one counting sort per
   8-bit digit, a digit whose histogram is a single bucket skipped, a pass whose keys are already in
@@ -776,8 +782,9 @@ is configured. Four pieces, in the `shuffle` module except the kernel:
   column whole, one string append per row, before gathering -- the shuffled hash join of Q14 went
   from 285 ms to 5.7 s; it now gathers through the codes into the dictionary.
 - The data plane: one `FlightServer` per executor (started by the executor plugin, registered with
-  the driver plugin as executor id to host and port), one `DoGet` per map output block, the block's
-  IPC bytes streamed straight from the file as chunks of a one-column binary stream; the client
+  the driver plugin as executor id to host and port), one `DoGet` per executor and reducer carrying
+  all of that executor's blocks for the reducer (#347), their IPC bytes streamed straight from the
+  files as 4 MB chunks of a one-column binary stream; the client
   decodes them with the same `PartitionedIpcFile.StreamReader` a local block goes through.
   **Not** re-framed as Flight record batches (#338): Flight writes a stream's dictionaries once, at
   its start, while our blocks carry a replacement dictionary per record batch, so a re-framed block
@@ -975,8 +982,9 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
 
 - The columnar shuffle (#288): the Flight server has no TLS (Spark's material is JKS, Flight wants
   PEM; with `spark.ssl.rpc.enabled` it refuses to start -- use `spark.vector.shuffle.backend=block`);
-  one `DoGet` per map output block rather than one stream per executor; both backends assume
-  executors that stay up for the job -- a push-based shuffle service is future work.
+  one `DoGet` per executor and reducer rather than one stream per executor across reducers; both
+  backends assume executors that stay up for the job -- a lost executor's map outputs are recomputed
+  through `FetchFailedException` (#364), a push-based shuffle service is future work.
 
 - Iceberg merge-on-read reads (#261): the delete cost is a fixed per-batch price paid inside Iceberg's
   reader (`buildRowIdMapping`, the per-task position index) by both engines, so our margin over Spark
@@ -1085,12 +1093,14 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
 - Without Comet, the shuffle is Spark's row shuffle with a `ColumnarToRowExec` above the partial
   aggregate and a `RowToColumnarExec` below the Final. A columnar shuffle of our own is the
   natural next seam to fill (3.7).
-- The sort does not spill, and without Comet the global sort sits above Spark's row shuffle and
-  stays Spark's. Joins do not spill either (the build side is held in memory per task).
-- The build side of a broadcast join is Spark's `HashedRelation`, re-read into columns by every
-  task; a columnar broadcast exchange would read it once. Sort-merge joins are not converted.
-- Decimals wider than 18 digits fall back, including the TPC-H price arithmetic. The one exception
-  is the `sum` buffer of a decimal of more than 8 digits: the Partial side accumulates it in 128 bits
+- The sort does not spill (#380), and without our shuffle or Comet's the global sort sits above
+  Spark's row shuffle and stays Spark's. Joins do not spill either (the build side is held in memory
+  per task). The grouped aggregate spills (#363, #367, #376).
+- The build side of a broadcast join is Spark's `HashedRelation`, read into columns once per
+  executor and shared by its tasks; a columnar broadcast exchange would read it once per job (#325).
+- Decimals wider than 18 digits are a DECIMAL128 lane since #257-#259 and #326 (arithmetic, keys,
+  `CASE`, `round`, subquery literals; section 3.1); what remains their own path is the `sum` buffer of a
+  decimal of more than 8 digits: the Partial side accumulates it in 128 bits
   (`GroupedAccumulators.WideLongSum`, scalar two-word adds -- an accumulator is one value per group,
   not per row) and emits Spark's `(sum: Decimal(p+10, s), isEmpty)` buffer through a wide Arrow
   `DecimalVector` (`ArrowOutput.newVector`/`decimalColumn`); the merge modes (`WideDecimalSumMergeAgg`)
@@ -1099,7 +1109,7 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
   `Final` emits `If(isEmpty, null, CheckOverflowInSum(sum))` ready-made, which `compileFinalResults`
   recognises and forwards. The planner accepts a wide decimal input only as that buffer of a merging
   aggregate (`VectorAggregatePlanner.wideSumBuffers`) and a wide output only as that buffer or result.
-- AVX2/AVX-512 paths are tested emulated, never measured on real hardware.
+- AVX2/AVX-512 paths were measured once on a Sapphire Rapids pool (#283, `docs/results.md` "x86 kernel lab"); the suites here run on NEON, the other x86 generations (#282/#284) are not measured.
 - `TpchRunner --keep-alive` leaves the session and the Spark UI up for inspection; the demo JVM's
   Jetty resets some parallel static-resource fetches under load, so reload the page if the tab's
   toggles do not react (jQuery failed to load).
