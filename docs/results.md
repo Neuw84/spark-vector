@@ -871,28 +871,35 @@ gathers, in main after this run: q30 at SF10 2377 -> 1963 ms) is not in this ima
 differs from Spark's in every configuration but Spark (100 rows each: a tie in its `LIMIT` order, to
 be confirmed); q64 returns 0 rows under Comet's scan (a Comet 1.0 issue). Per-query tables:
 `results/sf100-parquet-v7/cluster-results.md` on the results bucket.
-**1 TB (#248, `results/sf1000-parquet`, the same eight executors).** The baselines ran first: spark
-3029.9 s, hybrid 2246.3 (1.35x), comet 2091.3 (1.45x), 100 comparable, no failures. Our two
-configurations ran on the engine after #356 and #358 (the second attempt: the first filled the 20 GB
-node disks within minutes because our shuffle never deleted its map outputs, #358):
+**1 TB (#248, `results/sf1000-parquet`, the same eight executors, 200 reduce partitions).** The
+baselines ran first: spark, hybrid, comet, no failures. Our two configurations took three attempts:
+the first filled the 20 GB node disks within minutes because our shuffle never deleted its map outputs
+(#358); the second lost five executors to q78's aggregate over (item, customer), which our hash
+aggregate kept entirely in memory (#363, the hash-partitioned spill; #364, a remote fetch error is
+now Spark's `FetchFailedException`, so the scheduler recomputes the lost map outputs instead of
+failing the query -- the cascade after q78 shrank from 17 queries to 7 while executors were replaced);
+the third, with the spill's budget counting the accumulators at their interleaved, doubled capacity
+and arbitrated by Spark's task memory manager (#367), ran all 103 with no failure and no executor
+lost:
 
-| 1 TB, 83 comparable queries | total (s) | vs Spark | failed |
+| 1 TB, 100 comparable queries | total (s) | vs Spark | failed |
 |---|---:|---:|---:|
-| spark | 2419.0 | 1.00x | 0 |
-| vector-shuffle | 2199.8 | **1.10x** | 18 |
-| comet-scan-vector-ourshuffle | 2075.5 | **1.17x** | 0 |
-| hybrid | 1732.7 | 1.40x | 0 |
-| comet | 1668.2 | 1.45x | 0 |
+| spark | 3029.9 | 1.00x | 0 |
+| vector-shuffle | 2809.4 | **1.08x** | 0 |
+| comet-scan-vector-ourshuffle | 2541.7 | **1.19x** | 0 |
+| hybrid | 2246.3 | 1.35x | 0 |
+| comet | 2091.3 | 1.45x | 0 |
 
-Our shuffle is faster than Spark at 1 TB on the queries every configuration completed, and the mix
-of Comet's scan with our operators and shuffle ran all 103 with no failure. `vector-shuffle`'s 18
-failures are one root cause and one consequence: q78's aggregate over (item, customer) does not fit
-the heap -- our hash aggregate kept every group in memory and never spilled (#363, the hash-partitioned
-spill) -- five executors died, and q79-q95 then failed on the dead executors' Flight ports because a
-remote fetch error was a plain task failure rather than Spark's `FetchFailedException` (#364, fixed:
-the scheduler now recomputes the lost map outputs). The mix's heap split left the aggregate room
-(q78 86 s against Spark's 114). Its own regressions at 1 TB: q14b 95 -> 144 s, q8 6.9 -> 27, q22
-8.3 -> 17.5, q72 27 -> 36; the rest within 1.1x or faster.
+Excluded: q64, where Comet's scan returns no rows (Spark 12,185), and q65, where every accelerated
+configuration -- pure Comet included -- returns 100 rows with a checksum different from Spark's
+(the query orders by store name and item description with ties at this scale; not yet confirmed).
+Our shuffle is faster than Spark at 1 TB on the whole suite, with the wins where the shuffle is the
+work (q23b 286 -> 132 s, q5 47 -> 22, q29 23 -> 11, q97 33 -> 16, q23a 207 -> 124; q78 spills and
+completes in 99 s against Spark's 114) and the losses where it is not: q8 6.8 -> 41 s (the widest,
+a broadcast-side plan under study), q67 126 -> 178 (the rollup window), q72 27 -> 42, and a band of
+small queries at 0.5-0.65x (q18, q19, q22, q99, q39b, q47, q57) whose exchanges are a few MB and
+whose time is our per-stage overhead. The mix of Comet's scan with our operators and shuffle is
+1.19x with its own regressions at q14b 95 -> 144 s and q72 27 -> 36.
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
