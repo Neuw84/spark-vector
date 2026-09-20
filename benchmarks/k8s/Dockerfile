@@ -27,7 +27,7 @@ WORKDIR /src
 COPY . /src
 # The shaded benchmarks.jar carries io.sparkvector:* (kernels, spark, shuffle, benchmarks); Spark, Comet
 # and Iceberg are provided by the image's jars directory.
-RUN mvn -B -q -Pcomet,iceberg -DskipTests -pl benchmarks -am package
+RUN mvn -B -q -Pcomet,iceberg -DskipTests -pl benchmarks -am install
 # The Flight shuffle's runtime jars: the shaded benchmarks.jar carries only io.sparkvector:*, and Spark's
 # distribution has Arrow and guava but no flight-core, gRPC or protobuf-java (the Netty classes are Spark's).
 RUN mvn -B -q -pl shuffle dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/src/flight-jars \
