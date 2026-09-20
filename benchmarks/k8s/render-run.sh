@@ -15,6 +15,7 @@
 #   NAMESPACE (bench) SERVICE_ACCOUNT (sfi-engine) SUITE (tpcds | tpch)
 #   EXECUTORS (8) EXEC_CORES (14) EXEC_MEM (40g) EXEC_OVERHEAD (10g) DRIVER_CORES (2) DRIVER_MEM (8g)
 #   NODE_SELECTOR (workload=spark-xl; empty for none) OFFHEAP (32g, the comet configurations)
+#   KEEP_EXECUTORS (unset; set to 1 to keep dead executor pods for their logs)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CONFIG="${1:?config}"; TABLES="${2:?tables}"; DATASET="${3:?dataset}"; OUT="${4:?out}"; IMAGE="${5:?image}"; shift 5
@@ -69,7 +70,8 @@ for a in "$@"; do echo "    - \"$a\""; done
 cat <<EOF
   sparkVersion: "4.1.3"
   sparkConf:
-    spark.kubernetes.executor.deleteOnTermination: "true"
+    # KEEP_EXECUTORS=1 leaves finished/dead executor pods in place, so a dying executor's own log survives.
+    spark.kubernetes.executor.deleteOnTermination: "${KEEP_EXECUTORS:+false}${KEEP_EXECUTORS:-true}"
     spark.kubernetes.authenticate.executor.serviceAccountName: "$SERVICE_ACCOUNT"
     # A query that kills executors (native memory past the container limit) must not end the whole run:
     # the runner records the failure and moves on; Spark's default gives up after 16 executor losses.
