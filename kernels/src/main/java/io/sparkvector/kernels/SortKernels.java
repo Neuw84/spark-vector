@@ -500,7 +500,9 @@ public final class SortKernels {
     if (maxLen <= SHORT_STRING) {
       return shortStringPasses(order, k, desc, p, n);
     }
-    if (maxLen <= CHUNKED_STRING) {
+    // A dictionary-encoded key ranks its dictionary (a few entries) and takes one pass over the codes;
+    // the chunked passes are for plain columns, where the rank would merge-sort every row.
+    if (maxLen <= CHUNKED_STRING && !k.isDictionaryEncoded()) {
       return chunkedStringPasses(order, k, desc, p, n, (maxLen + SHORT_STRING - 1) / SHORT_STRING);
     }
     int[] rank = ranks(k, n);
