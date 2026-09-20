@@ -839,24 +839,28 @@ queries (the driver's `ContextCleaner` removes them after a GC, every 30 min by 
 evicted an executor at query 95 -- `spark.cleaner.periodicGC.interval=2min` in the manifests), and
 hadoop-aws 3.4's default credential chain has no IRSA (`WebIdentityTokenFileCredentialsProvider` set).
 
-**v7 (the five fixes and the writer rework: #349 plain slices encoded once, #351 per-partition
-builders), 101 of 103 queries comparable, no failures in any configuration:**
+**v8 (the five fixes and the writer rework: #349 plain slices encoded once, #351 per-partition
+builders, #353 index-list gathers), all six configurations, 101 of 103 queries comparable, no failures
+in any configuration:**
 
 | configuration | suite wall (s) | failed | comparable total (s, 101 queries) | vs Spark |
 |---|---:|---:|---:|---:|
-| spark | 675 | 0 | 552.8 | 1.00x |
-| vector-shuffle | 735 | 0 | 638.9 | 0.87x |
-| comet-scan-vector-ourshuffle | 674 | 0 | 593.4 | 0.93x |
+| spark | 705 | 0 | 556.1 | 1.00x |
+| vector-shuffle | 736 | 0 | 639.1 | 0.87x |
+| vector-shuffle-strict | 736 | 0 | 639.3 | 0.87x |
+| comet-scan-vector-ourshuffle | 674 | 0 | 575.5 | 0.97x |
+| hybrid | 552 | 0 | 471.2 | 1.18x |
+| comet | 520 | 0 | 441.6 | 1.26x |
 
+`vector-shuffle-strict` -- bit-identical floating point against the benchmarks' fast default -- costs
+**0.03%** (639.3 s against 639.1), noise. 
 `comet-scan-vector-ourshuffle` is Comet's native Parquet scan feeding our operators over our shuffle
-(its v2 reading: 0.78x with 3 failures). The runs before: v2 (the first, 87 comparable) vector-shuffle
+(its v2 reading: 0.78x with 3 failures; v7: 0.93x). The runs before: v2 (the first, 87 comparable) vector-shuffle
 0.45x with 9 failures; v3 after #338: 0.33x, 2 failures; v4 after #340: 0.35x, 5 failures all one
-evicted executor; v5 after #343 and #345: 0.58x, none; v6 after #347: 0.73x. `vector-shuffle-strict`
-in v2 cost **0.6%** over `vector-shuffle` (873.0 s against 878.5), within noise: the same failures, the
-same checksums. The other configurations of v2 -- hybrid 1.20x, comet 1.29x -- are to be rerun on the
-fixed engine.
+evicted executor; v5 after #343 and #345: 0.58x, none; v6 after #347: 0.73x; v7 after #349 and #351: 0.87x, the mix
+0.93x. hybrid and comet in v2 read 1.20x and 1.29x on the unfixed engine.
 
-Where the numbers now live (v7): under `vector-shuffle` 30 queries are faster than Spark (q97 1.96x,
+Where the numbers now live (v7/v8): under `vector-shuffle` 30 queries are faster than Spark (q97 1.96x,
 q94 1.77x, q52, q82, q51, q42 1.5-1.6x, q29, q93 1.44x), 27 within 10%, 32 more than 20% slower --
 q30 (4.35 -> 9.88 s) and q8 (2.71 -> 6.06) at the top, then q1, q39a/b, q46, q67, q72, q4 around 1.5-2x.
 Under the Comet-scan mix 35 are faster (q97 2.25x, q94 1.90x, q82 1.86x, q42, q52, q41 1.75-1.84x),
