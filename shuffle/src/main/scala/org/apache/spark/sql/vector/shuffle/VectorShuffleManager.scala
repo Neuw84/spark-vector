@@ -161,7 +161,8 @@ final class VectorShuffleWriter(
     new PartitionedIpcWriter(dep.schema, numPartitions, allocator, tmp.toPath,
       VectorShuffleWriter.flushBytes(conf), VectorShuffleWriter.compression(conf),
       conf.getInt(VectorShuffleWriter.BatchRowsKey, 8192), conf.getSizeAsBytes(VectorShuffleWriter.BatchBytesKey, "1m"),
-      conf.getSizeAsBytes(VectorShuffleWriter.BufferBytesKey, "64m"))
+      conf.getSizeAsBytes(VectorShuffleWriter.BufferBytesKey, "64m"),
+      conf.getDouble(VectorShuffleWriter.DictionaryMaxRatioKey, PartitionedIpcWriter.DefaultDictionaryMaxRatio))
   }
   private var lengths: Array[Long] = _
   private var stopped = false
@@ -254,6 +255,8 @@ object VectorShuffleWriter {
   /** The hard limit of one map task's writer allocator; the writer flushes long before it, this is the backstop. */
   val MemoryLimitKey = "spark.vector.shuffle.writer.memoryLimit"
   def memoryLimit(conf: SparkConf): Long = conf.getSizeAsBytes(MemoryLimitKey, "1g")
+  /** A record batch's string column is dictionary-encoded only when distinct/rows is at most this (#356); 0 never, 1 always. */
+  val DictionaryMaxRatioKey = "spark.vector.shuffle.writer.dictionaryMaxRatio"
 
   /**
    * Arrow's `OutOfMemoryException` is not `Serializable` (it carries an `Optional`); a task failing with
