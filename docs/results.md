@@ -871,8 +871,28 @@ gathers, in main after this run: q30 at SF10 2377 -> 1963 ms) is not in this ima
 differs from Spark's in every configuration but Spark (100 rows each: a tie in its `LIMIT` order, to
 be confirmed); q64 returns 0 rows under Comet's scan (a Comet 1.0 issue). Per-query tables:
 `results/sf100-parquet-v7/cluster-results.md` on the results bucket.
-The 1 TB baselines (#248, `results/sf1000-parquet`): spark 3029.9 s, hybrid 2246.3 (1.35x), comet
-2091.3 (1.45x), 100 comparable, no failures; our shuffle's 1 TB run follows the speed work.
+**1 TB (#248, `results/sf1000-parquet`, the same eight executors).** The baselines ran first: spark
+3029.9 s, hybrid 2246.3 (1.35x), comet 2091.3 (1.45x), 100 comparable, no failures. Our two
+configurations ran on the engine after #356 and #358 (the second attempt: the first filled the 20 GB
+node disks within minutes because our shuffle never deleted its map outputs, #358):
+
+| 1 TB, 83 comparable queries | total (s) | vs Spark | failed |
+|---|---:|---:|---:|
+| spark | 2419.0 | 1.00x | 0 |
+| vector-shuffle | 2199.8 | **1.10x** | 18 |
+| comet-scan-vector-ourshuffle | 2075.5 | **1.17x** | 0 |
+| hybrid | 1732.7 | 1.40x | 0 |
+| comet | 1668.2 | 1.45x | 0 |
+
+Our shuffle is faster than Spark at 1 TB on the queries every configuration completed, and the mix
+of Comet's scan with our operators and shuffle ran all 103 with no failure. `vector-shuffle`'s 18
+failures are one root cause and one consequence: q78's aggregate over (item, customer) does not fit
+the heap -- our hash aggregate kept every group in memory and never spilled (#363, the hash-partitioned
+spill) -- five executors died, and q79-q95 then failed on the dead executors' Flight ports because a
+remote fetch error was a plain task failure rather than Spark's `FetchFailedException` (#364, fixed:
+the scheduler now recomputes the lost map outputs). The mix's heap split left the aggregate room
+(q78 86 s against Spark's 114). Its own regressions at 1 TB: q14b 95 -> 144 s, q8 6.9 -> 27, q22
+8.3 -> 17.5, q72 27 -> 36; the rest within 1.1x or faster.
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
