@@ -71,8 +71,8 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   }
 
   test("expressions over a wide decimal still fall back with the type reason until #258") {
-    // Rounding functions and string parsing into the lane are the rest of #258; arithmetic, comparisons, casts, abs and negation compile.
-    checkFallback("SELECT round(w27, 1) AS r FROM tw_plain", Seq(Project), "decimal")
+    // String parsing into the lane and half-even rounding are the rest of #258; arithmetic, comparisons, casts, abs, negation and round compile.
+    checkFallback("SELECT bround(w27, 1) AS r FROM tw_plain", Seq(Project), "decimal")
     checkFallback("SELECT cast(cast(w20 AS string) AS decimal(20,0)) AS s FROM tw_plain", Seq(Project), "unsupported cast string -> decimal(20,0)")
     checkFallback("SELECT w27 % cast(7 AS decimal(27,2)) AS m FROM tw_plain", Seq(Project), "% over decimal(27,2) not supported")
   }
@@ -196,6 +196,29 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
           // Under AND/OR with narrow predicates, and as a projected boolean.
           checkVectorized(s"SELECT i FROM $t WHERE (w38 > 0 AND w27 < 0) OR i % 101 = 3", Seq(Filter))
           checkVectorized(s"SELECT i, w38 > 0 AS pos, w27 = 0 AS zero FROM $t", Seq(Project))
+        }
+      }
+    }
+  }
+
+  Seq("tw_dict", "tw_plain").foreach { t =>
+    test(s"$t: wide decimals as values -- CASE WHEN results, scalar-subquery filters, round (#326)") {
+      for (ansi <- Seq("true", "false")) {
+        withConf("spark.sql.ansi.enabled" -> ansi) {
+          // TPC-DS q4/q11/q74's shape: a CASE whose branch is a wide division, no ELSE (null), then compared.
+          checkVectorized(s"SELECT i, CASE WHEN w27 > 0 THEN w38 / w27 END AS ratio FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i FROM $t WHERE CASE WHEN w27 > 0 THEN w38 / w27 END > CASE WHEN w20 > 0 THEN w38 / w20 END", Seq(Filter))
+          // Wide branches: columns, a wide literal, an ELSE; a null branch.
+          checkVectorized(s"SELECT i, CASE WHEN i % 3 = 0 THEN w38 WHEN i % 3 = 1 THEN cast('1.5' as decimal(38,10)) ELSE null END AS c FROM $t", Seq(Project))
+          checkVectorized(s"SELECT i, IF(w27 < 0, w27, cast(0 as decimal(27,2))) AS nonpos FROM $t", Seq(Project))
+          // TPC-DS q14/q23/q24's shape: a scalar subquery of a wide decimal in a filter (avg over w27: the sum of w38 overflows Spark's own decimal(38) accumulator).
+          checkVectorized(s"SELECT i, w27 FROM $t WHERE w27 > (SELECT avg(w27) * 1.1 FROM $t)", Seq(Filter))
+          checkVectorized(s"SELECT i FROM $t WHERE w27 <= (SELECT max(w27) FROM $t WHERE i % 2 = 0)", Seq(Filter))
+          // A subquery over no rows: a null literal, so nothing passes.
+          checkVectorized(s"SELECT i FROM $t WHERE w27 > (SELECT max(w27) FROM $t WHERE i < 0)", Seq(Filter))
+          // TPC-DS q2/q59's shape: round of a wide quotient to a narrow result.
+          checkVectorized(s"SELECT i, round(w38 / w27, 2) AS r2, round(w38 / 7, 0) AS r0 FROM $t WHERE w27 <> 0", Seq(Project))
+          checkVectorized(s"SELECT i, round(w38, 3) AS r3 FROM $t WHERE w38 IS NOT NULL", Seq(Project))
         }
       }
     }
