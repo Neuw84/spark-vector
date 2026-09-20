@@ -71,7 +71,7 @@ cat <<EOF
   sparkVersion: "4.1.3"
   sparkConf:
     # KEEP_EXECUTORS=1 leaves finished/dead executor pods in place, so a dying executor's own log survives.
-    spark.kubernetes.executor.deleteOnTermination: "${KEEP_EXECUTORS:+false}${KEEP_EXECUTORS:-true}"
+    spark.kubernetes.executor.deleteOnTermination: "$([ -n "${KEEP_EXECUTORS:-}" ] && echo false || echo true)"
     spark.kubernetes.authenticate.executor.serviceAccountName: "$SERVICE_ACCOUNT"
     # A query that kills executors (native memory past the container limit) must not end the whole run:
     # the runner records the failure and moves on; Spark's default gives up after 16 executor losses.
