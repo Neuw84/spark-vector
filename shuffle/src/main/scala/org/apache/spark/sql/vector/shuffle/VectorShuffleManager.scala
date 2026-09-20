@@ -160,11 +160,15 @@ final class VectorShuffleWriter(
   }
 
   override def write(records: Iterator[Product2[Int, ColumnarBatch]]): Unit = try {
-    val start = System.nanoTime()
+    // The write time is the writer's own work per batch -- adapting, partitioning, appending -- not
+    // the upstream operators pulled through `records.next()`: timed around the whole loop it read as
+    // the entire map stage (15 s against Spark's 81 ms on the same exchange at SF1, #247).
+    var written = 0L
     while (records.hasNext) {
       val batch = records.next()._2
       val n = batch.numRows()
       if (n > 0) {
+        val start = System.nanoTime()
         val arena = java.lang.foreign.Arena.ofConfined()
         try {
           val buffers = Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
@@ -172,9 +176,10 @@ final class VectorShuffleWriter(
           writer.write(buffers, n, ids, arena)
         } finally arena.close()
         rows += n
+        written += System.nanoTime() - start
       }
     }
-    metrics.incWriteTime(System.nanoTime() - start)
+    metrics.incWriteTime(written)
   } catch {
     case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("write", allocator, e)
   }
@@ -209,11 +214,13 @@ final class VectorShuffleWriter(
         tmp.delete()
         None
       } else {
+        val start = System.nanoTime()
         val index = writer.finish(withFooter = false)
         val rawBytes = writer.rawBytes
         writer.close()
         lengths = index.lengths
         resolver.writeMetadataFileAndCommit(handle.shuffleId, mapId, lengths, Array.emptyLongArray, tmp)
+        metrics.incWriteTime(System.nanoTime() - start) // the last record batches and the file, as Spark counts its merge
         VectorShuffleBackend(SparkEnv.get.conf).mapOutputCommitted(handle.shuffleId, mapId, dataFile, lengths)
         metrics.incBytesWritten(lengths.sum)
         // Pre-compression size, as Spark's dataSize is; never below the file (IPC framing dominates tiny outputs).
