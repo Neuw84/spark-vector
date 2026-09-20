@@ -240,4 +240,50 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 1, batches = Seq((50, true)), flushBytes = 1L << 20)
     roundTrip(numPartitions = 64, batches = Seq((3, false)), flushBytes = 1L << 20)
   }
+
+  test("#356: a record batch's string column is dictionary-encoded only when the dictionary pays; the reader takes either per batch") {
+    import org.apache.arrow.vector.{IntVector, VarCharVector}
+    // The encoder itself: all-distinct gives up at the sample (nothing allocated stays behind), repeats encode.
+    def strings(values: Seq[String]): VarCharVector = {
+      val v = new VarCharVector("t", allocator); v.allocateNew(values.size * 8, values.size)
+      values.zipWithIndex.foreach { case (x, i) => if (x == null) v.setNull(i) else v.setSafe(i, x.getBytes("UTF-8")) }
+      v.setValueCount(values.size); v
+    }
+    val before = allocator.getAllocatedMemory
+    val distinct = strings((0 until 2000).map(i => s"email-$i@example.com"))
+    try assert(PartitionedIpcWriter.encodeStrings(distinct, "t", allocator) == null, "2000 distinct of 2000 goes plain")
+    finally distinct.close()
+    assert(allocator.getAllocatedMemory === before, "a rejected encoding leaves nothing allocated")
+    val repeats = strings((0 until 2000).map(i => if (i % 7 == 0) null else s"state-${i % 40}"))
+    try {
+      val (ids, dict) = PartitionedIpcWriter.encodeStrings(repeats, "t", allocator)
+      try { assert(dict.getValueCount === 40); assert(ids.getValueCount === 2000); assert(ids.isNull(0) && ids.get(1) === 0 && ids.get(41) === 0) }
+      finally { ids.close(); dict.close() }
+      // ratio 1 always encodes, 0 never.
+      val distinct600 = strings((0 until 600).map(i => s"u$i"))
+      try { val (i1, d1) = PartitionedIpcWriter.encodeStrings(distinct600, "t", allocator, maxRatio = 1.0); i1.close(); d1.close() }
+      finally distinct600.close()
+      assert(PartitionedIpcWriter.encodeStrings(repeats, "t", allocator, maxRatio = 0.0) == null)
+    } finally repeats.close()
+
+    // Through the writer and the reader: `s` (random alphanumerics, nearly all distinct) comes back plain,
+    // `sd` (five words) comes back dictionary-encoded, in the same record batch; values survive either way.
+    val dir = Files.createTempDirectory("svipc")
+    val path = dir.resolve("map.ipc")
+    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20)
+    val arena = Arena.ofConfined()
+    try {
+      val (b, rows) = batch(3000, arena, dictStrings = false)
+      try writer.write(b, new Array[Int](3000)) finally b.close()
+      writer.finish()
+      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator)
+      try {
+        val got = reader.next()
+        assert(got.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "plain UTF8 for the high-cardinality column")
+        assert(got.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
+        assert(read(got) === rows)
+        assert(!reader.hasNext)
+      } finally reader.close()
+    } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+  }
 }

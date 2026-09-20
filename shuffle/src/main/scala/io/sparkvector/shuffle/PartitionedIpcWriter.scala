@@ -16,7 +16,7 @@ import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
 import org.apache.arrow.vector.compression.CompressionUtil
 import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.apache.arrow.vector.ipc.message.IpcOption
-import org.apache.arrow.vector.types.pojo.Schema
+import org.apache.arrow.vector.types.pojo.{Field, Schema}
 import org.apache.spark.sql.types.{BooleanType, StringType, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -61,9 +61,20 @@ final class PartitionedIpcWriter(
     /** A partition's held bytes before they become one record batch. */
     batchBytes: Long = 1L << 20,
     /** Held bytes across all partitions before the fullest partitions are written out. */
-    bufferBytes: Long = 64L << 20) extends AutoCloseable {
+    bufferBytes: Long = 64L << 20,
+    /**
+     * A record batch's string column is dictionary-encoded only when its distinct values are at most
+     * this share of its rows (#356): above it -- names, emails, addresses within 8192 rows -- the
+     * hash per row buys nothing and the column goes plain. 0 never encodes, 1 always does.
+     */
+    dictionaryMaxRatio: Double = PartitionedIpcWriter.DefaultDictionaryMaxRatio) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
+  /** The plain-UTF8 variant of every string field, for the batches whose dictionary does not pay. */
+  private val plainFields: Array[Field] = Array.tabulate(schema.fields.length) { c =>
+    val f = schema.fields(c)
+    if (f.dataType == StringType) PartitionedIpcFile.arrowField(f.name, f.dataType, c, dictionary = false) else null
+  }
 
   /**
    * One column of one partition's pending record batch (#351): an Arrow vector the input batches'
@@ -193,8 +204,8 @@ final class PartitionedIpcWriter(
      * partitions that was most of a map task's footprint. A stream per batch frees them with the
      * batch; the reader decodes concatenated streams already. Started by `flush`, ended right after.
      */
-    def start(): Unit = {
-      root = VectorSchemaRoot.create(arrowSchema, allocator)
+    def start(batchSchema: Schema): Unit = {
+      root = VectorSchemaRoot.create(batchSchema, allocator)
       // Up to Spark's bypass-merge threshold of partitions the stream goes straight to its own file,
       // Arrow memory to the page cache with no heap in between; above it, a heap staging buffer up to
       // `flushBytes` keeps the file count down, as Spark's sort-based writer does.
@@ -352,19 +363,28 @@ final class PartitionedIpcWriter(
       while (c < schema.fields.length) { taken(c) = seg.builders(c).take(); c += 1 }
       // Pass 1: the record batch's dictionaries into the provider -- all of them before the stream
       // writer exists, since it converts the schema with the dictionaries' types at construction.
+      // A string column whose distinct values are too many for the dictionary to pay stays plain
+      // (#356), and the batch's schema says which is which: every batch is its own stream.
+      var batchFields: java.util.List[Field] = null // built only when a column goes plain
       c = 0
       while (c < schema.fields.length) {
         val encoding = arrowSchema.getFields.get(c).getDictionary
         if (encoding != null) {
-          val (ids, dictionary) = PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator)
-          taken(c).close()
-          taken(c) = ids
-          batchDictionaries += dictionary
-          seg.provider.put(new Dictionary(dictionary, encoding))
+          val encoded = PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator, dictionaryMaxRatio)
+          if (encoded != null) {
+            val (ids, dictionary) = encoded
+            taken(c).close()
+            taken(c) = ids
+            batchDictionaries += dictionary
+            seg.provider.put(new Dictionary(dictionary, encoding))
+          } else {
+            if (batchFields == null) batchFields = new java.util.ArrayList[Field](arrowSchema.getFields)
+            batchFields.set(c, plainFields(c))
+          }
         }
         c += 1
       }
-      seg.start()
+      seg.start(if (batchFields == null) arrowSchema else new Schema(batchFields))
       // Pass 2: the columns move into the root (no copy).
       c = 0
       while (c < schema.fields.length) {
@@ -464,9 +484,21 @@ object PartitionedIpcWriter {
   /** Partition count up to which each stream is written straight to its own file (Spark's `spark.shuffle.sort.bypassMergeThreshold`). */
   val DirectFileMaxPartitions = 200
 
-  /** Dictionary-encodes a plain string vector: the distinct values in first-seen order, int32 ids, nulls kept. */
-  def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator): (IntVector, VarCharVector) = {
+  /** Default share of distinct values per rows above which a batch's string column goes plain (#356). */
+  val DefaultDictionaryMaxRatio: Double = 0.5
+  /** Rows hashed before the first distinct-ratio check: enough to tell a name column from a state column. */
+  val DictionarySampleRows: Int = 512
+
+  /**
+   * Dictionary-encodes a plain string vector: the distinct values in first-seen order, int32 ids,
+   * nulls kept. Returns `null` -- nothing allocated stays behind -- when the distinct values exceed
+   * `maxRatio` of the rows seen, checked after [[DictionarySampleRows]] rows and at the end: the
+   * caller then ships the column plain (#356).
+   */
+  def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator,
+      maxRatio: Double = DefaultDictionaryMaxRatio): (IntVector, VarCharVector) = {
     val n = in.getValueCount
+    if (maxRatio <= 0.0) return null
     val ids = new IntVector(name, allocator)
     ids.allocateNew(n)
     val dictionary = new VarCharVector(name + ".dictionary", allocator)
@@ -491,6 +523,10 @@ object PartitionedIpcWriter {
         ids.set(i, id.intValue())
       }
       i += 1
+      if ((i == DictionarySampleRows || i == n) && next > (i * maxRatio) && maxRatio < 1.0) {
+        ids.close(); dictionary.close()
+        return null
+      }
     }
     ids.setValueCount(n)
     dictionary.setValueCount(next)

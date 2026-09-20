@@ -51,11 +51,20 @@ object PartitionedIpcFile {
   def dictionaryEncoding(ordinal: Int): DictionaryEncoding =
     new DictionaryEncoding(ordinal + 1L, false, new ArrowType.Int(32, true))
 
-  def arrowField(name: String, dt: DataType, ordinal: Int): Field = {
+  /**
+   * The field of one column. A string column is dictionary-encoded (int32 ids, the dictionary with
+   * id `ordinal + 1`) or, with `dictionary = false`, plain UTF8: the writer decides per record batch
+   * whether the dictionary pays (#356), and since every record batch is its own stream (#340) the
+   * two encodings may alternate within one partition's bytes -- the reader takes either.
+   */
+  def arrowField(name: String, dt: DataType, ordinal: Int, dictionary: Boolean = true): Field = {
     val metadata = new JHashMap[String, String]()
     metadata.put(TypeKey, dt.json)
-    val encoding = if (dt == StringType) dictionaryEncoding(ordinal) else null
-    new Field(name, new FieldType(true, arrowType(dt), encoding, metadata), null)
+    val (arrow, encoding) =
+      if (dt == StringType && dictionary) (arrowType(dt), dictionaryEncoding(ordinal))
+      else if (dt == StringType) (ArrowType.Utf8.INSTANCE, null)
+      else (arrowType(dt), null)
+    new Field(name, new FieldType(true, arrow, encoding, metadata), null)
   }
 
   def arrowSchema(schema: StructType): Schema =
@@ -157,11 +166,12 @@ object PartitionedIpcFile {
       val moved = source.getField.createVector(allocator)
       source.makeTransferPair(moved).transfer()
       columns(c) = dt match {
-        case StringType =>
+        case StringType if field.getDictionary != null =>
           val dict = dictionary(field.getDictionary.getId)
           val copy = new VarCharVector(field.getName + ".dictionary", allocator)
           dict.makeTransferPair(copy).splitAndTransfer(0, dict.getValueCount)
           new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], copy)
+        case StringType => new VectorArrowColumnVector(moved) // plain UTF8: the writer found no dictionary worth sending
         case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
           new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
         case _ => new VectorArrowColumnVector(moved)
