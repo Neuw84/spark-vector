@@ -791,49 +791,69 @@ at scale (#329).
 
 ### On the cluster (#247, #248): TPC-DS SF100 Parquet on S3, eight executors
 
-The first distributed reading: TPC-DS SF100 (27 GB ZSTD Parquet on S3, generated on the cluster),
-`sfi-iceberg-bench` EKS, node group `bench-xl` (m5.4xlarge), **eight executors of 13 cores and ~50 GiB
-each**, the memory placed where each engine uses it (Spark and our shuffle: 20 GiB heap + 30 GiB overhead
-for our native allocations; Comet: 20 GiB heap + 24 GiB off-heap; the Comet-scan mix over our shuffle:
+TPC-DS SF100 (27 GB ZSTD Parquet on S3, generated on the cluster), `sfi-iceberg-bench` EKS, node group
+`bench-xl` (m5.4xlarge), **eight executors of 13 cores and ~50 GiB each**, the memory placed where each
+engine uses it (Spark and our shuffle: 20 GiB heap + 30 GiB overhead, the overhead less 2 GiB as the
+JVM's direct-memory limit; Comet: 20 GiB heap + 24 GiB off-heap; the Comet-scan mix over our shuffle:
 20 + 14 + 16), driver 4 GiB, one iteration per query, no warm-up. Image `benchmarks/k8s/Dockerfile`,
 manifests from `render-run.sh`, report `TpcdsRunner --cluster-report` over the rows on S3.
 
-| configuration | suite wall (s) | failed | comparable total (s, 87 queries) | vs Spark |
+**The first run (v2) found four defects; the fifth run has our shuffle at zero failures and every checksum
+but one equal to Spark's.** The four, each with its own issue and fix:
+
+1. **The Flight shuffle lost dictionary replacements (#338).** `FlightShuffle.Producer` started a stream
+   with the block's first dictionaries and Arrow Flight writes dictionaries only at a stream's start,
+   while our blocks carry one replacement dictionary per record batch: a remote block of several
+   batches decoded against the first batch's dictionary -- `IndexOutOfBoundsException` in every string
+   consumer (q4, q11, q23b, q24b, q38, q74, q87), and **silently wrong strings** where the index fit
+   (the checksums of q1, q6, q23b, q24a, q24b, q38, q39a, q39b, q74, q87 disagreed with Spark's). The
+   data plane now sends the block's IPC bytes as they are. Local reads never showed it.
+2. **The shuffle writer's memory was not what it accounted (#340).** q67 took every executor down in
+   four seconds: an Arrow `OutOfMemoryException` from the writer (one task's allocator at 1.14 GB
+   against a 64 MB budget: the estimate ignored `setSafe`-grown capacity and the per-slice
+   dictionaries; `ArrowStreamWriter` kept a copy of every dictionary it ever wrote), which Spark could
+   not serialize, and on JDK 25 `SerializationDebugger`'s initializer then dies (SPARK-55679, fixed in
+   4.2.0 only) -- exit 50. Now: flushes by the allocator's real allocation, one IPC stream per record
+   batch, a limited writer allocator, and Arrow's OOM rethrown as a serializable `SparkException`.
+   The new test also caught **arrow-java 18.3.0's zstd codec writing 8 bytes past its buffer**
+   (GH-1116, fixed upstream for 20.0.0): the shuffle uses its own correctly-sized codec.
+3. **The partitioner's hash loop deoptimized a hundred times per JVM (#343).** JFR on q79 at SF1: 37%
+   of CPU in `PartitionKernels.mixColumn`, 101 `profile_predicate` traps on its null-row branch. One
+   loop per key kind and validity shape, null rows blended by a mask: q79 at SF1 1984 -> 857 ms.
+4. **Every partition slice of a dictionary-encoded string column carried the whole dictionary (#345).**
+   The runner's `--explain` at SF100 showed q79's `customer` exchange at 1,623 MB against Spark's
+   52 MB with identical plans and record counts: at 200 partitions a slice holds ~41 rows and copied a
+   dictionary of thousands of names, and the flush concatenated hundreds of such copies per batch.
+   That was the 15-25x shuffle-read gap and the whole 20x on q73/q79/q34/q68/q46/q30 (q79: 55.6 s ->
+   6.3 s). A slice now carries only the entries it uses.
+
+Two more things the cluster taught: a node's 20 GB root disk fills with the shuffle files of finished
+queries (the driver's `ContextCleaner` removes them after a GC, every 30 min by default; the kubelet
+evicted an executor at query 95 -- `spark.cleaner.periodicGC.interval=2min` in the manifests), and
+hadoop-aws 3.4's default credential chain has no IRSA (`WebIdentityTokenFileCredentialsProvider` set).
+
+**v5 (the three engine fixes in), spark and vector-shuffle, 102 of 103 queries comparable:**
+
+| configuration | suite wall (s) | failed | comparable total (s, 102 queries) | vs Spark |
 |---|---:|---:|---:|---:|
-| spark | 643 | 0 | 398.0 | 1.00x |
-| vector-shuffle | 1898 | 9 | 878.5 | 0.45x |
-| vector-shuffle-strict | 1897 | 9 | 873.0 | 0.46x |
-| comet-scan-vector-ourshuffle | 888 | 3 | 512.4 | 0.78x |
-| hybrid | 551 | 0 | 331.9 | 1.20x |
-| comet | 521 | 0 | 308.3 | 1.29x |
+| spark | 643 | 0 | 572.1 | 1.00x |
+| vector-shuffle | 1071 | 0 | 982.3 | 0.58x |
 
-`vector-shuffle-strict` is `vector-shuffle` with `spark.vector.exec.strictFloatingPoint=true`: the cost
-of bit-identical floating-point results against the benchmarks' default is **0.6%** of the comparable
-total (873.0 s versus 878.5 s), within run-to-run noise -- the same failure set, the same checksums.
+(v2, the first run, 87 comparable: vector-shuffle 878.5 s to Spark's 398.0, 0.45x with 9 failures; v3
+after #338: 0.33x, 2 failures; v4 after #340: 0.35x, the 5 failures all one evicted executor.)
+`vector-shuffle-strict` in v2 cost **0.6%** over `vector-shuffle` (873.0 s against 878.5), within noise:
+the same failures, the same checksums. The other configurations of v2: comet-scan-vector-ourshuffle
+0.78x (3 failures), hybrid 1.20x, comet 1.29x -- to be rerun on the fixed engine.
 
-What the cluster showed that one machine never did:
-
-1. **The Flight shuffle loses dictionary replacements.** `FlightShuffle.Producer` starts a stream with
-   the block's first dictionaries and Arrow Flight writes dictionaries only at a stream's start; our
-   blocks carry one replacement dictionary per record batch. A remote block with several batches is
-   decoded against the first batch's dictionary: indices past its size fail with
-   `IndexOutOfBoundsException` in every string consumer (q4, q11, q23b, q24b, q38, q74, q87 under
-   `vector-shuffle`), indices within it decode to the wrong string silently -- **the checksums of q1,
-   q6, q23b, q24a, q24b, q38, q39a, q39b, q74 and q87 disagree with Spark's in the configurations that
-   use our shuffle** (q39a returns 7,746 rows to Spark's 7,475). Local reads take the file reader,
-   which handles replacement, so SF1 on one executor passes.
-2. **Our native memory is not bounded.** The kernels and the shuffle allocate outside Spark's memory
-   manager; q67 (window/rollup over `store_sales`) grows an executor past its 50 GiB container and the
-   container is OOM-killed under every configuration that uses our operators over our shuffle. With
-   `spark.executor.maxNumFailures` raised the run survives it (q67 fails, the suite continues), and the
-   executors that relaunch during a dictionary-bug query die again with exit code 50 -- q81 then lost
-   shuffle outputs. Accounting and spilling for the native side is the engineering item.
-3. **q64 returns 0 rows under Comet** (`comet`, `hybrid`, and the Comet-scan mix; Spark 453) -- a Comet
-   1.0 issue, not ours; q65's checksum differs from Spark's in all five other configurations, 100 rows
-   each -- a tie in its `LIMIT` order is the likely reason, to be confirmed.
-
-Per-query and environment tables: `results/sf100-parquet-v2/cluster-results.md` on the results bucket.
-The 1 TB runs (#248) follow the shuffle fix.
+Where the 0.58x now lives: 9 queries faster than Spark (q41 1.34x, q66 1.33x, q48, q97, q96), 8 within
+10%, and a broad 1.5-2x on most of the rest -- small queries included (q32 0.96 -> 1.92 s, q55 0.96 ->
+1.62 s), which points at a per-stage cost of the exchange rather than at one operator; the worst are
+q30 (4.8x), q53 (4.3x), q77 (4.1x), q71, q39a/b, q92 (3.1-3.3x), q11 (14.7 -> 42.0 s), q4 (20.9 ->
+56.9 s), q67 (14.5 -> 38.2 s), q1. q65's checksum differs from Spark's in every configuration but Spark
+(100 rows each: a tie in its `LIMIT` order, to be confirmed); q64 returns 0 rows under Comet (a Comet
+1.0 issue). Per-query tables: `results/sf100-parquet-v5/cluster-results.md` on the results bucket.
+The 1 TB baselines (#248, `results/sf1000-parquet`): spark 3029.9 s, hybrid 2246.3 (1.35x), comet
+2091.3 (1.45x), 100 comparable, no failures; our shuffle's 1 TB run follows the speed work.
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
