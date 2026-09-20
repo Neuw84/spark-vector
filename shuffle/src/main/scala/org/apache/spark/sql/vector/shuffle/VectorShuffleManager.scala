@@ -323,7 +323,7 @@ final class VectorShuffleReader(
       context.taskMetrics().mergeShuffleReadMetrics()
     }
     val nonEmpty = blocksByAddress.map { case (address, blocks) =>
-      address -> blocks.collect { case (id: ShuffleBlockId, size, _) if size > 0 => (id, size) }.toIndexedSeq
+      address -> blocks.collect { case (id: ShuffleBlockId, size, mapIndex) if size > 0 => (id, size, mapIndex) }.toIndexedSeq
     }
     val streams = VectorShuffleBackend(env.conf).read(nonEmpty, allocator, metrics)
     streams.flatMap { reader =>

@@ -82,16 +82,17 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("with spark.authenticate on, a DoGet without the secret is refused and one with it is served") {
-    // The executors' servers are reachable by their registered locations; the driver plugin holds them.
-    // One of THIS session's executors: the registry is a JVM-wide map and another suite's (unauthenticated)
-    // server may still be registered when the suites share a JVM -- `anyLocation` then served the call.
-    val execIds = spark.sparkContext.getExecutorIds()
-    assert(execIds.nonEmpty, "no executors")
-    val loc = execIds.iterator.flatMap(id => Option(org.apache.spark.sql.vector.shuffle.flight.FlightRegistry.driverReceive(
-      org.apache.spark.sql.vector.shuffle.flight.LookupFlight(id)).asInstanceOf[FlightLocation])).nextOption()
-      .getOrElse(fail(s"no Flight server registered for executors $execIds"))
+    // The same Producer and SecretAuthenticator the executors' servers are built with, on a server of
+    // this test's own: looking the executors' servers up in the JVM-wide registry served the call
+    // unauthenticated whenever another suite's server (no secret) was still registered under the same
+    // executor id -- the flaky failure of every fourth gate.
     val allocator = new RootAllocator()
-    val client = FlightClient.builder(allocator, Location.forGrpcInsecure(loc.host, loc.port)).build()
+    val block = Array.emptyByteArray
+    val producer = new FlightShuffle.Producer((_, _, _) => new org.apache.spark.network.buffer.NioManagedBuffer(java.nio.ByteBuffer.wrap(block)), allocator)
+    val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer)
+      .headerAuthenticator(new FlightShuffle.SecretAuthenticator("flight-shuffle-test-secret")).build()
+    server.start()
+    val client = FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", server.getPort)).build()
     try {
       val ticket = FlightShuffle.ticket(0, 0L, 0)
       val e = intercept[FlightRuntimeException] {
@@ -99,12 +100,9 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
         try s.next() finally s.close()
       }
       assert(e.status().code() === FlightStatusCode.UNAUTHENTICATED, e.toString)
-      // With the secret the call is authenticated; the block may not exist, which is a different error.
-      val e2 = intercept[FlightRuntimeException] {
-        val s = client.getStream(ticket, new CredentialCallOption(new BearerCredentialWriter("flight-shuffle-test-secret")))
-        try s.next() finally s.close()
-      }
-      assert(e2.status().code() !== FlightStatusCode.UNAUTHENTICATED, e2.toString)
+      // With the secret the call is authenticated and the (empty) block is served.
+      val s = client.getStream(ticket, new CredentialCallOption(new BearerCredentialWriter("flight-shuffle-test-secret")))
+      try s.next() finally s.close()
       val e3 = intercept[FlightRuntimeException] {
         val s = client.getStream(ticket, new CredentialCallOption(new BearerCredentialWriter("wrong")))
         try s.next() finally s.close()
@@ -112,6 +110,7 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
       assert(e3.status().code() === FlightStatusCode.UNAUTHENTICATED, e3.toString)
     } finally {
       client.close()
+      server.close()
       allocator.close()
     }
   }
