@@ -1054,7 +1054,7 @@ object ExpressionCompiler {
       case _: LiteralExpr => Left("IN over a literal")
       case c if c.vecType == VecType.UTF8 =>
         if (!hset.forall(_.isInstanceOf[UTF8String])) Left("IN set elements are not strings")
-        else Right(InExpr(c, hset.toSeq.map(v => LiteralExpr(v, value.dataType))))
+        else Right(stringIn(c, hset.toSeq.map(v => LiteralExpr(v, value.dataType))))
       case c if c.vecType == VecType.FLOAT64 =>
         if (!hset.forall(_.isInstanceOf[Double])) Left("IN set elements are not doubles")
         else Right(InSetExpr(c, PredicateKernels.doubleKeys(hset.toArray.map(_.asInstanceOf[Double]))))
@@ -1084,7 +1084,7 @@ object ExpressionCompiler {
         val lits = list.map(operand(_, input))
         lits.collectFirst { case Left(reason) => reason } match {
           case Some(reason) => Left(reason)
-          case None => Right(InExpr(c, lits.collect { case Right(lit: LiteralExpr) => lit }))
+          case None => Right(stringIn(c, lits.collect { case Right(lit: LiteralExpr) => lit }))
         }
     }
   }
@@ -1094,6 +1094,13 @@ object ExpressionCompiler {
    * A column pattern, a non-string operand or a `NULL` pattern falls back; `LIKE` with inner
    * wildcards never reaches here (the optimizer leaves it as `Like`, #3 follow-up).
    */
+  /**
+   * `IN` over literals: a string column with more than a few literals goes through the hash set (#371,
+   * one pass whatever the list's size); short lists and the other lanes compare literal by literal.
+   */
+  private def stringIn(c: VectorExpr, lits: Seq[LiteralExpr]): VectorExpr =
+    if (c.vecType == VecType.UTF8 && lits.size > 3) StringInSetExpr(c, lits) else InExpr(c, lits)
+
   /** The string a slicing function works on: a UTF8 lane (a literal subject folds in Spark). */
   private def stringSubject(e: Expression, input: Seq[Attribute], what: String): Result =
     compile(e, input).flatMap {

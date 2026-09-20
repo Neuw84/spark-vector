@@ -188,6 +188,21 @@ class VectorFilterSuite extends VectorQuerySuite {
     assert(hits === 20, "every Fibonacci number below 20000 is a row")
   }
 
+  test("string IN lists go through the hash set (#371): dictionary and plain columns, duplicates, misses, the empty string") {
+    // s is dictionary encoded ('s0'..'s49' with nulls); substr(s, 2) is a plain computed column, as q8's substr(ca_zip, 1, 5) is.
+    val zips = (0 until 400).map(z => s"'$z'").mkString(", ")
+    checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12', 's13')", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE s NOT IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12', 's13')", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE substr(s, 2) IN ('1', '2', '3', '4', '17', '18', '19', '20', '21', '22', '23', '49')", Seq(Filter))
+    checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's1', 's1', 's2', 's2')", Seq(Filter)) // duplicates, below the InSet threshold
+    checkVectorized("SELECT i FROM t WHERE s IN ('', 's', 'S1', 's1 ', ' s1', 's100', 's001', 'nowhere', 'x', 'y', 'z')", Seq(Filter)) // near misses only
+    checkVectorized(s"SELECT i FROM t WHERE CAST(i AS STRING) IN ($zips)", Seq(Filter)) // q8's shape: 400 literals
+    val four = checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's17', 's30', 's49')", Seq(Filter)).count()
+    assert(four === 1200) // 400 each for s1, s17 and s49; s30 never occurs
+    val z = checkVectorized(s"SELECT i FROM t WHERE CAST(i AS STRING) IN ($zips)", Seq(Filter)).count()
+    assert(z === 400)
+  }
+
   test("filter conversion can be disabled by configuration") {
     withConf(VectorConf.FilterEnabled -> "false") {
       val df = withPlugin(enabled = true)(spark.sql("SELECT * FROM t WHERE i > 500"))

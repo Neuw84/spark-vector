@@ -240,6 +240,23 @@ final case class InExpr(child: VectorExpr, values: Seq[LiteralExpr]) extends Vec
 }
 
 /**
+ * `child IN (s1, s2, ...)` over a string column with more than a few literals (#371): one pass through
+ * a hash set of the literals' bytes -- with a dictionary path -- instead of `InExpr`'s one compare
+ * pass per literal. The literals stay as children so the tree reads as the SQL does.
+ */
+final case class StringInSetExpr(child: VectorExpr, values: Seq[LiteralExpr]) extends VectorExpr {
+  override def dataType: DataType = BooleanType
+  override def children: Seq[VectorExpr] = child +: values
+  @transient private lazy val set = new StringSetKernels.StringSet(values.map(_.utf8Bytes).toArray)
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val bits = ctx.bitmap()
+    StringSetKernels.inSet(a, set, ctx.active, bits)
+    SegmentVectorBuffers.fixedWidth(VecType.BOOL, ctx.numRows, a.validity(), bits)
+  }
+}
+
+/**
  * `startswith(child, p)`, `endswith(child, p)` and `contains(child, p)` against a string literal
  * -- what Spark's `LikeSimplification` makes of `LIKE 'p%'`, `LIKE '%p'` and `LIKE '%p%'`. Null
  * exactly where the child is null (the pattern is a non-null literal), so the child's validity is
