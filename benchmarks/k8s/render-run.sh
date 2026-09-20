@@ -82,6 +82,10 @@ cat <<EOF
     # turns a non-serializable task failure into an executor death; off, the plain exception is reported.
     # See upstream/spark-55679-serialization-debugger-jdk25/.
     spark.serializer.extraDebugInfo: "false"
+    # Shuffle files go when the driver's ContextCleaner sees the ShuffleDependency collected, which waits for
+    # a GC: over a 100-query run with the default 30 min the files of finished queries filled a node's 20 GB
+    # root disk and the kubelet evicted the executor (SF100 v4: q95-q99 lost to disk pressure).
+    spark.cleaner.periodicGC.interval: "2min"
     # Arrow's Netty allocator is bounded by the JVM's direct-memory limit, which defaults to the heap size:
     # give it the overhead instead (DIRECT_MEM; default EXEC_OVERHEAD less 2g), or our kernels' and the
     # shuffle's buffers hit a 20 GiB wall inside a 50 GiB container.
