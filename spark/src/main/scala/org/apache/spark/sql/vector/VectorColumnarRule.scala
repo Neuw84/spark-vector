@@ -576,6 +576,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       case Some(reason) => fallback(original, reason)
       case None =>
         VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf), VectorConf.strictFloatingPoint(conf)) match {
+          // A partial aggregate over our Expand (ROLLUP, CUBE, GROUPING SETS): aggregate the finest grouping
+          // once and roll the partials up, instead of hashing every input row once per grouping set (#383).
+          case Right(v) if VectorConf.rollupRewriteEnabled(conf) => RollupRewrite(v, VectorConf.strictFloatingPoint(conf))
           case Right(v) => v
           case Left(reason) => fallback(original, reason)
         }

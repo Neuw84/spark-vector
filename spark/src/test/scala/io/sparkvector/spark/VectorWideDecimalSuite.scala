@@ -290,6 +290,7 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
   private val LocalLimit = classOf[org.apache.spark.sql.vector.VectorLocalLimitExec]
   private val Sample = classOf[org.apache.spark.sql.vector.VectorSampleExec]
   private val Expand = classOf[org.apache.spark.sql.vector.VectorExpandExec]
+  private val Rollup = classOf[org.apache.spark.sql.vector.VectorRollupExec]
   private val Union = classOf[org.apache.spark.sql.vector.VectorUnionExec]
   private val Coalesce = classOf[org.apache.spark.sql.vector.VectorCoalesceExec]
 
@@ -308,7 +309,7 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
       // A sample keeps the wide columns with their rows.
       checkVectorized(s"SELECT i, w38, w27 FROM $t TABLESAMPLE (30 PERCENT) REPEATABLE (7)", Seq(Sample))
       // Expand: a wide grouping key nulled per grouping set (a wide null constant column), a wide sum through it.
-      checkVectorized(s"SELECT w27, i % 3 AS k, count(*) AS c, sum(w20) AS s, grouping_id() AS gid FROM $t WHERE i < 4000 GROUP BY ROLLUP(w27, i % 3)", Seq(Expand, Agg))
+      checkVectorized(s"SELECT w27, i % 3 AS k, count(*) AS c, sum(w20) AS s, grouping_id() AS gid FROM $t WHERE i < 4000 GROUP BY ROLLUP(w27, i % 3)", Seq(Rollup, Agg)) // a rollup is the chain since #383
       checkVectorized(s"SELECT w27, w20, count(*) AS c FROM $t WHERE i < 3000 GROUP BY GROUPING SETS ((w27), (w20), ())", Seq(Expand, Agg))
       // Union of two wide-sum aggregates (q66's shape: two channels summed then unioned), and a wide key coalesced.
       checkVectorized(
