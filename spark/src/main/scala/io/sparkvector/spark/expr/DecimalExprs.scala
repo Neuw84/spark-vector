@@ -618,7 +618,14 @@ final case class WideDecimalCastExpr(child: VectorExpr, from: DataType, dataType
         val data = ArrowLayout.allocateData(ctx.arena, VecType.DECIMAL128, n)
         val invalid = ctx.bitmap()
         WideDecimalCastKernels.fromDouble(a, t.scale, t.precision, n, data, invalid)
-        finish(ctx, a, VecType.DECIMAL128, data, invalid)
+        // Spark's `Decimal(double)` throws NumberFormatException on NaN and the infinities and `Cast`
+        // turns that into null in every mode: not an overflow, so never an ANSI error (#326).
+        val nonFinite = ctx.bitmap()
+        var i = 0
+        while (i < n) { if (!a.isNull(i) && !java.lang.Double.isFinite(a.getDouble(i))) Bitmap.set(nonFinite, i); i += 1 }
+        BitmapKernels.andNot(invalid, nonFinite, invalid, n)
+        val out = finish(ctx, a, VecType.DECIMAL128, data, invalid)
+        SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, n, DecimalExprs.without(ctx, out.validity(), nonFinite), data)
       case (f: DecimalType, DoubleType) =>
         val data = ArrowLayout.allocateData(ctx.arena, VecType.FLOAT64, n)
         WideDecimalCastKernels.toDouble(a, f.scale, n, data)

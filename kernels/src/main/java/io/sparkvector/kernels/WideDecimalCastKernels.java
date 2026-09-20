@@ -108,7 +108,7 @@ public final class WideDecimalCastKernels {
 
   /**
    * A double to a DECIMAL128 as Spark's {@code Decimal(double)} then {@code changePrecision}: the double's
-   * exact decimal expansion rounded half up to the scale. NaN and infinities are invalid.
+   * exact decimal expansion rounded half up to the scale. NaN and infinities are marked invalid here; the caller makes them null in every mode, as Spark does.
    */
   public static void fromDouble(VectorBuffers a, int toScale, int toPrecision, int n, MemorySegment out, MemorySegment invalid) {
     for (int i = 0; i < n; i++) {

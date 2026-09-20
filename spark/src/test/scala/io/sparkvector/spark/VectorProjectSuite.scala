@@ -80,7 +80,7 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkFallback("SELECT i, mp['k'] AS k FROM nested", Seq(Project), "map value access")
     checkFallback("SELECT st, count(*) AS n FROM nested GROUP BY st", Seq(classOf[VectorHashAggregateExec]), "unsupported column type struct")
     // Arithmetic, casts and abs over the wide lane compile since #258; a rounding function over it still falls back.
-    checkFallback("SELECT round(wide, 1) AS w FROM nested", Seq(Project), "decimal(38,4)")
+    checkFallback("SELECT bround(wide, 1) AS w FROM nested", Seq(Project), "decimal(38,4)")
   }
 
   test("struct fields are read from the struct vector's children, through chains, with the struct's nulls") {
@@ -215,7 +215,8 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT IF(i > 100, d, d2) AS pick, IF(l > 3000, 1L, 0L) AS flag_with_null_cond FROM t", Seq(Project))
     checkVectorized("SELECT COALESCE(l, CAST(i AS BIGINT)) AS a, COALESCE(d, d2, 0.0) AS b, COALESCE(s, 'none') AS c FROM t", Seq(Project))
     checkVectorized("SELECT NVL(l, -1L) AS a, NULLIF(i, 5) AS b, NVL2(l, d, d2) AS c FROM t WHERE i < 1000", Seq(Filter, Project))
-    checkFallback("SELECT CASE WHEN i > 100 THEN CAST(d AS DECIMAL(30, 2)) ELSE NULL END AS wide FROM t", Seq(Project), "unsupported result type")
+    // A wide result compiles since #326; the cast of an infinity is null in every mode, as in Spark.
+    checkVectorized("SELECT CASE WHEN i > 100 THEN CAST(d AS DECIMAL(30, 2)) ELSE NULL END AS wide FROM t", Seq(Project))
   }
 
   test("literal columns are materialised, dense or under a selection") {
