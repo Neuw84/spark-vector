@@ -71,6 +71,9 @@ cat <<EOF
   sparkConf:
     spark.kubernetes.executor.deleteOnTermination: "true"
     spark.kubernetes.authenticate.executor.serviceAccountName: "$SERVICE_ACCOUNT"
+    # A query that kills executors (native memory past the container limit) must not end the whole run:
+    # the runner records the failure and moves on; Spark's default gives up after 16 executor losses.
+    spark.executor.maxNumFailures: "200"
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://sfi-iceberg-wh-378683551918/spark-events"
     spark.hadoop.fs.s3a.connection.maximum: "200"
