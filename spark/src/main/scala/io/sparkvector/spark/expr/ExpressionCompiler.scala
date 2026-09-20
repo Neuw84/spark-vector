@@ -645,6 +645,14 @@ object ExpressionCompiler {
       e: Expression,
       input: Seq[Attribute]): Result =
     scale match {
+      // round (half up) of a wide decimal to a non-negative scale is Spark's `toPrecision(p, k, HALF_UP)`:
+      // the decimal-to-decimal cast's rescale, which never overflows since the result type keeps every
+      // integer digit (#326). bround (half even) and negative scales stay refused.
+      case Literal(k: Int, IntegerType) if isWideDecimal(child.dataType) && mode == RoundKernels.Mode.HALF_UP && k >= 0 && TypeMapping.hasLane(resultType) =>
+        wideOperand(child, input).flatMap {
+          case _: LiteralExpr => Left(s"$what of a literal")
+          case c => Right(WideDecimalCastExpr(c, child.dataType, resultType, ansi = false, e.origin.context))
+        }
       case Literal(k: Int, IntegerType) =>
         if (!RoundExpr.supports(child.dataType, resultType)) Left(s"$what over ${child.dataType.simpleString} -> ${resultType.simpleString} not supported")
         else
@@ -948,13 +956,15 @@ object ExpressionCompiler {
       elseValue: Option[Expression],
       e: Expression,
       input: Seq[Attribute]): Result = {
-    if (!TypeMapping.isSupported(e.dataType)) Left(s"unsupported result type ${e.dataType.simpleString} for ${e.sql}")
+    // A wide decimal result (#326) is the DECIMAL128 lane: its branches are wide columns, wide
+    // arithmetic or wide literals, blended limb by limb; anything else the wide path refuses itself.
+    if (!TypeMapping.isSupported(e.dataType) && !isWideDecimal(e.dataType)) Left(s"unsupported result type ${e.dataType.simpleString} for ${e.sql}")
     else {
       def value(v: Expression): Either[String, Option[VectorExpr]] = v match {
         case Literal(null, _) => Right(None)
         case Literal(x, dt) if dt == e.dataType && CaseWhenExpr.isBranchLiteralType(dt) => Right(Some(LiteralExpr(x, dt)))
         case other if other.dataType != e.dataType => Left(s"branch type ${other.dataType.simpleString} differs from ${e.dataType.simpleString}")
-        case other => compile(other, input).map(Some(_))
+        case other => operand(other, input).map(Some(_))
       }
       val compiled = branches.foldLeft[Either[String, Vector[(VectorExpr, Option[VectorExpr])]]](Right(Vector.empty)) {
         case (acc, (cond, v)) =>

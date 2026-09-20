@@ -96,6 +96,10 @@ object CaseWhenExpr {
           case VecType.INT32 => while (i < n) { data.setAtIndex(VectorBuffers.LE_INT, i, v.intValue()); i += 1 }
           case VecType.INT64 => while (i < n) { data.setAtIndex(VectorBuffers.LE_LONG, i, v.longValue()); i += 1 }
           case VecType.FLOAT64 => while (i < n) { data.setAtIndex(VectorBuffers.LE_DOUBLE, i, v.doubleValue()); i += 1 }
+          case VecType.DECIMAL128 => // the unscaled value as two limbs per row (#326)
+            val big = v.asInstanceOf[java.math.BigInteger]
+            val hi = Decimal128.hiOf(big); val lo = Decimal128.loOf(big)
+            while (i < n) { Decimal128.set(data, i, hi, lo); i += 1 }
           case other => throw new IllegalStateException(s"no constant column for $other")
         }
         SegmentVectorBuffers.fixedWidth(fixed, n, null, data)
@@ -103,5 +107,6 @@ object CaseWhenExpr {
   }
 
   /** Literal types a CASE branch may carry, beyond the operand literals the compiler accepts elsewhere. */
-  def isBranchLiteralType(dt: DataType): Boolean = dt == StringType || dt == BooleanType || TypeMapping.isSupported(dt)
+  def isBranchLiteralType(dt: DataType): Boolean =
+    dt == StringType || dt == BooleanType || TypeMapping.isSupported(dt) || TypeMapping.isWideDecimal(dt) // wide: a two-limb constant (#326)
 }

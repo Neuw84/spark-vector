@@ -54,6 +54,7 @@ public final class SelectKernels {
         case INT64 -> data.setAtIndex(VectorBuffers.LE_LONG, i, src.getLong(i));
         case FLOAT64 -> data.setAtIndex(VectorBuffers.LE_DOUBLE, i, src.getDouble(i));
         case BOOL -> Bitmap.setTo(data, i, src.getBoolean(i));
+        case DECIMAL128 -> Decimal128.copy(src.data(), i, data, i); // both limbs (#326)
         default -> throw new IllegalArgumentException("unsupported type " + type);
       }
     }
