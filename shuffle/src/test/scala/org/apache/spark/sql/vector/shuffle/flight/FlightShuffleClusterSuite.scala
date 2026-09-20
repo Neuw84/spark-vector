@@ -83,7 +83,13 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
 
   test("with spark.authenticate on, a DoGet without the secret is refused and one with it is served") {
     // The executors' servers are reachable by their registered locations; the driver plugin holds them.
-    val loc = org.apache.spark.sql.vector.shuffle.flight.FlightRegistry.anyLocation.getOrElse(fail("no Flight server registered"))
+    // One of THIS session's executors: the registry is a JVM-wide map and another suite's (unauthenticated)
+    // server may still be registered when the suites share a JVM -- `anyLocation` then served the call.
+    val execIds = spark.sparkContext.getExecutorIds()
+    assert(execIds.nonEmpty, "no executors")
+    val loc = execIds.iterator.flatMap(id => Option(org.apache.spark.sql.vector.shuffle.flight.FlightRegistry.driverReceive(
+      org.apache.spark.sql.vector.shuffle.flight.LookupFlight(id)).asInstanceOf[FlightLocation])).nextOption()
+      .getOrElse(fail(s"no Flight server registered for executors $execIds"))
     val allocator = new RootAllocator()
     val client = FlightClient.builder(allocator, Location.forGrpcInsecure(loc.host, loc.port)).build()
     try {

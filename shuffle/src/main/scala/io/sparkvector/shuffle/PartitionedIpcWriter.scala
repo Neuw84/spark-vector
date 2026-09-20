@@ -195,14 +195,11 @@ final class PartitionedIpcWriter(
             d.indices()
           case d: VectorDecimalColumnVector => d.vector()
           case a: VectorArrowColumnVector if f.dataType == StringType =>
-            // A plain string batch (the source was not dictionary encoded): encode it here so the
-            // field stays one dictionary-encoded int32 whatever the batch; the dictionary is this
-            // slice's distinct values.
-            val (indices, dictionary) = PartitionedIpcWriter.encodeStrings(a.getValueVector.asInstanceOf[VarCharVector], f.name, allocator)
-            extra += dictionary
-            extra += indices
-            dictionaries(c) = dictionary
-            indices
+            // A plain string batch (the source was not dictionary encoded) stays plain in the slice:
+            // the flush encodes a record batch's plain slices together, once (#349). Encoding each
+            // slice on its own was a hash map and a dictionary per ~40 rows at 200 partitions -- the
+            // shuffle write was 63% of q30's CPU, a third of it here.
+            a.getValueVector.asInstanceOf[VarCharVector]
           case a: VectorArrowColumnVector => a.getValueVector.asInstanceOf[FieldVector]
           case other => throw new IllegalStateException(s"unexpected compacted column ${other.getClass.getName}")
         }
@@ -251,9 +248,34 @@ final class PartitionedIpcWriter(
       while (c < schema.fields.length) {
         val encoding = arrowSchema.getFields.get(c).getDictionary
         if (encoding != null) {
-          if (single) {
-            seg.provider.put(new Dictionary(slices.head.dictionaries(c), encoding))
+          val plain = slices.count(_.dictionaries(c) == null)
+          if (plain == slices.size) {
+            // Every slice plain: one dictionary for the batch from the strings back to back, encoded once.
+            val strings = if (single) slices.head.sources(c).asInstanceOf[VarCharVector] else {
+              val all = new VarCharVector(schema.fields(c).name + ".plain", allocator)
+              all.allocateNew()
+              mergedDictionaries += all
+              val appender = new VectorAppender(all)
+              slices.foreach(sl => sl.sources(c).accept(appender, null))
+              all
+            }
+            val (ids, dictionary) = PartitionedIpcWriter.encodeStrings(strings, schema.fields(c).name, allocator)
+            mergedDictionaries += dictionary
+            encodedIds(c) = ids
+            seg.provider.put(new Dictionary(dictionary, encoding))
           } else {
+            if (plain > 0) {
+              // A mix of encoded and plain slices in one batch (the source changed encoding between
+              // input batches): the plain ones are encoded on their own and merged like the others.
+              slices.filter(_.dictionaries(c) == null).foreach { sl =>
+                val (ids, dictionary) = PartitionedIpcWriter.encodeStrings(sl.sources(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator)
+                mergedDictionaries += ids; mergedDictionaries += dictionary
+                sl.sources(c) = ids; sl.dictionaries(c) = dictionary
+              }
+            }
+            if (single) {
+              seg.provider.put(new Dictionary(slices.head.dictionaries(c), encoding))
+            } else {
             // One dictionary for the record batch: the slices' dictionaries back to back, each slice's
             // indices shifted by the entries before its own.
             val merged = new VarCharVector(schema.fields(c).name + ".dictionary", allocator)
@@ -271,6 +293,7 @@ final class PartitionedIpcWriter(
               offset += sl.dictionaries(c).getValueCount
             }
             seg.provider.put(new Dictionary(merged, encoding))
+            }
           }
         }
         c += 1
@@ -280,7 +303,11 @@ final class PartitionedIpcWriter(
       c = 0
       while (c < schema.fields.length) {
         val target = seg.root.getVector(c)
-        if (single) {
+        if (encodedIds(c) != null) {
+          // The ids of a batch's plain string slices, encoded together in pass 1.
+          encodedIds(c).makeTransferPair(target).transfer()
+          encodedIds(c).close(); encodedIds(c) = null
+        } else if (single) {
           // Buffers move into the root's vector (no copy); the compacted wrapper is left empty and closed below.
           slices.head.sources(c).makeTransferPair(target).transfer()
         } else {
@@ -301,12 +328,15 @@ final class PartitionedIpcWriter(
       // Closes the slices' dictionaries too: the stream writer keeps its own copy of what it sent.
       slices.foreach(_.close())
       mergedDictionaries.foreach(_.close()); mergedDictionaries.clear()
+      java.util.Arrays.fill(encodedIds.asInstanceOf[Array[AnyRef]], null)
       heldBytes -= seg.pendingBytes
       seg.pending.clear(); seg.pendingRows = 0; seg.pendingBytes = 0L
     }
   }
 
-  private val mergedDictionaries = scala.collection.mutable.ArrayBuffer.empty[VarCharVector]
+  private val mergedDictionaries = scala.collection.mutable.ArrayBuffer.empty[FieldVector]
+  /** Per column, the ids of a batch whose plain string slices were encoded together (pass 1), moved into the root in pass 2. */
+  private val encodedIds = new Array[IntVector](schema.fields.length)
 
   /**
    * Ends every stream and writes the data file: the streams back to back and, when `withFooter`,
@@ -372,7 +402,9 @@ object PartitionedIpcWriter {
     val ids = new IntVector(name, allocator)
     ids.allocateNew(n)
     val dictionary = new VarCharVector(name + ".dictionary", allocator)
-    val seen = new java.util.HashMap[java.nio.ByteBuffer, Integer]()
+    // Sized to the input once (the distinct values are at most all of it): no reallocation per growth.
+    dictionary.allocateNew(math.max(if (n == 0) 0L else in.getOffsetBuffer.getInt(n.toLong * 4).toLong, 1L), math.max(n, 1))
+    val seen = new java.util.HashMap[java.nio.ByteBuffer, Integer](math.max(16, n * 2))
     var next = 0
     var i = 0
     while (i < n) {
