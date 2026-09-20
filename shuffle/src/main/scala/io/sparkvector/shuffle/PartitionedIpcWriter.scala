@@ -13,7 +13,6 @@ import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorD
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
-import org.apache.arrow.compression.CommonsCompressionFactory
 import org.apache.arrow.vector.compression.CompressionUtil
 import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.apache.arrow.vector.ipc.message.IpcOption
@@ -84,19 +83,35 @@ final class PartitionedIpcWriter(
     var overflowPath: Path = _
     var overflowBytes: Long = 0L
 
+    /**
+     * One IPC stream per record batch (#340): the stream writer keeps a copy of every dictionary it
+     * wrote and the root keeps the batch's buffers, both until the writer closes -- across 200
+     * partitions that was most of a map task's footprint. A stream per batch frees them with the
+     * batch; the reader decodes concatenated streams already. Started by `flush`, ended right after.
+     */
     def start(): Unit = {
       root = VectorSchemaRoot.create(arrowSchema, allocator)
       // Up to Spark's bypass-merge threshold of partitions the stream goes straight to its own file,
       // Arrow memory to the page cache with no heap in between; above it, a heap staging buffer up to
       // `flushBytes` keeps the file count down, as Spark's sort-based writer does.
-      val sink: java.nio.channels.WritableByteChannel =
+      if (sink == null) sink = new PartitionedIpcWriter.NonClosing(
         if (numPartitions <= PartitionedIpcWriter.DirectFileMaxPartitions) { openOverflow(); overflow }
-        else Channels.newChannel(bytes)
+        else Channels.newChannel(bytes))
       writer = compression match {
-        case Some(codec) => new ArrowStreamWriter(root, provider, sink, IpcOption.DEFAULT, CommonsCompressionFactory.INSTANCE, codec)
+        case Some(codec) => new ArrowStreamWriter(root, provider, sink, IpcOption.DEFAULT, io.sparkvector.shuffle.ShuffleCompression.Factory, codec)
         case None => new ArrowStreamWriter(root, provider, sink)
       }
       writer.start()
+    }
+    private var sink: java.nio.channels.WritableByteChannel = _
+
+    /** Ends the batch's stream and frees the root and the writer's dictionary copies. */
+    def endStream(): Unit = if (writer != null) {
+      writer.end()
+      writer.close()
+      root.close()
+      writer = null; root = null
+      if (overflow != null && overflow.isOpen) overflowBytes = math.max(overflowBytes, overflow.position())
     }
 
     private def openOverflow(): Unit = if (overflow == null) {
@@ -112,14 +127,7 @@ final class PartitionedIpcWriter(
       bytes.reset()
     }
 
-    def end(): Unit = if (writer != null) {
-      writer.end()
-      // A direct stream wrote to the overflow channel, which the writer closes with itself.
-      if (overflow != null && overflow.isOpen) overflowBytes = math.max(overflowBytes, overflow.position())
-      writer.close()
-      root.close()
-      writer = null
-    }
+    def end(): Unit = endStream()
 
     def release(): Unit = {
       pending.foreach(sl => try sl.close() catch { case _: Exception => }); pending.clear()
@@ -214,7 +222,10 @@ final class PartitionedIpcWriter(
     seg.pendingBytes += size
     heldBytes += size
     if (seg.pendingRows >= batchRows || seg.pendingBytes >= batchBytes) flush(seg)
-    while (heldBytes > bufferBytes) {
+    // The cap is on what the allocator really holds, not on the slices' used bytes: `setSafe`-grown
+    // vectors carry doubled capacity and the per-slice string dictionaries their own, so the estimate
+    // ran 10-20x under the truth (#340: a task's writer at 1.1 GB against a 64 MB `bufferBytes`).
+    while (heldBytes > bufferBytes || allocator.getAllocatedMemory > bufferBytes) {
       var fullest: Segment = null
       var p = 0
       while (p < numPartitions) {
@@ -222,9 +233,12 @@ final class PartitionedIpcWriter(
         if (sg.pendingBytes > 0 && (fullest == null || sg.pendingBytes > fullest.pendingBytes)) fullest = sg
         p += 1
       }
-      if (fullest == null) heldBytes = 0L else flush(fullest)
+      if (fullest == null) { heldBytes = 0L; return } else flush(fullest)
     }
   }
+
+  /** What the writer's allocator holds right now (pending slices; the roots are emptied after each batch). */
+  def allocatedBytes: Long = allocator.getAllocatedMemory
 
   /** The partition's held slices become one record batch of its stream. */
   private def flush(seg: Segment): Unit = if (seg.pending.nonEmpty) {
@@ -261,7 +275,7 @@ final class PartitionedIpcWriter(
         }
         c += 1
       }
-      if (seg.writer == null) seg.start()
+      seg.start()
       // Pass 2: the columns into the root -- moved when there is one slice, appended otherwise.
       c = 0
       while (c < schema.fields.length) {
@@ -279,6 +293,7 @@ final class PartitionedIpcWriter(
       }
       seg.root.setRowCount(seg.pendingRows)
       seg.writer.writeBatch()
+      seg.endStream()
       seg.rows += seg.pendingRows
       rawBytesWritten += seg.pendingBytes
       seg.spillIfNeeded()
@@ -341,6 +356,13 @@ final class PartitionedIpcWriter(
 }
 
 object PartitionedIpcWriter {
+  /** A channel the stream writer may close without closing the file or buffer behind it (one stream per batch). */
+  final class NonClosing(inner: java.nio.channels.WritableByteChannel) extends java.nio.channels.WritableByteChannel {
+    override def write(src: ByteBuffer): Int = inner.write(src)
+    override def isOpen: Boolean = inner.isOpen
+    override def close(): Unit = ()
+  }
+
   /** Partition count up to which each stream is written straight to its own file (Spark's `spark.shuffle.sort.bypassMergeThreshold`). */
   val DirectFileMaxPartitions = 200
 
