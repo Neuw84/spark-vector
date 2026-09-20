@@ -15,6 +15,7 @@
 #   NAMESPACE (bench) SERVICE_ACCOUNT (sfi-engine) SUITE (tpcds | tpch)
 #   EXECUTORS (8) EXEC_CORES (14) EXEC_MEM (40g) EXEC_OVERHEAD (10g) DRIVER_CORES (2) DRIVER_MEM (8g)
 #   NODE_SELECTOR (workload=spark-xl; empty for none) OFFHEAP (32g, the comet configurations)
+#   EXEC_JAVA_OPTS (extra executor JVM options, e.g. a JFR recording: -XX:StartFlightRecording=duration=300s,filename=/tmp/exec.jfr,settings=profile)
 #   KEEP_EXECUTORS (unset; set to 1 to keep dead executor pods for their logs)
 #   DIRECT_MEM (EXEC_OVERHEAD minus 2g; the executors' -XX:MaxDirectMemorySize)
 set -euo pipefail
@@ -89,7 +90,7 @@ cat <<EOF
     # Arrow's Netty allocator is bounded by the JVM's direct-memory limit, which defaults to the heap size:
     # give it the overhead instead (DIRECT_MEM; default EXEC_OVERHEAD less 2g), or our kernels' and the
     # shuffle's buffers hit a 20 GiB wall inside a 50 GiB container.
-    spark.executor.extraJavaOptions: "-XX:MaxDirectMemorySize=$DIRECT_MEM"
+    spark.executor.extraJavaOptions: "-XX:MaxDirectMemorySize=$DIRECT_MEM${EXEC_JAVA_OPTS:+ $EXEC_JAVA_OPTS}"
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://sfi-iceberg-wh-378683551918/spark-events"
     spark.hadoop.fs.s3a.connection.maximum: "200"
