@@ -2,7 +2,7 @@ package io.sparkvector.spark.expr
 
 import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, CastKernels, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
 import org.apache.spark.QueryContext
-import org.apache.spark.sql.types.{BooleanType, DataType, DoubleType, IntegerType, LongType, StringType, TimestampType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DoubleType, IntegerType, LongType, ShortType, StringType, TimestampType}
 import org.apache.spark.sql.vector.{SparkCasts, SparkFormatters, VectorErrors}
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -220,5 +220,77 @@ final case class StringToDateTimeExpr(child: VectorExpr, toTimestamp: Boolean, t
 
 object CastExprs {
   /** The lane types the first cast slice writes strings for. */
-  def stringable(dt: DataType): Boolean = dt == IntegerType || dt == LongType || dt == DoubleType || dt == BooleanType
+  def stringable(dt: DataType): Boolean = dt == IntegerType || dt == LongType || dt == DoubleType || dt == BooleanType || dt == ByteType || dt == ShortType
+}
+
+/**
+ * `int / bigint / double / smallint -> tinyint` and `-> smallint` (#327): the value narrowed into the
+ * declared type's range on the INT32 lane, as Spark's `Cast` does -- legacy mode truncates to int
+ * (a double saturates, NaN is 0) and wraps like Java's `(byte)` / `(short)`; ANSI raises the cast
+ * overflow when the value is not exactly representable; `try_cast` nulls it. With `arithmetic` the
+ * expression narrows the result of a byte or short `+ - *` computed on the int lane, and the ANSI
+ * error is the arithmetic overflow, as in Spark.
+ */
+final case class NarrowIntExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext,
+    nullOnOverflow: Boolean = false, arithmetic: Boolean = false) extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(child)
+  private val isByte = dataType == ByteType
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val a = child.eval(ctx)
+    val n = ctx.numRows
+    val out = ArrowLayout.allocateData(ctx.arena, VecType.INT32, n)
+    val overflow = if (ansi || nullOnOverflow) ctx.bitmap() else null
+    val lane = a.`type`()
+    var i = 0
+    while (i < n) {
+      if (a.validity() == null || Bitmap.isSet(a.validity(), i)) {
+        var exact = true
+        val v: Int = lane match {
+          case VecType.INT32 => a.getInt(i)
+          case VecType.INT64 =>
+            val l = a.getLong(i)
+            exact = l == l.toInt
+            l.toInt
+          case VecType.FLOAT64 =>
+            val d = a.getDouble(i)
+            exact = !d.isNaN && !d.isInfinite && math.floor(d) <= Int.MaxValue && math.ceil(d) >= Int.MinValue
+            d.toInt // Scala's saturating conversion, NaN -> 0: Spark's Numeric.toInt
+          case other => throw new IllegalStateException(s"no narrowing from $other")
+        }
+        val narrowed = if (isByte) v.toByte.toInt else v.toShort.toInt
+        out.setAtIndex(VectorBuffers.LE_INT, i, narrowed)
+        if (overflow != null && (!exact || narrowed != v)) Bitmap.set(overflow, i)
+      }
+      i += 1
+    }
+    if (nullOnOverflow) {
+      val validity = ArrowLayout.allocateBitmap(ctx.arena, n)
+      if (a.validity() == null) BitmapKernels.not(overflow, validity, n)
+      else BitmapKernels.andNot(a.validity(), overflow, validity, n)
+      return SegmentVectorBuffers.fixedWidth(VecType.INT32, n, validity, out)
+    }
+    if (ansi && ArithExpr.anyActive(overflow, a.validity(), ctx)) {
+      var j = 0
+      while (j < n) {
+        if (Bitmap.isSet(overflow, j) && (a.validity() == null || Bitmap.isSet(a.validity(), j)) && (ctx.active == null || Bitmap.isSet(ctx.active, j))) {
+          if (arithmetic) throw VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(VecType.INT32), "", queryContext)
+          val value: Any = lane match {
+            case VecType.INT32 => if (child.dataType == ShortType) a.getInt(j).toShort else a.getInt(j)
+            case VecType.INT64 => a.getLong(j)
+            case _ => a.getDouble(j)
+          }
+          throw VectorErrors.castOverflow(value, child.dataType, dataType)
+        }
+        j += 1
+      }
+    }
+    SegmentVectorBuffers.fixedWidth(VecType.INT32, n, a.validity(), out)
+  }
+}
+
+/** The same lane under another Spark type: `tinyint / smallint -> int` is the INT32 lane as it is (#327). */
+final case class RetypeExpr(child: VectorExpr, dataType: DataType) extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers = child.eval(ctx)
 }

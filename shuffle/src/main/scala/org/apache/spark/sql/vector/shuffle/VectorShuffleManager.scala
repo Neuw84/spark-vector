@@ -49,7 +49,7 @@ object VectorPartitioning {
   def keyKind(dt: DataType): KeyKind = {
     import org.apache.spark.sql.types._
     dt match {
-      case IntegerType | DateType => KeyKind.INT
+      case IntegerType | DateType | ByteType | ShortType => KeyKind.INT // Spark hashes a byte or short as its int value
       case LongType | TimestampType => KeyKind.LONG
       case d: DecimalType if d.precision <= io.sparkvector.spark.adapter.TypeMapping.MAX_DECIMAL_PRECISION => KeyKind.LONG
       case _: DecimalType => KeyKind.DECIMAL128

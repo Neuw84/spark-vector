@@ -7,7 +7,7 @@ import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMont
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
-import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, MapType, StringType, TimestampType}
+import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, ByteType, ShortType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, MapType, StringType, TimestampType}
 
 /**
  * Translates Catalyst expressions into [[VectorExpr]] trees. Returns a human-readable reason on
@@ -21,7 +21,7 @@ object ExpressionCompiler {
 
   /** Types whose literals can be used as compare / IN operands. */
   private def isLiteralType(dt: DataType): Boolean = dt match {
-    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType => true
+    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType | ByteType | ShortType => true // byte and short literals ride the int lane (#327)
     case d: DecimalType => TypeMapping.isSupported(d)
     case _ => false
   }
@@ -305,6 +305,9 @@ object ExpressionCompiler {
         case _: LiteralExpr => Left("cast of a literal")
         case ce =>
           (from, to) match {
+            // Narrow integers (#327): into tinyint / smallint from any int lane or double; out of them the lane is already an int.
+            case (IntegerType | LongType | DoubleType | ShortType | ByteType, ByteType | ShortType) => Right(NarrowIntExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
+            case (ByteType | ShortType, IntegerType) => Right(RetypeExpr(ce, IntegerType))
             case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => Right(NarrowCastExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
             case (IntegerType | LongType | DoubleType, BooleanType) => Right(ToBooleanExpr(ce))
             case (BooleanType, IntegerType | LongType | DoubleType) => Right(FromBooleanExpr(ce, to))
@@ -694,6 +697,8 @@ object ExpressionCompiler {
   /** A compiled non-literal date operand. */
   /** The casts of #43 (the widening kernel and the decimal path keep their own cases). */
   private def sliceOneCast(c: Cast): Boolean = (c.child.dataType, c.dataType) match {
+    case (IntegerType | LongType | DoubleType | ShortType | ByteType, ByteType | ShortType) => true // #327
+    case (ByteType | ShortType, IntegerType) => true
     case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => true
     case (IntegerType | LongType | DoubleType, BooleanType) => true
     case (BooleanType, IntegerType | LongType | DoubleType) => true
@@ -806,7 +811,14 @@ object ExpressionCompiler {
       le <- compile(l, input)
       re <- compile(r, input)
       _ <- checkArithmetic(op, le, re, l, r, mode)
-    } yield ArithExpr(op, le, re, e.dataType, mode == EvalMode.ANSI, e.origin.context, nullOnOverflow = mode == EvalMode.TRY)
+    } yield e.dataType match {
+      // tinyint / smallint arithmetic (#327): exact on the int lane (two bytes or shorts never overflow an
+      // int), then narrowed into the declared type -- Spark wraps in legacy mode, raises in ANSI, nulls in try.
+      case ByteType | ShortType =>
+        NarrowIntExpr(ArithExpr(op, le, re, IntegerType, ansiDivideByZero = false, e.origin.context), e.dataType, mode == EvalMode.ANSI, e.origin.context,
+          nullOnOverflow = mode == EvalMode.TRY, arithmetic = true)
+      case _ => ArithExpr(op, le, re, e.dataType, mode == EvalMode.ANSI, e.origin.context, nullOnOverflow = mode == EvalMode.TRY)
+    }
 
   private def checkArithmetic(
       op: ArithOp,

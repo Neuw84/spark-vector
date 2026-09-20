@@ -2,6 +2,8 @@ package io.sparkvector.spark.adapter;
 
 import io.sparkvector.kernels.VecType;
 import org.apache.spark.sql.types.BooleanType;
+import org.apache.spark.sql.types.ByteType;
+import org.apache.spark.sql.types.ShortType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DateType;
 import org.apache.spark.sql.types.DecimalType;
@@ -18,7 +20,9 @@ public final class TypeMapping {
 
   /** Physical type for a supported Spark type, or {@code null} if unsupported. */
   public static VecType vecTypeOf(DataType dt) {
-    if (dt instanceof IntegerType || dt instanceof DateType) {
+    if (dt instanceof IntegerType || dt instanceof DateType || dt instanceof ByteType || dt instanceof ShortType) {
+      // TINYINT and SMALLINT ride INT32 lanes (#327): every value fits, and the output wrapper
+      // (VectorNarrowIntColumnVector) hands Spark the declared type back.
       return VecType.INT32;
     }
     if (dt instanceof LongType || dt instanceof TimestampType) {

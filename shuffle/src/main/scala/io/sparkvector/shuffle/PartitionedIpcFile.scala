@@ -7,7 +7,7 @@ import java.util.{HashMap => JHashMap}
 import scala.jdk.CollectionConverters._
 
 import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
+import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector, VectorNarrowIntColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector}
 import org.apache.arrow.vector.ipc.ArrowStreamReader
@@ -36,7 +36,7 @@ object PartitionedIpcFile {
   }
 
   def arrowType(dt: DataType): ArrowType = dt match {
-    case IntegerType => new ArrowType.Int(32, true)
+    case IntegerType | ByteType | ShortType => new ArrowType.Int(32, true) // narrow ints ride INT32 lanes (#327)
     case DateType => new ArrowType.Date(DateUnit.DAY)
     case LongType => new ArrowType.Int(64, true)
     case TimestampType => new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC")
@@ -174,6 +174,7 @@ object PartitionedIpcFile {
         case StringType => new VectorArrowColumnVector(moved) // plain UTF8: the writer found no dictionary worth sending
         case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
           new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
+        case ByteType | ShortType => new VectorNarrowIntColumnVector(moved.asInstanceOf[IntVector], dt) // #327
         case _ => new VectorArrowColumnVector(moved)
       }
       c += 1

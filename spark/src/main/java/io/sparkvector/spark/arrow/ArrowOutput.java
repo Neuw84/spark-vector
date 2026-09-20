@@ -43,7 +43,7 @@ public final class ArrowOutput {
 
   /** Allocates an empty Arrow vector for a supported Spark type. */
   public static FieldVector newVector(String name, DataType dt, BufferAllocator allocator) {
-    if (dt instanceof IntegerType) {
+    if (dt instanceof IntegerType || VectorNarrowIntColumnVector.isNarrow(dt)) {
       return new IntVector(name, allocator);
     }
     if (dt instanceof DateType) {
@@ -116,6 +116,9 @@ public final class ArrowOutput {
   public static ColumnVector wrap(FieldVector v, DataType sparkType) {
     if (sparkType instanceof DecimalType d && v instanceof BigIntVector lv) {
       return new VectorDecimalColumnVector(lv, d);
+    }
+    if (VectorNarrowIntColumnVector.isNarrow(sparkType) && v instanceof IntVector iv) {
+      return new VectorNarrowIntColumnVector(iv, sparkType); // #327
     }
     return new VectorArrowColumnVector(v);
   }
