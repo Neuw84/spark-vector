@@ -115,9 +115,36 @@ class SortKernelsTest {
           }
         }
         if (n > 0) {
-          values[0] = "a string that is definitely longer than eight bytes"; // forces the rank path
+          values[0] = "a string that is definitely longer than eight bytes"; // the chunked path (#377)
         }
         checkAllOrders(ArrowLayout.ofStrings(arena, values), n, "long strings n=" + n);
+        if (n > 1) {
+          values[1] = "a string longer than sixty-four bytes forces the merge-sort rank path, still exact"; // 84 bytes
+          checkAllOrders(ArrowLayout.ofStrings(arena, values), n, "very long strings n=" + n);
+        }
+      }
+    }
+  }
+
+  @Test
+  void chunkedStringsAtTheBoundaries() {
+    // Lengths around the 8-byte chunks, shared prefixes across a chunk edge, embedded zero bytes
+    // (a shorter prefix sorts first, a zero byte after it does not tie with the end), and a
+    // partition whose strings are all equal -- q67's window partitioned by its first sort key.
+    try (Arena arena = Arena.ofConfined()) {
+      String[] values = {
+        "abcdefgh", "abcdefghi", "abcdefg", "abcdefgh\u0000", "abcdefghijklmnop", "abcdefghijklmnopq",
+        "abcdefghijklmno", "ABCDEFGHIJKLMNOPQRSTUVWX", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "", null, "z", "abcdefgh", "\u00ff\u00ff\u00ff\u00ff\u00ff\u00ff\u00ff\u00ff\u00ff", "日本語日本語", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXY"
+      };
+      checkAllOrders(ArrowLayout.ofStrings(arena, values), values.length, "chunk boundaries");
+      Random rnd = new Random(377);
+      for (int n : SIZES) {
+        String[] same = new String[n];
+        for (int i = 0; i < n; i++) {
+          same[i] = rnd.nextInt(50) == 0 ? null : "Electronics"; // 11 bytes: two chunks
+        }
+        checkAllOrders(ArrowLayout.ofStrings(arena, same), n, "all equal n=" + n);
       }
     }
   }

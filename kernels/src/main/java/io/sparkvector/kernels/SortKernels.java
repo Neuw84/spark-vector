@@ -492,9 +492,16 @@ public final class SortKernels {
   private static final int SHORT_STRING = 8;
   private static final ValueLayout.OfLong BE_LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
 
+  /** Strings up to this length sort by 8-byte chunks; longer ones are ranked by a merge sort. */
+  private static final int CHUNKED_STRING = 64;
+
   private static int[] passesUtf8(int[] order, VectorBuffers k, boolean desc, Passes p, int n) {
-    if (maxLength(k) <= SHORT_STRING) {
+    int maxLen = maxLength(k);
+    if (maxLen <= SHORT_STRING) {
       return shortStringPasses(order, k, desc, p, n);
+    }
+    if (maxLen <= CHUNKED_STRING) {
+      return chunkedStringPasses(order, k, desc, p, n, (maxLen + SHORT_STRING - 1) / SHORT_STRING);
     }
     int[] rank = ranks(k, n);
     int[] key = p.key;
@@ -542,6 +549,58 @@ public final class SortKernels {
       carried[j] = prefix[src[j]];
     }
     return p.pass64(afterLen, carried);
+  }
+
+  /**
+   * Strings of up to {@link #CHUNKED_STRING} bytes (#377): a length pass, then one 64-bit pass per
+   * 8-byte chunk from the last chunk to the first (least significant first), each over the
+   * zero-padded big-endian chunk of every row. A pass whose digits are all equal is skipped by
+   * {@code pass64}, so a partition whose strings are all the same -- q67's window, partitioned by
+   * the sort's first key -- costs one scan per chunk; the merge-sort rank it replaced compared
+   * every pair on the way, n log n byte comparisons for an order that was already known.
+   */
+  private static int[] chunkedStringPasses(int[] order, VectorBuffers k, boolean desc, Passes p, int n, int chunks) {
+    int[] key = p.key;
+    VectorBuffers values = k.isDictionaryEncoded() ? k.dictionary() : k;
+    MemorySegment off = values.offsets();
+    MemorySegment data = values.data();
+    for (int i = 0; i < n; i++) {
+      int row = order[i];
+      if (k.isNull(row)) {
+        key[i] = 0;
+      } else {
+        int v = k.isDictionaryEncoded() ? k.getInt(row) : row;
+        int len = off.get(VectorBuffers.LE_INT, (long) (v + 1) << 2) - off.get(VectorBuffers.LE_INT, (long) v << 2);
+        key[i] = flip(len, desc);
+      }
+    }
+    order = p.pass(order);
+    long[] chunk = new long[n];
+    for (int c = chunks - 1; c >= 0; c--) {
+      int from = c * SHORT_STRING;
+      for (int i = 0; i < n; i++) {
+        int row = order[i];
+        long pre = 0L;
+        if (!k.isNull(row)) {
+          int v = k.isDictionaryEncoded() ? k.getInt(row) : row;
+          int start = off.get(VectorBuffers.LE_INT, (long) v << 2);
+          int len = off.get(VectorBuffers.LE_INT, (long) (v + 1) << 2) - start;
+          if (len >= from + SHORT_STRING) {
+            pre = data.get(BE_LONG, start + from);
+          } else {
+            for (int j = from; j < len; j++) {
+              pre |= (data.get(ValueLayout.JAVA_BYTE, start + j) & 0xFFL) << (56 - 8 * (j - from));
+            }
+          }
+          if (desc) {
+            pre = ~pre;
+          }
+        }
+        chunk[i] = pre;
+      }
+      order = p.pass64(order, chunk);
+    }
+    return order;
   }
 
   private static int maxLength(VectorBuffers k) {
