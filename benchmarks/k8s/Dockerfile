@@ -30,7 +30,7 @@ COPY . /src
 RUN mvn -B -q -Pcomet,iceberg -DskipTests -pl benchmarks -am package
 # The Flight shuffle's runtime jars: the shaded benchmarks.jar carries only io.sparkvector:*, and Spark's
 # distribution has Arrow and guava but no flight-core, gRPC or protobuf-java (the Netty classes are Spark's).
-RUN mvn -B -q -o -pl shuffle dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/src/flight-jars \
+RUN mvn -B -q -pl shuffle dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/src/flight-jars \
       -DincludeArtifactIds=flight-core,grpc-api,grpc-core,grpc-context,grpc-netty,grpc-protobuf,grpc-protobuf-lite,grpc-stub,grpc-util,perfmark-api,proto-google-common-protos,protobuf-java,protobuf-java-util,animal-sniffer-annotations,error_prone_annotations,annotations,j2objc-annotations,jspecify \
  && ls /src/flight-jars
 RUN git clone --depth 1 https://github.com/databricks/tpcds-kit /opt/tpcds-kit \
