@@ -14,6 +14,7 @@ import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.SparkConf
 import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vector.shuffle.VectorShuffleBackend
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -128,5 +129,34 @@ class FlightBlockStreamSuite extends AnyFunSuite {
       server.close()
       allocator.close()
     }
+  }
+
+  test("#364: a remote executor that refuses connections is a FetchFailedException for its address, not a plain failure") {
+    // A port nothing listens on: the connect fails at open or on the first read, depending on the transport.
+    val closed = new java.net.ServerSocket(0)
+    val port = closed.getLocalPort
+    closed.close()
+    val address = org.apache.spark.storage.BlockManagerId("exec-9", "127.0.0.1", 7079)
+    val blockId = org.apache.spark.storage.ShuffleBlockId(3, 11L, 5)
+    def fail(e: Throwable): Nothing =
+      throw new org.apache.spark.shuffle.FetchFailedException(address, blockId.shuffleId, blockId.mapId, 4, blockId.reduceId, s"refused: $e", e)
+    def open(): Iterator[ColumnarBatch] with AutoCloseable =
+      try {
+        val s = new FlightBlockStream(FlightLocation("127.0.0.1", port), 3, 11L, 5, new SparkConf(false), FlightShuffle.Clients.allocatorForReads,
+          new org.apache.spark.executor.TempShuffleReadMetrics())
+        VectorShuffleBackend.fetchFailing(s, fail)
+      } catch { case e: Exception if !VectorShuffleBackend.isMemory(e) => fail(e) }
+    // The connect fails at open (the stream's constructor asks for the DoGet) or on the first read.
+    val ex = intercept[org.apache.spark.shuffle.FetchFailedException] { open().hasNext }
+    val reason = ex.toTaskFailedReason.asInstanceOf[org.apache.spark.FetchFailed]
+    assert(reason.bmAddress === address)
+    assert(reason.shuffleId === 3 && reason.mapId === 11L && reason.mapIndex === 4 && reason.reduceId === 5)
+    // Memory errors are not fetch failures.
+    val oom = VectorShuffleBackend.fetchFailing(new Iterator[ColumnarBatch] with AutoCloseable {
+      override def hasNext: Boolean = throw new org.apache.arrow.memory.OutOfMemoryException("full")
+      override def next(): ColumnarBatch = throw new NoSuchElementException
+      override def close(): Unit = ()
+    }, fail)
+    intercept[org.apache.arrow.memory.OutOfMemoryException] { oom.hasNext }
   }
 }

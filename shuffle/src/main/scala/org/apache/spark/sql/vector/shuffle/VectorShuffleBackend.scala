@@ -43,9 +43,13 @@ trait VectorShuffleBackend {
 
   /**
    * The reducer's whole input. The default reads blocks this executor wrote from its own files and
-   * hands every other executor's to [[remoteBlocks]]; a service-backed backend overrides it.
+   * hands every other executor's to [[remoteBlocks]]; a service-backed backend overrides it. Each
+   * block comes with its map index, so a failed remote fetch can be reported as Spark's
+   * `FetchFailedException` (#364): the scheduler then unregisters the executor's map outputs and
+   * recomputes them, where a plain task failure would retry against the same dead address and fail
+   * the query.
    */
-  def read(blocksByAddress: Seq[(BlockManagerId, Seq[(ShuffleBlockId, Long)])], allocator: BufferAllocator,
+  def read(blocksByAddress: Seq[(BlockManagerId, Seq[(ShuffleBlockId, Long, Int)])], allocator: BufferAllocator,
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] = {
     val env = SparkEnv.get
     val local = env.blockManager.blockManagerId.executorId
@@ -53,11 +57,18 @@ trait VectorShuffleBackend {
     // executors send concurrently while the reducer decodes the first; gRPC's flow control bounds
     // what each stream buffers. The local blocks are read as they are reached.
     val remote = blocksByAddress.iterator.collect {
-      case (address, blocks) if blocks.nonEmpty && address.executorId != local => remoteBlocks(address, blocks, allocator, metrics).toIndexedSeq
+      case (address, blocks) if blocks.nonEmpty && address.executorId != local =>
+        val (firstId, _, firstIndex) = blocks.head
+        def fetchFailed(e: Throwable): Nothing =
+          throw new org.apache.spark.shuffle.FetchFailedException(address, firstId.shuffleId, firstId.mapId, firstIndex, firstId.reduceId,
+            s"fetch of ${blocks.length} block(s) from ${address.executorId} at ${address.host}:${address.port} failed: $e", e)
+        val opened = try remoteBlocks(address, blocks.map { case (id, size, _) => (id, size) }, allocator, metrics).toIndexedSeq
+          catch { case e: Exception if !VectorShuffleBackend.isMemory(e) => fetchFailed(e) }
+        opened.map(s => VectorShuffleBackend.fetchFailing(s, fetchFailed))
     }.toIndexedSeq.flatten
     val localBlocks = blocksByAddress.iterator.collect {
       case (address, blocks) if blocks.nonEmpty && address.executorId == local => blocks
-    }.flatten.map { case (id, _) =>
+    }.flatten.map { case (id, _, _) =>
       metrics.incLocalBlocksFetched(1)
       val buf = env.blockManager.getLocalBlockData(id)
       metrics.incLocalBytesRead(buf.size())
@@ -71,6 +82,20 @@ object VectorShuffleBackend {
   val Key = "spark.vector.shuffle.backend"
 
   def backendName(conf: SparkConf): String = conf.get(Key, "flight").trim
+
+  /** Arrow's allocator running out is the reducer's memory, not the remote executor: never a fetch failure. */
+  def isMemory(e: Throwable): Boolean = e match {
+    case _: org.apache.arrow.memory.OutOfMemoryException | _: OutOfMemoryError => true
+    case _ => false
+  }
+
+  /** `inner` with every non-memory failure of `hasNext` / `next` turned into the fetch failure `fail` builds (#364). */
+  def fetchFailing(inner: Iterator[ColumnarBatch] with AutoCloseable, fail: Throwable => Nothing): Iterator[ColumnarBatch] with AutoCloseable =
+    new Iterator[ColumnarBatch] with AutoCloseable {
+      override def hasNext: Boolean = try inner.hasNext catch { case e: Exception if !isMemory(e) => fail(e) }
+      override def next(): ColumnarBatch = try inner.next() catch { case e: Exception if !isMemory(e) => fail(e) }
+      override def close(): Unit = inner.close()
+    }
 
   /** `flight`, `block`, or the class name of a backend with a no-argument constructor. */
   def apply(conf: SparkConf): VectorShuffleBackend = backendName(conf).toLowerCase match {
