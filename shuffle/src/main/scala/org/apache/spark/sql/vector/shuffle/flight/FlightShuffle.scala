@@ -44,17 +44,28 @@ object FlightShuffle extends Logging {
 
   def backend(conf: SparkConf): String = org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
 
-  /** The ticket of one block: 4-byte shuffleId, 8-byte mapId, 4-byte reducePartition, big-endian. */
-  def ticket(shuffleId: Int, mapId: Long, reduce: Int): Ticket = {
-    val b = ByteBuffer.allocate(16)
-    b.putInt(shuffleId).putLong(mapId).putInt(reduce)
+  /**
+   * The ticket of one reducer's blocks on one executor (#347): 4-byte shuffleId, 4-byte
+   * reducePartition, 4-byte count, then count 8-byte mapIds, big-endian. One `DoGet` per (executor,
+   * reducer) instead of one per block: a reduce task's input is a block per map task, and a round
+   * trip per block made the reducers latency-bound (a hundred sequential stream setups each at SF100).
+   */
+  def ticket(shuffleId: Int, reduce: Int, mapIds: Seq[Long]): Ticket = {
+    val b = ByteBuffer.allocate(12 + 8 * mapIds.size)
+    b.putInt(shuffleId).putInt(reduce).putInt(mapIds.size)
+    mapIds.foreach(b.putLong)
     new Ticket(b.array())
   }
 
-  def parseTicket(t: Ticket): (Int, Long, Int) = {
+  /** The ticket of a single block. */
+  def ticket(shuffleId: Int, mapId: Long, reduce: Int): Ticket = ticket(shuffleId, reduce, Seq(mapId))
+
+  def parseTicket(t: Ticket): (Int, Int, Seq[Long]) = {
     val b = ByteBuffer.wrap(t.getBytes)
-    require(b.remaining() == 16, s"malformed shuffle ticket (${b.remaining()} bytes)")
-    (b.getInt, b.getLong, b.getInt)
+    require(b.remaining() >= 12 && (b.remaining() - 12) % 8 == 0, s"malformed shuffle ticket (${b.remaining()} bytes)")
+    val shuffleId = b.getInt; val reduce = b.getInt; val count = b.getInt
+    require(count >= 0 && b.remaining() == 8L * count, s"malformed shuffle ticket: $count blocks, ${b.remaining()} bytes left")
+    (shuffleId, reduce, Seq.fill(count)(b.getLong))
   }
 
   /** Spark's shuffle secret when `spark.authenticate` is on, else None. */
@@ -90,32 +101,41 @@ object FlightShuffle extends Logging {
    */
   final class Producer(blockData: (Int, Long, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) extends NoOpFlightProducer {
     override def getStream(context: FlightProducer.CallContext, ticket: Ticket, listener: FlightProducer.ServerStreamListener): Unit = {
-      val (shuffleId, mapId, reduce) = parseTicket(ticket)
-      val buf = blockData(shuffleId, mapId, reduce)
-      val in = buf.createInputStream()
+      val (shuffleId, reduce, mapIds) = parseTicket(ticket)
       val root = VectorSchemaRoot.create(BytesSchema, allocator)
       val vector = root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector]
+      var current = -1L
       try {
         listener.start(root)
         val chunk = new Array[Byte](ChunkBytes)
-        var n = readFully(in, chunk)
-        while (n > 0) {
-          vector.reset()
-          vector.setSafe(0, chunk, 0, n)
-          vector.setValueCount(1)
-          root.setRowCount(1)
-          listener.putNext()
-          n = readFully(in, chunk)
+        // The blocks back to back: each is a sequence of IPC streams and the client's reader decodes
+        // concatenated streams, so where one block ends and the next begins needs no marker.
+        mapIds.foreach { mapId =>
+          current = mapId
+          val buf = blockData(shuffleId, mapId, reduce)
+          val in = buf.createInputStream()
+          try {
+            var n = readFully(in, chunk)
+            while (n > 0) {
+              vector.reset()
+              vector.setSafe(0, chunk, 0, n)
+              vector.setValueCount(1)
+              root.setRowCount(1)
+              listener.putNext()
+              n = readFully(in, chunk)
+            }
+          } finally {
+            in.close()
+            buf.release()
+          }
         }
         listener.completed()
       } catch {
         case e: Exception =>
-          logWarning(s"flight shuffle: serving $shuffleId/$mapId/$reduce failed", e)
+          logWarning(s"flight shuffle: serving $shuffleId/$current/$reduce (${mapIds.size} blocks) failed", e)
           listener.error(CallStatus.INTERNAL.withCause(e).withDescription(e.toString).toRuntimeException)
       } finally {
         root.close()
-        in.close()
-        buf.release()
       }
     }
 
@@ -268,22 +288,28 @@ object FlightRegistry extends Logging {
 }
 
 /**
- * One remote block over Flight: a `DoGet` for `(shuffleId, mapId, reduce)` against the executor's
- * server, each arriving root turned into a batch that owns its memory; the previous batch is closed
- * when the next is produced (the consumers do not close their input).
+ * One reducer's blocks on one remote executor over Flight (#347): a single `DoGet` for
+ * `(shuffleId, reduce, mapIds)` against the executor's server, the blocks' IPC bytes arriving back to
+ * back and decoded by the local path's reader; each batch owns its memory and the previous batch is
+ * closed when the next is produced (the consumers do not close their input). The stream is opened at
+ * construction, so the streams to several executors, built together, transfer concurrently.
  */
 final class FlightBlockStream(
     location: FlightLocation,
     shuffleId: Int,
-    mapId: Long,
+    mapIds: Seq[Long],
     reduce: Int,
     conf: SparkConf,
     allocator: BufferAllocator,
     metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) extends Iterator[org.apache.spark.sql.vectorized.ColumnarBatch] with AutoCloseable {
 
+  /** A single block. */
+  def this(location: FlightLocation, shuffleId: Int, mapId: Long, reduce: Int, conf: SparkConf, allocator: BufferAllocator,
+      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) = this(location, shuffleId, Seq(mapId), reduce, conf, allocator, metrics)
+
   private val stream: FlightStream = {
     val start = System.nanoTime()
-    val s = FlightShuffle.Clients.client(location).getStream(FlightShuffle.ticket(shuffleId, mapId, reduce), FlightShuffle.Clients.callOptions(conf): _*)
+    val s = FlightShuffle.Clients.client(location).getStream(FlightShuffle.ticket(shuffleId, reduce, mapIds), FlightShuffle.Clients.callOptions(conf): _*)
     metrics.incFetchWaitTime((System.nanoTime() - start) / 1000000)
     s
   }
