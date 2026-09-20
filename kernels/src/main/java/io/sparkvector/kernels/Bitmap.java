@@ -68,6 +68,44 @@ public final class Bitmap {
   }
 
   /** Sets or clears the first {@code numBits} bits. */
+  /** Sets bits {@code [from, from + count)} to {@code value}; the rest of the bitmap is left as it is. */
+  public static void fillRange(MemorySegment bm, int from, int count, boolean value) {
+    int i = from;
+    int end = from + count;
+    // Leading partial byte, whole bytes, trailing partial byte.
+    while (i < end && (i & 7) != 0) {
+      setTo(bm, i++, value);
+    }
+    byte b = (byte) (value ? 0xFF : 0);
+    while (i + 8 <= end) {
+      bm.set(BYTE, i >>> 3, b);
+      i += 8;
+    }
+    while (i < end) {
+      setTo(bm, i++, value);
+    }
+  }
+
+  /**
+   * Copies bits {@code [0, count)} of {@code src} to {@code dst} at bit offset {@code dstFrom} --
+   * the append of a compacted validity or BOOL slice at a row offset (#351).
+   */
+  public static void copyBits(MemorySegment src, MemorySegment dst, int dstFrom, int count) {
+    if ((dstFrom & 7) == 0) {
+      int whole = count >>> 3;
+      if (whole > 0) {
+        MemorySegment.copy(src, 0, dst, dstFrom >>> 3, whole);
+      }
+      for (int i = whole << 3; i < count; i++) {
+        setTo(dst, dstFrom + i, isSet(src, i));
+      }
+      return;
+    }
+    for (int i = 0; i < count; i++) {
+      setTo(dst, dstFrom + i, isSet(src, i));
+    }
+  }
+
   public static void fill(MemorySegment bm, int numBits, boolean value) {
     long bytes = bytesFor(numBits);
     if (bytes == 0) {

@@ -741,9 +741,12 @@ is configured. Four pieces, in the `shuffle` module except the kernel:
   field metadata, spilling a partition's stream to a temporary file past `spark.vector.shuffle.flushBytes`
   and concatenating at finish. The file is committed through Spark's `IndexShuffleBlockResolver`, so
   `MapStatus`, the index file and Spark's own block transfer all work on it. Record batches are
-  sized by the writer, not the input: a partition's compacted slices are held until `batchRows`
-  (8192) or `batchBytes` and written as one record batch, slices concatenated with `VectorAppender`
-  and their string dictionaries concatenated with index offsets into one replacement dictionary.
+  sized by the writer, not the input: every partition holds one builder per column -- an Arrow
+  vector its rows are compacted into at the current row offset, doubled as it fills (#351) -- and at
+  `batchRows` (8192) or `batchBytes` the builders become the record batch as they are; strings are
+  plain in the builders (a dictionary input is decoded once per input batch) and encoded once per
+  record batch (#349). Before that, a set of vectors per (input batch, partition) slice concatenated
+  at the flush made the write 63% of a string-heavy query's CPU at 200 partitions (~40-row slices).
   The first SF10 run wrote one record batch per (input batch, partition) -- 512 rows at 8 partitions,
   20 at 200 -- and the per-message costs made shuffled joins 2x slower than the row shuffle; sized
   batches made them faster. Each record batch is its own IPC stream (#340): an `ArrowStreamWriter`
