@@ -16,6 +16,7 @@ import scala.sys.process._
  *
  * {{{
  *   TpcdsGenRunner --scale 100 --out s3a://bucket/tpcds/sf100/parquet [--parallel 64] [--children-per-round 64]
+ *   TpcdsGenRunner --count-only 1 --out s3a://bucket/tpcds/sf100/parquet     # rows and files per table
  *                  [--dsdgen /opt/tpcds-kit/tools] [--tables store_sales,date_dim]
  * }}}
  *
@@ -45,6 +46,17 @@ object TpcdsGenRunner {
 
     val spark = SparkSession.builder().appName(s"tpcds-gen-sf$scale").getOrCreate()
     val tables = Schema.columns.keys.toSeq.sorted.filter(t => only.forall(_.contains(t)))
+
+    if (opts.contains("count-only")) {
+      // Verification of an existing dataset: rows and files per table (a long run's driver log rotates
+      // away before it ends).
+      tables.foreach { table =>
+        val df = spark.read.parquet(s"$out/$table")
+        val files = df.inputFiles.length
+        println(f"[tpcds-gen] $table: ${df.count()}%,d rows, $files%,d files")
+      }
+      spark.stop(); return
+    }
     println(s"[tpcds-gen] scale $scale, ${tables.length} tables, $parallel children, dsdgen at $dsdgenDir, out $out")
 
     tables.foreach { table =>
