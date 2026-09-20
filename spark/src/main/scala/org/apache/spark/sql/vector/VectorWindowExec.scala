@@ -11,7 +11,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, DenseRank, Expression, NamedExpression, Rank, RowNumber, SortOrder, SpecifiedWindowFrame, UnboundedFollowing, UnboundedPreceding, WindowExpression, WindowSpecDefinition}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, Complete, Count, First, Last, Max, Min, Sum}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CumeDist, EmptyRow, FrameLessOffsetWindowFunction, Literal, NTile, NthValue, PercentRank, UnboundedFollowing => UnboundedFollowingBound}
-import org.apache.spark.sql.types.{DateType, IntegerType, StringType, TimestampType, BooleanType, DecimalType => SparkDecimalType}
+import org.apache.spark.sql.types.{ByteType, ShortType, DateType, IntegerType, StringType, TimestampType, BooleanType, DecimalType => SparkDecimalType}
 import org.apache.spark.sql.catalyst.expressions.{CurrentRow, EvalMode, RangeFrame, RowFrame}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
 import org.apache.spark.sql.execution.SparkPlan
@@ -1139,6 +1139,8 @@ private[vector] class VectorWindowOffsetIterator(
     if (col.isNullAt(r)) null
     else dt match {
       case IntegerType | DateType => java.lang.Integer.valueOf(col.getInt(r))
+      case ByteType => java.lang.Byte.valueOf(col.getByte(r)) // #327: the int lane read back as the declared type
+      case ShortType => java.lang.Short.valueOf(col.getShort(r))
       case LongType | TimestampType => java.lang.Long.valueOf(col.getLong(r))
       case DoubleType => java.lang.Double.valueOf(col.getDouble(r))
       case BooleanType => java.lang.Boolean.valueOf(col.getBoolean(r))

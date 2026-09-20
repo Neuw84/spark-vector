@@ -21,7 +21,7 @@ object ExpressionCompiler {
 
   /** Types whose literals can be used as compare / IN operands. */
   private def isLiteralType(dt: DataType): Boolean = dt match {
-    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType => true
+    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType | ByteType | ShortType => true // byte and short literals ride the int lane (#327)
     case d: DecimalType => TypeMapping.isSupported(d)
     case _ => false
   }

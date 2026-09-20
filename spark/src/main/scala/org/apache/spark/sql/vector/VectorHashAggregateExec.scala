@@ -727,6 +727,10 @@ object AggBufferColumns {
           io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
         case v: java.lang.Integer =>
           io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+        case v: java.lang.Byte => // tinyint / smallint values ride the int lane (#327)
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+        case v: java.lang.Short =>
+          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
         case v: java.lang.Boolean =>
           io.sparkvector.kernels.Bitmap.set(validity, o); io.sparkvector.kernels.Bitmap.setTo(data, o, v.booleanValue())
         case other => throw new IllegalStateException(s"unexpected buffer value $other")
