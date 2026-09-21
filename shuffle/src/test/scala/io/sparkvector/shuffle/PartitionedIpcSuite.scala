@@ -220,6 +220,14 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 5, batches = Seq((500, true), (500, false), (500, true)), flushBytes = 1L << 20, bufferBytes = 4096)
   }
 
+  test("#416: above StagingPartitions the rows are staged and partitioned at the flush -- 400 partitions, several flushes, sliced batches") {
+    // The staged path: every partition's rows arrive in one gather per flush; a small bufferBytes forces
+    // several flushes (a record batch per partition per flush) and batchRows = 100 slices a partition's rows.
+    roundTrip(numPartitions = 400, batches = Seq((3000, true), (2000, false), (2500, true), (1000, false)), flushBytes = 1L << 20)
+    roundTrip(numPartitions = 400, batches = Seq((3000, true), (2000, false), (2500, true), (1000, false)), flushBytes = 1L << 20, bufferBytes = 64L << 10)
+    roundTrip(numPartitions = 400, batches = Seq((3000, true), (2000, false), (2500, true)), flushBytes = 4096, batchRows = 100)
+  }
+
   test("#340: the writer's real allocation stays within bufferBytes -- 200 partitions of string-heavy batches under a 24 MB limit") {
     // Before #340 the flush decision counted the slices' used bytes while the allocator held their
     // doubled capacity, the per-slice string dictionaries and every partition's last record batch in
