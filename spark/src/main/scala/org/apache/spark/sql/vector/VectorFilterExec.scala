@@ -6,7 +6,7 @@ import io.sparkvector.spark.expr.{ExpressionCompiler, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.{FilterExec, SparkPlan}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -19,7 +19,18 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 case class VectorFilterExec(condition: Expression, child: SparkPlan, emitSelection: Boolean = false)
     extends VectorExec {
 
-  override def output: Seq[Attribute] = child.output
+  /**
+   * The output Spark's own filter reports: the attributes its `IsNotNull` predicates guard become
+   * non-nullable. Nullability is part of the plan AQE validates (#416): a broadcast join requires a
+   * hash-relation mode over the build side's bound keys, nullability included, and the broadcast
+   * exchange fixed its mode at the first planning, when the filter under it was still Spark's. A
+   * filter reporting its child's nullability made the re-planned join's requirement differ from the
+   * exchange's mode, `ValidateRequirements` rejected the stage plan, and AQE silently dropped the
+   * shuffle-partition coalescing of every join in it -- at 1 TB / 1000 partitions the two shuffled
+   * joins of q18 ran 1000 tasks each over 1000-partition inputs, 330 s of the 556 s the partition
+   * count cost.
+   */
+  override lazy val output: Seq[Attribute] = FilterExec(condition, child).output
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
   override def outputPartitioning: Partitioning = child.outputPartitioning
 
