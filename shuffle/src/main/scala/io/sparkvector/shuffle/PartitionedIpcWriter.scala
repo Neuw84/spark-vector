@@ -101,6 +101,7 @@ final class PartitionedIpcWriter(
 
     /** Room for `count` more rows and `bytes` more string bytes, doubling the vector as needed. */
     private def ensure(count: Int, bytes: Long): Unit = {
+      if (retained) { retainedBytes -= capacityBytes; retained = false }
       if (vector == null) {
         val cap = math.max(PartitionedIpcWriter.InitialRows, Integer.highestOneBit(math.max(count, 1) - 1) << 1)
         allocate(math.min(math.max(cap, count), math.max(batchRows, count)), if (isString) math.max(bytes, PartitionedIpcWriter.InitialBytesPerRow.toLong * cap) else 0L)
@@ -171,16 +172,47 @@ final class PartitionedIpcWriter(
 
     /** The finished vector (value count set), the builder emptied for the next batch. */
     def take(): FieldVector = {
+      val v = finish()
+      vector = null; buffers = null; rows = 0; dataBytes = 0L
+      v
+    }
+
+    /** The finished vector (value count set), still the builder's: `recycle` or `close` follows the flush. */
+    def finish(): FieldVector = {
       val v = vector
       v match {
         case vw: VarCharVector => vw.setLastSet(rows - 1); vw.setValueCount(rows)
         case other => other.setValueCount(rows)
       }
-      vector = null; buffers = null; rows = 0; dataBytes = 0L
       v
     }
 
-    def close(): Unit = { if (vector != null) vector.close(); vector = null; buffers = null; rows = 0; dataBytes = 0L }
+    /** Bytes the vector's buffers hold, used or not. */
+    def capacityBytes: Long = if (vector == null) 0L else { var t = 0L; val bs = vector.getBuffers(false); var i = 0; while (i < bs.length) { t += bs(i).capacity(); i += 1 }; t }
+
+    /**
+     * After the flush (#416): the vector is kept, emptied, for the partition's next batch when the
+     * writer's retained capacity allows, else freed. At 1000 partitions a block is a few rows and
+     * the Arrow allocate-and-free of every column's vector per block -- 18 columns, 2 M blocks in
+     * q18's exchange at 1 TB -- was the largest single item of the executor time that grew with the
+     * partition count; a reset keeps the capacity and costs a memset of a few KB.
+     */
+    def recycle(): Unit = {
+      if (vector == null) return
+      val cap = capacityBytes
+      if (retainedBytes + cap <= retainBudget) {
+        vector.reset(); rows = 0; dataBytes = 0L
+        retainedBytes += cap
+        retained = true
+      } else close()
+    }
+    private var retained = false
+
+    def close(): Unit = {
+      if (retained) { retainedBytes -= capacityBytes; retained = false }
+      if (vector != null) vector.close()
+      vector = null; buffers = null; rows = 0; dataBytes = 0L
+    }
   }
 
   private final class Segment(val partition: Int) {
@@ -248,6 +280,17 @@ final class PartitionedIpcWriter(
 
   private val segments = Array.tabulate(numPartitions)(new Segment(_))
   private var heldBytes = 0L
+  /** Capacity held by emptied builders kept for their partition's next batch (#416), and its cap: well
+   *  under `bufferBytes`, which the flush loop below also measures against the allocator's total. */
+  private var retainedBytes = 0L
+  private val retainBudget: Long = bufferBytes / 4
+  /** Per string column, the ids and dictionary vectors of its encoding, reused across blocks (#416). */
+  private val dictScratch = new Array[(IntVector, VarCharVector)](schema.fields.length)
+  private def scratchFor(c: Int): (IntVector, VarCharVector) = {
+    var sc = dictScratch(c)
+    if (sc == null) { sc = (new IntVector(schema.fields(c).name, allocator), new VarCharVector(schema.fields(c).name + ".dictionary", allocator)); dictScratch(c) = sc }
+    sc
+  }
   private var rawBytesWritten = 0L
 
   /**
@@ -355,7 +398,7 @@ final class PartitionedIpcWriter(
     val taken = new Array[FieldVector](schema.fields.length)
     try {
       var c = 0
-      while (c < schema.fields.length) { taken(c) = seg.builders(c).take(); c += 1 }
+      while (c < schema.fields.length) { taken(c) = seg.builders(c).finish(); c += 1 }
       // Pass 1: the record batch's dictionaries into the provider -- all of them before the stream
       // writer exists, since it converts the schema with the dictionaries' types at construction.
       // A string column whose distinct values are too many for the dictionary to pay stays plain
@@ -365,10 +408,10 @@ final class PartitionedIpcWriter(
       while (c < schema.fields.length) {
         val encoding = arrowSchema.getFields.get(c).getDictionary
         if (encoding != null) {
-          val encoded = PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator, dictionaryMaxRatio)
+          val (sids, sdict) = scratchFor(c)
+          val encoded = PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator, dictionaryMaxRatio, sids, sdict)
           if (encoded != null) {
             val (ids, dictionary) = encoded
-            taken(c).close()
             taken(c) = ids
             batchDictionaries += ((dictionary, encoding.getId))
           } else {
@@ -400,8 +443,15 @@ final class PartitionedIpcWriter(
       rawBytesWritten += seg.pendingBytes
       seg.spillIfNeeded()
     } finally {
-      taken.foreach(v => if (v != null) v.close())
-      batchDictionaries.foreach(_._1.close()); batchDictionaries.clear()
+      // The builders keep or free their vectors; the encoding scratch is emptied for the next block.
+      var b = 0
+      while (b < schema.fields.length) {
+        seg.builders(b).recycle()
+        val sc = dictScratch(b)
+        if (sc != null) { sc._1.reset(); sc._2.reset() }
+        b += 1
+      }
+      batchDictionaries.clear()
       heldBytes -= seg.pendingBytes
       seg.pendingRows = 0; seg.pendingBytes = 0L
     }
@@ -463,7 +513,11 @@ final class PartitionedIpcWriter(
     } finally out.close()
   }
 
-  override def close(): Unit = { segments.foreach(_.release()); frameCompressor.close() }
+  override def close(): Unit = {
+    segments.foreach(_.release())
+    dictScratch.foreach(sc => if (sc != null) { sc._1.close(); sc._2.close() })
+    frameCompressor.close()
+  }
 }
 
 object PartitionedIpcWriter {
@@ -504,14 +558,27 @@ object PartitionedIpcWriter {
    */
   def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator,
       maxRatio: Double = DefaultDictionaryMaxRatio): (IntVector, VarCharVector) = {
-    val n = in.getValueCount
     if (maxRatio <= 0.0) return null
     val ids = new IntVector(name, allocator)
-    ids.allocateNew(n)
     val dictionary = new VarCharVector(name + ".dictionary", allocator)
+    val r = encodeStrings(in, name, allocator, maxRatio, ids, dictionary)
+    if (r == null) { ids.close(); dictionary.close() }
+    r
+  }
+
+  /**
+   * As above into the caller's `ids` and `dictionary` (emptied, grown as needed and kept by the caller
+   * across blocks, #416); on `null` they are left empty.
+   */
+  def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator, maxRatio: Double,
+      ids: IntVector, dictionary: VarCharVector): (IntVector, VarCharVector) = {
+    val n = in.getValueCount
+    if (maxRatio <= 0.0) return null
     val totalBytes = if (n == 0) 0L else in.getOffsetBuffer.getInt(n.toLong * 4).toLong
+    if (ids.getValueCapacity < n) ids.allocateNew(n) else ids.reset()
     // Sized to the input once (the distinct values are at most all of it): no reallocation per growth.
-    dictionary.allocateNew(math.max(totalBytes, 1L), math.max(n, 1))
+    if (dictionary.getValueCapacity < math.max(n, 1) || dictionary.getByteCapacity < totalBytes) dictionary.allocateNew(math.max(totalBytes, 1L), math.max(n, 1))
+    else dictionary.reset()
     // The distinct values as an open-addressing table over the input's own bytes (#387): an entry is the
     // row where its value was first seen, hashed and compared in place through the Arrow buffers -- no
     // ByteBuffer per row, no boxing, no HashMap. A HashMap of ByteBuffers here was 11% of an executor's
@@ -554,7 +621,7 @@ object PartitionedIpcWriter {
       }
       i += 1
       if ((i == DictionarySampleRows || i == n) && next > (i * maxRatio) && maxRatio < 1.0) {
-        ids.close(); dictionary.close()
+        ids.reset(); dictionary.reset()
         return null
       }
     }
