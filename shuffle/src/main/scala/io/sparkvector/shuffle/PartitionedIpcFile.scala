@@ -29,6 +29,8 @@ object PartitionedIpcFile {
 
   val Magic: Long = 0x53564950434631L // "SVIPCF1"
   val TypeKey = "sparkvector.type"
+  /** Rows a reader accumulates small plain batches up to before handing a batch to the operators (#411). */
+  val CoalesceRows: Int = 1024
 
   final case class Index(offsets: Array[Long], lengths: Array[Long], rows: Array[Long]) {
     def numPartitions: Int = offsets.length
@@ -231,9 +233,33 @@ object PartitionedIpcFile {
     private val roots = new JHashMap[java.util.BitSet, (org.apache.arrow.vector.VectorSchemaRoot, org.apache.arrow.vector.VectorLoader)]()
     private val factory = io.sparkvector.shuffle.ShuffleCompression.Factory
     private var nextBatch: ColumnarBatch = _
+    /** A full-size batch that arrived while small ones were pending: handed out right after them. */
+    private var held: ColumnarBatch = _
     /** The batch last handed out: the consumers do not close their input, so it is closed when the next one is produced (or at close). */
     private var last: ColumnarBatch = _
     private var done = false
+    /** Small plain batches accumulated until `CoalesceRows` (all-plain shape, so every string column is UTF8). */
+    private var pending: org.apache.arrow.vector.VectorSchemaRoot = _
+
+    private def append(root: org.apache.arrow.vector.VectorSchemaRoot): Unit = {
+      if (pending == null) {
+        val fs = new java.util.ArrayList[Field](fields.length)
+        var c = 0
+        while (c < fields.length) { fs.add(if (plain(c) != null) plain(c) else fields(c)); c += 1 }
+        pending = org.apache.arrow.vector.VectorSchemaRoot.create(new Schema(fs), allocator)
+        pending.allocateNew() // the appender reads the target's buffers: they must exist, empty
+        pending.setRowCount(0)
+      }
+      org.apache.arrow.vector.util.VectorSchemaRootAppender.append(false, pending, root)
+      root.clear()
+    }
+
+    private def takePending(): ColumnarBatch = {
+      val b = take(pending) // the vectors moved out; fresh empty buffers for the next accumulation
+      pending.allocateNew()
+      pending.setRowCount(0)
+      b
+    }
 
     private def rootFor(shape: java.util.BitSet): (org.apache.arrow.vector.VectorSchemaRoot, org.apache.arrow.vector.VectorLoader) = {
       var r = roots.get(shape)
@@ -249,9 +275,12 @@ object PartitionedIpcFile {
     }
 
     private def advance(): Unit = while (!done && nextBatch == null) {
+      if (held != null) { nextBatch = held; held = null; return }
       val result = messages.readNext()
-      if (result == null) done = true
-      else {
+      if (result == null) {
+        done = true
+        if (pending != null && pending.getRowCount > 0) nextBatch = takePending()
+      } else {
         val message = result.getMessage
         // A message with no body (an empty dictionary, a batch of zero-length buffers) carries a null buffer.
         val body = if (result.getBodyBuffer == null) allocator.getEmpty else result.getBodyBuffer
@@ -272,7 +301,17 @@ object PartitionedIpcFile {
             try {
               val (root, loader) = rootFor(encoded)
               loader.load(batch)
-              nextBatch = take(root)
+              if (root.getRowCount < CoalesceRows && encoded.isEmpty) {
+                // A small, plain batch (a block of a few dozen rows at 1000 partitions) is appended to
+                // the pending batch instead of reaching the operators on its own: their per-batch
+                // costs -- kernel set-up, a hash table's probe round, an output batch per input batch
+                // -- were most of a reduce task's time over ten-row blocks (#411).
+                append(root)
+                if (pending.getRowCount >= CoalesceRows) nextBatch = takePending()
+              } else {
+                if (pending != null && pending.getRowCount > 0) { nextBatch = takePending(); held = take(root) }
+                else nextBatch = take(root)
+              }
             } finally {
               batch.close()
               encoded.clear()
@@ -293,7 +332,7 @@ object PartitionedIpcFile {
         val moved = source.getField.createVector(allocator)
         source.makeTransferPair(moved).transfer()
         columns(c) = types(c) match {
-          case StringType if encoded.get(c) =>
+          case StringType if (root ne pending) && encoded.get(c) =>
             val dict = dictionaries(c)
             val movedDict = new VarCharVector(dict.getName, allocator)
             dict.makeTransferPair(movedDict).transfer()
@@ -323,8 +362,10 @@ object PartitionedIpcFile {
     override def close(): Unit = {
       if (nextBatch != null) { nextBatch.close(); nextBatch = null }
       if (last != null) { last.close(); last = null }
+      if (held != null) { held.close(); held = null }
       roots.values().forEach(r => r._1.close())
       roots.clear()
+      if (pending != null) { pending.close(); pending = null }
       dictionaries.foreach(d => if (d != null) d.close())
       messages.close()
     }
