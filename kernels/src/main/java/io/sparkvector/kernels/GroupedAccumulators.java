@@ -597,11 +597,13 @@ public final class GroupedAccumulators {
       return toBigInteger(hi[g], lo[g]);
     }
 
-    /** {@code hi * 2^64 + lo} with {@code lo} unsigned: a signed 128-bit value. */
+    /**
+     * {@code hi * 2^64 + lo} with {@code lo} unsigned: a signed 128-bit value. Built from the 16
+     * big-endian bytes -- the previous form went through {@code Long.toUnsignedString} and a decimal
+     * parse per group, 2% of an executor's time when a wide-decimal partial emits every row (#388).
+     */
     public static java.math.BigInteger toBigInteger(long hi, long lo) {
-      java.math.BigInteger high = java.math.BigInteger.valueOf(hi).shiftLeft(64);
-      java.math.BigInteger low = new java.math.BigInteger(Long.toUnsignedString(lo));
-      return high.add(low);
+      return Decimal128.toBigInteger(hi, lo);
     }
   }
 
