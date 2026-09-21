@@ -48,8 +48,8 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     val dir = Files.createTempDirectory("svflight")
     val path = dir.resolve("block.ipc")
     val expected = mutable.ArrayBuffer.empty[(Int, String)]
-    // batchBytes tiny: every write() becomes its own record batch, with its own dictionary.
-    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchBytes = 1L)
+    // batchRows = 500: the 1500 staged rows leave as three record batches, each with its own dictionary (#416).
+    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchRows = 500)
     val arena = Arena.ofConfined()
     try {
       Seq("alpha", "beta", "gamma").foreach { prefix =>
