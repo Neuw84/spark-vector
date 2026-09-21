@@ -221,7 +221,7 @@ public final class SparkColumnVectorBuffers {
     }
     MemorySegment validity = ArrowLayout.allocateBitmap(arena, numRows);
     boolean any = false;
-    byte[] nulls = cv instanceof OnHeapColumnVector ? (byte[]) get(ONHEAP_NULLS, cv) : null;
+    byte[] nulls = heapNulls(cv, numRows);
     if (nulls != null && nulls.length >= numRows) {
       // The bitmap is built on the heap, eight rows per byte, and copied out once: one Bitmap.set
       // per row -- a segment read-modify-write with its checks -- was 18% of an executor's time in
@@ -311,8 +311,8 @@ public final class SparkColumnVectorBuffers {
       return false;
     }
     WritableColumnVector ids = cv.getDictionaryIds();
-    int[] idArray = ids instanceof OnHeapColumnVector ? (int[]) get(ONHEAP_INTS, ids) : null;
-    byte[] nulls = validity != null && cv instanceof OnHeapColumnVector ? (byte[]) get(ONHEAP_NULLS, cv) : null;
+    int[] idArray = heapIds(ids, numRows);
+    byte[] nulls = validity != null ? heapNulls(cv, numRows) : null;
     if (idArray == null || idArray.length < numRows || (validity != null && (nulls == null || nulls.length < numRows))) {
       return decodeDictionaryIntoSlow(cv, dict, type, numRows, validity, data);
     }
@@ -588,6 +588,45 @@ public final class SparkColumnVectorBuffers {
       return null;
     }
     return MemorySegment.ofAddress(addr).reinterpret(bytes);
+  }
+
+  /**
+   * The reader's null flags as a heap array, one byte per row: the on-heap vector's own array, or
+   * the off-heap vector's native array copied out once. With {@code spark.sql.columnVector.offheap.enabled}
+   * the bulk validity and dictionary paths of #398 otherwise fell to their per-row forms -- the
+   * scan-heavy queries of the 1 TB run were 5-10% slower off-heap than on-heap (#403).
+   */
+  private static byte[] heapNulls(ColumnVector cv, int numRows) {
+    if (cv instanceof OnHeapColumnVector) {
+      return (byte[]) get(ONHEAP_NULLS, cv);
+    }
+    if (cv instanceof OffHeapColumnVector) {
+      MemorySegment nativeNulls = nativeSegment(OFFHEAP_NULLS, cv, numRows);
+      if (nativeNulls == null) {
+        return null;
+      }
+      byte[] nulls = new byte[numRows];
+      MemorySegment.copy(nativeNulls, ValueLayout.JAVA_BYTE, 0, nulls, 0, numRows);
+      return nulls;
+    }
+    return null;
+  }
+
+  /** The dictionary ids as a heap {@code int[]}: the on-heap array, or the off-heap ints copied out once. */
+  private static int[] heapIds(WritableColumnVector ids, int numRows) {
+    if (ids instanceof OnHeapColumnVector) {
+      return (int[]) get(ONHEAP_INTS, ids);
+    }
+    if (ids instanceof OffHeapColumnVector) {
+      MemorySegment nativeIds = nativeSegment(OFFHEAP_DATA, ids, 4L * numRows);
+      if (nativeIds == null) {
+        return null;
+      }
+      int[] idArray = new int[numRows];
+      MemorySegment.copy(nativeIds, ValueLayout.JAVA_INT_UNALIGNED, 0, idArray, 0, numRows);
+      return idArray;
+    }
+    return null;
   }
 
   private static Dictionary dictionaryOf(WritableColumnVector cv) {
