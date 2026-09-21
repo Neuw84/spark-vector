@@ -901,6 +901,29 @@ small queries at 0.5-0.65x (q18, q19, q22, q99, q39b, q47, q57) whose exchanges 
 whose time is our per-stage overhead. The mix of Comet's scan with our operators and shuffle is
 1.19x with its own regressions at q14b 95 -> 144 s and q72 27 -> 36.
 
+**The losses, one root cause at a time (targeted 1 TB runs, each with a Spark baseline in the same
+run, heap 30 g / overhead 20 g / direct 30 g, single iteration).** Each fix was measured at SF10
+first and then on the cluster; the executor profiles that ranked the work came from JFR on all
+eight executors, and one lesson of the series is that a recording's window must cover the stage
+under study -- the first profiles covered the executors' first 150 s and could not see q67's sort
+stage at all.
+
+| query | Spark | before | after | fixes |
+|---|---:|---:|---:|---|
+| q8 | 6.9 s | 40.8 | 18.5 | string `IN` lists through a hash set (#371); the remaining broadcast join on a 2-character zip prefix is #378 |
+| q67 | 114.4 | 178 | **100.2** | rollup as one chain (#383), writer dictionary without `ByteBuffer`s (#387), limb-based wide sum merge and geometric state growth (#388), group keys as one record per group (#377), and the sort's input materialised as one copy per column instead of one per value (#394) -- the last was 4470 s of task time |
+| q22 | 8.7 | 14.6 | **6.4** | the rollup chain (#383) |
+| q18 | 9.5-11.3 | 26.8 | 11-20 | memory split (#376); the rest varies run to run and is scan-side (#384) |
+| q47 | 14.4-16.3 | 22.7 | 19.9-22.7 | scan-side (#384) |
+| q57 | 7.5-8.1 | 11.5 | 10.2-11.3 | scan-side (#384) |
+| q72 | 26-27 | 41-42 | 38-40 | the fused residual (#332) removes under 0.1% of the pairs at this scale; the remaining gap is six ~1.58 B-row joins each materialising its output, an architecture question |
+
+q67 is faster than Spark for the first time. The small-query band is not the operators: with our
+operators on Spark's own shuffle the gap is already there (q47 20.6 s, q57 10.8, q18 16.7), the
+executors' task time is 30-60% above Spark's for the same scans, and their profile shows the task
+threads parked in the S3 reader's `awaitData` for more than half of that time with a dozen samples
+in our kernels -- a reader-side question, recorded on #384.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
