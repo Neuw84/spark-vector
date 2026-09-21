@@ -325,7 +325,7 @@ final class VectorShuffleReader(
     val nonEmpty = blocksByAddress.map { case (address, blocks) =>
       address -> blocks.collect { case (id: ShuffleBlockId, size, mapIndex) if size > 0 => (id, size, mapIndex) }.toIndexedSeq
     }
-    val streams = VectorShuffleBackend(env.conf).read(nonEmpty, allocator, metrics)
+    val streams = VectorShuffleBackend(env.conf).read(nonEmpty, handle.dependency.schema, VectorShuffleWriter.compression(env.conf), allocator, metrics)
     streams.flatMap { reader =>
       open.add(reader)
       new Iterator[Product2[Int, ColumnarBatch]] {
@@ -352,7 +352,8 @@ final class VectorShuffleReader(
 
 object VectorShuffleReader {
   /** A fetched or local block (one partition's IPC stream) as batches; the buffer is released with the stream. */
-  def blockStream(buf: ManagedBuffer, allocator: BufferAllocator): Iterator[ColumnarBatch] with AutoCloseable =
+  def blockStream(buf: ManagedBuffer, allocator: BufferAllocator, schema: org.apache.spark.sql.types.StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType]): Iterator[ColumnarBatch] with AutoCloseable =
     new Iterator[ColumnarBatch] with AutoCloseable {
       // A file segment is read with positional reads straight into Arrow memory; an InputStream
       // channel would copy every byte through a heap array first (the GC behind Q19/Q20's 1.15x).
@@ -362,7 +363,7 @@ object VectorShuffleReader {
             java.nio.channels.FileChannel.open(f.getFile.toPath, java.nio.file.StandardOpenOption.READ), f.getOffset, f.getLength)
         case other => Channels.newChannel(other.createInputStream())
       }
-      private val inner = new PartitionedIpcFile.StreamReader(channel, allocator)
+      private val inner = new PartitionedIpcFile.StreamReader(channel, allocator, schema, compression)
       private var released = false
       override def hasNext: Boolean = inner.hasNext
       override def next(): ColumnarBatch = inner.next()

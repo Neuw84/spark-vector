@@ -10,7 +10,6 @@ import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector, VectorNarrowIntColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector}
-import org.apache.arrow.vector.ipc.ArrowStreamReader
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
 import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, Field, FieldType, Schema}
 import org.apache.spark.sql.types._
@@ -141,12 +140,14 @@ object PartitionedIpcFile {
    * its buffers are transferred out; the dictionary, which the reader keeps for later batches, is
    * copied -- it is small by construction).
    */
-  final class PartitionReader(path: Path, partition: Int, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
+  final class PartitionReader(path: Path, partition: Int, allocator: BufferAllocator, schema: StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] = Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD))
+    extends Iterator[ColumnarBatch] with AutoCloseable {
     private val file = FileChannel.open(path, StandardOpenOption.READ)
     private val index = readIndex(file)
     private val inner =
       if (index.lengths(partition) == 0) null
-      else new StreamReader(new RangeChannel(file, index.offsets(partition), index.lengths(partition)), allocator)
+      else new StreamReader(new RangeChannel(file, index.offsets(partition), index.lengths(partition)), allocator, schema, compression)
 
     def rows: Long = index.rows(partition)
     override def hasNext: Boolean = inner != null && inner.hasNext
@@ -197,33 +198,115 @@ object PartitionedIpcFile {
   }
 
   /**
-   * One IPC stream (a partition's bytes, wherever they come from: a file range, a fetched block, a
-   * Flight stream's file) read back as the operators' column vectors.
+   * A partition range's bytes (a file range, a fetched block, a Flight stream) read back as the
+   * operators' column vectors. The bytes are IPC messages without a schema message or an
+   * end-of-stream marker (#411): the shuffle's schema comes from the dependency, and a string column
+   * is dictionary-encoded in a record batch exactly when a dictionary batch with its id precedes it.
+   * The reader's roots -- one per batch shape, which columns are encoded -- and its dictionary vectors
+   * are created once and reused across every batch of every map output in the range; a batch costs
+   * its record-batch message and nothing else. Every batch handed out owns its memory: the vectors
+   * are transferred out of the root, and an encoded column's dictionary, loaded for that batch alone,
+   * is transferred with it.
    */
-  final class StreamReader(channel: ReadableByteChannel, allocator: BufferAllocator) extends Iterator[ColumnarBatch] with AutoCloseable {
-    private val input = new PeekableChannel(channel)
-    private var reader: ArrowStreamReader = new ArrowStreamReader(input, allocator, io.sparkvector.shuffle.ShuffleCompression.Factory)
+  final class StreamReader(channel: ReadableByteChannel, allocator: BufferAllocator, schema: StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] = Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD))
+    extends Iterator[ColumnarBatch] with AutoCloseable {
+    /** The block's bytes decompressed as one stream (several frames back to back read as one), then read as IPC messages. */
+    private val input: ReadableByteChannel = compression match {
+      case None => channel
+      case codec => java.nio.channels.Channels.newChannel(io.sparkvector.shuffle.ShuffleCompression.decompressing(java.nio.channels.Channels.newInputStream(channel), codec))
+    }
+    private val messages = new org.apache.arrow.vector.ipc.message.MessageChannelReader(new org.apache.arrow.vector.ipc.ReadChannel(input), allocator)
+    private val fields: Array[Field] = arrowSchema(schema).getFields.asScala.toArray
+    private val plain: Array[Field] = Array.tabulate(fields.length) { c =>
+      if (schema.fields(c).dataType == StringType) arrowField(schema.fields(c).name, StringType, c, dictionary = false) else null
+    }
+    private val types: Array[DataType] = schema.fields.map(_.dataType)
+    /** Column ordinal of a dictionary id (#dictionaryEncoding: id = ordinal + 1), or -1. */
+    private def columnOf(id: Long): Int = if (id >= 1 && id <= fields.length && plain((id - 1).toInt) != null) (id - 1).toInt else -1
+    /** The dictionary vector of each string column, loaded by the batch's dictionary message. */
+    private val dictionaries: Array[VarCharVector] = Array.tabulate(fields.length)(c => if (plain(c) != null) new VarCharVector(fields(c).getName + ".dictionary", allocator) else null)
+    private val encoded = new java.util.BitSet(fields.length)
+    /** One root and loader per batch shape, keyed by the encoded-columns set. */
+    private val roots = new JHashMap[java.util.BitSet, (org.apache.arrow.vector.VectorSchemaRoot, org.apache.arrow.vector.VectorLoader)]()
+    private val factory = io.sparkvector.shuffle.ShuffleCompression.Factory
     private var nextBatch: ColumnarBatch = _
-    private var types: Array[DataType] = _
     /** The batch last handed out: the consumers do not close their input, so it is closed when the next one is produced (or at close). */
     private var last: ColumnarBatch = _
     private var done = false
 
-    /**
-     * Past one stream's end-of-stream marker, another stream may follow: the channel is the
-     * concatenation of several map outputs' streams when a shuffle service aggregated a partition
-     * (future work) -- each carries its own schema and dictionaries, so a fresh reader starts there.
-     */
-    private def advance(): Unit = while (!done && nextBatch == null) {
-      if (reader.loadNextBatch()) {
-        if (types == null) types = sparkTypes(reader.getVectorSchemaRoot)
-        nextBatch = toBatch(reader.getVectorSchemaRoot, id => reader.lookup(id).getVector.asInstanceOf[VarCharVector], allocator, types)
-      } else if (input.atEnd) {
-        done = true
-      } else {
-        reader.close(false)
-        reader = new ArrowStreamReader(input, allocator, io.sparkvector.shuffle.ShuffleCompression.Factory)
+    private def rootFor(shape: java.util.BitSet): (org.apache.arrow.vector.VectorSchemaRoot, org.apache.arrow.vector.VectorLoader) = {
+      var r = roots.get(shape)
+      if (r == null) {
+        val fs = new java.util.ArrayList[Field](fields.length)
+        var c = 0
+        while (c < fields.length) { fs.add(if (plain(c) != null && !shape.get(c)) plain(c) else fields(c)); c += 1 }
+        val root = org.apache.arrow.vector.VectorSchemaRoot.create(new Schema(fs), allocator)
+        r = (root, new org.apache.arrow.vector.VectorLoader(root, factory))
+        roots.put(shape.clone().asInstanceOf[java.util.BitSet], r)
       }
+      r
+    }
+
+    private def advance(): Unit = while (!done && nextBatch == null) {
+      val result = messages.readNext()
+      if (result == null) done = true
+      else {
+        val message = result.getMessage
+        // A message with no body (an empty dictionary, a batch of zero-length buffers) carries a null buffer.
+        val body = if (result.getBodyBuffer == null) allocator.getEmpty else result.getBodyBuffer
+        message.headerType() match {
+          case org.apache.arrow.flatbuf.MessageHeader.DictionaryBatch =>
+            val batch = org.apache.arrow.vector.ipc.message.MessageSerializer.deserializeDictionaryBatch(message, body)
+            try {
+              val c = columnOf(batch.getDictionaryId)
+              require(c >= 0, s"shuffle stream: dictionary ${batch.getDictionaryId} matches no string column")
+              val vector = dictionaries(c)
+              new org.apache.arrow.vector.VectorLoader(
+                new org.apache.arrow.vector.VectorSchemaRoot(java.util.List.of(vector.getField), java.util.List.of[FieldVector](vector), 0), factory)
+                .load(batch.getDictionary)
+              encoded.set(c)
+            } finally batch.close()
+          case org.apache.arrow.flatbuf.MessageHeader.RecordBatch =>
+            val batch = org.apache.arrow.vector.ipc.message.MessageSerializer.deserializeRecordBatch(message, body)
+            try {
+              val (root, loader) = rootFor(encoded)
+              loader.load(batch)
+              nextBatch = take(root)
+            } finally {
+              batch.close()
+              encoded.clear()
+            }
+          case other =>
+            throw new IllegalStateException(s"shuffle stream: unexpected IPC message type $other")
+        }
+      }
+    }
+
+    /** The loaded root as a batch owning its memory (the root is reused for the next batch). */
+    private def take(root: org.apache.arrow.vector.VectorSchemaRoot): ColumnarBatch = {
+      val n = root.getRowCount
+      val columns = new Array[ColumnVector](fields.length)
+      var c = 0
+      while (c < columns.length) {
+        val source = root.getVector(c)
+        val moved = source.getField.createVector(allocator)
+        source.makeTransferPair(moved).transfer()
+        columns(c) = types(c) match {
+          case StringType if encoded.get(c) =>
+            val dict = dictionaries(c)
+            val movedDict = new VarCharVector(dict.getName, allocator)
+            dict.makeTransferPair(movedDict).transfer()
+            new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], movedDict)
+          case StringType => new VectorArrowColumnVector(moved) // plain UTF8: the writer found no dictionary worth sending
+          case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
+            new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
+          case ByteType | ShortType => new VectorNarrowIntColumnVector(moved.asInstanceOf[IntVector], types(c)) // #327
+          case _ => new VectorArrowColumnVector(moved)
+        }
+        c += 1
+      }
+      new ColumnarBatch(columns, n)
     }
 
     override def hasNext: Boolean = { advance(); nextBatch != null }
@@ -240,36 +323,10 @@ object PartitionedIpcFile {
     override def close(): Unit = {
       if (nextBatch != null) { nextBatch.close(); nextBatch = null }
       if (last != null) { last.close(); last = null }
-      reader.close()
+      roots.values().forEach(r => r._1.close())
+      roots.clear()
+      dictionaries.foreach(d => if (d != null) d.close())
+      messages.close()
     }
-  }
-
-  /** A channel that can tell whether any byte is left, by reading one ahead. */
-  private final class PeekableChannel(inner: ReadableByteChannel) extends ReadableByteChannel {
-    private var peeked: Int = -1 // -1 none, 0..255 a byte held back
-    private var eof = false
-
-    def atEnd: Boolean = {
-      if (peeked < 0 && !eof) {
-        val one = ByteBuffer.allocate(1)
-        var n = 0
-        while (n == 0) n = inner.read(one)
-        if (n < 0) eof = true else peeked = one.get(0) & 0xff
-      }
-      peeked < 0
-    }
-
-    override def read(dst: ByteBuffer): Int = {
-      if (!dst.hasRemaining) return 0
-      if (peeked >= 0) {
-        dst.put(peeked.toByte)
-        peeked = -1
-        val more = if (dst.hasRemaining) inner.read(dst) else 0
-        1 + (if (more < 0) 0 else more)
-      } else inner.read(dst)
-    }
-
-    override def isOpen: Boolean = inner.isOpen
-    override def close(): Unit = inner.close()
   }
 }

@@ -38,7 +38,8 @@ trait VectorShuffleBackend {
   def unregisterShuffle(shuffleId: Int): Unit = ()
 
   /** The non-empty blocks another executor holds for this reducer, as batch streams. */
-  def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], allocator: BufferAllocator,
+  def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], schema: org.apache.spark.sql.types.StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType], allocator: BufferAllocator,
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable]
 
   /**
@@ -49,7 +50,8 @@ trait VectorShuffleBackend {
    * recomputes them, where a plain task failure would retry against the same dead address and fail
    * the query.
    */
-  def read(blocksByAddress: Seq[(BlockManagerId, Seq[(ShuffleBlockId, Long, Int)])], allocator: BufferAllocator,
+  def read(blocksByAddress: Seq[(BlockManagerId, Seq[(ShuffleBlockId, Long, Int)])], schema: org.apache.spark.sql.types.StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType], allocator: BufferAllocator,
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] = {
     val env = SparkEnv.get
     val local = env.blockManager.blockManagerId.executorId
@@ -62,17 +64,25 @@ trait VectorShuffleBackend {
         def fetchFailed(e: Throwable): Nothing =
           throw new org.apache.spark.shuffle.FetchFailedException(address, firstId.shuffleId, firstId.mapId, firstIndex, firstId.reduceId,
             s"fetch of ${blocks.length} block(s) from ${address.executorId} at ${address.host}:${address.port} failed: $e", e)
-        val opened = try remoteBlocks(address, blocks.map { case (id, size, _) => (id, size) }, allocator, metrics).toIndexedSeq
+        val opened = try remoteBlocks(address, blocks.map { case (id, size, _) => (id, size) }, schema, compression, allocator, metrics).toIndexedSeq
           catch { case e: Exception if !VectorShuffleBackend.isMemory(e) => fetchFailed(e) }
         opened.map(s => VectorShuffleBackend.fetchFailing(s, fetchFailed))
     }.toIndexedSeq.flatten
+    // The local map outputs: one range per map for the task's partitions (#411, as the Flight path
+    // does) -- the resolver's batch block id is one index lookup and one file segment where a block
+    // per partition was a lookup and an open each, times the partitions AQE coalesced into the task.
     val localBlocks = blocksByAddress.iterator.collect {
       case (address, blocks) if blocks.nonEmpty && address.executorId == local => blocks
-    }.flatten.map { case (id, _, _) =>
-      metrics.incLocalBlocksFetched(1)
+    }.flatten.toIndexedSeq.groupBy(_._1.mapId).toIndexedSeq.sortBy(_._1).iterator.map { case (mapId, blocks) =>
+      metrics.incLocalBlocksFetched(blocks.size)
+      val first = blocks.head._1
+      val start = blocks.iterator.map(_._1.reduceId).min
+      val end = blocks.iterator.map(_._1.reduceId).max + 1
+      val id: org.apache.spark.storage.BlockId =
+        if (end == start + 1) first else org.apache.spark.storage.ShuffleBlockBatchId(first.shuffleId, mapId, start, end)
       val buf = env.blockManager.getLocalBlockData(id)
       metrics.incLocalBytesRead(buf.size())
-      VectorShuffleReader.blockStream(buf, allocator)
+      VectorShuffleReader.blockStream(buf, allocator, schema, compression)
     }
     localBlocks ++ remote.iterator
   }
@@ -114,7 +124,8 @@ object VectorShuffleBackend {
  */
 object FlightBackend extends VectorShuffleBackend {
   override def name: String = "flight"
-  override def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], allocator: BufferAllocator,
+  override def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], schema: org.apache.spark.sql.types.StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType], allocator: BufferAllocator,
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] = {
     val conf = SparkEnv.get.conf
     val location = flight.FlightRegistry.locationOf(address.executorId)
@@ -126,14 +137,15 @@ object FlightBackend extends VectorShuffleBackend {
     val end = blocks.iterator.map(_._1.reduceId).max + 1
     val mapIds = blocks.iterator.map(_._1.mapId).toIndexedSeq.distinct.sorted
     metrics.incRemoteBlocksFetched(blocks.size)
-    Iterator.single(new flight.FlightBlockStream(location, shuffleId, mapIds, start, end, conf, allocator, metrics))
+    Iterator.single(new flight.FlightBlockStream(location, shuffleId, mapIds, start, end, schema, compression, conf, allocator, metrics))
   }
 }
 
 /** Slice 2: Spark's block transfer, all of one executor's blocks in one request. */
 object BlockTransferBackend extends VectorShuffleBackend {
   override def name: String = "block"
-  override def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], allocator: BufferAllocator,
+  override def remoteBlocks(address: BlockManagerId, blocks: Seq[(ShuffleBlockId, Long)], schema: org.apache.spark.sql.types.StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType], allocator: BufferAllocator,
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] =
-    VectorShuffleReader.fetchRemote(address, blocks.map(_._1), metrics).map { case (_, buf) => VectorShuffleReader.blockStream(buf, allocator) }
+    VectorShuffleReader.fetchRemote(address, blocks.map(_._1), metrics).map { case (_, buf) => VectorShuffleReader.blockStream(buf, allocator, schema, compression) }
 }

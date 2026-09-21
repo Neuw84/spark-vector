@@ -320,17 +320,21 @@ final class FlightBlockStream(
     mapIds: Seq[Long],
     reduce: Int,
     endReduce: Int,
+    schema: org.apache.spark.sql.types.StructType,
+    compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType],
     conf: SparkConf,
     allocator: BufferAllocator,
     metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) extends Iterator[org.apache.spark.sql.vectorized.ColumnarBatch] with AutoCloseable {
 
-  /** One reduce partition's blocks on the executor. */
-  def this(location: FlightLocation, shuffleId: Int, mapIds: Seq[Long], reduce: Int, conf: SparkConf, allocator: BufferAllocator,
-      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) = this(location, shuffleId, mapIds, reduce, reduce + 1, conf, allocator, metrics)
+  /** One reduce partition's blocks on the executor, zstd-compressed streams (the default). */
+  def this(location: FlightLocation, shuffleId: Int, mapIds: Seq[Long], reduce: Int, schema: org.apache.spark.sql.types.StructType, conf: SparkConf,
+      allocator: BufferAllocator, metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) =
+    this(location, shuffleId, mapIds, reduce, reduce + 1, schema, Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), conf, allocator, metrics)
 
   /** A single block. */
-  def this(location: FlightLocation, shuffleId: Int, mapId: Long, reduce: Int, conf: SparkConf, allocator: BufferAllocator,
-      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) = this(location, shuffleId, Seq(mapId), reduce, reduce + 1, conf, allocator, metrics)
+  def this(location: FlightLocation, shuffleId: Int, mapId: Long, reduce: Int, schema: org.apache.spark.sql.types.StructType, conf: SparkConf,
+      allocator: BufferAllocator, metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) =
+    this(location, shuffleId, Seq(mapId), reduce, reduce + 1, schema, Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), conf, allocator, metrics)
 
   private val stream: FlightStream = {
     val start = System.nanoTime()
@@ -380,7 +384,7 @@ final class FlightBlockStream(
   private val channel = new ChunkChannel
   /** The local path's decoder over the remote bytes; None for an empty block. */
   private val reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] =
-    if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator))
+    if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
 
   override def hasNext: Boolean = reader.exists(_.hasNext)
 

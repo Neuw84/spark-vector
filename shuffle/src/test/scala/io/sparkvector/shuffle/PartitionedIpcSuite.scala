@@ -133,7 +133,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       assert(index.rows.toSeq === expected.map(_.size.toLong).toSeq)
       val fileBytes = Files.size(path)
       for (p <- 0 until numPartitions) {
-        val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator)
+        val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator, schema)
         try {
           val got = mutable.ArrayBuffer.empty[Row]
           while (reader.hasNext) {
@@ -200,7 +200,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         val all = Files.readAllBytes(p); java.util.Arrays.copyOfRange(all, ix.offsets(0).toInt, (ix.offsets(0) + ix.lengths(0)).toInt)
       }
       val channel = java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(bytes.reduce(_ ++ _)))
-      val reader = new PartitionedIpcFile.StreamReader(channel, allocator)
+      val reader = new PartitionedIpcFile.StreamReader(channel, allocator, schema)
       try {
         val got = mutable.ArrayBuffer.empty[Row]
         while (reader.hasNext) got ++= read(reader.next())
@@ -276,7 +276,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       val (b, rows) = batch(3000, arena, dictStrings = false)
       try writer.write(b, new Array[Int](3000)) finally b.close()
       writer.finish()
-      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator)
+      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
       try {
         val got = reader.next()
         assert(got.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "plain UTF8 for the high-cardinality column")

@@ -206,12 +206,23 @@ final class PartitionedIpcWriter(
       // Up to Spark's bypass-merge threshold of partitions the stream goes straight to its own file,
       // Arrow memory to the page cache with no heap in between; above it, a heap staging buffer up to
       // `flushBytes` keeps the file count down, as Spark's sort-based writer does.
-      if (sinkChannel == null) sinkChannel = new PartitionedIpcWriter.NonClosing(
-        if (numPartitions <= PartitionedIpcWriter.DirectFileMaxPartitions) { openOverflow(); overflow }
-        else Channels.newChannel(bytes))
+      if (sinkChannel == null) {
+        val raw = new PartitionedIpcWriter.NonClosing(
+          if (numPartitions <= PartitionedIpcWriter.DirectFileMaxPartitions) { openOverflow(); overflow }
+          else Channels.newChannel(bytes))
+        // The partition's bytes are one compressed stream (#411), as Spark's shuffle compresses a
+        // partition's segment: one frame per partition instead of one per buffer of every record
+        // batch. With a thousand partitions a map task's batches are a few hundred rows, and per-buffer
+        // compression was a compressor call and a frame header for every 1-2 KB buffer -- q35 at 1000
+        // partitions shuffled 17x Spark's bytes at SF10 -- while a stream over the partition's
+        // messages compresses their repeated metadata away and calls the compressor per block.
+        compressor = ShuffleCompression.compressing(Channels.newOutputStream(raw), compression)
+        sinkChannel = if (compressor == null) raw else Channels.newChannel(compressor)
+      }
       sinkChannel
     }
     private var sinkChannel: java.nio.channels.WritableByteChannel = _
+    private var compressor: java.io.OutputStream = _
 
     /** After a stream: the overflow file's high-water mark. */
     def endStream(): Unit =
@@ -230,7 +241,11 @@ final class PartitionedIpcWriter(
       bytes.reset()
     }
 
-    def end(): Unit = endStream()
+    /** Ends the partition's compressed stream (its frame end) and takes the overflow's high-water mark. */
+    def end(): Unit = {
+      if (compressor != null) { compressor.close(); compressor = null; sinkChannel = null }
+      endStream()
+    }
 
     def release(): Unit = {
       builders.foreach(b => try b.close() catch { case _: Exception => })
@@ -372,9 +387,9 @@ final class PartitionedIpcWriter(
       }
       val batchSchema = if (batchFields == null) arrowSchema else new Schema(batchFields)
       val out = new org.apache.arrow.vector.ipc.WriteChannel(seg.sink)
-      // The schema message: the same bytes for every batch of the same schema (which columns went plain).
-      val schemaMessage = messageSchema(batchSchema, batchFields)
-      org.apache.arrow.vector.ipc.message.MessageSerializer.writeMessageBuffer(out, schemaMessage.remaining(), schemaMessage.duplicate(), IpcOption.DEFAULT)
+      // No schema message and no end-of-stream marker (#411): the reader knows the shuffle's schema
+      // from the dependency, and a string column is dictionary-encoded in a batch exactly when a
+      // dictionary batch with its id precedes the record batch -- that is the batch's shape signal.
       // The dictionaries, one batch each, then the record batch, over roots that wrap the vectors.
       var d = 0
       while (d < batchDictionaries.length) {
@@ -387,8 +402,6 @@ final class PartitionedIpcWriter(
       val root = new VectorSchemaRoot(batchSchema.getFields, java.util.Arrays.asList(taken: _*), rows)
       val batch = new org.apache.arrow.vector.VectorUnloader(root, true, codec, true).getRecordBatch
       try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, batch, IpcOption.DEFAULT) finally batch.close()
-      out.writeIntLittleEndian(org.apache.arrow.vector.ipc.message.MessageSerializer.IPC_CONTINUATION_TOKEN)
-      out.writeIntLittleEndian(0)
       seg.endStream()
       seg.rows += rows
       rawBytesWritten += seg.pendingBytes
@@ -403,37 +416,9 @@ final class PartitionedIpcWriter(
 
   private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Long)]
 
-  /** The record batches' body compression, one codec for the writer (stateless per call). */
-  private val codec: org.apache.arrow.vector.compression.CompressionCodec = compression match {
-    case Some(c) => io.sparkvector.shuffle.ShuffleCompression.Factory.createCodec(c)
-    case None => org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
-  }
+  /** No per-buffer body compression: the partition's stream is compressed as a whole (see `Segment.sink`). */
+  private val codec: org.apache.arrow.vector.compression.CompressionCodec = org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
 
-  /**
-   * The serialised schema message of a batch schema, in the stream's message format: in memory a
-   * dictionary column's field is its index type, on the wire it is the dictionary's value type (UTF8)
-   * with the encoding attached -- what `ArrowStreamWriter` derived from the provider's dictionary
-   * vector. Cached by which columns went plain: the FlatBuffers work happens once per shape.
-   */
-  private val schemaMessages = new java.util.HashMap[java.util.BitSet, ByteBuffer]()
-  private def messageSchema(batchSchema: Schema, batchFields: java.util.List[Field]): ByteBuffer = {
-    val key = new java.util.BitSet(schema.fields.length)
-    if (batchFields != null) {
-      var c = 0
-      while (c < schema.fields.length) { if (batchFields.get(c) eq plainFields(c)) key.set(c); c += 1 }
-    }
-    var buf = schemaMessages.get(key)
-    if (buf == null) {
-      val fields = new java.util.ArrayList[Field](batchSchema.getFields.size())
-      batchSchema.getFields.forEach { f =>
-        val enc = f.getDictionary
-        fields.add(if (enc == null) f else new Field(f.getName, new org.apache.arrow.vector.types.pojo.FieldType(f.isNullable, org.apache.arrow.vector.types.pojo.ArrowType.Utf8.INSTANCE, enc, f.getMetadata), f.getChildren))
-      }
-      buf = org.apache.arrow.vector.ipc.message.MessageSerializer.serializeMetadata(new Schema(fields, batchSchema.getCustomMetadata), IpcOption.DEFAULT)
-      schemaMessages.put(key, buf)
-    }
-    buf
-  }
 
 
   /**

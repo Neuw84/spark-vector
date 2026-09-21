@@ -36,6 +36,29 @@ object ShuffleCompression {
 
   private val DefaultZstdLevel = 3
 
+  /**
+   * The partition stream's compression (#411): the writer compresses a partition's IPC messages as
+   * one stream and the reader decompresses the block's bytes before its message reader -- one
+   * compressor call and one frame per block instead of one per buffer of every record batch, and
+   * the messages' repeated metadata compresses away. `None` when the configured codec is none.
+   */
+  def compressing(out: java.io.OutputStream, codec: Option[CompressionUtil.CodecType]): java.io.OutputStream = codec match {
+    case Some(CompressionUtil.CodecType.ZSTD) => new com.github.luben.zstd.ZstdOutputStreamNoFinalizer(out, DefaultZstdLevel)
+    case Some(CompressionUtil.CodecType.LZ4_FRAME) => new net.jpountz.lz4.LZ4BlockOutputStream(out)
+    case Some(other) => throw new IllegalArgumentException(s"no stream compression for $other")
+    case None => null
+  }
+
+  /** The reading side of [[compressing]]: several frames back to back (a range of partitions, several map outputs) read as one stream. */
+  def decompressing(in: java.io.InputStream, codec: Option[CompressionUtil.CodecType]): java.io.InputStream = codec match {
+    case Some(CompressionUtil.CodecType.ZSTD) => new com.github.luben.zstd.ZstdInputStreamNoFinalizer(in)
+    case Some(CompressionUtil.CodecType.LZ4_FRAME) =>
+      new net.jpountz.lz4.LZ4BlockInputStream(in, net.jpountz.lz4.LZ4Factory.fastestInstance().fastDecompressor(),
+        net.jpountz.xxhash.XXHashFactory.fastestInstance().newStreamingHash32(0x9747b28c).asChecksum(), false)
+    case Some(other) => throw new IllegalArgumentException(s"no stream compression for $other")
+    case None => in
+  }
+
   /** The factory every stream writer and reader of the shuffle uses. */
   val Factory: CompressionCodec.Factory = new CompressionCodec.Factory {
     override def createCodec(codecType: CompressionUtil.CodecType): CompressionCodec = codecType match {
