@@ -959,6 +959,35 @@ through per-row segment reads (#409; q88 -9% at SF10); a per-column-chunk cache 
 dictionary was tried on the same profile and measured slower twice (#408) -- the cost there is the
 gather through the decoded table, not the decode.
 
+**1000 shuffle partitions (v6).** The suite once more, both engines in one window, with
+`spark.sql.shuffle.partitions=1000` and a 128 MB advisory partition size (the setting planned for
+3 TB at 2000). Over the 100 comparable queries Spark took 2864.6 s and we took 3011.9 -- 1.05x
+slower, where at 200 partitions we were 1.04x faster over the same queries. The partition count cost
+Spark 4.6% and us 14.8%, and the difference is entirely the shuffle-heavy queries (q67 103 -> 142 s,
+q18 10.8 -> 30.5, q95 93 -> 114, q75 70 -> 91, q4 106 -> 122, q84 20 -> 32, q35 20 -> 26); the
+scan-bound ones moved with the window for both engines. Two notes on AQE first: it *does* coalesce,
+but with `coalescePartitions.parallelismFirst=true` (Spark's default) only down to the core count,
+using the advisory size as a cap -- the driver log reads `advisory 134217728, actual target 4317642`
+-- and coalescing groups reducers, not the blocks the mappers wrote: every map task still writes
+1000 blocks, and a coalesced task reads ten of them per map instead of two.
+
+Why our shuffle pays for that and Spark's does not, in the order it was found (#411): a reduce task
+opened one Flight stream per (executor, reduce partition) -- 70 streams per coalesced task instead
+of 7 -- and the server served each (map, partition) block with its own index lookup and file open;
+range tickets (#412: one stream per executor per task, one lookup per map for the task's whole
+range) returned q84 to parity (31.7 -> 22.5 s, Spark 22.8) and changed nothing else. The rest
+reproduces on one machine with no network at all (SF10, 1000 partitions: q35 7.6 s against Spark's
+1.8, near parity at 200), and the profiles show not a hot frame but the per-record-batch machinery
+paid five times as often at a fifth the bytes: on the writer a schema message, a dictionary batch
+per string column, a record batch and an end marker per batch, three FlatBuffers builds and a
+dozen Arrow allocations with their accounting; on the reader an `ArrowStreamReader` per block.
+Writing the messages directly with the schema cached, and caching the Spark type parsed from each
+field's metadata (#413), took single digits off. Spark's sort shuffle pays none of this per block:
+its blocks are byte spans with no framing. The step that makes the partition count as irrelevant
+for us as it is for Spark is one IPC stream per map output with the per-batch shape carried as a
+flag rather than a schema per batch -- a file-layout change, put to the owner on #411. Until it
+lands, 200-400 partitions is the right setting for 1 TB with this shuffle.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
