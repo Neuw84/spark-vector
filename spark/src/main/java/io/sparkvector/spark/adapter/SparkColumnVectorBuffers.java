@@ -223,14 +223,35 @@ public final class SparkColumnVectorBuffers {
     boolean any = false;
     byte[] nulls = cv instanceof OnHeapColumnVector ? (byte[]) get(ONHEAP_NULLS, cv) : null;
     if (nulls != null && nulls.length >= numRows) {
-      for (int i = 0; i < numRows; i++) {
-        if (nulls[i] != 0) {
-          any = true;
+      // The bitmap is built on the heap, eight rows per byte, and copied out once: one Bitmap.set
+      // per row -- a segment read-modify-write with its checks -- was 18% of an executor's time in
+      // q8 at SF10 (#398).
+      byte[] bits = new byte[(numRows + 7) >>> 3];
+      int nullCount = 0;
+      int i = 0;
+      for (; i + 8 <= numRows; i += 8) {
+        int b = 0;
+        for (int j = 0; j < 8; j++) {
+          if (nulls[i + j] == 0) {
+            b |= 1 << j;
+          } else {
+            nullCount++;
+          }
+        }
+        bits[i >>> 3] = (byte) b;
+      }
+      for (; i < numRows; i++) {
+        if (nulls[i] == 0) {
+          bits[i >>> 3] |= (byte) (1 << (i & 7));
         } else {
-          Bitmap.set(validity, i);
+          nullCount++;
         }
       }
-      return any ? validity : null;
+      if (nullCount == 0) {
+        return null;
+      }
+      MemorySegment.copy(bits, 0, validity, ValueLayout.JAVA_BYTE, 0, bits.length);
+      return validity;
     }
     MemorySegment nativeNulls = cv instanceof OffHeapColumnVector ? nativeSegment(OFFHEAP_NULLS, cv, numRows) : null;
     for (int i = 0; i < numRows; i++) {
@@ -289,6 +310,85 @@ public final class SparkColumnVectorBuffers {
     if (type != VecType.INT32 && type != VecType.INT64 && type != VecType.FLOAT64) {
       return false;
     }
+    WritableColumnVector ids = cv.getDictionaryIds();
+    int[] idArray = ids instanceof OnHeapColumnVector ? (int[]) get(ONHEAP_INTS, ids) : null;
+    byte[] nulls = validity != null && cv instanceof OnHeapColumnVector ? (byte[]) get(ONHEAP_NULLS, cv) : null;
+    if (idArray == null || idArray.length < numRows || (validity != null && (nulls == null || nulls.length < numRows))) {
+      return decodeDictionaryIntoSlow(cv, dict, type, numRows, validity, data);
+    }
+    // The reader's own arrays, a heap staging array and one copy out (#398): the per-row virtual
+    // getInt, Bitmap.isSet and setAtIndex were 7% of an executor's time in q8 at SF10.
+    int maxId = -1;
+    for (int i = 0; i < numRows; i++) {
+      if (nulls == null || nulls[i] == 0) {
+        maxId = Math.max(maxId, idArray[i]);
+      }
+    }
+    long[] table = DICTIONARY_TABLE.get();
+    if (table.length <= maxId) {
+      table = new long[Integer.highestOneBit(maxId) << 1];
+      DICTIONARY_TABLE.set(table);
+    }
+    switch (type) {
+      case INT32 -> {
+        for (int id = 0; id <= maxId; id++) {
+          table[id] = dict.decodeToInt(id);
+        }
+        int[] out = intScratch(numRows);
+        for (int i = 0; i < numRows; i++) {
+          out[i] = nulls == null || nulls[i] == 0 ? (int) table[idArray[i]] : 0;
+        }
+        MemorySegment.copy(out, 0, data, VectorBuffers.LE_INT, 0, numRows);
+      }
+      case INT64 -> {
+        for (int id = 0; id <= maxId; id++) {
+          table[id] = dict.decodeToLong(id);
+        }
+        long[] out = longScratch(numRows);
+        for (int i = 0; i < numRows; i++) {
+          out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
+        }
+        MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
+      }
+      default -> {
+        for (int id = 0; id <= maxId; id++) {
+          table[id] = Double.doubleToRawLongBits(dict.decodeToDouble(id));
+        }
+        long[] out = longScratch(numRows);
+        for (int i = 0; i < numRows; i++) {
+          out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
+        }
+        MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
+      }
+    }
+    return true;
+  }
+
+  private static final ThreadLocal<int[]> INT_SCRATCH = ThreadLocal.withInitial(() -> new int[4096]);
+  private static final ThreadLocal<long[]> LONG_SCRATCH = ThreadLocal.withInitial(() -> new long[4096]);
+
+  private static int[] intScratch(int n) {
+    int[] s = INT_SCRATCH.get();
+    if (s.length < n) {
+      s = new int[Integer.highestOneBit(n) << 1];
+      INT_SCRATCH.set(s);
+    }
+    return s;
+  }
+
+  private static long[] longScratch(int n) {
+    long[] s = LONG_SCRATCH.get();
+    if (s.length < n) {
+      s = new long[Integer.highestOneBit(n) << 1];
+      LONG_SCRATCH.set(s);
+    }
+    return s;
+  }
+
+  /** The general form: any column vector, ids through the vector's accessor, validity from the bitmap. */
+  private static boolean decodeDictionaryIntoSlow(
+      WritableColumnVector cv, Dictionary dict, VecType type, int numRows, MemorySegment validity,
+      MemorySegment data) {
     WritableColumnVector ids = cv.getDictionaryIds();
     int maxId = -1;
     for (int i = 0; i < numRows; i++) {
