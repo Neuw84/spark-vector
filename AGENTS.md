@@ -168,7 +168,9 @@ that pin it.
   zero-copy with `MemorySegment.ofAddress(...).reinterpret(size)`, and so are the fixed-width
   columns of Spark's own `OffHeapColumnVector` (`spark.sql.columnVector.offheap.enabled=true`,
   no dictionary) -- `SparkColumnVectorBuffers.wrappedOffHeapColumns()` counts them; strings and
-  dictionaries still take the copy. `docs/operators.md` "Scan compatibility" is the matrix. A cached
+  dictionaries still take the copy. The benchmark configurations set that flag since #403 (SF10:
+  q8 1.46 -> 1.14 s, q47 6.28 -> 5.30); the copying path's validity and dictionary loops were made
+  bulk in #398 (one segment call per row was 25% of q8's executor time). `docs/operators.md` "Scan compatibility" is the matrix. A cached
   table is a columnar input only when Spark's `DefaultCachedBatchSerializer` says so, and it decides on
   the cached relation's *whole* schema: boolean/byte/short/int/long/float/double only, so a string or
   date column anywhere in the cache makes `InMemoryTableScanExec` a row scan whatever is projected
@@ -926,6 +928,38 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
 - One JVM per configuration, `local[8]`, 8 GB heap, `spark.sql.shuffle.partitions=8`; SF1 with 10
   warm-up and 10 measured runs, SF10 with 5 and 7. Configurations: `spark`, `vector`, `comet-scan`,
   `comet-scan-vector`, `comet-scan-vector-shuffle`, `comet`.
+- What a configuration sets lives in two places kept in step by hand: `TpchRunner.Configs`
+  (`VectorFast` is the base of every `vector*` configuration) and the `ENGINE` arrays of
+  `benchmarks/scripts/submit-cluster.sh`; the runner warns when the session disagrees with the
+  configuration it is labelled with. `vector` today: the plugin, `strictFloatingPoint=false`,
+  `sortMergeJoin.mode=auto`, `spark.sql.parquet.enableVectorizedReader=true` (Spark's default made
+  explicit -- our operators consume the vectorized reader's batches, the row reader would make every
+  plan fall back) and `spark.sql.columnVector.offheap.enabled=true` (#403: fixed-width lanes wrapped
+  in place, see section 3's scan note); `vector-shuffle` adds the `VectorShuffleManager` and
+  `spark.vector.shuffle.enabled`. Change a setting in both tables and in README's "The benchmark
+  configurations" in the same PR.
+- On the cluster (`benchmarks/k8s/run-matrix.sh`, `render-run.sh`; the campaign branch carries the
+  k8s scripts) the 1 TB protocol is: `EXECUTORS=8 EXEC_CORES=13 EXEC_MEM=30g EXEC_OVERHEAD=20g
+  DIRECT_MEM=30g DRIVER_CORES=2 DRIVER_MEM=4g KEEP_EXECUTORS=1`, 200 shuffle partitions, one
+  iteration per query, a warm-up query (`q3`) first, and a `spark` baseline in the same results
+  prefix whenever a comparison is drawn from the run (the report needs it there). One results prefix
+  per run; a fix is measured by exactly this loop -- gate, merge, rebase the campaign branch, kaniko
+  image `issue-247-<sha>`, targeted run of the affected queries, numbers on the issue -- before the
+  next change. Single iterations at 1 TB have a wide band on the small queries (q47 17.7-23.5 s
+  across runs of the same image); do not read a 5% move on them as a result.
+- Executor profiles on the cluster: `EXEC_JAVA_OPTS="-XX:StartFlightRecording=delay=<s>,duration=<s>,filename=/tmp/exec.jfr,settings=profile"`
+  and copy the files out of the executor pods with `kubectl cp` while the application still runs
+  (`KEEP_EXECUTORS=1`; the image has `tar`). The recording window must cover the stage under study:
+  the first q67 profiles covered the executors' first 150 s and missed the sort stage entirely, and
+  a recording longer than the application is never written. A short-query window where the Java
+  sampler returns ~1.5 k samples per executor in 50 s (q67's windows give 30-40 k) means the
+  executors are waiting, not computing -- read the `jdk.ThreadPark` events by thread and first
+  non-JDK frame before blaming a kernel. `jfr-summary.sh` needs `JAVA_HOME`.
+- Read a run's medians from the driver log before the next run of the same configuration replaces
+  the pod (the application name is `spark-vector-<suite>-<config>-<dataset>`), and know that the
+  container log rotates at 10 MB; the `.jsonl` results in the prefix and `run-tpcds.sh --cluster-report`
+  (the in-cluster report job) are the durable record. The results bucket is KMS-protected: read it
+  in-cluster.
 - Results are appended to `benchmarks/results/<config>.jsonl` (committed) and the report takes the
   latest measurement per (dataset, config, query). Outliers stay in the files with older
   timestamps; note discarded runs in `docs/results.md`.
