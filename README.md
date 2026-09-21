@@ -445,6 +445,35 @@ turns a configuration into the `spark-submit` line, and `run-tpcds.sh --cluster-
 the report in the layout of the data-on-EKS Comet benchmark (summary, speedup distribution,
 regressions with their stage evidence, per-query table, environment) -- see `benchmarks/k8s/README.md`.
 
+### The benchmark configurations
+
+The named configurations are defined twice and kept in step by hand -- `TpchRunner.Configs` for the
+local harness and the `ENGINE` arrays of `benchmarks/scripts/submit-cluster.sh` for a cluster (the
+runner warns when the session it runs in disagrees with the configuration it is labelled with):
+
+| configuration | what the session sets |
+|---|---|
+| `spark` | nothing: plain Spark, its vectorized Parquet reader, its sort-based shuffle |
+| `vector` | `spark.plugins=io.sparkvector.spark.VectorPlugin`; `spark.vector.exec.strictFloatingPoint=false` (Comet's rounding; see the note under Aggregation); `spark.vector.exec.sortMergeJoin.mode=auto`; `spark.sql.parquet.enableVectorizedReader=true` (Spark's default, made explicit -- our operators consume its batches, the row reader would make every plan fall back); `spark.sql.columnVector.offheap.enabled=true` (#403: the reader writes Arrow's fixed-width layout into native memory and the adapter wraps those lanes in place instead of copying them) |
+| `vector-shuffle` | `vector` plus `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` and `spark.vector.shuffle.enabled=true`: our columnar exchange (#288) |
+| `vector-shuffle-strict` | `vector-shuffle` with `strictFloatingPoint=true` (bit-identical double sums) |
+| `comet-scan-vector-ourshuffle` | `vector-shuffle` with Comet's plugin and scan (`spark.comet.enabled`, `spark.comet.scan.enabled`, every `spark.comet.exec.*` operator off, `spark.memory.offHeap.enabled` with `OFFHEAP`, 32 g) |
+| `comet-scan-vector-shuffle`, `hybrid`, `comet` | Comet's scan and native shuffle under our operators; the same with the mixed pass (`spark.vector.comet.mixed.enabled`); pure Comet |
+
+On the cluster (`benchmarks/k8s/run-matrix.sh <tables> <dataset> <out> <image> [runner args]`,
+`CONFIGS="spark vector-shuffle"` selects the configurations) the executor properties are environment
+variables of `render-run.sh`, and the 1 TB runs in `docs/results.md` use: `EXECUTORS=8`,
+`EXEC_CORES=13`, `EXEC_MEM=30g` (heap), `EXEC_OVERHEAD=20g`, `DIRECT_MEM=30g`
+(`-XX:MaxDirectMemorySize`, where our Arrow batches and the shuffle's buffers live -- see Memory
+tuning), `DRIVER_CORES=2`, `DRIVER_MEM=4g`, `KEEP_EXECUTORS=1`, 200 shuffle partitions, one
+iteration per query. `EXEC_JAVA_OPTS` appends executor JVM options (a JFR recording:
+`-XX:StartFlightRecording=delay=55s,duration=60s,filename=/tmp/exec.jfr,settings=profile`, copied
+out of the executor pods with `kubectl cp` before the application ends), `SUBMIT_ARGS` extra
+`--conf` pairs for one run (`--conf spark.vector.exec.sortMergeJoin.maxInputSize=64g`). Read a
+run's medians from the driver log before the next run of the same configuration replaces the pod,
+and know that the container log rotates at 10 MB; the `.jsonl` results in `<out>` and
+`run-tpcds.sh --cluster-report` are the durable record.
+
 Each configuration runs in its own JVM and appends its measurements to
 `benchmarks/results/<config>.jsonl` (`benchmarks/results/tpcds/<config>.jsonl` for TPC-DS). The runner then rewrites two reports from every `.jsonl` file,
 one section per dataset (`sf1`, `sf10`, ...): `benchmarks/results/results.md` and a self-contained
