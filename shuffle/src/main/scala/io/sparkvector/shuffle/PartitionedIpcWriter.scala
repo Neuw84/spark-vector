@@ -30,19 +30,21 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * type in the field metadata, which the reader uses to rebuild the same Spark column vectors the
  * operators produce.
  *
- * Record batches are sized on this side, not by the input: every partition holds one builder per
- * column (#351) -- an Arrow vector the input batches' rows for that partition are compacted into at
- * the current row offset, grown by doubling from a small start -- and when a partition reaches
- * `batchRows` rows or `batchBytes` bytes (or the task's held total passes `bufferBytes`, or
- * `finish`) its builders become the record batch as they are: one IPC message, one compression
- * call per buffer, one dictionary per batch. Without sizing, an input of 4096 rows over 200
- * partitions would give 20-row record batches, and the per-message costs (Arrow object churn,
- * metadata, compression) were 2x the row shuffle on TPC-H; with a set of vectors per (input batch,
- * partition) slice, concatenated at the flush, the write was 63% of a string-heavy query's CPU at
- * 200 partitions (#349, #351). Strings are plain in the builders whatever the input (a dictionary
- * column is decoded once per input batch) and dictionary-encoded once per record batch.
+ * Record batches are sized on this side, not by the input (#416, replacing #349/#351's builder set
+ * per partition): the task's rows are staged once, whatever their partition -- one builder per
+ * column plus the partition id of every row -- and when the staged data reaches `bufferBytes` (or
+ * at `finish`) the rows are grouped by partition and each partition's rows gathered, in slices of
+ * at most `batchRows`, into one reusable set of batch vectors that is serialised as the partition's
+ * record batch: one IPC message per (partition, slice), one dictionary per batch. A builder set per
+ * partition made a map task at 1000 partitions allocate a vector per column per partition -- 18,000
+ * for 1.2 MB of output -- and gather every input batch into a thousand slices of eight rows; at 1 TB
+ * the map stage carried the whole cost of the partition count. Spark's sort-based writer has this
+ * shape: rows appended once, partitioned at the write. Strings are plain in the staging whatever the
+ * input (a dictionary column is decoded once per input batch) and dictionary-encoded once per record
+ * batch.
  *
- * Memory: the builders, at most about `bufferBytes` across partitions; the serialised bytes of a
+ * Memory: the staging, about `bufferBytes` of data plus the spare capacity of its doubled vectors,
+ * and one batch's vectors; the serialised bytes of a
  * partition stay in memory up to `flushBytes` and overflow to a per-partition temporary file,
  * concatenated into the data file at `finish` (the shape of Spark's bypass-merge writer).
  */
@@ -54,11 +56,11 @@ final class PartitionedIpcWriter(
     flushBytes: Long = 1L << 20,
     /** Body compression of every record batch (`None` = raw). Spark's own shuffle is compressed; raw IPC wrote 1.8x its bytes on TPC-H. */
     compression: Option[CompressionUtil.CodecType] = Some(CompressionUtil.CodecType.ZSTD),
-    /** A partition's held rows before they become one record batch. */
+    /** The most rows of one partition that become one record batch. */
     batchRows: Int = 8192,
-    /** A partition's held bytes before they become one record batch. */
+    /** A partition's held bytes before they become one record batch (the per-partition path). */
     batchBytes: Long = 1L << 20,
-    /** Held bytes across all partitions before the fullest partitions are written out. */
+    /** Staged data across all partitions before the staging is written out as record batches. */
     bufferBytes: Long = 64L << 20,
     /**
      * A record batch's string column is dictionary-encoded only when its distinct values are at most
@@ -68,6 +70,15 @@ final class PartitionedIpcWriter(
     dictionaryMaxRatio: Double = PartitionedIpcWriter.DefaultDictionaryMaxRatio) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
+  /**
+   * A builder's first capacity in rows (#416): an input batch's rows spread over the partitions, so
+   * at 1000 partitions a partition sees ~8 rows per 8192-row batch and a 256-row first vector per
+   * column was 74 KB per partition, 74 MB per map task, allocated and mostly never filled -- a
+   * third of the map task's time at 1 TB / 1000 partitions was spent on those. The vectors still
+   * double as rows arrive, so a partition that does fill pays only the reallocations it earns.
+   */
+  private val initialRows: Int = math.max(PartitionedIpcWriter.MinInitialRows,
+    math.min(PartitionedIpcWriter.InitialRows, Integer.highestOneBit(math.max(1, 4 * batchRows / math.max(numPartitions, 1)))))
   /** The plain-UTF8 variant of every string field, for the batches whose dictionary does not pay. */
   private val plainFields: Array[Field] = Array.tabulate(schema.fields.length) { c =>
     val f = schema.fields(c)
@@ -82,7 +93,7 @@ final class PartitionedIpcWriter(
    * batch made a set of vectors per partition -- allocated, filled, appended into the batch and freed
    * for ~40 rows at 200 partitions, 3,600 vectors per batch for an 18-column table.
    */
-  private final class Builder(val column: Int) {
+  private final class Builder(val column: Int, val shared: Boolean = false) {
     private val field = schema.fields(column)
     private val isString = field.dataType == StringType
     private val isBool = field.dataType == BooleanType
@@ -103,7 +114,7 @@ final class PartitionedIpcWriter(
     private def ensure(count: Int, bytes: Long): Unit = {
       if (retained) { retainedBytes -= capacityBytes; retained = false }
       if (vector == null) {
-        val cap = math.max(PartitionedIpcWriter.InitialRows, Integer.highestOneBit(math.max(count, 1) - 1) << 1)
+        val cap = math.max(initialRows, Integer.highestOneBit(math.max(count, 1) - 1) << 1)
         allocate(math.min(math.max(cap, count), math.max(batchRows, count)), if (isString) math.max(bytes, PartitionedIpcWriter.InitialBytesPerRow.toLong * cap) else 0L)
         return
       }
@@ -143,6 +154,33 @@ final class PartitionedIpcWriter(
       if (isString) bytes + (count.toLong << 2) else count.toLong * math.max(width, 1)
     }
 
+    /**
+     * Appends all `n` rows of `in`: the staging path (#416), a bulk copy of each buffer -- no mask,
+     * no per-element compaction -- since every row of the input is staged whatever its partition.
+     */
+    def appendAll(in: VectorBuffers, n: Int): Long = {
+      val srcOff = in.offsets()
+      val start = if (isString) srcOff.get(VectorBuffers.LE_INT, 0L) else 0
+      val bytes = if (isString) (srcOff.get(VectorBuffers.LE_INT, n.toLong << 2) - start).toLong else 0L
+      ensure(n, bytes)
+      if (isString) {
+        val offsets = buffers.offsets()
+        val base = dataBytes.toInt - start
+        var i = 0
+        while (i <= n) { offsets.set(VectorBuffers.LE_INT, (rows + i).toLong << 2, srcOff.get(VectorBuffers.LE_INT, i.toLong << 2) + base); i += 1 }
+        if (bytes > 0) MemorySegment.copy(in.data(), start.toLong, buffers.data(), dataBytes, bytes)
+      } else if (isBool) {
+        Bitmap.copyBits(in.data(), buffers.data(), rows, n)
+      } else {
+        MemorySegment.copy(in.data(), 0L, buffers.data(), rows.toLong * width, n.toLong * width)
+      }
+      if (in.validity() != null) Bitmap.copyBits(in.validity(), buffers.validity(), rows, n)
+      else Bitmap.fillRange(buffers.validity(), rows, n, true)
+      rows += n
+      dataBytes += bytes
+      if (isString) bytes + (n.toLong << 2) else n.toLong * math.max(width, 1)
+    }
+
     /** Appends rows `idx(from until to)` of `in` (the index-list path, #353). */
     def appendIndexed(in: VectorBuffers, idx: Array[Int], from: Int, to: Int, scratch: Arena): Long = {
       val count = to - from
@@ -177,6 +215,9 @@ final class PartitionedIpcWriter(
       v
     }
 
+    /** The staged rows as buffers to gather from (value count set); the builder keeps them. */
+    def finished(): VectorBuffers = { finish(); buffers }
+
     /** The finished vector (value count set), still the builder's: `recycle` or `close` follows the flush. */
     def finish(): FieldVector = {
       val v = vector
@@ -191,14 +232,16 @@ final class PartitionedIpcWriter(
     def capacityBytes: Long = if (vector == null) 0L else { var t = 0L; val bs = vector.getBuffers(false); var i = 0; while (i < bs.length) { t += bs(i).capacity(); i += 1 }; t }
 
     /**
-     * After the flush (#416): the vector is kept, emptied, for the partition's next batch when the
-     * writer's retained capacity allows, else freed. At 1000 partitions a block is a few rows and
-     * the Arrow allocate-and-free of every column's vector per block -- 18 columns, 2 M blocks in
-     * q18's exchange at 1 TB -- was the largest single item of the executor time that grew with the
-     * partition count; a reset keeps the capacity and costs a memset of a few KB.
+     * After a flush: the vector kept and emptied for the next rows (a reset keeps its capacity). A
+     * shared builder (the staging, the batch vectors) always keeps; a partition's own keeps while
+     * the writer's retained capacity stays under `retainBudget` (#417) -- the allocator cap in
+     * `appendIndexed` measures the allocator's total, and unbounded retention across a few hundred
+     * partitions tripped it into flushing on every append (record batches of a few rows, 1.5x the
+     * bytes, 2x the time on q67 at 200 partitions).
      */
     def recycle(): Unit = {
       if (vector == null) return
+      if (shared) { vector.reset(); rows = 0; dataBytes = 0L; return }
       val cap = capacityBytes
       if (retainedBytes + cap <= retainBudget) {
         vector.reset(); rows = 0; dataBytes = 0L
@@ -218,7 +261,8 @@ final class PartitionedIpcWriter(
   private final class Segment(val partition: Int) {
     val bytes = new ByteArrayOutputStream()
     var rows: Long = 0L
-    val builders: Array[Builder] = Array.tabulate(schema.fields.length)(new Builder(_))
+    /** The partition's own builders (the per-partition path, at most `StagingPartitions` partitions); null when staged. */
+    val builders: Array[Builder] = if (staged) null else Array.tabulate(schema.fields.length)(new Builder(_))
     var pendingRows: Int = 0
     var pendingBytes: Long = 0L
     var overflow: FileChannel = _
@@ -273,15 +317,39 @@ final class PartitionedIpcWriter(
     }
 
     def release(): Unit = {
-      builders.foreach(b => try b.close() catch { case _: Exception => })
+      if (builders != null) builders.foreach(b => try b.close() catch { case _: Exception => })
       if (overflow != null) { try overflow.close() catch { case _: Exception => }; try Files.deleteIfExists(overflowPath) catch { case _: Exception => } }
     }
   }
 
+  /**
+   * Above `StagingPartitions` partitions the task's rows are staged and partitioned at the flush; at
+   * or below, every partition keeps its own builders and each input batch is gathered into them
+   * (#349, #351). The staging removes a builder set per partition -- 18,000 vector allocations per
+   * map task at 1000 partitions -- but its flush gathers from a staging that no longer fits the
+   * cache, which cost q67 8% of executor time at 200 partitions where the per-partition path's
+   * gathers read an input batch still in L2. Each shape where it wins.
+   */
+  private val staged: Boolean = numPartitions > PartitionedIpcWriter.StagingPartitions
   private val segments = Array.tabulate(numPartitions)(new Segment(_))
+  /**
+   * The task's rows, staged once whatever their partition (#416): one builder per column plus the
+   * partition id of every staged row. At the flush the staged rows are grouped by partition and
+   * each partition's rows gathered into `batchBuilders` -- one reusable set of vectors -- and
+   * serialised as its record batch. Before this every partition had its own builders: at 1000
+   * partitions a map task allocated 18,000 vectors (one per column per partition) for 1.2 MB of
+   * output and gathered every input batch into a thousand slices of eight rows; at 1 TB the map
+   * stage carried the whole partition-count cost. Spark's sort-based writer has this shape.
+   */
+  private val staging: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
+  private var stagedIds: Array[Int] = new Array[Int](0)
+  private var stagedRows: Int = 0
+  /** The vectors a partition's rows are gathered into for one record batch, reused for every partition and flush. */
+  private val batchBuilders: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
+  /** Staged data before a flush. A smaller staging (12.8 MB at 200 partitions) gave more, smaller record batches and cost q67 a further 8%. */
+  private val stagingBytes: Long = bufferBytes
   private var heldBytes = 0L
-  /** Capacity held by emptied builders kept for their partition's next batch (#416), and its cap: well
-   *  under `bufferBytes`, which the flush loop below also measures against the allocator's total. */
+  /** Capacity held by emptied per-partition builders kept for their next batch (#417), and its cap: well under `bufferBytes`. */
   private var retainedBytes = 0L
   private val retainBudget: Long = bufferBytes / 4
   /** Per string column, the ids and dictionary vectors of its encoding, reused across blocks (#416). */
@@ -324,9 +392,9 @@ final class PartitionedIpcWriter(
     // A dictionary-encoded string column is decoded once here and appended plain: the batch's strings
     // are dictionary-encoded again at the flush, once per record batch (#349, #351).
     val plain = buffers.map(b => if (b.`type`() == io.sparkvector.kernels.VecType.UTF8 && b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, scratch) else b)
-    if (numPartitions > PartitionedIpcWriter.IndexListPartitions) {
-      // Many partitions: the rows grouped by partition once, a gather per partition of its own rows
-      // (#353). A mask per partition cost a scan of the batch's words per partition and column.
+    if (!staged) {
+      // The per-partition path: the rows grouped by partition once, a gather per partition of its own
+      // rows into that partition's builders (#353).
       if (order.length < n) order = new Array[Int](n)
       PartitionKernels.partitionOrder(ids, n, numPartitions, starts, order)
       var p = 0
@@ -334,16 +402,22 @@ final class PartitionedIpcWriter(
         if (starts(p + 1) > starts(p)) appendIndexed(segments(p), plain, order, starts(p), starts(p + 1), scratch)
         p += 1
       }
-    } else {
-      val masks = Array.tabulate(numPartitions)(_ => scratch.allocate(Bitmap.bytesFor(n), 8))
-      val counts = new Array[Int](numPartitions)
-      PartitionKernels.partitionMasks(ids, n, masks, counts)
-      var p = 0
-      while (p < numPartitions) {
-        if (counts(p) > 0) appendPartition(segments(p), plain, masks(p), counts(p), scratch)
-        p += 1
-      }
+      return
     }
+    if (stagedIds.length < stagedRows + n) stagedIds = java.util.Arrays.copyOf(stagedIds, math.max(stagedRows + n, stagedIds.length * 2))
+    System.arraycopy(ids, 0, stagedIds, stagedRows, n)
+    var size = 0L
+    var c = 0
+    while (c < plain.length) {
+      size += staging(c).appendAll(plain(c), n)
+      c += 1
+    }
+    stagedRows += n
+    heldBytes += size
+    // The staging vectors keep their capacity across flushes (at most about twice the data they held,
+    // doubling as they grow), so the allocator's total is bounded by a multiple of `bufferBytes`
+    // rather than compared with it: the check is a backstop against a growth the estimate misses (#340).
+    if (heldBytes > stagingBytes || allocator.getAllocatedMemory > 4 * bufferBytes) flushStaging()
   }
 
   private val starts = new Array[Int](numPartitions + 1)
@@ -356,24 +430,10 @@ final class PartitionedIpcWriter(
       size += seg.builders(c).appendIndexed(buffers(c), idx, from, to, scratch)
       c += 1
     }
-    afterAppend(seg, to - from, size)
-  }
-
-  private def appendPartition(seg: Segment, buffers: Array[VectorBuffers], mask: MemorySegment, count: Int, scratch: Arena): Unit = {
-    var size = 0L
-    var c = 0
-    while (c < buffers.length) {
-      size += seg.builders(c).append(buffers(c), mask, count, scratch)
-      c += 1
-    }
-    afterAppend(seg, count, size)
-  }
-
-  private def afterAppend(seg: Segment, count: Int, size: Long): Unit = {
-    seg.pendingRows += count
+    seg.pendingRows += to - from
     seg.pendingBytes += size
     heldBytes += size
-    if (seg.pendingRows >= batchRows || seg.pendingBytes >= batchBytes) flush(seg)
+    if (seg.pendingRows >= batchRows || seg.pendingBytes >= batchBytes) flushPartition(seg)
     // The cap is on what the allocator really holds, not on the slices' used bytes: `setSafe`-grown
     // vectors carry doubled capacity and the per-slice string dictionaries their own, so the estimate
     // ran 10-20x under the truth (#340: a task's writer at 1.1 GB against a 64 MB `bufferBytes`).
@@ -385,20 +445,57 @@ final class PartitionedIpcWriter(
         if (sg.pendingBytes > 0 && (fullest == null || sg.pendingBytes > fullest.pendingBytes)) fullest = sg
         p += 1
       }
-      if (fullest == null) { heldBytes = 0L; return } else flush(fullest)
+      if (fullest == null) { heldBytes = 0L; return } else flushPartition(fullest)
     }
+  }
+
+  /** The per-partition path's flush: the partition's builders become its record batch. */
+  private def flushPartition(seg: Segment): Unit = if (seg.pendingRows > 0) {
+    flush(seg, seg.pendingRows, seg.builders)
+    heldBytes -= seg.pendingBytes
+    seg.pendingRows = 0; seg.pendingBytes = 0L
+  }
+
+  /**
+   * The staged rows out as record batches: grouped by partition (#353's order kernel), each
+   * partition's rows gathered into the batch builders in slices of at most `batchRows` and
+   * serialised into the partition's stream.
+   */
+  private def flushStaging(): Unit = if (stagedRows > 0) {
+    val scratch = Arena.ofConfined()
+    try {
+      if (order.length < stagedRows) order = new Array[Int](stagedRows)
+      PartitionKernels.partitionOrder(stagedIds, stagedRows, numPartitions, starts, order)
+      val source: Array[VectorBuffers] = Array.tabulate(schema.fields.length)(c => staging(c).finished())
+      var p = 0
+      while (p < numPartitions) {
+        var from = starts(p)
+        val end = starts(p + 1)
+        while (from < end) {
+          val to = math.min(end, from + batchRows)
+          var c = 0
+          while (c < schema.fields.length) { batchBuilders(c).appendIndexed(source(c), order, from, to, scratch); c += 1 }
+          flush(segments(p), to - from, batchBuilders)
+          from = to
+        }
+        p += 1
+      }
+    } finally scratch.close()
+    var c = 0
+    while (c < schema.fields.length) { staging(c).recycle(); c += 1 }
+    stagedRows = 0
+    heldBytes = 0L
   }
 
   /** What the writer's allocator holds right now (pending slices; the roots are emptied after each batch). */
   def allocatedBytes: Long = allocator.getAllocatedMemory
 
   /** The partition's held slices become one record batch of its stream. */
-  private def flush(seg: Segment): Unit = if (seg.pendingRows > 0) {
-    val rows = seg.pendingRows
+  private def flush(seg: Segment, rows: Int, builders: Array[Builder]): Unit = if (rows > 0) {
     val taken = new Array[FieldVector](schema.fields.length)
     try {
       var c = 0
-      while (c < schema.fields.length) { taken(c) = seg.builders(c).finish(); c += 1 }
+      while (c < schema.fields.length) { taken(c) = builders(c).finish(); c += 1 }
       // Pass 1: the record batch's dictionaries into the provider -- all of them before the stream
       // writer exists, since it converts the schema with the dictionaries' types at construction.
       // A string column whose distinct values are too many for the dictionary to pay stays plain
@@ -440,21 +537,27 @@ final class PartitionedIpcWriter(
       try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, batch, IpcOption.DEFAULT) finally batch.close()
       seg.endStream()
       seg.rows += rows
-      rawBytesWritten += seg.pendingBytes
+      rawBytesWritten += batchBytesOf(taken)
       seg.spillIfNeeded()
     } finally {
-      // The builders keep or free their vectors; the encoding scratch is emptied for the next block.
+      // The builders keep their vectors for the next batch; the encoding scratch is emptied.
       var b = 0
       while (b < schema.fields.length) {
-        seg.builders(b).recycle()
+        builders(b).recycle()
         val sc = dictScratch(b)
         if (sc != null) { sc._1.reset(); sc._2.reset() }
         b += 1
       }
       batchDictionaries.clear()
-      heldBytes -= seg.pendingBytes
-      seg.pendingRows = 0; seg.pendingBytes = 0L
     }
+  }
+
+  /** The record batch's data bytes as written (the exchange's `dataSize`, see `rawBytes`). */
+  private def batchBytesOf(vectors: Array[FieldVector]): Long = {
+    var t = 0L
+    var c = 0
+    while (c < vectors.length) { t += vectors(c).getBufferSize; c += 1 }
+    t
   }
 
   private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Long)]
@@ -480,9 +583,10 @@ final class PartitionedIpcWriter(
       val lengths = new Array[Long](numPartitions)
       var pos = 0L
       var p = 0
+      flushStaging()
       while (p < numPartitions) {
         val seg = segments(p)
-        flush(seg)
+        if (!staged) flushPartition(seg)
         seg.end()
         offsets(p) = pos
         if (seg.overflow != null) {
@@ -515,6 +619,8 @@ final class PartitionedIpcWriter(
 
   override def close(): Unit = {
     segments.foreach(_.release())
+    if (staging != null) staging.foreach(b => try b.close() catch { case _: Exception => })
+    if (batchBuilders != null) batchBuilders.foreach(b => try b.close() catch { case _: Exception => })
     dictScratch.foreach(sc => if (sc != null) { sc._1.close(); sc._2.close() })
     frameCompressor.close()
   }
@@ -523,6 +629,10 @@ final class PartitionedIpcWriter(
 object PartitionedIpcWriter {
   /** A builder's first capacity in rows, doubled as a partition fills (#351). */
   val InitialRows: Int = 256
+  /** The floor of a builder's first capacity, however many partitions there are. */
+  val MinInitialRows: Int = 16
+  /** Above this many partitions the writer stages rows and partitions them at the flush; at or below, a builder set per partition. */
+  val StagingPartitions: Int = 256
   /** A string builder's first data capacity per row, in bytes. */
   val InitialBytesPerRow: Int = 16
   /** Above this many partitions the writer groups rows by index lists and gathers; below, it compacts by masks. */
