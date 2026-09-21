@@ -411,13 +411,18 @@ final case class WideDecimalSumMergeAgg(
   override def bufferTypes: Seq[DataType] = Seq(bufferType, BooleanType)
   private val limit = java.math.BigInteger.TEN.pow(bufferType.precision)
 
-  /** Per-group merge state. */
+  /**
+   * Per-group merge state: the total as two 64-bit limbs (#388 -- a `BigInteger` per row was 4% of an
+   * executor's time in q67 at 1 TB), a signed 128-bit overflow marking the group overflowed (any such
+   * total is past the 38-digit limit anyway). `BigInteger` appears once per group, at the end.
+   */
   private final class State(var groups: Int) {
-    var total = Array.fill[java.math.BigInteger](groups)(java.math.BigInteger.ZERO)
+    var hi = new Array[Long](groups)
+    var lo = new Array[Long](groups)
     var nonEmpty = new Array[Boolean](groups)
     var overflowed = new Array[Boolean](groups)
     def ensure(n: Int): Unit = if (n > groups) {
-      total = java.util.Arrays.copyOf(total, n); java.util.Arrays.fill(total.asInstanceOf[Array[AnyRef]], groups, n, java.math.BigInteger.ZERO)
+      hi = java.util.Arrays.copyOf(hi, n); lo = java.util.Arrays.copyOf(lo, n)
       nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
     }
     /** Folds the buffer rows of `ctx` in: `groupOf(i)` is the row's group, or -1 to skip it. */
@@ -426,18 +431,30 @@ final case class WideDecimalSumMergeAgg(
       val sums = ctx.input(sumOrdinal)
       val data = sums.data()
       val empty = isEmpty.eval(ctx)
+      val emptyValidity = empty.validity()
+      val emptyBits = empty.data()
       val n = ctx.numRows
       var i = 0
       while (i < n) {
         val g = groupOf(i)
-        if (g >= 0 && !(empty.validity() != null && !Bitmap.isSet(empty.validity(), i)) && !Bitmap.isSet(empty.data(), i)) {
+        if (g >= 0 && !(emptyValidity != null && !Bitmap.isSet(emptyValidity, i)) && !Bitmap.isSet(emptyBits, i)) {
           nonEmpty(g) = true
           if (sums.isNull(i)) overflowed(g) = true
-          else if (!overflowed(g)) total(g) = total(g).add(Decimal128.toBigInteger(Decimal128.hi(data, i), Decimal128.lo(data, i)))
+          else if (!overflowed(g)) {
+            val rhi = Decimal128.hi(data, i)
+            val rlo = Decimal128.lo(data, i)
+            val l = lo(g) + rlo
+            val carry = if (java.lang.Long.compareUnsigned(l, lo(g)) < 0) 1L else 0L
+            val h = hi(g) + rhi + carry
+            // Signed overflow of the 128-bit total: both operands of one sign, the result of the other.
+            if (((hi(g) ^ h) & (rhi ^ h)) < 0) overflowed(g) = true
+            else { hi(g) = h; lo(g) = l }
+          }
         }
         i += 1
       }
     }
+    private def total(g: Int): java.math.BigInteger = Decimal128.toBigInteger(hi(g), lo(g))
     def value(g: Int, slot: Int): Any =
       if (slot == 1) java.lang.Boolean.valueOf(!nonEmpty(g))
       else if (finalResult) {
@@ -445,16 +462,22 @@ final case class WideDecimalSumMergeAgg(
         else if (overflowed(g)) {
           // A partial that overflowed left a null sum: Spark's CheckOverflowInSum raises on it in ANSI.
           if (nullOnOverflow) null else throw org.apache.spark.sql.vector.VectorErrors.overflowInSumOfDecimal(queryContext)
-        } else if (total(g).abs.compareTo(limit) >= 0) {
-          if (nullOnOverflow) null
-          else throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
-            org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(total(g), bufferType.scale)), bufferType.precision, bufferType.scale, queryContext)
-        } else new java.math.BigDecimal(total(g), bufferType.scale)
+        } else {
+          val t = total(g)
+          if (t.abs.compareTo(limit) >= 0) {
+            if (nullOnOverflow) null
+            else throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+              org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(t, bufferType.scale)), bufferType.precision, bufferType.scale, queryContext)
+          } else new java.math.BigDecimal(t, bufferType.scale)
+        }
       } else {
         // The merged buffer, as Spark's Sum holds it: zero while empty, null once overflowed.
         if (!nonEmpty(g)) java.math.BigDecimal.valueOf(0L, bufferType.scale)
-        else if (overflowed(g) || total(g).abs.compareTo(limit) >= 0) null
-        else new java.math.BigDecimal(total(g), bufferType.scale)
+        else if (overflowed(g)) null
+        else {
+          val t = total(g)
+          if (t.abs.compareTo(limit) >= 0) null else new java.math.BigDecimal(t, bufferType.scale)
+        }
       }
   }
 
