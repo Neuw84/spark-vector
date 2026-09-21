@@ -46,6 +46,7 @@ public final class GroupKeyTable {
   private final BitSet[] nulls;
 
   private int[] hashScratch = new int[0]; // row hashes, or combined indices on the memoised path
+  private byte[] emitScratch = new byte[0]; // a column's values gathered from the records before one bulk copy out
   private int[] idxScratch = new int[0];
   private int[] memo = new int[0];
 
@@ -797,7 +798,7 @@ public final class GroupKeyTable {
       }
     }
     if (strCols > 0) {
-      bytes += 4L * recStart.length + 4L * colEnd.length + keyBytes.length;
+      bytes += 4L * recStart.length + 4L * colEnd.length + keyBytes.length + emitScratch.length;
     }
     return bytes;
   }
@@ -889,7 +890,15 @@ public final class GroupKeyTable {
         }
       }
       case UTF8 -> {
+        // Gather the column's values from the records into a heap buffer (System.arraycopy, no
+        // per-value segment checks) and copy them out once: one small MemorySegment.copy per value
+        // was 15% of an executor's time in q67 at 1 TB, whose finest level emits nearly every row.
         int j = strCol[c];
+        int total = (int) utf8Bytes(c, from, to);
+        if (emitScratch.length < total) {
+          emitScratch = new byte[Math.max(total, emitScratch.length * 2)];
+        }
+        byte[] scratch = emitScratch;
         int out = 0;
         offsets.set(VectorBuffers.LE_INT, 0L, 0);
         for (int o = 0; o < count; o++) {
@@ -897,10 +906,11 @@ public final class GroupKeyTable {
           int base = gid * strCols + j;
           int start = j == 0 ? recStart[gid] : colEnd[base - 1];
           int len = colEnd[base] - start;
-          MemorySegment.copy(keyBytes, start, data, ValueLayout.JAVA_BYTE, out, len);
+          System.arraycopy(keyBytes, start, scratch, out, len);
           out += len;
           offsets.set(VectorBuffers.LE_INT, (long) (o + 1) << 2, out);
         }
+        MemorySegment.copy(scratch, 0, data, ValueLayout.JAVA_BYTE, 0, out);
       }
     }
   }
