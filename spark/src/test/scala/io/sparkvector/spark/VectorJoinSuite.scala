@@ -62,6 +62,15 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di AND dim.weight * 2.0 > 20.0", Seq(BHJ))
   }
 
+  test("a non-equi condition on integer lanes with a literal offset is fused per pair (#332)") {
+    // `lane OP lane ± literal` on INT32 lanes: the offset on the build side, on the streamed side,
+    // subtracted, and written literal-first. q72's date_add on a date lane compiles to the same shape.
+    checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di AND tk.i > dim.di + 100", Seq(BHJ))
+    checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di AND tk.i + 3 < dim.di", Seq(BHJ))
+    checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di AND tk.i - 40 <= dim.di", Seq(BHJ))
+    checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di AND 7 + dim.di >= tk.i", Seq(BHJ))
+  }
+
   // `tk.i50 = dim.di` gives every streamed row one or two candidates (ten dimension keys appear
   // twice); `tk.d > dim.weight` passes for some candidates and fails for others, `dim.dl` is null
   // for every ninth dimension row so a condition on it is null for those candidates, and

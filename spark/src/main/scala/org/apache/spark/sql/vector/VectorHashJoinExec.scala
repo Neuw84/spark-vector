@@ -681,17 +681,36 @@ private[vector] class VectorHashJoinIterator(
   }
 
   /**
-   * The condition as a per-pair test over heap mirrors, when it is `lane OP lane` on INT32 or INT64
-   * lanes both mirrored for this batch; null otherwise (the gather-then-compact path applies). A
-   * null on either side fails the pair, as Spark's condition does.
+   * The condition as a per-pair test over heap mirrors, when it is `lane OP lane` -- either side
+   * optionally `± literal` (#332: q72's `d3.d_date > d1.d_date + 5`, a date lane plus an integer
+   * literal) -- on INT32 or INT64 lanes both mirrored for this batch; null otherwise (the
+   * gather-then-compact path applies). A null on either side fails the pair, as Spark's condition
+   * does; the offset is added in the lane's width, wrapping as Spark's non-ANSI Add and DateAdd do.
    */
   private def fusedPredicate(ctx: EvalContext): PairPredicate = spec.condition match {
-    case Some(io.sparkvector.spark.expr.CompareExpr(op, io.sparkvector.spark.expr.ColumnRef(a, _), io.sparkvector.spark.expr.ColumnRef(b, _)))
+    case Some(io.sparkvector.spark.expr.CompareExpr(op, LaneWithOffset(a, ao), LaneWithOffset(b, bo)))
         if isSemiOrAnti == false && !keepUnmatched && !isExistence =>
       val ma = mirrorOf(ctx, a); val mb = mirrorOf(ctx, b)
       if (ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)) null
-      else new PairPredicate(op, ma, isBuildColumn(a), mb, isBuildColumn(b))
+      else new PairPredicate(op, ma, isBuildColumn(a), ao, mb, isBuildColumn(b), bo)
     case _ => null
+  }
+
+  /** A joined lane, possibly plus or minus an integer literal (date_add / date_sub / +, - on integers). */
+  private object LaneWithOffset {
+    import io.sparkvector.spark.expr.{ArithExpr, ColumnRef, LiteralExpr}
+    def unapply(e: io.sparkvector.spark.expr.VectorExpr): Option[(Int, Long)] = e match {
+      case ColumnRef(c, _) => Some((c, 0L))
+      // Only the plain wrapping form: an ANSI / try_add arithmetic checks overflow, which the fused
+      // test does not reproduce, so it keeps the gather-then-compact path.
+      case ArithExpr(op, ColumnRef(c, _), LiteralExpr(v, _), _, false, _, false) if v != null && integral(v) && (op == io.sparkvector.kernels.ArithOp.ADD || op == io.sparkvector.kernels.ArithOp.SUB) =>
+        Some((c, if (op == io.sparkvector.kernels.ArithOp.ADD) toLong(v) else -toLong(v)))
+      case ArithExpr(io.sparkvector.kernels.ArithOp.ADD, LiteralExpr(v, _), ColumnRef(c, _), _, false, _, false) if v != null && integral(v) =>
+        Some((c, toLong(v)))
+      case _ => None
+    }
+    private def integral(v: Any): Boolean = v.isInstanceOf[Int] || v.isInstanceOf[Long] || v.isInstanceOf[Short] || v.isInstanceOf[Byte]
+    private def toLong(v: Any): Long = v.asInstanceOf[Number].longValue()
   }
 
   /** The heap mirror behind joined ordinal `c` for this batch, or null. */
@@ -700,17 +719,20 @@ private[vector] class VectorHashJoinIterator(
     else if (TypeMapping.hasLane(spec.joinedAttrs(c)._2)) streamedMirror(ctx, streamedOrdinal(c))
     else null
 
-  /** `left OP right` per pair; each side reads the build row or the streamed row of the pair. */
+  /** `left [+ lo] OP right [+ ro]` per pair; each side reads the build row or the streamed row of the pair. */
   private final class PairPredicate(
-      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean,
-      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean) {
+      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean, leftOffset: Long,
+      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean, rightOffset: Long) {
     private val ints = left.`type` == io.sparkvector.kernels.VecType.INT32
     def test(streamed: Int, buildRow: Int): Boolean = {
       val li = if (leftIsBuild) buildRow else streamed
       val ri = if (rightIsBuild) buildRow else streamed
       if (!left.isValid(li) || !right.isValid(ri)) false
       else {
-        val cmp = if (ints) Integer.compare(left.ints(li), right.ints(ri)) else java.lang.Long.compare(left.longs(li), right.longs(ri))
+        // The offset is added in the lane's own width, wrapping as Spark's non-ANSI Add / DateAdd do.
+        val cmp =
+          if (ints) Integer.compare(left.ints(li) + leftOffset.toInt, right.ints(ri) + rightOffset.toInt)
+          else java.lang.Long.compare(left.longs(li) + leftOffset, right.longs(ri) + rightOffset)
         op match {
           case io.sparkvector.kernels.CompareOp.EQ => cmp == 0
           case io.sparkvector.kernels.CompareOp.NE => cmp != 0
