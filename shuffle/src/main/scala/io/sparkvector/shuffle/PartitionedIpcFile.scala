@@ -7,7 +7,8 @@ import java.util.{HashMap => JHashMap}
 import scala.jdk.CollectionConverters._
 
 import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector, VectorNarrowIntColumnVector}
+import io.sparkvector.kernels.{Bitmap, VectorBuffers}
+import io.sparkvector.spark.arrow.{ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector, VectorNarrowIntColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector}
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
@@ -239,25 +240,100 @@ object PartitionedIpcFile {
     private var last: ColumnarBatch = _
     private var done = false
     /** Small plain batches accumulated until `CoalesceRows` (all-plain shape, so every string column is UTF8). */
-    private var pending: org.apache.arrow.vector.VectorSchemaRoot = _
+    private val pending: Array[Pending] = Array.tabulate(fields.length)(c => new Pending(c))
+    private var pendingRows = 0
+
+    /**
+     * One accumulating column of the pending batch (#416): each small batch is appended as a bulk copy
+     * of its buffers -- data, offsets rebased, validity bits -- the way the writer's staging copies
+     * its input. Arrow's `VectorSchemaRootAppender`, used first, copies value by value: at 1 TB and
+     * 1000 partitions a reduce task reading a thousand 50-row blocks of 18 columns spent ~1 ms per
+     * block in it, more than decoding the block cost.
+     */
+    private final class Pending(c: Int) {
+      private val dt = types(c)
+      private val isString = dt == StringType
+      private val isBool = dt == BooleanType
+      private val width: Int = if (isString || isBool) 0 else PartitionedIpcWriter.byteWidth(dt)
+      private val field: Field = if (plain(c) != null) plain(c) else fields(c)
+      var vector: FieldVector = _
+      private var buffers: ArrowVectorBuffers = _
+      private var rows = 0
+      private var dataBytes = 0L
+
+      private def ensure(n: Int, bytes: Long): Unit = {
+        if (vector == null) {
+          val cap = math.max(CoalesceRows, n)
+          vector = field.createVector(allocator)
+          vector match {
+            case v: VarCharVector => v.allocateNew(math.max(bytes, 32L * cap), cap)
+            case v => v.setInitialCapacity(cap); v.allocateNew()
+          }
+          buffers = ArrowVectorBuffers.forWrite(vector, vector.getValueCapacity, dt)
+          if (isString) buffers.offsets().set(VectorBuffers.LE_INT, 0L, 0)
+          return
+        }
+        var grown = false
+        while (vector.getValueCapacity < rows + n) { vector.reAlloc(); grown = true }
+        if (isString) {
+          val v = vector.asInstanceOf[VarCharVector]
+          while (v.getDataBuffer.capacity() < dataBytes + bytes) { v.reallocDataBuffer(); grown = true }
+        }
+        if (grown) buffers = ArrowVectorBuffers.forWrite(vector, vector.getValueCapacity, dt)
+      }
+
+      /** Appends all `n` rows of `src` (a vector of the loader's root, plain). */
+      def append(src: FieldVector, n: Int): Unit = {
+        val in = ArrowVectorBuffers.forRead(src)
+        val srcOff = in.offsets()
+        val start = if (isString) srcOff.get(VectorBuffers.LE_INT, 0L) else 0
+        val bytes = if (isString) (srcOff.get(VectorBuffers.LE_INT, n.toLong << 2) - start).toLong else 0L
+        ensure(n, bytes)
+        if (isString) {
+          val offsets = buffers.offsets()
+          val base = dataBytes.toInt - start
+          var i = 0
+          while (i <= n) { offsets.set(VectorBuffers.LE_INT, (rows + i).toLong << 2, srcOff.get(VectorBuffers.LE_INT, i.toLong << 2) + base); i += 1 }
+          if (bytes > 0) java.lang.foreign.MemorySegment.copy(in.data(), start.toLong, buffers.data(), dataBytes, bytes)
+        } else if (isBool) {
+          Bitmap.copyBits(in.data(), buffers.data(), rows, n)
+        } else {
+          java.lang.foreign.MemorySegment.copy(in.data(), 0L, buffers.data(), rows.toLong * width, n.toLong * width)
+        }
+        if (in.validity() != null) Bitmap.copyBits(in.validity(), buffers.validity(), rows, n)
+        else Bitmap.fillRange(buffers.validity(), rows, n, true)
+        rows += n
+        dataBytes += bytes
+      }
+
+      /** The accumulated vector (value count set), the column emptied for the next accumulation. */
+      def take(): FieldVector = {
+        val v = vector
+        v match {
+          case vw: VarCharVector => vw.setLastSet(rows - 1); vw.setValueCount(rows)
+          case other => other.setValueCount(rows)
+        }
+        vector = null; buffers = null; rows = 0; dataBytes = 0L
+        v
+      }
+
+      def close(): Unit = if (vector != null) { vector.close(); vector = null }
+    }
 
     private def append(root: org.apache.arrow.vector.VectorSchemaRoot): Unit = {
-      if (pending == null) {
-        val fs = new java.util.ArrayList[Field](fields.length)
-        var c = 0
-        while (c < fields.length) { fs.add(if (plain(c) != null) plain(c) else fields(c)); c += 1 }
-        pending = org.apache.arrow.vector.VectorSchemaRoot.create(new Schema(fs), allocator)
-        pending.allocateNew() // the appender reads the target's buffers: they must exist, empty
-        pending.setRowCount(0)
-      }
-      org.apache.arrow.vector.util.VectorSchemaRootAppender.append(false, pending, root)
+      val n = root.getRowCount
+      var c = 0
+      while (c < fields.length) { pending(c).append(root.getVector(c), n); c += 1 }
+      pendingRows += n
       root.clear()
     }
 
     private def takePending(): ColumnarBatch = {
-      val b = take(pending) // the vectors moved out; fresh empty buffers for the next accumulation
-      pending.allocateNew()
-      pending.setRowCount(0)
+      val columns = new Array[ColumnVector](fields.length)
+      var c = 0
+      while (c < columns.length) { columns(c) = wrap(pending(c).take(), c, dictionaryEncoded = false); c += 1 }
+      val b = new ColumnarBatch(columns, pendingRows)
+      pendingRows = 0
       b
     }
 
@@ -279,7 +355,7 @@ object PartitionedIpcFile {
       val result = messages.readNext()
       if (result == null) {
         done = true
-        if (pending != null && pending.getRowCount > 0) nextBatch = takePending()
+        if (pendingRows > 0) nextBatch = takePending()
       } else {
         val message = result.getMessage
         // A message with no body (an empty dictionary, a batch of zero-length buffers) carries a null buffer.
@@ -307,9 +383,9 @@ object PartitionedIpcFile {
                 // costs -- kernel set-up, a hash table's probe round, an output batch per input batch
                 // -- were most of a reduce task's time over ten-row blocks (#411).
                 append(root)
-                if (pending.getRowCount >= CoalesceRows) nextBatch = takePending()
+                if (pendingRows >= CoalesceRows) nextBatch = takePending()
               } else {
-                if (pending != null && pending.getRowCount > 0) { nextBatch = takePending(); held = take(root) }
+                if (pendingRows > 0) { nextBatch = takePending(); held = take(root) }
                 else nextBatch = take(root)
               }
             } finally {
@@ -331,21 +407,24 @@ object PartitionedIpcFile {
         val source = root.getVector(c)
         val moved = source.getField.createVector(allocator)
         source.makeTransferPair(moved).transfer()
-        columns(c) = types(c) match {
-          case StringType if (root ne pending) && encoded.get(c) =>
-            val dict = dictionaries(c)
-            val movedDict = new VarCharVector(dict.getName, allocator)
-            dict.makeTransferPair(movedDict).transfer()
-            new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], movedDict)
-          case StringType => new VectorArrowColumnVector(moved) // plain UTF8: the writer found no dictionary worth sending
-          case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
-            new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
-          case ByteType | ShortType => new VectorNarrowIntColumnVector(moved.asInstanceOf[IntVector], types(c)) // #327
-          case _ => new VectorArrowColumnVector(moved)
-        }
+        columns(c) = wrap(moved, c, encoded.get(c))
         c += 1
       }
       new ColumnarBatch(columns, n)
+    }
+
+    /** The Spark column over a vector of ours (moved out of a root or taken from the pending batch). */
+    private def wrap(moved: FieldVector, c: Int, dictionaryEncoded: Boolean): ColumnVector = types(c) match {
+      case StringType if dictionaryEncoded =>
+        val dict = dictionaries(c)
+        val movedDict = new VarCharVector(dict.getName, allocator)
+        dict.makeTransferPair(movedDict).transfer()
+        new VectorDictionaryColumnVector(moved.asInstanceOf[IntVector], movedDict)
+      case StringType => new VectorArrowColumnVector(moved) // plain UTF8: the writer found no dictionary worth sending
+      case d: DecimalType if d.precision <= TypeMapping.MAX_DECIMAL_PRECISION =>
+        new VectorDecimalColumnVector(moved.asInstanceOf[org.apache.arrow.vector.BigIntVector], d)
+      case ByteType | ShortType => new VectorNarrowIntColumnVector(moved.asInstanceOf[IntVector], types(c)) // #327
+      case _ => new VectorArrowColumnVector(moved)
     }
 
     override def hasNext: Boolean = { advance(); nextBatch != null }
@@ -365,7 +444,7 @@ object PartitionedIpcFile {
       if (held != null) { held.close(); held = null }
       roots.values().forEach(r => r._1.close())
       roots.clear()
-      if (pending != null) { pending.close(); pending = null }
+      pending.foreach(_.close())
       dictionaries.foreach(d => if (d != null) d.close())
       messages.close()
     }
