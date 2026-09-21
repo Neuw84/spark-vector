@@ -124,8 +124,14 @@ object FlightShuffle extends Logging {
       try {
         listener.start(root)
         val chunk = new Array[Byte](ChunkBytes)
+        var filled = 0
         // The blocks back to back: each is a sequence of IPC streams and the client's reader decodes
-        // concatenated streams, so where one block ends and the next begins needs no marker.
+        // concatenated streams, so where one block ends and the next begins needs no marker -- and a
+        // message therefore need not end at a map output's boundary either. A message per map output
+        // (#416) made a stream of 2,000 map outputs 2,000 gRPC messages of a few KB each, one Flight
+        // decode and one flow-control round trip apiece: at 1 TB / 1000 partitions the reduce tasks
+        // spent a third of their time waiting on those. The message is filled across map outputs and
+        // sent when [[ChunkBytes]] are in it or the range is done.
         mapIds.foreach { mapId =>
           current = mapId
           // One lookup and one open per map for the task's whole partition range (#411): the
@@ -133,19 +139,33 @@ object FlightShuffle extends Logging {
           val buf = blockData(shuffleId, mapId, reduce, endReduce)
           val in = buf.createInputStream()
           try {
-            var n = readFully(in, chunk)
-            while (n > 0) {
-              vector.reset()
-              vector.setSafe(0, chunk, 0, n)
-              vector.setValueCount(1)
-              root.setRowCount(1)
-              listener.putNext()
-              n = readFully(in, chunk)
+            var more = true
+            while (more) {
+              val r = in.read(chunk, filled, chunk.length - filled)
+              if (r < 0) more = false
+              else {
+                filled += r
+                if (filled == chunk.length) {
+                  vector.reset()
+                  vector.setSafe(0, chunk, 0, filled)
+                  vector.setValueCount(1)
+                  root.setRowCount(1)
+                  listener.putNext()
+                  filled = 0
+                }
+              }
             }
           } finally {
             in.close()
             buf.release()
           }
+        }
+        if (filled > 0) {
+          vector.reset()
+          vector.setSafe(0, chunk, 0, filled)
+          vector.setValueCount(1)
+          root.setRowCount(1)
+          listener.putNext()
         }
         listener.completed()
       } catch {
@@ -155,17 +175,6 @@ object FlightShuffle extends Logging {
       } finally {
         root.close()
       }
-    }
-
-    /** Fills `dst` as far as the stream goes; the count read (0 at end of stream). */
-    private def readFully(in: java.io.InputStream, dst: Array[Byte]): Int = {
-      var off = 0
-      while (off < dst.length) {
-        val r = in.read(dst, off, dst.length - off)
-        if (r < 0) return off
-        off += r
-      }
-      off
     }
   }
 
@@ -382,11 +391,21 @@ final class FlightBlockStream(
   }
 
   private val channel = new ChunkChannel
-  /** The local path's decoder over the remote bytes; None for an empty block. */
-  private val reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] =
-    if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
+  /**
+   * The local path's decoder over the remote bytes; None for an empty block. Made on the first
+   * `hasNext`, not in the constructor (#416): a reduce task opens one stream per executor back to
+   * back, and waiting for each stream's first message inside its constructor serialised those waits
+   * -- seven servers asked one after another, each only after the previous had answered. With the
+   * `getStream` calls issued together every server produces at once and the first message of the
+   * stream being read is the only one waited for.
+   */
+  private var reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = _
+  private def decoder: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = {
+    if (reader == null) reader = if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
+    reader
+  }
 
-  override def hasNext: Boolean = reader.exists(_.hasNext)
+  override def hasNext: Boolean = decoder.exists(_.hasNext)
 
   override def next(): org.apache.spark.sql.vectorized.ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException
@@ -394,7 +413,7 @@ final class FlightBlockStream(
   }
 
   override def close(): Unit = {
-    reader.foreach(_.close())
+    if (reader != null) reader.foreach(_.close())
     channel.close()
     stream.close()
   }
