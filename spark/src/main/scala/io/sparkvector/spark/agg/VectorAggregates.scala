@@ -333,7 +333,8 @@ final case class WideDecimalAvgMergeAgg(
     var total = Array.fill[java.math.BigInteger](groups)(java.math.BigInteger.ZERO)
     var counts = new Array[Long](groups)
     var overflowed = new Array[Boolean](groups)
-    def ensure(n: Int): Unit = if (n > groups) {
+    def ensure(needed: Int): Unit = if (needed > groups) {
+      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
       total = java.util.Arrays.copyOf(total, n); java.util.Arrays.fill(total.asInstanceOf[Array[AnyRef]], groups, n, java.math.BigInteger.ZERO)
       counts = java.util.Arrays.copyOf(counts, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
     }
@@ -421,7 +422,8 @@ final case class WideDecimalSumMergeAgg(
     var lo = new Array[Long](groups)
     var nonEmpty = new Array[Boolean](groups)
     var overflowed = new Array[Boolean](groups)
-    def ensure(n: Int): Unit = if (n > groups) {
+    def ensure(needed: Int): Unit = if (needed > groups) {
+      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
       hi = java.util.Arrays.copyOf(hi, n); lo = java.util.Arrays.copyOf(lo, n)
       nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
     }
@@ -512,7 +514,8 @@ final case class TrySumLongAgg(input: VectorExpr) extends VectorAggFunction {
     var sum = new Array[Long](groups)
     var nonEmpty = new Array[Boolean](groups)
     var poisoned = new Array[Boolean](groups)
-    def ensure(n: Int): Unit = if (n > groups) {
+    def ensure(needed: Int): Unit = if (needed > groups) {
+      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
       sum = java.util.Arrays.copyOf(sum, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
     }
     def add(v: VectorBuffers, validity: java.lang.foreign.MemorySegment, n: Int, groupOf: Int => Int): Unit = {
@@ -566,7 +569,8 @@ final case class TrySumLongMergeAgg(sum: VectorExpr, isEmpty: VectorExpr) extend
     var total = new Array[Long](groups)
     var nonEmpty = new Array[Boolean](groups)
     var poisoned = new Array[Boolean](groups)
-    def ensure(n: Int): Unit = if (n > groups) {
+    def ensure(needed: Int): Unit = if (needed > groups) {
+      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
       total = java.util.Arrays.copyOf(total, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
     }
     def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
