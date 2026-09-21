@@ -391,11 +391,21 @@ final class FlightBlockStream(
   }
 
   private val channel = new ChunkChannel
-  /** The local path's decoder over the remote bytes; None for an empty block. */
-  private val reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] =
-    if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
+  /**
+   * The local path's decoder over the remote bytes; None for an empty block. Made on the first
+   * `hasNext`, not in the constructor (#416): a reduce task opens one stream per executor back to
+   * back, and waiting for each stream's first message inside its constructor serialised those waits
+   * -- seven servers asked one after another, each only after the previous had answered. With the
+   * `getStream` calls issued together every server produces at once and the first message of the
+   * stream being read is the only one waited for.
+   */
+  private var reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = _
+  private def decoder: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = {
+    if (reader == null) reader = if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
+    reader
+  }
 
-  override def hasNext: Boolean = reader.exists(_.hasNext)
+  override def hasNext: Boolean = decoder.exists(_.hasNext)
 
   override def next(): org.apache.spark.sql.vectorized.ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException
@@ -403,7 +413,7 @@ final class FlightBlockStream(
   }
 
   override def close(): Unit = {
-    reader.foreach(_.close())
+    if (reader != null) reader.foreach(_.close())
     channel.close()
     stream.close()
   }
