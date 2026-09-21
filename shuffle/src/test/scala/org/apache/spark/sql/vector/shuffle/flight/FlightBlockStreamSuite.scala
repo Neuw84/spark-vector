@@ -66,7 +66,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer).build()
     server.start()
     try {
-      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, 0L, 0, new SparkConf(false), FlightShuffle.Clients.allocatorForReads,
+      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, 0L, 0, schema, new SparkConf(false), FlightShuffle.Clients.allocatorForReads,
         new org.apache.spark.executor.TempShuffleReadMetrics())
       try {
         val got = mutable.ArrayBuffer.empty[(Int, String)]
@@ -114,7 +114,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     server.start()
     try {
       val mapIds = Seq(0L, 1L, 2L, 5L)
-      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, mapIds, 0, new SparkConf(false),
+      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, mapIds, 0, schema, new SparkConf(false),
         FlightShuffle.Clients.allocatorForReads, new org.apache.spark.executor.TempShuffleReadMetrics())
       try {
         val got = mutable.ArrayBuffer.empty[(Int, String)]
@@ -171,7 +171,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     server.start()
     try {
       val mapIds = Seq(0L, 3L)
-      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, mapIds, 1, 4, new SparkConf(false),
+      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, mapIds, 1, 4, schema, Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), new SparkConf(false),
         FlightShuffle.Clients.allocatorForReads, new org.apache.spark.executor.TempShuffleReadMetrics())
       try {
         val got = mutable.ArrayBuffer.empty[(Int, String)]
@@ -199,7 +199,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
       throw new org.apache.spark.shuffle.FetchFailedException(address, blockId.shuffleId, blockId.mapId, 4, blockId.reduceId, s"refused: $e", e)
     def open(): Iterator[ColumnarBatch] with AutoCloseable =
       try {
-        val s = new FlightBlockStream(FlightLocation("127.0.0.1", port), 3, 11L, 5, new SparkConf(false), FlightShuffle.Clients.allocatorForReads,
+        val s = new FlightBlockStream(FlightLocation("127.0.0.1", port), 3, 11L, 5, schema, new SparkConf(false), FlightShuffle.Clients.allocatorForReads,
           new org.apache.spark.executor.TempShuffleReadMetrics())
         VectorShuffleBackend.fetchFailing(s, fail)
       } catch { case e: Exception if !VectorShuffleBackend.isMemory(e) => fail(e) }
