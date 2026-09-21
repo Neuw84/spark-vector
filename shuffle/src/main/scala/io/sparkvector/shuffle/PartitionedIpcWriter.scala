@@ -202,49 +202,42 @@ final class PartitionedIpcWriter(
      * allocated and released): a fifth of the writer's time at 1000 partitions, where a map task
      * writes a thousand small batches over the same bytes it wrote two hundred at 200.
      */
+    /**
+     * The partition's IPC messages are staged raw on the heap and compressed in frames of at most
+     * `flushBytes` (#411): one compressor call per frame through the writer's single reusable context,
+     * against a compressing stream per partition -- a native zstd context created for each of a
+     * thousand partitions per map task was 5% of an executor's time at 1000 partitions -- and the
+     * frames of a partition, and of the partitions of a range, read back as one stream. Frames go to a
+     * per-partition overflow file as they fill and the last one straight to the data file at `finish`.
+     */
     def sink: java.nio.channels.WritableByteChannel = {
-      // Up to Spark's bypass-merge threshold of partitions the stream goes straight to its own file,
-      // Arrow memory to the page cache with no heap in between; above it, a heap staging buffer up to
-      // `flushBytes` keeps the file count down, as Spark's sort-based writer does.
-      if (sinkChannel == null) {
-        val raw = new PartitionedIpcWriter.NonClosing(
-          if (numPartitions <= PartitionedIpcWriter.DirectFileMaxPartitions) { openOverflow(); overflow }
-          else Channels.newChannel(bytes))
-        // The partition's bytes are one compressed stream (#411), as Spark's shuffle compresses a
-        // partition's segment: one frame per partition instead of one per buffer of every record
-        // batch. With a thousand partitions a map task's batches are a few hundred rows, and per-buffer
-        // compression was a compressor call and a frame header for every 1-2 KB buffer -- q35 at 1000
-        // partitions shuffled 17x Spark's bytes at SF10 -- while a stream over the partition's
-        // messages compresses their repeated metadata away and calls the compressor per block.
-        compressor = ShuffleCompression.compressing(Channels.newOutputStream(raw), compression)
-        sinkChannel = if (compressor == null) raw else Channels.newChannel(compressor)
-      }
+      if (sinkChannel == null) sinkChannel = new PartitionedIpcWriter.NonClosing(Channels.newChannel(bytes))
       sinkChannel
     }
     private var sinkChannel: java.nio.channels.WritableByteChannel = _
-    private var compressor: java.io.OutputStream = _
+    /** The compressed frame of the last staged bytes, written to the data file at `finish`. */
+    var tail: Array[Byte] = Array.emptyByteArray
 
-    /** After a stream: the overflow file's high-water mark. */
-    def endStream(): Unit =
-      if (overflow != null && overflow.isOpen) overflowBytes = math.max(overflowBytes, overflow.position())
+    /** After a record batch: nothing to do until the staged bytes reach `flushBytes`. */
+    def endStream(): Unit = ()
 
     private def openOverflow(): Unit = if (overflow == null) {
       overflowPath = Files.createTempFile(path.getParent, path.getFileName.toString + ".p" + partition + ".", ".tmp")
       overflow = FileChannel.open(overflowPath, StandardOpenOption.WRITE)
     }
 
+    /** Staged bytes past `flushBytes`: one frame to the overflow file. */
     def spillIfNeeded(): Unit = if (bytes.size() >= flushBytes) {
       openOverflow()
-      val buf = ByteBuffer.wrap(bytes.toByteArray)
-      while (buf.hasRemaining) overflow.write(buf)
-      overflowBytes += buf.limit()
+      val frame = ByteBuffer.wrap(compressFrame(bytes.toByteArray))
+      while (frame.hasRemaining) overflow.write(frame)
+      overflowBytes += frame.limit()
       bytes.reset()
     }
 
-    /** Ends the partition's compressed stream (its frame end) and takes the overflow's high-water mark. */
+    /** The remaining staged bytes as the partition's last frame. */
     def end(): Unit = {
-      if (compressor != null) { compressor.close(); compressor = null; sinkChannel = null }
-      endStream()
+      if (bytes.size() > 0) { tail = compressFrame(bytes.toByteArray); bytes.reset() }
     }
 
     def release(): Unit = {
@@ -416,8 +409,12 @@ final class PartitionedIpcWriter(
 
   private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Long)]
 
-  /** No per-buffer body compression: the partition's stream is compressed as a whole (see `Segment.sink`). */
+  /** No per-buffer body compression: the partition's stream is compressed in frames (see `Segment.sink`). */
   private val codec: org.apache.arrow.vector.compression.CompressionCodec = org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
+
+  /** The writer's one compression context and its output scratch, reused for every frame of every partition. */
+  private val frameCompressor: ShuffleCompression.FrameCompressor = ShuffleCompression.frameCompressor(compression)
+  private def compressFrame(raw: Array[Byte]): Array[Byte] = frameCompressor.compress(raw)
 
 
 
@@ -449,9 +446,10 @@ final class PartitionedIpcWriter(
           seg.overflow = null
           pos += seg.overflowBytes
         }
-        val tail = ByteBuffer.wrap(seg.bytes.toByteArray)
+        val tail = ByteBuffer.wrap(seg.tail)
         while (tail.hasRemaining) out.write(tail)
         pos += tail.limit()
+        seg.tail = Array.emptyByteArray
         lengths(p) = pos - offsets(p)
         p += 1
       }
@@ -465,7 +463,7 @@ final class PartitionedIpcWriter(
     } finally out.close()
   }
 
-  override def close(): Unit = segments.foreach(_.release())
+  override def close(): Unit = { segments.foreach(_.release()); frameCompressor.close() }
 }
 
 object PartitionedIpcWriter {
@@ -492,8 +490,6 @@ object PartitionedIpcWriter {
     override def close(): Unit = ()
   }
 
-  /** Partition count up to which each stream is written straight to its own file (Spark's `spark.shuffle.sort.bypassMergeThreshold`). */
-  val DirectFileMaxPartitions = 200
 
   /** Default share of distinct values per rows above which a batch's string column goes plain (#356). */
   val DefaultDictionaryMaxRatio: Double = 0.5
