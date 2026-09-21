@@ -502,25 +502,48 @@ object PartitionedIpcWriter {
     val ids = new IntVector(name, allocator)
     ids.allocateNew(n)
     val dictionary = new VarCharVector(name + ".dictionary", allocator)
+    val totalBytes = if (n == 0) 0L else in.getOffsetBuffer.getInt(n.toLong * 4).toLong
     // Sized to the input once (the distinct values are at most all of it): no reallocation per growth.
-    dictionary.allocateNew(math.max(if (n == 0) 0L else in.getOffsetBuffer.getInt(n.toLong * 4).toLong, 1L), math.max(n, 1))
-    val seen = new java.util.HashMap[java.nio.ByteBuffer, Integer](math.max(16, n * 2))
+    dictionary.allocateNew(math.max(totalBytes, 1L), math.max(n, 1))
+    // The distinct values as an open-addressing table over the input's own bytes (#387): an entry is the
+    // row where its value was first seen, hashed and compared in place through the Arrow buffers -- no
+    // ByteBuffer per row, no boxing, no HashMap. A HashMap of ByteBuffers here was 11% of an executor's
+    // time in q67 at 1 TB (encodeStrings 7%, ByteBuffer.hashCode 4%).
+    val offsets = MemorySegment.ofBuffer(in.getOffsetBuffer.nioBuffer(0, (n + 1) * 4))
+    val data = if (totalBytes == 0) MemorySegment.NULL else MemorySegment.ofBuffer(in.getDataBuffer.nioBuffer(0, totalBytes.toInt))
+    val dataBuf = if (totalBytes == 0) null else in.getDataBuffer.nioBuffer(0, totalBytes.toInt)
+    var capacity = 16
+    while (capacity < n * 2) capacity <<= 1
+    val mask = capacity - 1
+    val table = new Array[Int](capacity) // the row of the entry's first occurrence + 1; 0 = empty
+    val entryId = new Array[Int](n) // id by first-occurrence row
     var next = 0
     var i = 0
     while (i < n) {
       if (in.isNull(i)) {
         ids.setNull(i)
       } else {
-        val bytes = in.get(i)
-        val key = java.nio.ByteBuffer.wrap(bytes)
-        var id = seen.get(key)
-        if (id == null) {
-          id = next
-          seen.put(key, id)
-          dictionary.setSafe(next, bytes)
-          next += 1
+        val start = offsets.get(VectorBuffers.LE_INT, i.toLong * 4)
+        val end = offsets.get(VectorBuffers.LE_INT, (i.toLong + 1) * 4)
+        var h = (if (end > start) io.sparkvector.kernels.HashKernels.hashBytes(data, start, end - start) else 0) & mask
+        var id = -1
+        while (id < 0) {
+          val slot = table(h)
+          if (slot == 0) {
+            table(h) = i + 1
+            entryId(i) = next
+            id = next
+            if (end > start) dictionary.setSafe(next, dataBuf, start, end - start) else dictionary.setSafe(next, Array.emptyByteArray)
+            next += 1
+          } else {
+            val row = slot - 1
+            val rs = offsets.get(VectorBuffers.LE_INT, row.toLong * 4)
+            val re = offsets.get(VectorBuffers.LE_INT, (row.toLong + 1) * 4)
+            if (re - rs == end - start && (end == start || MemorySegment.mismatch(data, rs, re, data, start, end) < 0)) id = entryId(row)
+            else h = (h + 1) & mask
+          }
         }
-        ids.set(i, id.intValue())
+        ids.set(i, id)
       }
       i += 1
       if ((i == DictionarySampleRows || i == n) && next > (i * maxRatio) && maxRatio < 1.0) {
