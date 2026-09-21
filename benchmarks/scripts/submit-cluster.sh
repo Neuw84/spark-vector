@@ -42,7 +42,9 @@ OFFHEAP="${OFFHEAP:-32g}"
 # when the session disagrees with the configuration it is labelled with).
 VECTOR=(--conf spark.plugins=io.sparkvector.spark.VectorPlugin
         --conf spark.vector.exec.strictFloatingPoint=false
-        --conf spark.vector.exec.sortMergeJoin.enabled=true)
+        --conf spark.vector.exec.sortMergeJoin.enabled=true
+        --conf spark.sql.parquet.enableVectorizedReader=true
+        --conf spark.sql.columnVector.offheap.enabled=true) # #403: fixed-width lanes wrapped in place
 COMET_SCAN_ONLY=(--conf spark.comet.enabled=true --conf spark.comet.scan.enabled=true --conf spark.comet.exec.enabled=true
         --conf spark.comet.exec.shuffle.enabled=false
         --conf spark.comet.exec.project.enabled=false --conf spark.comet.exec.filter.enabled=false

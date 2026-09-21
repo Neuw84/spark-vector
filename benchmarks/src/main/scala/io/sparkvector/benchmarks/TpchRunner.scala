@@ -81,7 +81,12 @@ object TpchRunner {
   val VectorFast: Map[String, String] = Map(
     "spark.plugins" -> "io.sparkvector.spark.VectorPlugin",
     "spark.vector.exec.strictFloatingPoint" -> "false",
-    "spark.vector.exec.sortMergeJoin.mode" -> "auto") // #287: the merge join where the order can show or statistics are missing, the hash rewrite otherwise
+    "spark.vector.exec.sortMergeJoin.mode" -> "auto", // #287: the merge join where the order can show or statistics are missing, the hash rewrite otherwise
+    // #403: the vectorized Parquet reader is what our operators consume (Spark's default, made explicit),
+    // and its off-heap column vectors already hold Arrow's fixed-width layout, so those lanes are wrapped
+    // in place instead of copied (SF10: q8 1.46 -> 1.14 s, q47 6.28 -> 5.30).
+    "spark.sql.parquet.enableVectorizedReader" -> "true",
+    "spark.sql.columnVector.offheap.enabled" -> "true")
 
   /** Spark configurations under comparison. Comet configs need the Comet jar on the classpath. */
   val Configs: Map[String, Map[String, String]] = Map(
