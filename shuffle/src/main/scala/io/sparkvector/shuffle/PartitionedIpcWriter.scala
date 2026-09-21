@@ -12,9 +12,7 @@ import io.sparkvector.spark.adapter.ColumnVectorAdapters
 import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector, VectorSchemaRoot}
-import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
 import org.apache.arrow.vector.compression.CompressionUtil
-import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.apache.arrow.vector.ipc.message.IpcOption
 import org.apache.arrow.vector.types.pojo.{Field, Schema}
 import org.apache.spark.sql.types.{BooleanType, StringType, StructType}
@@ -187,9 +185,6 @@ final class PartitionedIpcWriter(
 
   private final class Segment(val partition: Int) {
     val bytes = new ByteArrayOutputStream()
-    val provider = new DictionaryProvider.MapDictionaryProvider()
-    var root: VectorSchemaRoot = _
-    var writer: ArrowStreamWriter = _
     var rows: Long = 0L
     val builders: Array[Builder] = Array.tabulate(schema.fields.length)(new Builder(_))
     var pendingRows: Int = 0
@@ -199,35 +194,28 @@ final class PartitionedIpcWriter(
     var overflowBytes: Long = 0L
 
     /**
-     * One IPC stream per record batch (#340): the stream writer keeps a copy of every dictionary it
-     * wrote and the root keeps the batch's buffers, both until the writer closes -- across 200
-     * partitions that was most of a map task's footprint. A stream per batch frees them with the
-     * batch; the reader decodes concatenated streams already. Started by `flush`, ended right after.
+     * One IPC stream per record batch (#340): its messages are written directly by `flush` (#411) --
+     * the schema message serialised once per distinct batch schema and reused as bytes, the
+     * dictionary and record batches through `MessageSerializer`, the end-of-stream marker as two
+     * words -- over a root that wraps the builders' vectors. Until #411 every batch built an
+     * `ArrowStreamWriter` (a FlatBuffers schema serialisation, a dictionary provider, a root
+     * allocated and released): a fifth of the writer's time at 1000 partitions, where a map task
+     * writes a thousand small batches over the same bytes it wrote two hundred at 200.
      */
-    def start(batchSchema: Schema): Unit = {
-      root = VectorSchemaRoot.create(batchSchema, allocator)
+    def sink: java.nio.channels.WritableByteChannel = {
       // Up to Spark's bypass-merge threshold of partitions the stream goes straight to its own file,
       // Arrow memory to the page cache with no heap in between; above it, a heap staging buffer up to
       // `flushBytes` keeps the file count down, as Spark's sort-based writer does.
-      if (sink == null) sink = new PartitionedIpcWriter.NonClosing(
+      if (sinkChannel == null) sinkChannel = new PartitionedIpcWriter.NonClosing(
         if (numPartitions <= PartitionedIpcWriter.DirectFileMaxPartitions) { openOverflow(); overflow }
         else Channels.newChannel(bytes))
-      writer = compression match {
-        case Some(codec) => new ArrowStreamWriter(root, provider, sink, IpcOption.DEFAULT, io.sparkvector.shuffle.ShuffleCompression.Factory, codec)
-        case None => new ArrowStreamWriter(root, provider, sink)
-      }
-      writer.start()
+      sinkChannel
     }
-    private var sink: java.nio.channels.WritableByteChannel = _
+    private var sinkChannel: java.nio.channels.WritableByteChannel = _
 
-    /** Ends the batch's stream and frees the root and the writer's dictionary copies. */
-    def endStream(): Unit = if (writer != null) {
-      writer.end()
-      writer.close()
-      root.close()
-      writer = null; root = null
+    /** After a stream: the overflow file's high-water mark. */
+    def endStream(): Unit =
       if (overflow != null && overflow.isOpen) overflowBytes = math.max(overflowBytes, overflow.position())
-    }
 
     private def openOverflow(): Unit = if (overflow == null) {
       overflowPath = Files.createTempFile(path.getParent, path.getFileName.toString + ".p" + partition + ".", ".tmp")
@@ -246,7 +234,6 @@ final class PartitionedIpcWriter(
 
     def release(): Unit = {
       builders.foreach(b => try b.close() catch { case _: Exception => })
-      if (writer != null) { try writer.close() catch { case _: Exception => }; try root.close() catch { case _: Exception => } }
       if (overflow != null) { try overflow.close() catch { case _: Exception => }; try Files.deleteIfExists(overflowPath) catch { case _: Exception => } }
     }
   }
@@ -375,8 +362,7 @@ final class PartitionedIpcWriter(
             val (ids, dictionary) = encoded
             taken(c).close()
             taken(c) = ids
-            batchDictionaries += dictionary
-            seg.provider.put(new Dictionary(dictionary, encoding))
+            batchDictionaries += ((dictionary, encoding.getId))
           } else {
             if (batchFields == null) batchFields = new java.util.ArrayList[Field](arrowSchema.getFields)
             batchFields.set(c, plainFields(c))
@@ -384,30 +370,70 @@ final class PartitionedIpcWriter(
         }
         c += 1
       }
-      seg.start(if (batchFields == null) arrowSchema else new Schema(batchFields))
-      // Pass 2: the columns move into the root (no copy).
-      c = 0
-      while (c < schema.fields.length) {
-        taken(c).makeTransferPair(seg.root.getVector(c)).transfer()
-        taken(c).close(); taken(c) = null
-        c += 1
+      val batchSchema = if (batchFields == null) arrowSchema else new Schema(batchFields)
+      val out = new org.apache.arrow.vector.ipc.WriteChannel(seg.sink)
+      // The schema message: the same bytes for every batch of the same schema (which columns went plain).
+      val schemaMessage = messageSchema(batchSchema, batchFields)
+      org.apache.arrow.vector.ipc.message.MessageSerializer.writeMessageBuffer(out, schemaMessage.remaining(), schemaMessage.duplicate(), IpcOption.DEFAULT)
+      // The dictionaries, one batch each, then the record batch, over roots that wrap the vectors.
+      var d = 0
+      while (d < batchDictionaries.length) {
+        val (vector, id) = batchDictionaries(d)
+        val droot = new VectorSchemaRoot(java.util.List.of(vector.getField), java.util.List.of[FieldVector](vector), vector.getValueCount)
+        val dbatch = new org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch(id, new org.apache.arrow.vector.VectorUnloader(droot, true, codec, true).getRecordBatch, false)
+        try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, dbatch, IpcOption.DEFAULT) finally dbatch.close()
+        d += 1
       }
-      seg.root.setRowCount(rows)
-      seg.writer.writeBatch()
+      val root = new VectorSchemaRoot(batchSchema.getFields, java.util.Arrays.asList(taken: _*), rows)
+      val batch = new org.apache.arrow.vector.VectorUnloader(root, true, codec, true).getRecordBatch
+      try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, batch, IpcOption.DEFAULT) finally batch.close()
+      out.writeIntLittleEndian(org.apache.arrow.vector.ipc.message.MessageSerializer.IPC_CONTINUATION_TOKEN)
+      out.writeIntLittleEndian(0)
       seg.endStream()
       seg.rows += rows
       rawBytesWritten += seg.pendingBytes
       seg.spillIfNeeded()
     } finally {
       taken.foreach(v => if (v != null) v.close())
-      // The stream writer kept its own copy of what it sent.
-      batchDictionaries.foreach(_.close()); batchDictionaries.clear()
+      batchDictionaries.foreach(_._1.close()); batchDictionaries.clear()
       heldBytes -= seg.pendingBytes
       seg.pendingRows = 0; seg.pendingBytes = 0L
     }
   }
 
-  private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[VarCharVector]
+  private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Long)]
+
+  /** The record batches' body compression, one codec for the writer (stateless per call). */
+  private val codec: org.apache.arrow.vector.compression.CompressionCodec = compression match {
+    case Some(c) => io.sparkvector.shuffle.ShuffleCompression.Factory.createCodec(c)
+    case None => org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
+  }
+
+  /**
+   * The serialised schema message of a batch schema, in the stream's message format: in memory a
+   * dictionary column's field is its index type, on the wire it is the dictionary's value type (UTF8)
+   * with the encoding attached -- what `ArrowStreamWriter` derived from the provider's dictionary
+   * vector. Cached by which columns went plain: the FlatBuffers work happens once per shape.
+   */
+  private val schemaMessages = new java.util.HashMap[java.util.BitSet, ByteBuffer]()
+  private def messageSchema(batchSchema: Schema, batchFields: java.util.List[Field]): ByteBuffer = {
+    val key = new java.util.BitSet(schema.fields.length)
+    if (batchFields != null) {
+      var c = 0
+      while (c < schema.fields.length) { if (batchFields.get(c) eq plainFields(c)) key.set(c); c += 1 }
+    }
+    var buf = schemaMessages.get(key)
+    if (buf == null) {
+      val fields = new java.util.ArrayList[Field](batchSchema.getFields.size())
+      batchSchema.getFields.forEach { f =>
+        val enc = f.getDictionary
+        fields.add(if (enc == null) f else new Field(f.getName, new org.apache.arrow.vector.types.pojo.FieldType(f.isNullable, org.apache.arrow.vector.types.pojo.ArrowType.Utf8.INSTANCE, enc, f.getMetadata), f.getChildren))
+      }
+      buf = org.apache.arrow.vector.ipc.message.MessageSerializer.serializeMetadata(new Schema(fields, batchSchema.getCustomMetadata), IpcOption.DEFAULT)
+      schemaMessages.put(key, buf)
+    }
+    buf
+  }
 
 
   /**
