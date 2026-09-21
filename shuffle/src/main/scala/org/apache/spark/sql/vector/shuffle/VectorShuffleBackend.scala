@@ -106,9 +106,11 @@ object VectorShuffleBackend {
 }
 
 /**
- * Slice 3: Flight against the executor's server -- one `DoGet` per (executor, reducer) carrying all of
- * that executor's blocks for the reducer (#347). A reduce task's input is a block per map task; a
- * `DoGet` per block, opened one after another, was a round trip per map output.
+ * Slice 3: Flight against the executor's server -- one `DoGet` per (executor, reduce task) carrying all
+ * of that executor's map outputs for the task's partition range (#347, #411). A reduce task's input is
+ * a block per map task; a `DoGet` per block, opened one after another, was a round trip per map output,
+ * and a `DoGet` per reduce partition multiplied the streams, index lookups and file opens by the number
+ * of partitions AQE coalesced into the task.
  */
 object FlightBackend extends VectorShuffleBackend {
   override def name: String = "flight"
@@ -116,11 +118,15 @@ object FlightBackend extends VectorShuffleBackend {
       metrics: ShuffleReadMetricsReporter): Iterator[Iterator[ColumnarBatch] with AutoCloseable] = {
     val conf = SparkEnv.get.conf
     val location = flight.FlightRegistry.locationOf(address.executorId)
-    val byReducer = blocks.groupBy(_._1.reduceId).toSeq.sortBy(_._1)
-    byReducer.iterator.map { case (reduceId, group) =>
-      metrics.incRemoteBlocksFetched(group.size)
-      new flight.FlightBlockStream(location, group.head._1.shuffleId, group.map(_._1.mapId), reduceId, conf, allocator, metrics)
-    }
+    if (blocks.isEmpty) return Iterator.empty
+    // The task's partitions are consecutive; a partition with no block here is a zero-length span
+    // of the range, so the range is the task's whole [min, max] and the maps are those with any block.
+    val shuffleId = blocks.head._1.shuffleId
+    val start = blocks.iterator.map(_._1.reduceId).min
+    val end = blocks.iterator.map(_._1.reduceId).max + 1
+    val mapIds = blocks.iterator.map(_._1.mapId).toIndexedSeq.distinct.sorted
+    metrics.incRemoteBlocksFetched(blocks.size)
+    Iterator.single(new flight.FlightBlockStream(location, shuffleId, mapIds, start, end, conf, allocator, metrics))
   }
 }
 

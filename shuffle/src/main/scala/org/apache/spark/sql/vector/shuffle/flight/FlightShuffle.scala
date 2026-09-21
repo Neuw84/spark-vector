@@ -45,27 +45,36 @@ object FlightShuffle extends Logging {
   def backend(conf: SparkConf): String = org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
 
   /**
-   * The ticket of one reducer's blocks on one executor (#347): 4-byte shuffleId, 4-byte
-   * reducePartition, 4-byte count, then count 8-byte mapIds, big-endian. One `DoGet` per (executor,
-   * reducer) instead of one per block: a reduce task's input is a block per map task, and a round
-   * trip per block made the reducers latency-bound (a hundred sequential stream setups each at SF100).
+   * The ticket of one reduce task's blocks on one executor (#347, #411): 4-byte shuffleId, 4-byte
+   * startReduce, 4-byte endReduce (exclusive), 4-byte count, then count 8-byte mapIds, big-endian.
+   * One `DoGet` per (executor, reduce task): a reduce task's input is a block per map task, and a
+   * round trip per block made the reducers latency-bound (#347); with AQE coalescing several
+   * partitions into a task, a `DoGet` per partition multiplied the streams by the coalescing factor
+   * and the index lookups and file opens with them (#411) -- the server now reads, per map, the
+   * contiguous byte range of the task's partitions in one lookup.
    */
-  def ticket(shuffleId: Int, reduce: Int, mapIds: Seq[Long]): Ticket = {
-    val b = ByteBuffer.allocate(12 + 8 * mapIds.size)
-    b.putInt(shuffleId).putInt(reduce).putInt(mapIds.size)
+  def ticket(shuffleId: Int, startReduce: Int, endReduce: Int, mapIds: Seq[Long]): Ticket = {
+    require(endReduce > startReduce, s"empty reduce range [$startReduce, $endReduce)")
+    val b = ByteBuffer.allocate(16 + 8 * mapIds.size)
+    b.putInt(shuffleId).putInt(startReduce).putInt(endReduce).putInt(mapIds.size)
     mapIds.foreach(b.putLong)
     new Ticket(b.array())
   }
 
-  /** The ticket of a single block. */
-  def ticket(shuffleId: Int, mapId: Long, reduce: Int): Ticket = ticket(shuffleId, reduce, Seq(mapId))
+  /** The ticket of one reduce partition's blocks on one executor. */
+  def ticket(shuffleId: Int, reduce: Int, mapIds: Seq[Long]): Ticket = ticket(shuffleId, reduce, reduce + 1, mapIds)
 
-  def parseTicket(t: Ticket): (Int, Int, Seq[Long]) = {
+  /** The ticket of a single block. */
+  def ticket(shuffleId: Int, mapId: Long, reduce: Int): Ticket = ticket(shuffleId, reduce, reduce + 1, Seq(mapId))
+
+  /** `(shuffleId, startReduce, endReduce, mapIds)`. */
+  def parseTicket(t: Ticket): (Int, Int, Int, Seq[Long]) = {
     val b = ByteBuffer.wrap(t.getBytes)
-    require(b.remaining() >= 12 && (b.remaining() - 12) % 8 == 0, s"malformed shuffle ticket (${b.remaining()} bytes)")
-    val shuffleId = b.getInt; val reduce = b.getInt; val count = b.getInt
+    require(b.remaining() >= 16 && (b.remaining() - 16) % 8 == 0, s"malformed shuffle ticket (${b.remaining()} bytes)")
+    val shuffleId = b.getInt; val start = b.getInt; val end = b.getInt; val count = b.getInt
+    require(end > start, s"malformed shuffle ticket: reduce range [$start, $end)")
     require(count >= 0 && b.remaining() == 8L * count, s"malformed shuffle ticket: $count blocks, ${b.remaining()} bytes left")
-    (shuffleId, reduce, Seq.fill(count)(b.getLong))
+    (shuffleId, start, end, Seq.fill(count)(b.getLong))
   }
 
   /** Spark's shuffle secret when `spark.authenticate` is on, else None. */
@@ -99,9 +108,16 @@ object FlightShuffle extends Logging {
    * [[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader]] a local block goes through, and the
    * server neither decodes nor re-encodes anything.
    */
-  final class Producer(blockData: (Int, Long, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) extends NoOpFlightProducer {
+  final class Producer(blockData: (Int, Long, Int, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) extends NoOpFlightProducer {
+    /** A producer serving single partitions: `blockData(shuffleId, mapId, reduce)`. */
+    def this(single: (Int, Long, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) =
+      this((shuffleId: Int, mapId: Long, start: Int, end: Int) => {
+        require(end == start + 1, s"a single-partition producer asked for [$start, $end)")
+        single(shuffleId, mapId, start)
+      }, allocator)
+
     override def getStream(context: FlightProducer.CallContext, ticket: Ticket, listener: FlightProducer.ServerStreamListener): Unit = {
-      val (shuffleId, reduce, mapIds) = parseTicket(ticket)
+      val (shuffleId, reduce, endReduce, mapIds) = parseTicket(ticket)
       val root = VectorSchemaRoot.create(BytesSchema, allocator)
       val vector = root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector]
       var current = -1L
@@ -112,7 +128,9 @@ object FlightShuffle extends Logging {
         // concatenated streams, so where one block ends and the next begins needs no marker.
         mapIds.foreach { mapId =>
           current = mapId
-          val buf = blockData(shuffleId, mapId, reduce)
+          // One lookup and one open per map for the task's whole partition range (#411): the
+          // partitions are consecutive in the data file, and an empty one is a zero-length span.
+          val buf = blockData(shuffleId, mapId, reduce, endReduce)
           val in = buf.createInputStream()
           try {
             var n = readFully(in, chunk)
@@ -132,7 +150,7 @@ object FlightShuffle extends Logging {
         listener.completed()
       } catch {
         case e: Exception =>
-          logWarning(s"flight shuffle: serving $shuffleId/$current/$reduce (${mapIds.size} blocks) failed", e)
+          logWarning(s"flight shuffle: serving $shuffleId/$current/[$reduce, $endReduce) (${mapIds.size} map outputs) failed", e)
           listener.error(CallStatus.INTERNAL.withCause(e).withDescription(e.toString).toRuntimeException)
       } finally {
         root.close()
@@ -169,7 +187,9 @@ object FlightShuffle extends Logging {
           "spark.ssl.rpc.enabled is on but the Flight shuffle server has no TLS material yet (#288): " +
             "use spark.vector.shuffle.backend=block or turn RPC TLS off")
       }
-      val builder = FlightServer.builder(allocator, Location.forGrpcInsecure(host, 0), new Producer((s, m, r) => resolver().getBlockData(ShuffleBlockId(s, m, r), None), allocator)).executor(executor)
+      val builder = FlightServer.builder(allocator, Location.forGrpcInsecure(host, 0), new Producer((s: Int, m: Long, start: Int, end: Int) =>
+        if (end == start + 1) resolver().getBlockData(ShuffleBlockId(s, m, start), None)
+        else resolver().getBlockData(org.apache.spark.storage.ShuffleBlockBatchId(s, m, start, end), None), allocator)).executor(executor)
       secret(conf) match {
         case Some(s) => builder.headerAuthenticator(new SecretAuthenticator(s))
         case None if conf.getBoolean("spark.authenticate", false) =>
@@ -299,17 +319,22 @@ final class FlightBlockStream(
     shuffleId: Int,
     mapIds: Seq[Long],
     reduce: Int,
+    endReduce: Int,
     conf: SparkConf,
     allocator: BufferAllocator,
     metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) extends Iterator[org.apache.spark.sql.vectorized.ColumnarBatch] with AutoCloseable {
 
+  /** One reduce partition's blocks on the executor. */
+  def this(location: FlightLocation, shuffleId: Int, mapIds: Seq[Long], reduce: Int, conf: SparkConf, allocator: BufferAllocator,
+      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) = this(location, shuffleId, mapIds, reduce, reduce + 1, conf, allocator, metrics)
+
   /** A single block. */
   def this(location: FlightLocation, shuffleId: Int, mapId: Long, reduce: Int, conf: SparkConf, allocator: BufferAllocator,
-      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) = this(location, shuffleId, Seq(mapId), reduce, conf, allocator, metrics)
+      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) = this(location, shuffleId, Seq(mapId), reduce, reduce + 1, conf, allocator, metrics)
 
   private val stream: FlightStream = {
     val start = System.nanoTime()
-    val s = FlightShuffle.Clients.client(location).getStream(FlightShuffle.ticket(shuffleId, reduce, mapIds), FlightShuffle.Clients.callOptions(conf): _*)
+    val s = FlightShuffle.Clients.client(location).getStream(FlightShuffle.ticket(shuffleId, reduce, endReduce, mapIds), FlightShuffle.Clients.callOptions(conf): _*)
     metrics.incFetchWaitTime((System.nanoTime() - start) / 1000000)
     s
   }
