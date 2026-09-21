@@ -18,6 +18,8 @@ public final class Species {
 
   public static final VectorSpecies<Integer> I = VectorSpecies.of(int.class, SHAPE);
   public static final VectorSpecies<Long> L = VectorSpecies.of(long.class, SHAPE);
+  /** Bytes at the platform shape: 64 lanes on AVX-512, 32 on AVX2, 16 on NEON -- one masked load per short string. */
+  public static final VectorSpecies<Byte> B = VectorSpecies.of(byte.class, SHAPE);
   public static final VectorSpecies<Double> D = VectorSpecies.of(double.class, SHAPE);
 
   /** Int species with as many lanes as {@link #L} / {@link #D}, for widening conversions. */

@@ -37,7 +37,6 @@ public final class GroupKeyTable {
    * a column's range in one piece.
    */
   private byte[] keyBytes;
-  private MemorySegment keySegment; // heap view of keyBytes, refreshed on growth
   private int keyUsed; // bytes used
   private int[] recStart; // size + 1: start of each group's record in keyBytes
   private int[] colEnd; // size * strCols: end of each UTF8 value in keyBytes, records in column order
@@ -57,7 +56,6 @@ public final class GroupKeyTable {
   private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
 
   /** UTF8 keys up to this length are compared byte by byte rather than with MemorySegment.mismatch. */
-  private static final int SHORT_KEY_BYTES = 16;
 
   /**
    * Plain (non-dictionary) UTF8 keys are dictionary-encoded on the fly, against a per-column
@@ -129,7 +127,6 @@ public final class GroupKeyTable {
     strCols = s;
     if (s > 0) {
       keyBytes = new byte[INITIAL_CAPACITY * 8 * s];
-      keySegment = MemorySegment.ofArray(keyBytes);
       recStart = new int[INITIAL_CAPACITY + 1];
       colEnd = new int[INITIAL_CAPACITY * s];
     }
@@ -786,20 +783,11 @@ public final class GroupKeyTable {
     if (rowLen != len) {
       return false;
     }
-    if (len <= SHORT_KEY_BYTES) {
-      // Group-by strings are mostly codes of a few bytes. MemorySegment.mismatch costs more in
-      // set-up (two liveness checks, a vectorized-mismatch call) than the comparison itself at
-      // these lengths; TPC-H Q1 over plain (non-dictionary) Arrow strings spent a third of the
-      // aggregate's time there.
-      byte[] store = keyBytes;
-      for (int i = 0; i < len; i++) {
-        if (store[start + i] != data.get(ValueLayout.JAVA_BYTE, rowStart + i)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    return MemorySegment.mismatch(keySegment, start, end, data, rowStart, rowStart + len) == -1;
+    // One masked vector compare per width (#418): group-by strings are mostly codes of a few bytes,
+    // where MemorySegment.mismatch cost more in set-up than the bytes and a byte loop paid a
+    // bounds check per byte; a masked load of each side and one NE compare covers up to a vector
+    // width (64 bytes on AVX-512) in two instructions.
+    return HashKernels.bytesEqual(keyBytes, start, data, rowStart, len);
   }
 
   private int insert(VectorBuffers[] keys, int row, int hash, int pos) {
@@ -855,7 +843,6 @@ public final class GroupKeyTable {
       }
       if (used + len > keyBytes.length) {
         keyBytes = Arrays.copyOf(keyBytes, Math.max(keyBytes.length * 2, used + len));
-        keySegment = MemorySegment.ofArray(keyBytes);
       }
       MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, keyBytes, used, len);
       used += len;

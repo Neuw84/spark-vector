@@ -613,7 +613,7 @@ object PartitionedIpcWriter {
             val row = slot - 1
             val rs = offsets.get(VectorBuffers.LE_INT, row.toLong * 4)
             val re = offsets.get(VectorBuffers.LE_INT, (row.toLong + 1) * 4)
-            if (re - rs == end - start && (end == start || MemorySegment.mismatch(data, rs, re, data, start, end) < 0)) id = entryId(row)
+            if (re - rs == end - start && (end == start || io.sparkvector.kernels.HashKernels.bytesEqual(data, rs, data, start, end - start))) id = entryId(row)
             else h = (h + 1) & mask
           }
         }
