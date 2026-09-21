@@ -329,13 +329,25 @@ final case class WideDecimalAvgMergeAgg(
     if (finalResult) Seq(result.resultType, declared(1)) else declared
   private val limit = java.math.BigInteger.TEN.pow(bufferType.precision)
 
+  /**
+   * Per-group merge state: the total as two 64-bit limbs, as the sum's merge keeps it (#388). A
+   * `BigInteger` per row -- an allocation and an add for each of 5.5 M rows x 7 columns in q18's final
+   * aggregate at 1 TB -- was most of a reduce task's time (#416). A signed 128-bit overflow is past the
+   * 38-digit limit, so it marks the group overflowed; the exact ungrouped final, which reports such a
+   * total rather than null, carries it on in a `BigInteger` from that point. `BigInteger` otherwise
+   * appears once per group, at the end.
+   */
   private final class State(var groups: Int, ungrouped: Boolean) {
-    var total = Array.fill[java.math.BigInteger](groups)(java.math.BigInteger.ZERO)
+    var hi = new Array[Long](groups)
+    var lo = new Array[Long](groups)
+    /** Exact totals of the groups whose 128 bits overflowed (the exact ungrouped final only); null otherwise. */
+    var wide: Array[java.math.BigInteger] = _
     var counts = new Array[Long](groups)
     var overflowed = new Array[Boolean](groups)
     def ensure(needed: Int): Unit = if (needed > groups) {
       val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
-      total = java.util.Arrays.copyOf(total, n); java.util.Arrays.fill(total.asInstanceOf[Array[AnyRef]], groups, n, java.math.BigInteger.ZERO)
+      hi = java.util.Arrays.copyOf(hi, n); lo = java.util.Arrays.copyOf(lo, n)
+      if (wide != null) wide = java.util.Arrays.copyOf(wide, n)
       counts = java.util.Arrays.copyOf(counts, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
     }
     def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
@@ -351,11 +363,26 @@ final case class WideDecimalAvgMergeAgg(
           // Spark's count buffer is never null (initial 0); a null here is a defensive skip.
           if (counted.validity() == null || Bitmap.isSet(counted.validity(), i)) counts(g) += counted.data().getAtIndex(VectorBuffers.LE_LONG, i)
           if (sums.isNull(i)) overflowed(g) = true
-          else if (!overflowed(g)) total(g) = total(g).add(Decimal128.toBigInteger(Decimal128.hi(data, i), Decimal128.lo(data, i)))
+          else if (!overflowed(g)) add(g, Decimal128.hi(data, i), Decimal128.lo(data, i))
         }
         i += 1
       }
     }
+    private def add(g: Int, rhi: Long, rlo: Long): Unit = {
+      if (wide != null && wide(g) != null) { wide(g) = wide(g).add(Decimal128.toBigInteger(rhi, rlo)); return }
+      val l = lo(g) + rlo
+      val carry = if (java.lang.Long.compareUnsigned(l, lo(g)) < 0) 1L else 0L
+      val h = hi(g) + rhi + carry
+      // Signed overflow of the 128-bit total: both operands of one sign, the result of the other.
+      if (((hi(g) ^ h) & (rhi ^ h)) < 0) {
+        if (finalResult && ungrouped) {
+          if (wide == null) wide = new Array[java.math.BigInteger](groups)
+          wide(g) = Decimal128.toBigInteger(hi(g), lo(g)).add(Decimal128.toBigInteger(rhi, rlo))
+        } else overflowed(g) = true
+      } else { hi(g) = h; lo(g) = l }
+    }
+    private def total(g: Int): java.math.BigInteger =
+      if (wide != null && wide(g) != null) wide(g) else Decimal128.toBigInteger(hi(g), lo(g))
     /**
      * The merged sum as Spark's buffer holds it: null once a partial arrived null. A total past the
      * buffer precision is null in a grouped result -- Spark's hash-map buffer rows re-check the
