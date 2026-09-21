@@ -70,7 +70,21 @@ object PartitionedIpcFile {
   def arrowSchema(schema: StructType): Schema =
     new Schema(schema.fields.zipWithIndex.map { case (f, i) => arrowField(f.name, f.dataType, i) }.toSeq.asJava)
 
-  def sparkType(field: Field): DataType = DataType.fromJson(field.getMetadata.get(TypeKey))
+  /**
+   * The Spark type carried in a field's metadata. Parsed once per distinct JSON: the reader asks for
+   * every column of every block, and a block per (map, partition) at 1000 partitions made the JSON
+   * parse 3% of an executor's self time (#411).
+   */
+  def sparkType(field: Field): DataType = {
+    val json = field.getMetadata.get(TypeKey)
+    var dt = sparkTypeCache.get(json)
+    if (dt == null) {
+      dt = DataType.fromJson(json)
+      sparkTypeCache.put(json, dt)
+    }
+    dt
+  }
+  private val sparkTypeCache = new java.util.concurrent.ConcurrentHashMap[String, DataType]()
 
   /** `[n:int][offsets:long*n][lengths:long*n][rows:long*n][footerLength:int][magic:long]`. */
   def encodeIndex(index: Index): Array[Byte] = {
