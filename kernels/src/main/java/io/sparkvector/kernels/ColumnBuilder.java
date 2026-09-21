@@ -131,6 +131,25 @@ public final class ColumnBuilder {
   }
 
   private void appendUtf8(VectorBuffers in, MemorySegment selection, int count, int start) {
+    if (selection == null && !in.isDictionaryEncoded()) {
+      // A plain Arrow string vector's values are one contiguous range of its data buffer, so the
+      // whole batch is one copy and the offsets move by a constant (#394: one MemorySegment.copy
+      // per value -- with its bounds, alignment and liveness checks -- was 29% of an executor's
+      // time in the sort stage of q67 at 1 TB). Nulls need nothing: a null value has zero length.
+      int n = in.length();
+      MemorySegment off = in.offsets();
+      int first = off.get(VectorBuffers.LE_INT, 0L);
+      int last = off.get(VectorBuffers.LE_INT, (long) n << 2);
+      long bytes = last - first;
+      ensureBytes(bytesUsed + bytes);
+      MemorySegment.copy(in.data(), ValueLayout.JAVA_BYTE, first, data, ValueLayout.JAVA_BYTE, bytesUsed, bytes);
+      int delta = (int) bytesUsed - first;
+      for (int i = 0; i <= n; i++) {
+        offsets.set(VectorBuffers.LE_INT, (long) (start + i) << 2, off.get(VectorBuffers.LE_INT, (long) i << 2) + delta);
+      }
+      bytesUsed += bytes;
+      return;
+    }
     long bytes;
     if (in.isDictionaryEncoded()) {
       bytes = 0;
