@@ -3,8 +3,10 @@ package io.sparkvector.kernels;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
+import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.IntVector;
 import jdk.incubator.vector.LongVector;
+import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
@@ -149,18 +151,91 @@ public final class HashKernels {
   }
 
   /** Hash of a UTF-8 byte range, used for both plain and dictionary strings. */
+  /** Bytes per masked load: the platform's vector width. */
+  static final VectorSpecies<Byte> B = Species.B;
+  /** One odd multiplier per long lane, so equal words in different lanes hash apart. */
+  private static final LongVector LANE_MULT = laneMultipliers();
+
+  private static LongVector laneMultipliers() {
+    long[] m = new long[L.length()];
+    long x = 0x9E3779B97F4A7C15L;
+    for (int i = 0; i < m.length; i++) {
+      x = x * 0xBF58476D1CE4E5B9L + 0x94D049BB133111EBL;
+      m[i] = x | 1L;
+    }
+    return LongVector.fromArray(L, m, 0);
+  }
+
+  /**
+   * Hash of {@code len} bytes at {@code start}: our own function (the Spark-compatible Murmur3 of
+   * the partitioner lives in {@link PartitionKernels} and stays verbatim), so it hashes a vector
+   * width of bytes at a time -- a string of up to 64 bytes on AVX-512 is one masked load, eight
+   * long lanes multiplied and folded, then the length mixed in. The scalar loop this replaced read
+   * 4 bytes per step through a bounds-checked segment access (the checks alone were ~10% of q18's
+   * executor samples), and TPC-DS group-by strings are almost all under one vector width (#418).
+   */
   public static int hashBytes(MemorySegment data, long start, int len) {
-    int h = 0x1B873593;
-    long end = start + len;
-    long p = start;
-    for (; p + 4 <= end; p += 4) {
-      h = mix32(h, data.get(VectorBuffers.LE_INT, p));
+    int width = B.length();
+    LongVector acc;
+    if (len <= width) {
+      VectorMask<Byte> m = B.indexInRange(0, len);
+      acc = ByteVector.fromMemorySegment(B, data, start, LE, m).reinterpretAsLongs().mul(LANE_MULT);
+    } else {
+      acc = LongVector.zero(L);
+      long p = start;
+      long end = start + len;
+      for (; p + width <= end; p += width) {
+        LongVector v = ByteVector.fromMemorySegment(B, data, p, LE).reinterpretAsLongs();
+        acc = acc.lanewise(VectorOperators.XOR, v).mul(LANE_MULT);
+        acc = acc.lanewise(VectorOperators.XOR, acc.lanewise(VectorOperators.LSHR, 31));
+      }
+      if (p < end) {
+        VectorMask<Byte> m = B.indexInRange(0, (int) (end - p));
+        LongVector v = ByteVector.fromMemorySegment(B, data, p, LE, m).reinterpretAsLongs();
+        acc = acc.lanewise(VectorOperators.XOR, v).mul(LANE_MULT);
+      }
     }
-    int tail = 0;
-    for (int shift = 0; p < end; p++, shift += 8) {
-      tail |= (data.get(ValueLayout.JAVA_BYTE, p) & 0xFF) << shift;
+    acc = acc.lanewise(VectorOperators.XOR, acc.lanewise(VectorOperators.LSHR, 29));
+    long r = acc.reduceLanes(VectorOperators.XOR);
+    r = (r ^ (r >>> 32)) * 0xBF58476D1CE4E5B9L;
+    r ^= r >>> 29;
+    return mix32((int) r, len);
+  }
+
+  /** {@code len} bytes of {@code a} at {@code aPos} equal those of {@code b} at {@code bPos}: one masked compare per vector width. */
+  public static boolean bytesEqual(MemorySegment a, long aPos, MemorySegment b, long bPos, int len) {
+    int width = B.length();
+    long p = 0;
+    for (; p + width <= len; p += width) {
+      ByteVector x = ByteVector.fromMemorySegment(B, a, aPos + p, LE);
+      ByteVector y = ByteVector.fromMemorySegment(B, b, bPos + p, LE);
+      if (x.compare(VectorOperators.NE, y).anyTrue()) return false;
     }
-    return mix32(h, tail ^ len);
+    if (p < len) {
+      VectorMask<Byte> m = B.indexInRange(0, (int) (len - p));
+      ByteVector x = ByteVector.fromMemorySegment(B, a, aPos + p, LE, m);
+      ByteVector y = ByteVector.fromMemorySegment(B, b, bPos + p, LE, m);
+      if (x.compare(VectorOperators.NE, y, m).anyTrue()) return false;
+    }
+    return true;
+  }
+
+  /** As above with the first side a heap array (the group table's key store). */
+  public static boolean bytesEqual(byte[] a, int aPos, MemorySegment b, long bPos, int len) {
+    int width = B.length();
+    int p = 0;
+    for (; p + width <= len; p += width) {
+      ByteVector x = ByteVector.fromArray(B, a, aPos + p);
+      ByteVector y = ByteVector.fromMemorySegment(B, b, bPos + p, LE);
+      if (x.compare(VectorOperators.NE, y).anyTrue()) return false;
+    }
+    if (p < len) {
+      VectorMask<Byte> m = B.indexInRange(0, len - p);
+      ByteVector x = ByteVector.fromArray(B, a, aPos + p, m);
+      ByteVector y = ByteVector.fromMemorySegment(B, b, bPos + p, LE, m);
+      if (x.compare(VectorOperators.NE, y, m).anyTrue()) return false;
+    }
+    return true;
   }
 
   static void mixUtf8(VectorBuffers col, int[] hashes, int n) {
