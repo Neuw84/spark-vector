@@ -506,7 +506,10 @@ final class PartitionedIpcWriter(
         val encoding = arrowSchema.getFields.get(c).getDictionary
         if (encoding != null) {
           val (sids, sdict) = scratchFor(c)
-          val encoded = PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator, dictionaryMaxRatio, sids, sdict)
+          // A batch of a few rows keeps its strings plain (#416): its dictionary would cost more than it
+          // saves, and only plain batches can be coalesced by the reader before the operators see them.
+          val encoded = if (rows < PartitionedIpcWriter.DictionaryMinRows) null
+            else PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator, dictionaryMaxRatio, sids, sdict)
           if (encoded != null) {
             val (ids, dictionary) = encoded
             taken(c) = ids
@@ -657,6 +660,8 @@ object PartitionedIpcWriter {
 
   /** Default share of distinct values per rows above which a batch's string column goes plain (#356). */
   val DefaultDictionaryMaxRatio: Double = 0.5
+  /** Below this many rows a record batch's strings stay plain (#416): coalescible by the reader, and no dictionary to pay for. */
+  val DictionaryMinRows: Int = 256
   /** Rows hashed before the first distinct-ratio check: enough to tell a name column from a state column. */
   val DictionarySampleRows: Int = 512
 
