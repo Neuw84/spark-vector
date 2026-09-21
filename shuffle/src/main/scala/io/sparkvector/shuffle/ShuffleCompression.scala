@@ -42,11 +42,37 @@ object ShuffleCompression {
    * compressor call and one frame per block instead of one per buffer of every record batch, and
    * the messages' repeated metadata compresses away. `None` when the configured codec is none.
    */
-  def compressing(out: java.io.OutputStream, codec: Option[CompressionUtil.CodecType]): java.io.OutputStream = codec match {
-    case Some(CompressionUtil.CodecType.ZSTD) => new com.github.luben.zstd.ZstdOutputStreamNoFinalizer(out, DefaultZstdLevel)
-    case Some(CompressionUtil.CodecType.LZ4_FRAME) => new net.jpountz.lz4.LZ4BlockOutputStream(out)
+  /** One frame of a partition's stream from raw bytes; the context and scratch are the writer's, reused. */
+  trait FrameCompressor extends AutoCloseable {
+    def compress(raw: Array[Byte]): Array[Byte]
+  }
+
+  def frameCompressor(codec: Option[CompressionUtil.CodecType]): FrameCompressor = codec match {
+    case Some(CompressionUtil.CodecType.ZSTD) => new FrameCompressor {
+      private val ctx = new com.github.luben.zstd.ZstdCompressCtx().setLevel(DefaultZstdLevel)
+      private var scratch = new Array[Byte](1 << 16)
+      override def compress(raw: Array[Byte]): Array[Byte] = {
+        val bound = Zstd.compressBound(raw.length).toInt
+        if (scratch.length < bound) scratch = new Array[Byte](Integer.highestOneBit(bound) << 1)
+        val n = ctx.compressByteArray(scratch, 0, scratch.length, raw, 0, raw.length)
+        java.util.Arrays.copyOf(scratch, n)
+      }
+      override def close(): Unit = ctx.close()
+    }
+    case Some(CompressionUtil.CodecType.LZ4_FRAME) => new FrameCompressor {
+      override def compress(raw: Array[Byte]): Array[Byte] = {
+        val out = new java.io.ByteArrayOutputStream(raw.length / 2 + 64)
+        val lz4 = new net.jpountz.lz4.LZ4BlockOutputStream(out)
+        lz4.write(raw); lz4.close()
+        out.toByteArray
+      }
+      override def close(): Unit = ()
+    }
     case Some(other) => throw new IllegalArgumentException(s"no stream compression for $other")
-    case None => null
+    case None => new FrameCompressor {
+      override def compress(raw: Array[Byte]): Array[Byte] = raw
+      override def close(): Unit = ()
+    }
   }
 
   /** The reading side of [[compressing]]: several frames back to back (a range of partitions, several map outputs) read as one stream. */
