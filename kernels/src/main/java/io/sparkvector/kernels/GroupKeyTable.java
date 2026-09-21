@@ -227,10 +227,11 @@ public final class GroupKeyTable {
     for (VectorBuffers key : keys) {
       HashKernels.mixColumn(key, hashes);
     }
+    ProbeKeys heap = ProbeKeys.of(keys, n, types);
     int matched = 0;
     if (selection == null) {
       for (int i = 0; i < n; i++) {
-        int gid = lookupOnly(keys, i, HashKernels.finish(hashes[i]));
+        int gid = heap != null ? lookupOnly(heap, i, HashKernels.finish(hashes[i])) : lookupOnly(keys, i, HashKernels.finish(hashes[i]));
         outIds[i] = gid;
         if (gid >= 0) {
           matched++;
@@ -243,7 +244,7 @@ public final class GroupKeyTable {
         while (bits != 0L) {
           int i = (w << 6) + Long.numberOfTrailingZeros(bits);
           bits &= bits - 1;
-          int gid = lookupOnly(keys, i, HashKernels.finish(hashes[i]));
+          int gid = heap != null ? lookupOnly(heap, i, HashKernels.finish(hashes[i])) : lookupOnly(keys, i, HashKernels.finish(hashes[i]));
           outIds[i] = gid;
           if (gid >= 0) {
             matched++;
@@ -252,6 +253,110 @@ public final class GroupKeyTable {
       }
     }
     return matched;
+  }
+
+  /**
+   * The probe batch's key columns as Java arrays, for the probe of a join (#409). A join probes one
+   * row at a time -- hash, slot, compare -- and each compare read the row's key through
+   * {@link VectorBuffers#getInt} / {@link VectorBuffers#isNull}: a segment liveness check and a
+   * bounds check per read, virtual when the receiver profile mixes heap and native segments, which
+   * was 11% of an executor's samples in q88 at SF10 (store_sales probing three dimension tables).
+   * Plain INT32, INT64 and FLOAT64 keys (a double is its raw bits) are copied out once per batch
+   * with one bulk move per column and compared from the arrays; any other key type keeps the
+   * segment path. Per thread, since a broadcast table is probed by several tasks at once.
+   */
+  private static final class ProbeKeys {
+    int[][] ints = new int[0][];
+    long[][] longs = new long[0][];
+    long[][] validity = new long[0][];
+
+    private static final ThreadLocal<ProbeKeys> SCRATCH = ThreadLocal.withInitial(ProbeKeys::new);
+
+    static ProbeKeys of(VectorBuffers[] keys, int n, VecType[] types) {
+      for (int c = 0; c < keys.length; c++) {
+        VecType t = types[c];
+        if (keys[c].isDictionaryEncoded() || !(t == VecType.INT32 || t == VecType.INT64 || t == VecType.FLOAT64)) {
+          return null;
+        }
+      }
+      ProbeKeys p = SCRATCH.get();
+      if (p.ints.length < keys.length) {
+        p.ints = Arrays.copyOf(p.ints, keys.length);
+        p.longs = Arrays.copyOf(p.longs, keys.length);
+        p.validity = Arrays.copyOf(p.validity, keys.length);
+      }
+      for (int c = 0; c < keys.length; c++) {
+        VectorBuffers k = keys[c];
+        if (types[c] == VecType.INT32) {
+          int[] a = p.ints[c];
+          if (a == null || a.length < n) {
+            a = new int[Math.max(n, 4096)];
+            p.ints[c] = a;
+          }
+          MemorySegment.copy(k.data(), VectorBuffers.LE_INT, 0L, a, 0, n);
+        } else {
+          long[] a = p.longs[c];
+          if (a == null || a.length < n) {
+            a = new long[Math.max(n, 4096)];
+            p.longs[c] = a;
+          }
+          MemorySegment.copy(k.data(), VectorBuffers.LE_LONG, 0L, a, 0, n);
+        }
+        if (k.hasNulls()) {
+          int words = Bitmap.wordsFor(n);
+          long[] v = p.validity[c];
+          if (v == null || v.length < words) {
+            v = new long[Math.max(words, 64)];
+          }
+          for (int w = 0; w < words; w++) {
+            v[w] = Bitmap.wordAt(k.validity(), w, n);
+          }
+          p.validity[c] = v;
+        } else {
+          p.validity[c] = null;
+        }
+      }
+      return p;
+    }
+
+    boolean isNull(int c, int row) {
+      long[] v = validity[c];
+      return v != null && (v[row >>> 6] & (1L << (row & 63))) == 0L;
+    }
+  }
+
+  private int lookupOnly(ProbeKeys keys, int row, int hash) {
+    int pos = hash & mask;
+    while (true) {
+      int gid = slots[pos];
+      if (gid < 0) {
+        return -1;
+      }
+      if (groupHashes[gid] == hash && equals(gid, keys, row)) {
+        return gid;
+      }
+      pos = (pos + 1) & mask;
+    }
+  }
+
+  private boolean equals(int gid, ProbeKeys keys, int row) {
+    for (int c = 0; c < types.length; c++) {
+      boolean rowNull = keys.isNull(c, row);
+      if (rowNull != nulls[c].get(gid)) {
+        return false;
+      }
+      if (rowNull) {
+        continue;
+      }
+      if (types[c] == VecType.INT32) {
+        if (intKeys[c][gid] != keys.ints[c][row]) {
+          return false;
+        }
+      } else if (longKeys[c][gid] != keys.longs[c][row]) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private int lookupOnly(VectorBuffers[] keys, int row, int hash) {
