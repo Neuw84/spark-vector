@@ -312,13 +312,16 @@ public final class SparkColumnVectorBuffers {
     /** The identity the cache is keyed on: the parquet dictionary behind a {@code ParquetDictionary}, else the dictionary itself. */
     final Object key;
     final boolean transform;
+    /** The lane type the table was decoded for (a dictionary object serving two types is not a parquet one, but a test's). */
+    final VecType type;
     long[] table;
     /** Ids {@code [0, decoded)} are in {@code table}. */
     int decoded;
 
-    DecodedDictionary(Object key, boolean transform) {
+    DecodedDictionary(Object key, boolean transform, VecType type) {
       this.key = key;
       this.transform = transform;
+      this.type = type;
       this.table = new long[256];
     }
 
@@ -368,7 +371,7 @@ public final class SparkColumnVectorBuffers {
     }
   }
 
-  private static DecodedDictionary decodedDictionary(Dictionary dict) {
+  private static DecodedDictionary decodedDictionary(Dictionary dict, VecType type) {
     Object key = dict;
     boolean transform = false;
     if (PARQUET_DICTIONARY_INNER != null && PARQUET_DICTIONARY.isInstance(dict)) {
@@ -384,7 +387,7 @@ public final class SparkColumnVectorBuffers {
       if (d == null) {
         break;
       }
-      if (d.key == key && d.transform == transform) {
+      if (d.key == key && d.transform == transform && d.type == type) {
         if (i > 0) { // most recently used first, so a chunk's columns stay at the front
           System.arraycopy(recent, 0, recent, 1, i);
           recent[0] = d;
@@ -392,7 +395,7 @@ public final class SparkColumnVectorBuffers {
         return d;
       }
     }
-    DecodedDictionary d = new DecodedDictionary(key, transform);
+    DecodedDictionary d = new DecodedDictionary(key, transform, type);
     System.arraycopy(recent, 0, recent, 1, recent.length - 1); // the oldest falls off the end
     recent[0] = d;
     return d;
@@ -425,7 +428,7 @@ public final class SparkColumnVectorBuffers {
       }
     }
     // The dictionary decoded once per column chunk, not once per batch (#416).
-    long[] table = decodedDictionary(dict).upTo(dict, maxId, type);
+    long[] table = decodedDictionary(dict, type).upTo(dict, maxId, type);
     switch (type) {
       case INT32 -> {
         int[] out = intScratch(numRows);
