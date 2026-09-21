@@ -6,7 +6,6 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.Arrays;
-import java.util.BitSet;
 
 /**
  * Open-addressing hash table from grouping-key tuples to dense group ids, accumulated across the
@@ -42,7 +41,13 @@ public final class GroupKeyTable {
   private int[] colEnd; // size * strCols: end of each UTF8 value in keyBytes, records in column order
   private final int strCols; // number of UTF8 columns
   private final int[] strCol; // column -> index among the UTF8 columns, or -1
-  private final BitSet[] nulls;
+  /**
+   * Per key column, one bit per group: null. A plain word array grown with the group capacity (#418):
+   * java.util.BitSet's set(int, boolean) goes through clear(int)'s early return past wordsInUse, a
+   * branch C2 speculated away and then trapped on 200,000 times in one q67 executor at 1 TB -- the
+   * whole insert path ran deoptimised.
+   */
+  private final long[][] nulls;
 
   private int[] hashScratch = new int[0]; // row hashes, or combined indices on the memoised path
   private byte[] emitScratch = new byte[0]; // a column's values gathered from the records before one bulk copy out
@@ -109,10 +114,10 @@ public final class GroupKeyTable {
     longKeys = new long[k][];
     hiKeys = new long[k][];
     strCol = new int[k];
-    nulls = new BitSet[k];
+    nulls = new long[k][];
     int s = 0;
     for (int c = 0; c < k; c++) {
-      nulls[c] = new BitSet();
+      nulls[c] = new long[(groupHashes.length + 63) >>> 6];
       strCol[c] = -1;
       switch (types[c]) {
         case INT32, BOOL -> intKeys[c] = new int[INITIAL_CAPACITY];
@@ -339,7 +344,7 @@ public final class GroupKeyTable {
   private boolean equals(int gid, ProbeKeys keys, int row) {
     for (int c = 0; c < types.length; c++) {
       boolean rowNull = keys.isNull(c, row);
-      if (rowNull != nulls[c].get(gid)) {
+      if (rowNull != nullAt(c, gid)) {
         return false;
       }
       if (rowNull) {
@@ -718,7 +723,7 @@ public final class GroupKeyTable {
     for (int c = 0; c < types.length; c++) {
       VectorBuffers k = keys[c];
       boolean rowNull = k.isNull(row);
-      if (rowNull != nulls[c].get(gid)) {
+      if (rowNull != nullAt(c, gid)) {
         return false;
       }
       if (rowNull) {
@@ -800,7 +805,7 @@ public final class GroupKeyTable {
     for (int c = 0; c < types.length; c++) {
       VectorBuffers k = keys[c];
       boolean isNull = k.isNull(row);
-      nulls[c].set(gid, isNull);
+      if (isNull) nulls[c][gid >>> 6] |= 1L << gid; else nulls[c][gid >>> 6] &= ~(1L << gid);
       switch (types[c]) {
         case INT32 -> intKeys[c][gid] = isNull ? 0 : k.getInt(row);
         case BOOL -> intKeys[c][gid] = isNull ? 0 : (k.getBoolean(row) ? 1 : 0);
@@ -851,6 +856,10 @@ public final class GroupKeyTable {
     colEnd[gid * strCols + strCol[c]] = used;
   }
 
+  private boolean nullAt(int c, int gid) {
+    return (nulls[c][gid >>> 6] & (1L << gid)) != 0;
+  }
+
   private void ensureGroupCapacity(int needed) {
     if (needed <= groupHashes.length) {
       return;
@@ -858,6 +867,7 @@ public final class GroupKeyTable {
     int cap = Math.max(needed, groupHashes.length * 2);
     groupHashes = Arrays.copyOf(groupHashes, cap);
     for (int c = 0; c < types.length; c++) {
+      nulls[c] = Arrays.copyOf(nulls[c], (cap + 63) >>> 6);
       switch (types[c]) {
         case INT32, BOOL -> intKeys[c] = Arrays.copyOf(intKeys[c], cap);
         case INT64, FLOAT64 -> longKeys[c] = Arrays.copyOf(longKeys[c], cap);
@@ -913,7 +923,7 @@ public final class GroupKeyTable {
   // ------------------------------------------------------------------ reading keys back
 
   public boolean isNull(int c, int gid) {
-    return nulls[c].get(gid);
+    return nullAt(c, gid);
   }
 
   public int getInt(int c, int gid) {
@@ -966,7 +976,7 @@ public final class GroupKeyTable {
   public void writeKeys(int c, int from, int to, MemorySegment validity, MemorySegment data, MemorySegment offsets) {
     int count = to - from;
     for (int o = 0; o < count; o++) {
-      Bitmap.setTo(validity, o, !nulls[c].get(from + o));
+      Bitmap.setTo(validity, o, !nullAt(c, from + o));
     }
     switch (types[c]) {
       case INT32 -> MemorySegment.copy(intKeys[c], from, data, VectorBuffers.LE_INT, 0, count);
