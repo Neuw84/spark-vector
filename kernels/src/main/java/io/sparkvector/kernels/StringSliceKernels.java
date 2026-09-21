@@ -143,22 +143,59 @@ public final class StringSliceKernels {
       MemorySegment validity, Arena arena) {
     int n = str.length();
     VectorBuffers s = store(str);
-    MemorySegment data = s.data();
+    int m = s.length();
+    // The store's offsets and bytes on the heap once, the ranges computed there and the slices
+    // gathered with System.arraycopy into one output copied out once (#400): a MemorySegment.copy
+    // and two offset reads per value were 17.5% of an executor's time in q8 at SF10. With a
+    // dictionary-encoded input and literal arguments the range is computed once per dictionary
+    // entry, not once per row.
+    int[] off = s.offsets().asSlice(0, ((long) m + 1) << 2).toArray(VectorBuffers.LE_INT);
+    byte[] bytes = s.data().asSlice(0, off[m]).toArray(ValueLayout.JAVA_BYTE);
+    MemorySegment heapData = MemorySegment.ofArray(bytes);
     int[] srcOff = new int[n];
     int[] outLen = new int[n];
+    boolean encoded = str.dictionary() != null;
+    int[] codes = encoded ? str.data().asSlice(0, (long) n << 2).toArray(VectorBuffers.LE_INT) : null;
+    if (encoded && posCol == null && lenCol == null) {
+      int[] dOff = new int[m];
+      int[] dLen = new int[m];
+      for (int k = 0; k < m; k++) {
+        long range = substringRange(heapData, off[k], off[k + 1] - off[k], pos, len);
+        dOff[k] = off[k] + (int) (range >>> 32);
+        dLen[k] = (int) range;
+      }
+      for (int i = 0; i < n; i++) {
+        if (!live(validity, i)) continue;
+        int k = codes[i];
+        srcOff[i] = dOff[k];
+        outLen[i] = dLen[k];
+      }
+    } else {
+      for (int i = 0; i < n; i++) {
+        if (!live(validity, i)) continue;
+        int idx = encoded ? codes[i] : i;
+        long range = substringRange(heapData, off[idx], off[idx + 1] - off[idx], arg(posCol, pos, i), arg(lenCol, len, i));
+        srcOff[i] = off[idx] + (int) (range >>> 32);
+        outLen[i] = (int) range;
+      }
+    }
+    int[] outOff = new int[n + 1];
+    long total = 0;
     for (int i = 0; i < n; i++) {
-      if (!live(validity, i)) continue;
-      int idx = index(str, i);
-      long range = substringRange(data, startOf(s, idx), lengthOf(s, idx), arg(posCol, pos, i), arg(lenCol, len, i));
-      srcOff[i] = startOf(s, idx) + (int) (range >>> 32);
-      outLen[i] = (int) range;
+      total += outLen[i];
+      if (total > MAX_OUTPUT_BYTES) {
+        throw new IllegalStateException("string output of more than " + MAX_OUTPUT_BYTES + " bytes in one batch");
+      }
+      outOff[i + 1] = (int) total;
+    }
+    byte[] outBytes = new byte[(int) total];
+    for (int i = 0; i < n; i++) {
+      if (outLen[i] > 0) System.arraycopy(bytes, srcOff[i], outBytes, outOff[i], outLen[i]);
     }
     MemorySegment offsets = ArrowLayout.allocateOffsets(arena, n);
-    long total = prefix(outLen, offsets, n);
+    MemorySegment.copy(outOff, 0, offsets, VectorBuffers.LE_INT, 0, n + 1);
     MemorySegment out = ArrowLayout.allocateBytes(arena, total);
-    for (int i = 0; i < n; i++) {
-      if (outLen[i] > 0) MemorySegment.copy(data, srcOff[i], out, offsets.getAtIndex(VectorBuffers.LE_INT, i), outLen[i]);
-    }
+    MemorySegment.copy(outBytes, 0, out, ValueLayout.JAVA_BYTE, 0, outBytes.length);
     return SegmentVectorBuffers.utf8(n, validity, offsets, out);
   }
 
