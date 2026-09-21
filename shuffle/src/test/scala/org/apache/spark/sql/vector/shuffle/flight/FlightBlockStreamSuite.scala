@@ -131,6 +131,63 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     }
   }
 
+  test("#411: one DoGet carries a reduce task's partition range per map output -- one lookup per map, the empty partition a zero-length span") {
+    val allocator = new RootAllocator()
+    val dir = Files.createTempDirectory("svflight")
+    val arena = Arena.ofConfined()
+    // Two map outputs over four partitions; the task reads partitions [1, 4). Partition 2 gets no row
+    // from either map. Rows go to partitions 1 and 3 alternately (partition 0 is outside the range).
+    val files = mutable.Map.empty[Long, (java.nio.file.Path, PartitionedIpcFile.Index)]
+    val expected = mutable.Map.empty[Long, IndexedSeq[(Int, String)]]
+    try {
+      Seq(0L, 3L).foreach { mapId =>
+        val path = dir.resolve(s"map$mapId.ipc")
+        val writer = new PartitionedIpcWriter(schema, 4, allocator, path, 1L << 20, batchBytes = 1L)
+        try {
+          val (b, rows) = batch(arena, allocator, 200 + mapId.toInt, s"m$mapId")
+          val ids = Array.tabulate(b.numRows())(i => if (i % 3 == 0) 0 else if (i % 3 == 1) 1 else 3)
+          try {
+            writer.write(b, ids)
+            // The stream delivers partition 1's rows, then partition 3's, in input order within each.
+            expected(mapId) = rows.indices.filter(i => ids(i) == 1).map(rows) ++ rows.indices.filter(i => ids(i) == 3).map(rows)
+          } finally b.close()
+          writer.finish()
+        } finally writer.close()
+        val index = { val ch = java.nio.channels.FileChannel.open(path); try PartitionedIpcFile.readIndex(ch) finally ch.close() }
+        files(mapId) = (path, index)
+      }
+    } finally arena.close()
+
+    val asked = mutable.ArrayBuffer.empty[(Long, Int, Int)]
+    val producer = new FlightShuffle.Producer((_: Int, mapId: Long, start: Int, end: Int) => {
+      asked += ((mapId, start, end))
+      val (path, index) = files(mapId)
+      val from = index.offsets(start)
+      val to = index.offsets(end - 1) + index.lengths(end - 1)
+      val all = Files.readAllBytes(path)
+      new NioManagedBuffer(ByteBuffer.wrap(java.util.Arrays.copyOfRange(all, from.toInt, to.toInt)))
+    }, allocator)
+    val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer).build()
+    server.start()
+    try {
+      val mapIds = Seq(0L, 3L)
+      val stream = new FlightBlockStream(FlightLocation("127.0.0.1", server.getPort), 0, mapIds, 1, 4, new SparkConf(false),
+        FlightShuffle.Clients.allocatorForReads, new org.apache.spark.executor.TempShuffleReadMetrics())
+      try {
+        val got = mutable.ArrayBuffer.empty[(Int, String)]
+        while (stream.hasNext) {
+          val b = stream.next()
+          (0 until b.numRows()).foreach(r => got += ((b.column(0).getInt(r), b.column(1).getUTF8String(r).toString)))
+        }
+        assert(got === mapIds.flatMap(expected), "partitions 1 and 3 of each map, in map order; partition 0 excluded, 2 empty")
+        assert(asked.toSeq === Seq((0L, 1, 4), (3L, 1, 4)), "one range lookup per map output")
+      } finally stream.close()
+    } finally {
+      server.close()
+      allocator.close()
+    }
+  }
+
   test("#364: a remote executor that refuses connections is a FetchFailedException for its address, not a plain failure") {
     // A port nothing listens on: the connect fails at open or on the first read, depending on the transport.
     val closed = new java.net.ServerSocket(0)
