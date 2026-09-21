@@ -29,10 +29,20 @@ public final class GroupKeyTable {
   private final int[][] intKeys; // INT32 and BOOL (0/1)
   private final long[][] longKeys; // INT64 and FLOAT64 (raw bits); the low limb of DECIMAL128
   private final long[][] hiKeys; // the high limb of DECIMAL128
-  private final byte[][] strBytes; // UTF8 byte store per column
-  private final MemorySegment[] strSegments; // heap views of strBytes, refreshed on growth
-  private final int[] strUsed; // bytes used per UTF8 column
-  private final int[][] strOffsets; // per UTF8 column: size + 1 offsets
+  /**
+   * UTF8 keys as one record per group (#377): a group's string values lie contiguously in
+   * {@code keyBytes} in column order, so a probe that must compare five string keys reads one
+   * record start, one row of column ends and one stretch of bytes -- three cache lines -- where
+   * a per-column store cost two misses per column. Emission gathers per group instead of copying
+   * a column's range in one piece.
+   */
+  private byte[] keyBytes;
+  private MemorySegment keySegment; // heap view of keyBytes, refreshed on growth
+  private int keyUsed; // bytes used
+  private int[] recStart; // size + 1: start of each group's record in keyBytes
+  private int[] colEnd; // size * strCols: end of each UTF8 value in keyBytes, records in column order
+  private final int strCols; // number of UTF8 columns
+  private final int[] strCol; // column -> index among the UTF8 columns, or -1
   private final BitSet[] nulls;
 
   private int[] hashScratch = new int[0]; // row hashes, or combined indices on the memoised path
@@ -99,13 +109,12 @@ public final class GroupKeyTable {
     intKeys = new int[k][];
     longKeys = new long[k][];
     hiKeys = new long[k][];
-    strBytes = new byte[k][];
-    strSegments = new MemorySegment[k];
-    strUsed = new int[k];
-    strOffsets = new int[k][];
+    strCol = new int[k];
     nulls = new BitSet[k];
+    int s = 0;
     for (int c = 0; c < k; c++) {
       nulls[c] = new BitSet();
+      strCol[c] = -1;
       switch (types[c]) {
         case INT32, BOOL -> intKeys[c] = new int[INITIAL_CAPACITY];
         case INT64, FLOAT64 -> longKeys[c] = new long[INITIAL_CAPACITY];
@@ -113,12 +122,15 @@ public final class GroupKeyTable {
           longKeys[c] = new long[INITIAL_CAPACITY];
           hiKeys[c] = new long[INITIAL_CAPACITY];
         }
-        case UTF8 -> {
-          strBytes[c] = new byte[INITIAL_CAPACITY * 8];
-          strSegments[c] = MemorySegment.ofArray(strBytes[c]);
-          strOffsets[c] = new int[INITIAL_CAPACITY + 1];
-        }
+        case UTF8 -> strCol[c] = s++;
       }
+    }
+    strCols = s;
+    if (s > 0) {
+      keyBytes = new byte[INITIAL_CAPACITY * 8 * s];
+      keySegment = MemorySegment.ofArray(keyBytes);
+      recStart = new int[INITIAL_CAPACITY + 1];
+      colEnd = new int[INITIAL_CAPACITY * s];
     }
   }
 
@@ -647,8 +659,10 @@ public final class GroupKeyTable {
   }
 
   private boolean utf8Equals(int c, int gid, VectorBuffers k, int row) {
-    int start = strOffsets[c][gid];
-    int len = strOffsets[c][gid + 1] - start;
+    int j = strCol[c];
+    int end = colEnd[gid * strCols + j];
+    int start = j == 0 ? recStart[gid] : colEnd[gid * strCols + j - 1];
+    int len = end - start;
     MemorySegment data;
     long rowStart;
     int rowLen;
@@ -671,7 +685,7 @@ public final class GroupKeyTable {
       // set-up (two liveness checks, a vectorized-mismatch call) than the comparison itself at
       // these lengths; TPC-H Q1 over plain (non-dictionary) Arrow strings spent a third of the
       // aggregate's time there.
-      byte[] store = strBytes[c];
+      byte[] store = keyBytes;
       for (int i = 0; i < len; i++) {
         if (store[start + i] != data.get(ValueLayout.JAVA_BYTE, rowStart + i)) {
           return false;
@@ -679,13 +693,16 @@ public final class GroupKeyTable {
       }
       return true;
     }
-    return MemorySegment.mismatch(strSegments[c], start, start + len, data, rowStart, rowStart + len) == -1;
+    return MemorySegment.mismatch(keySegment, start, end, data, rowStart, rowStart + len) == -1;
   }
 
   private int insert(VectorBuffers[] keys, int row, int hash, int pos) {
     int gid = size;
     ensureGroupCapacity(gid + 1);
     groupHashes[gid] = hash;
+    if (strCols > 0) {
+      recStart[gid] = keyUsed;
+    }
     for (int c = 0; c < types.length; c++) {
       VectorBuffers k = keys[c];
       boolean isNull = k.isNull(row);
@@ -702,6 +719,9 @@ public final class GroupKeyTable {
         case UTF8 -> appendUtf8(c, gid, isNull ? null : k, row);
       }
     }
+    if (strCols > 0) {
+      recStart[gid + 1] = keyUsed;
+    }
     slots[pos] = gid;
     size++;
     if (size * 10L > (long) slots.length * 7L) {
@@ -711,8 +731,7 @@ public final class GroupKeyTable {
   }
 
   private void appendUtf8(int c, int gid, VectorBuffers k, int row) {
-    int used = strUsed[c];
-    strOffsets[c][gid] = used;
+    int used = keyUsed;
     if (k != null) {
       MemorySegment data;
       long start;
@@ -728,15 +747,15 @@ public final class GroupKeyTable {
         len = k.offsets().get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) start;
         data = k.data();
       }
-      if (used + len > strBytes[c].length) {
-        strBytes[c] = Arrays.copyOf(strBytes[c], Math.max(strBytes[c].length * 2, used + len));
-        strSegments[c] = MemorySegment.ofArray(strBytes[c]);
+      if (used + len > keyBytes.length) {
+        keyBytes = Arrays.copyOf(keyBytes, Math.max(keyBytes.length * 2, used + len));
+        keySegment = MemorySegment.ofArray(keyBytes);
       }
-      MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, strBytes[c], used, len);
+      MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, keyBytes, used, len);
       used += len;
     }
-    strUsed[c] = used;
-    strOffsets[c][gid + 1] = used;
+    keyUsed = used;
+    colEnd[gid * strCols + strCol[c]] = used;
   }
 
   private void ensureGroupCapacity(int needed) {
@@ -753,8 +772,12 @@ public final class GroupKeyTable {
           longKeys[c] = Arrays.copyOf(longKeys[c], cap);
           hiKeys[c] = Arrays.copyOf(hiKeys[c], cap);
         }
-        case UTF8 -> strOffsets[c] = Arrays.copyOf(strOffsets[c], cap + 1);
+        case UTF8 -> { }
       }
+    }
+    if (strCols > 0) {
+      recStart = Arrays.copyOf(recStart, cap + 1);
+      colEnd = Arrays.copyOf(colEnd, cap * strCols);
     }
   }
 
@@ -770,8 +793,11 @@ public final class GroupKeyTable {
         case INT32, BOOL -> bytes += 4L * intKeys[c].length;
         case INT64, FLOAT64 -> bytes += 8L * longKeys[c].length;
         case DECIMAL128 -> bytes += 16L * longKeys[c].length;
-        case UTF8 -> bytes += 4L * strOffsets[c].length + (strBytes[c] == null ? 0L : strBytes[c].length);
+        case UTF8 -> { }
       }
+    }
+    if (strCols > 0) {
+      bytes += 4L * recStart.length + 4L * colEnd.length + keyBytes.length;
     }
     return bytes;
   }
@@ -819,13 +845,25 @@ public final class GroupKeyTable {
   }
 
   public String getString(int c, int gid) {
-    int start = strOffsets[c][gid];
-    return new String(strBytes[c], start, strOffsets[c][gid + 1] - start, java.nio.charset.StandardCharsets.UTF_8);
+    int start = strStart(c, gid);
+    return new String(keyBytes, start, colEnd[gid * strCols + strCol[c]] - start, java.nio.charset.StandardCharsets.UTF_8);
+  }
+
+  /** Start of the UTF8 value of column {@code c} in group {@code gid}'s record. */
+  private int strStart(int c, int gid) {
+    int j = strCol[c];
+    return j == 0 ? recStart[gid] : colEnd[gid * strCols + j - 1];
   }
 
   /** Total UTF-8 bytes of the keys in {@code [from, to)} of column {@code c}. */
   public long utf8Bytes(int c, int from, int to) {
-    return (long) strOffsets[c][to] - strOffsets[c][from];
+    int j = strCol[c];
+    long total = 0;
+    for (int gid = from; gid < to; gid++) {
+      int base = gid * strCols + j;
+      total += colEnd[base] - (j == 0 ? recStart[gid] : colEnd[base - 1]);
+    }
+    return total;
   }
 
   /**
@@ -851,11 +889,18 @@ public final class GroupKeyTable {
         }
       }
       case UTF8 -> {
-        int base = strOffsets[c][from];
-        for (int o = 0; o <= count; o++) {
-          offsets.set(VectorBuffers.LE_INT, (long) o << 2, strOffsets[c][from + o] - base);
+        int j = strCol[c];
+        int out = 0;
+        offsets.set(VectorBuffers.LE_INT, 0L, 0);
+        for (int o = 0; o < count; o++) {
+          int gid = from + o;
+          int base = gid * strCols + j;
+          int start = j == 0 ? recStart[gid] : colEnd[base - 1];
+          int len = colEnd[base] - start;
+          MemorySegment.copy(keyBytes, start, data, ValueLayout.JAVA_BYTE, out, len);
+          out += len;
+          offsets.set(VectorBuffers.LE_INT, (long) (o + 1) << 2, out);
         }
-        MemorySegment.copy(strBytes[c], base, data, ValueLayout.JAVA_BYTE, 0, strOffsets[c][to] - base);
       }
     }
   }
