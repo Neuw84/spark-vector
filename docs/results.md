@@ -924,6 +924,41 @@ executors' task time is 30-60% above Spark's for the same scans, and their profi
 threads parked in the S3 reader's `awaitData` for more than half of that time with a dozen samples
 in our kernels -- a reader-side question, recorded on #384.
 
+**Two full runs after the fixes, and what they taught about the measurement.** The suite again,
+vector-shuffle only, on the code through #400 (v4, on-heap reader batches) and through #404 (v5,
+`spark.sql.columnVector.offheap.enabled=true`), against the clean run's Spark results; 102
+queries ran in all three:
+
+| | Spark (run 3) | vector-shuffle, run 3 | vector-shuffle, v4 | vector-shuffle, v5 (off-heap) |
+|---|---:|---:|---:|---:|
+| total, 102 queries (s) | 3146.0 | 2925.4 | 2898.0 | 2931.2 |
+
+The fixes show where they were aimed (q67 178 -> 103, q8 40.8 -> 6.6, q22 14.6 -> 6.5), but the
+totals barely move, because a second set of queries went the other way: q9 85.6 -> 110, q88 133 ->
+147, q94 44 -> 60, q90 28 -> 38, q51 19 -> 30, q2 39 -> 50. Those are not in the code. At SF10 the
+code through #400 is equal or faster than the code before it on all six; on the cluster, the two
+images run in adjacent windows each with its own Spark leg put the *older* code behind on every
+one (q9 148 vs 109 s, q88 190 vs 149), while Spark itself moved 20-40% between the two windows
+(q88 153 -> 128 s in ten minutes). The scan-bound queries at 1 TB are read-bound, and a single
+iteration's time is the cluster's read throughput of that window as much as it is the engine's.
+The rule that follows, applied to every targeted run since: **a loss at 1 TB is only a loss
+against a Spark leg in the same window**; comparing with another day's baseline finds weather.
+
+Off-heap reader batches were expected to help (SF10: q8 1.46 -> 1.14 s) and cost 1.1% instead,
+the scan-heavy `store_sales` queries 5-10%. The reason was ours: the adapter's bulk validity and
+dictionary paths (#398) read the reader's arrays only from `OnHeapColumnVector`, so off-heap
+batches fell back to their per-row forms on every nullable or dictionary-encoded column (#407
+fixed it: the native arrays are copied out once and take the same paths; SF10 q88 4.42 -> 3.79 s,
+q28 4.08 -> 3.30). Paired 1 TB runs after it: q88 125.9 s against Spark's 125.6 in the same window
+(1.40x behind in v5), q28 1.17x, q13 1.16x. The merge join under a top-N that q47 and q57 left to
+Spark (#402: the second self-join's input is the first join, which has no stage of its own, and
+the logical product read as 10^16 bytes) converts now -- SF10 q47 17.96 -> 8.68 s -- and did not
+move the 1 TB time (22.3 vs 16.0), which places those two in the read-bound band with q18. The
+join probe now compares plain integer keys from heap arrays mirrored once per batch instead of
+through per-row segment reads (#409; q88 -9% at SF10); a per-column-chunk cache of the decoded
+dictionary was tried on the same profile and measured slower twice (#408) -- the cost there is the
+gather through the decoded table, not the decode.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
