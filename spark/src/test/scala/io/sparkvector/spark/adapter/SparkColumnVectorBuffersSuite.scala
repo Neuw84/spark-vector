@@ -98,6 +98,43 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
     }
   }
 
+  test("dictionary-encoded numeric vectors decode to plain values on both heap kinds (#398, #403)") {
+    // Ints, longs and doubles through decodeDictionaryInto's bulk path: the on-heap vector's own id
+    // and null arrays, or the off-heap vector's native ones copied out once. Values are compared
+    // with the vector's own decoding reads.
+    val dictionary = new org.apache.spark.sql.execution.vectorized.Dictionary {
+      override def decodeToInt(id: Int): Int = id * 11 - 7
+      override def decodeToLong(id: Int): Long = id.toLong * 9876543210L - 3
+      override def decodeToFloat(id: Int): Float = fail("not a float dictionary")
+      override def decodeToDouble(id: Int): Double = id / 4.0 + 0.5
+      override def decodeToBinary(id: Int): Array[Byte] = fail("not a binary dictionary")
+    }
+    for (dt <- Seq(IntegerType, LongType, DoubleType); offHeap <- Seq(false, true); withNulls <- Seq(true, false)) {
+      val cv: WritableColumnVector = if (offHeap) new OffHeapColumnVector(n, dt) else new OnHeapColumnVector(n, dt)
+      try {
+        cv.setDictionary(dictionary)
+        val ids = cv.reserveDictionaryIds(n)
+        (0 until n).foreach { i =>
+          if (withNulls && i % 7 == 3) cv.putNull(i) else ids.putInt(i, i % 5)
+        }
+        val arena = Arena.ofConfined()
+        try {
+          val vb = SparkColumnVectorBuffers.copy(cv, n, arena)
+          assert(!vb.isDictionaryEncoded, s"$dt offHeap=$offHeap")
+          assert(vb.hasNulls === withNulls, s"$dt offHeap=$offHeap")
+          (0 until n).foreach { i =>
+            assert(vb.isNull(i) === cv.isNullAt(i), s"$dt offHeap=$offHeap row $i")
+            if (!cv.isNullAt(i)) dt match {
+              case IntegerType => assert(vb.getInt(i) === cv.getInt(i), s"offHeap=$offHeap row $i")
+              case LongType => assert(vb.getLong(i) === cv.getLong(i), s"offHeap=$offHeap row $i")
+              case _ => assert(vb.getDouble(i) === cv.getDouble(i), s"offHeap=$offHeap row $i")
+            }
+          }
+        } finally arena.close()
+      } finally cv.close()
+    }
+  }
+
   test("unsupported Spark types are rejected") {
     val cv = new OnHeapColumnVector(4, FloatType)
     try {
