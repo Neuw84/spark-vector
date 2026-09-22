@@ -30,8 +30,12 @@ object PartitionedIpcFile {
 
   val Magic: Long = 0x53564950434631L // "SVIPCF1"
   val TypeKey = "sparkvector.type"
-  /** Rows a reader accumulates small plain batches up to before handing a batch to the operators (#411). */
-  val CoalesceRows: Int = 1024
+  /**
+   * Rows a reader accumulates small plain batches up to before handing a batch to the operators (#411).
+   * The system property `sparkvector.shuffle.reader.coalesceRows` overrides the default for a JVM
+   * (the transport benchmark sweeps it per fork; on a cluster, `spark.executor.extraJavaOptions`).
+   */
+  val CoalesceRows: Int = Integer.getInteger("sparkvector.shuffle.reader.coalesceRows", 1024)
 
   final case class Index(offsets: Array[Long], lengths: Array[Long], rows: Array[Long]) {
     def numPartitions: Int = offsets.length
