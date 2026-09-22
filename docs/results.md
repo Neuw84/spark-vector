@@ -988,6 +988,49 @@ for us as it is for Spark is one IPC stream per map output with the per-batch sh
 flag rather than a schema per batch -- a file-layout change, put to the owner on #411. Until it
 lands, 200-400 partitions is the right setting for 1 TB with this shuffle.
 
+**The partition count, taken apart on q18 (#416).** With the per-block machinery reduced, q18 at
+1000 partitions was still 26 s against Spark's 9.5, and each fix below was measured as a paired 1 TB
+leg in one cluster window plus an SF10 A/B at 200 partitions (the local baseline moves 15% between
+runs; anything smaller was confirmed twice). Staging the map output once and partitioning it at the
+flush instead of holding builders per partition (#425: 21.8 -> 19.2 s); strings plain under 256 rows
+and the reader coalescing small plain batches to 1024 rows (#426, -4%); the root cause of the
+partition count itself (#427): our filter kept `IsNotNull`-guarded attributes nullable where Spark's
+`FilterExec` does not, so the AQE-replanned broadcast join's required hash-relation mode differed
+from the exchange's, `ValidateRequirements` failed, and `CoalesceShufflePartitions` was silently
+dropped for the whole stage plan -- the two shuffled joins ran 1000 tasks over 1000-partition inputs
+(18.4 -> 15.2 s, executor time -19%, shuffle bytes -34%). Then the map side: the wide-decimal average
+merge state as two 64-bit limbs (#428), the parquet dictionary decoded once per column chunk instead
+of once per 4096-row batch (#429, SF10 executor -13%), wide decimal sum/avg buffers written as lanes
+instead of boxed values (#430, -13%, GC -37%), dictionary decimals of up to 18 digits through the bulk
+path (#431). Dropped after measuring flat: bulk-copy coalescing in the reader, hoisting the merge
+loop's lookups, and a flush that gathers once per column and cuts small partitions as slices.
+
+What was left -- the reduce stages at 1000 partitions 7x slower per task than the same tasks at the
+tail of the stage, Spark's 2.6x -- turned out to be warm-up. q18 run five times in one application:
+the first iteration's rollup partial-aggregate stage takes 310 s of task run time and the final
+aggregate 240, iterations two to five 52-68 and 38-57; Spark's own first iteration is 145 and 110, its
+warm ones 48-58 and 35-45. Cold, we spend 1100 s of executor time against Spark's 690; warm, 330-400
+against 270-340, and the wall clock is the same 5.6-5.8 s. A JFR over the first iteration's reduce
+stages shows why: 1650 deoptimisations, and 14-38% of the samples with an interpreted top frame in a
+handful of generic kernels (`gatherFixed`, `decodeDictionaryInto`, the string sort passes, the
+wide-decimal average) as each stage brought a new combination of buffer type, lane type and call
+shape. Every single-query 1 TB figure in this series is a cold first iteration (`run-matrix.sh`
+runs one iteration, no warm-up); the campaign's single application amortises the warm-up unevenly
+across its query list. None of the JVM's levers move it: the JDK 25 AOT cache maps but carries no
+AOT-linked classes and no method profiles because `--add-modules=jdk.incubator.vector` disables the
+archived boot layer; compile thresholds and speculation knobs were flat across six legs. Making the
+two hottest kernels branchless, each shape its own method (#432), halved their deoptimisations and
+took 4-6% off the cold stage at no warm cost; the rest is first execution itself, and whether the
+per-query legs should warm up first is a measurement decision, not an engine one.
+
+The same profiles put q67's remaining cost (#377) in its rollup stage's shuffle write -- 2400 of
+5100 s of task run time writing four string keys per grouping level, gathered per partition and
+dictionary-encoded per block from scratch -- and not in the group table's compares: binding the
+batch's key columns once per assign (#433, the build-side twin of #409's `ProbeKeys`) removed the
+per-row interface calls and their segment checks, 3.5x on a gather microbenchmark, and moved q67 2%.
+The strings the aggregate emits are the table's own distinct values; carrying them through the
+writer as dictionary ids is the change that fits.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
