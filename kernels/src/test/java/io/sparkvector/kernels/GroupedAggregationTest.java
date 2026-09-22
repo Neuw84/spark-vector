@@ -519,6 +519,51 @@ class GroupedAggregationTest {
   }
 
   @Test
+  void tinyDictionaryEncodedBatchesPastTheMemoGateGroupLikePlainOnes() {
+    try (Arena arena = Arena.ofConfined()) {
+      // Two 40-entry dictionaries: 41 x 41 = 1681 combinations, under the memo's absolute cap but over
+      // the per-batch gate for a 50-row batch (#416: a block at 1000 partitions), so these batches take the
+      // plain probe path; a 4096-row batch of the same shape takes the memo. Both must agree with a table
+      // fed the same rows as plain strings, batch after batch.
+      String[] a = new String[40];
+      String[] b = new String[40];
+      for (int i = 0; i < 40; i++) {
+        a[i] = "alpha-" + i;
+        b[i] = "beta-" + i;
+      }
+      GroupKeyTable viaDict = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.UTF8});
+      GroupKeyTable viaPlain = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.UTF8});
+      Random rnd = new Random(416);
+      int[] idsDict = new int[4096];
+      int[] idsPlain = new int[4096];
+      for (int batch = 0; batch < 6; batch++) {
+        int n = batch < 5 ? 50 : 4096;
+        String[] ka = new String[n];
+        String[] kb = new String[n];
+        for (int i = 0; i < n; i++) {
+          ka[i] = rnd.nextInt(9) == 0 ? null : a[rnd.nextInt(40)];
+          kb[i] = b[rnd.nextInt(40)];
+        }
+        VectorBuffers[] enc = {dictionaryEncoded(arena, ka), dictionaryEncoded(arena, kb)};
+        VectorBuffers[] plain = {ArrowLayout.ofStrings(arena, ka), ArrowLayout.ofStrings(arena, kb)};
+        int g1 = viaDict.assign(enc, n, idsDict);
+        int g2 = viaPlain.assign(plain, n, idsPlain);
+        assertEquals(g2, g1, "batch " + batch);
+        for (int i = 0; i < n; i++) {
+          assertEquals(idsPlain[i], idsDict[i], "batch " + batch + " row " + i);
+        }
+      }
+      for (int gid = 0; gid < viaDict.size(); gid++) {
+        assertEquals(viaPlain.isNull(0, gid), viaDict.isNull(0, gid));
+        if (!viaDict.isNull(0, gid)) {
+          assertEquals(viaPlain.getString(0, gid), viaDict.getString(0, gid));
+        }
+        assertEquals(viaPlain.getString(1, gid), viaDict.getString(1, gid));
+      }
+    }
+  }
+
+  @Test
   void aTableBuiltForRecordsKeepsStringKeysAsBytesFromTheStart() {
     try (Arena arena = Arena.ofConfined()) {
       GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.INT32}, false);
