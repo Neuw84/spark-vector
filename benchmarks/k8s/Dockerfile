@@ -92,8 +92,10 @@ RUN rm -rf /opt/java/openjdk
 COPY --from=jre /opt/jre /opt/java/openjdk
 RUN java -version && java --show-module-resolution -version 2>&1 | grep -q "^root jdk.incubator.vector"
 
-RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz" \
-      | tar -xz -C /opt \
+# (downloads.apache.org first: the archive host throttles to well under 100 KB/s, two hours for the tarball.)
+RUN (curl -fsSL -o /tmp/spark.tgz "https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz" \
+      || curl -fsSL -o /tmp/spark.tgz "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz") \
+    && tar -xzf /tmp/spark.tgz -C /opt && rm /tmp/spark.tgz \
     && mv "/opt/spark-${SPARK_VERSION}-bin-hadoop3" /opt/spark \
     && cp /opt/spark/kubernetes/dockerfiles/spark/entrypoint.sh /opt/entrypoint.sh \
     && cp /opt/spark/kubernetes/dockerfiles/spark/decom.sh /opt/decom.sh \
