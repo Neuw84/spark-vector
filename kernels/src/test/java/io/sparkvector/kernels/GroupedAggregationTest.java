@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -407,7 +409,7 @@ class GroupedAggregationTest {
       int[] ids3 = new int[shortKeys.length];
       assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, shortKeys)}, shortKeys.length, ids3));
       assertArrayEquals(ids, ids3);
-      assertTrue(table.encodesPlainStrings());
+      assertEquals(7 - 1, table.dictionarySize(0), "one distinct value per non-null group");
     }
   }
 
@@ -434,45 +436,62 @@ class GroupedAggregationTest {
       assertEquals(ids[1], ids2[1]);
       assertEquals(ids[0], ids2[2]);
       assertEquals(ids2[2], ids2[3]);
-      assertTrue(table.encodesPlainStrings());
+      assertEquals(4, table.dictionarySize(0));
 
-      // The join probe over the same table encodes with the same dictionary.
+      // The join probe over the same table maps through the same dictionary; a value the table has
+      // never seen matches nothing and adds nothing.
       int[] probe = new int[again.length];
       assertEquals(4, table.lookup(new VectorBuffers[] {ArrowLayout.ofStrings(arena, again)}, again.length, probe, null));
       assertArrayEquals(ids2, probe);
+      String[] unknown = {"UNITED KINGDOM", "FRANCE", "UNITED KINGDO", null};
+      int[] probe2 = new int[unknown.length];
+      assertEquals(2, table.lookup(new VectorBuffers[] {ArrowLayout.ofStrings(arena, unknown)}, unknown.length, probe2, null));
+      assertEquals(ids[0], probe2[0]);
+      assertEquals(-1, probe2[1]);
+      assertEquals(-1, probe2[2]);
+      assertEquals(ids[3], probe2[3], "the null group");
+      assertEquals(4, table.dictionarySize(0), "a probe inserts nothing");
     }
   }
 
   @Test
-  void highCardinalityPlainStringsStopBeingEncodedAboveTheCap() {
-    System.setProperty("sparkvector.agg.plainDictMaxEntries", "4");
+  void highCardinalityPlainStringsGroupByIdsAndEmitFromTheDictionary() {
     try (Arena arena = Arena.ofConfined()) {
-      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8});
-      String[] comments = new String[12];
-      for (int i = 0; i < comments.length; i++) {
-        comments[i] = "comment number " + (i % 6) + " of a high-cardinality column";
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.INT32});
+      int n = 3000;
+      String[] comments = new String[n];
+      int[] ints = new int[n];
+      for (int i = 0; i < n; i++) {
+        comments[i] = "comment number " + (i % 1000) + " of a high-cardinality column";
+        ints[i] = i % 3;
       }
-      int[] ids = new int[comments.length];
-      // Six distinct values exceed a cap of four inside the first batch: the batch is finished on
-      // the hashing path and must still produce exactly the six groups, with the repeats matched.
-      assertEquals(6, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, comments)}, comments.length, ids));
-      for (int i = 0; i < 6; i++) {
-        assertEquals(ids[i], ids[i + 6], "row " + i);
+      int[] ids = new int[n];
+      // A thousand distinct strings times three ints: well past any memo, every row hashes its ids.
+      assertEquals(n, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, comments), ArrowLayout.ofInts(arena, ints, null)}, n, ids));
+      assertEquals(1000, table.dictionarySize(0));
+      for (int i = 0; i < n; i++) {
         assertEquals(comments[i], table.getString(0, ids[i]));
+        assertEquals(ints[i], table.getInt(1, ids[i]));
       }
-      assertFalse(table.encodesPlainStrings(), "the table gave up on encoding this column");
+      // The same strings again, with other ints: new groups, no new dictionary entries.
+      int[] ints2 = new int[n];
+      Arrays.fill(ints2, 7);
+      int[] ids2 = new int[n];
+      assertEquals(n + 1000, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, comments), ArrowLayout.ofInts(arena, ints2, null)}, n, ids2));
+      assertEquals(1000, table.dictionarySize(0));
+      assertEquals(table.getStringId(0, ids[5]), table.getStringId(0, ids2[5]), "same string, same id");
 
-      // Later batches, including short values that would have been encoded, take the hashing path
-      // and keep grouping correctly.
-      String[] more = {"a", comments[3], "a", comments[0]};
-      int[] ids2 = new int[more.length];
-      assertEquals(7, table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, more)}, more.length, ids2));
-      assertEquals(ids2[0], ids2[2]);
-      assertEquals(ids[3], ids2[1]);
-      assertEquals(ids[0], ids2[3]);
-      assertFalse(table.encodesPlainStrings());
-    } finally {
-      System.clearProperty("sparkvector.agg.plainDictMaxEntries");
+      // Emitted as ids, the column reads back through the dictionary.
+      int from = 10, to = 30;
+      MemorySegment validity = arena.allocate(8);
+      MemorySegment out = arena.allocate(4L * (to - from));
+      table.writeKeyIds(0, from, to, validity, out);
+      VectorBuffers dict = table.dictionary(0);
+      for (int o = 0; o < to - from; o++) {
+        assertTrue(Bitmap.isSet(validity, o));
+        int id = out.get(VectorBuffers.LE_INT, (long) o << 2);
+        assertEquals(table.getString(0, from + o), new String(dict.getUtf8Bytes(id), java.nio.charset.StandardCharsets.UTF_8));
+      }
     }
   }
 

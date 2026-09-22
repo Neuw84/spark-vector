@@ -13,8 +13,11 @@ import java.util.BitSet;
  * batches of one task. Keys are stored column-wise (ints, longs/double bits, UTF-8 bytes) so they
  * can be written back out as columns when the partial aggregate is emitted.
  *
- * <p>Dictionary-encoded string keys are compared and stored by their bytes, so batches with
- * different dictionaries (or none) group consistently.
+ * <p>UTF8 keys are stored as int ids (#377): each UTF8 key column owns a dictionary of the distinct
+ * values seen by this table, a row's string is mapped to its id once per batch (once per entry of
+ * the input's dictionary when it has one), and from there the table hashes, compares and stores
+ * ints -- five string keys probe like five int keys. The dictionary is what the aggregate emits
+ * with the ids, and what the shuffle writer stages, so a string is hashed once in the whole stage.
  */
 public final class GroupKeyTable {
 
@@ -29,24 +32,14 @@ public final class GroupKeyTable {
   private final int[][] intKeys; // INT32 and BOOL (0/1)
   private final long[][] longKeys; // INT64 and FLOAT64 (raw bits); the low limb of DECIMAL128
   private final long[][] hiKeys; // the high limb of DECIMAL128
-  /**
-   * UTF8 keys as one record per group (#377): a group's string values lie contiguously in
-   * {@code keyBytes} in column order, so a probe that must compare five string keys reads one
-   * record start, one row of column ends and one stretch of bytes -- three cache lines -- where
-   * a per-column store cost two misses per column. Emission gathers per group instead of copying
-   * a column's range in one piece.
-   */
-  private byte[] keyBytes;
-  private MemorySegment keySegment; // heap view of keyBytes, refreshed on growth
-  private int keyUsed; // bytes used
-  private int[] recStart; // size + 1: start of each group's record in keyBytes
-  private int[] colEnd; // size * strCols: end of each UTF8 value in keyBytes, records in column order
+  private final int[][] strIds; // UTF8: the id of the group's value in dicts[c]
+  private final StringDictionary[] dicts; // UTF8: the column's distinct values
   private final int strCols; // number of UTF8 columns
   private final int[] strCol; // column -> index among the UTF8 columns, or -1
   private final BitSet[] nulls;
 
   private int[] hashScratch = new int[0]; // row hashes, or combined indices on the memoised path
-  private byte[] emitScratch = new byte[0]; // a column's values gathered from the records before one bulk copy out
+  private byte[] emitScratch = new byte[0]; // a column's values gathered from the dictionary before one bulk copy out
   private int[] idxScratch = new int[0];
   private int[] memo = new int[0];
 
@@ -56,53 +49,18 @@ public final class GroupKeyTable {
    */
   private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
 
-  /** UTF8 keys up to this length are compared byte by byte rather than with MemorySegment.mismatch. */
-  private static final int SHORT_KEY_BYTES = 16;
-
-  /**
-   * Plain (non-dictionary) UTF8 keys are dictionary-encoded on the fly, against a per-column
-   * dictionary kept across batches, so the memoised path above applies to them too and the hashing
-   * path compares dictionary indices rather than bytes. Comet's native scan hands over plain Arrow
-   * strings for columns Spark's reader would keep dictionary encoded; without this, TPC-H Q1 over
-   * that scan hashed and compared every row's group key. Values of up to this many bytes are keyed
-   * in the dictionary by their packed bytes; longer values by a 64-bit hash plus a byte compare.
-   */
-  private static final int PACKED_KEY_BYTES = 8;
-
-  /**
-   * Once a plain-string dictionary would exceed this many distinct values the table stops encoding
-   * plain strings and hashes and compares every row instead. The dictionary pays off through the
-   * memoised path, whose per-batch memo reset and miss rate grow with the number of combinations:
-   * measured on 4096-row batches it wins up to a few hundred distinct values and loses by 2x at
-   * 4000, for 8-byte and 24-byte keys alike, so the default sits at the crossover. Read once per
-   * table from the {@code sparkvector.agg.plainDictMaxEntries} system property.
-   */
-  static final int DEFAULT_PLAIN_DICT_MAX_ENTRIES = 512;
-
-  private final int plainDictMaxEntries =
-      Integer.getInteger("sparkvector.agg.plainDictMaxEntries", DEFAULT_PLAIN_DICT_MAX_ENTRIES);
-  private boolean plainDictOverflowed;
-
-  private PlainStringDict[] shortDicts;
-  private VectorBuffers[] encodedKeys;
-  private int[] offsetScratch = new int[0];
-  private byte[] byteScratch = new byte[0];
-  private int[][] indexScratch;
-
   public GroupKeyTable(VecType[] types) {
     this(types, true);
   }
 
   /**
-   * @param encodePlainStrings whether plain UTF8 keys are dictionary-encoded on the fly (see
-   *     {@link #plainDictMaxEntries}). Group-by keys want it; a hash join's build side, whose keys
-   *     are mostly distinct, does not, and a table built without it is immutable once
-   *     {@link #assign} is done, so {@link #lookup(VectorBuffers[], int, int[], MemorySegment,
-   *     int[])} may run concurrently from several threads.
+   * @param encodePlainStrings kept for the callers' sake; every UTF8 key is stored by id now, and a
+   *     table is immutable once {@link #assign} is done (a probe inserts nothing, not even into the
+   *     dictionaries), so {@link #lookup(VectorBuffers[], int, int[], MemorySegment, int[])} may run
+   *     concurrently from several threads whichever way it was built.
    */
   public GroupKeyTable(VecType[] types, boolean encodePlainStrings) {
     this.types = types.clone();
-    this.plainDictOverflowed = !encodePlainStrings;
     this.slots = new int[INITIAL_CAPACITY * 2];
     Arrays.fill(slots, -1);
     this.mask = slots.length - 1;
@@ -110,6 +68,8 @@ public final class GroupKeyTable {
     intKeys = new int[k][];
     longKeys = new long[k][];
     hiKeys = new long[k][];
+    strIds = new int[k][];
+    dicts = new StringDictionary[k];
     strCol = new int[k];
     nulls = new BitSet[k];
     int s = 0;
@@ -123,16 +83,14 @@ public final class GroupKeyTable {
           longKeys[c] = new long[INITIAL_CAPACITY];
           hiKeys[c] = new long[INITIAL_CAPACITY];
         }
-        case UTF8 -> strCol[c] = s++;
+        case UTF8 -> {
+          strCol[c] = s++;
+          strIds[c] = new int[INITIAL_CAPACITY];
+          dicts[c] = new StringDictionary();
+        }
       }
     }
     strCols = s;
-    if (s > 0) {
-      keyBytes = new byte[INITIAL_CAPACITY * 8 * s];
-      keySegment = MemorySegment.ofArray(keyBytes);
-      recStart = new int[INITIAL_CAPACITY + 1];
-      colEnd = new int[INITIAL_CAPACITY * s];
-    }
   }
 
   public int size() {
@@ -145,11 +103,6 @@ public final class GroupKeyTable {
 
   public VecType type(int c) {
     return types[c];
-  }
-
-  /** Whether plain UTF8 keys are still dictionary-encoded on the fly (false once a column overflowed the cap). */
-  boolean encodesPlainStrings() {
-    return !plainDictOverflowed;
   }
 
   /**
@@ -166,13 +119,13 @@ public final class GroupKeyTable {
    * group.
    */
   public int assign(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection) {
-    VectorBuffers[] encoded = encodeShortStrings(keys, n);
-    if (encoded != null) {
-      keys = encoded;
+    IdScratch ids = toIds(keys, n, true);
+    if (ids != null) {
+      keys = ids.keys;
     }
-    long combinations = dictionaryCombinations(keys);
+    long combinations = dictionaryCombinations();
     if (combinations > 0 && combinations <= MEMO_MAX_COMBINATIONS) {
-      return assignMemoised(keys, n, outIds, (int) combinations, selection);
+      return assignMemoised(keys, ids, n, outIds, (int) combinations, selection);
     }
     if (hashScratch.length < n) {
       hashScratch = new int[Math.max(n, hashScratch.length * 2)];
@@ -182,7 +135,7 @@ public final class GroupKeyTable {
     for (VectorBuffers key : keys) {
       HashKernels.mixColumn(key, hashes);
     }
-    Bound b = Bound.of(keys);
+    Bound b = Bound.of(keys, ids);
     if (selection == null) {
       for (int i = 0; i < n; i++) {
         outIds[i] = lookupOrInsert(b, i, HashKernels.finish(hashes[i]));
@@ -220,16 +173,16 @@ public final class GroupKeyTable {
    * build table) are safe as long as nobody assigns to it any more.
    */
   public int lookup(VectorBuffers[] keys, int n, int[] outIds, MemorySegment selection, int[] hashes) {
-    VectorBuffers[] encoded = encodeShortStrings(keys, n);
-    if (encoded != null) {
-      keys = encoded;
+    IdScratch ids = toIds(keys, n, false);
+    if (ids != null) {
+      keys = ids.keys;
     }
     HashKernels.init(hashes, n);
     for (VectorBuffers key : keys) {
       HashKernels.mixColumn(key, hashes);
     }
     ProbeKeys heap = ProbeKeys.of(keys, n, types);
-    Bound b = heap != null ? null : Bound.of(keys);
+    Bound b = heap != null ? null : Bound.of(keys, ids);
     int matched = 0;
     if (selection == null) {
       for (int i = 0; i < n; i++) {
@@ -283,14 +236,11 @@ public final class GroupKeyTable {
     MemorySegment[] data = new MemorySegment[0];
     MemorySegment[] offsets = new MemorySegment[0];
     MemorySegment[] validity = new MemorySegment[0];
-    boolean[] dictEncoded = new boolean[0];
-    MemorySegment[] dictData = new MemorySegment[0];
-    MemorySegment[] dictOffsets = new MemorySegment[0];
-    MemorySegment[] dictValidity = new MemorySegment[0];
+    int[][] ids = new int[0][]; // UTF8 columns: the rows' dictionary ids as a heap array
 
     private static final ThreadLocal<Bound> SCRATCH = ThreadLocal.withInitial(Bound::new);
 
-    static Bound of(VectorBuffers[] keys) {
+    static Bound of(VectorBuffers[] keys, IdScratch idScratch) {
       Bound b = SCRATCH.get();
       int n = keys.length;
       b.count = n;
@@ -299,10 +249,7 @@ public final class GroupKeyTable {
         b.data = new MemorySegment[n];
         b.offsets = new MemorySegment[n];
         b.validity = new MemorySegment[n];
-        b.dictEncoded = new boolean[n];
-        b.dictData = new MemorySegment[n];
-        b.dictOffsets = new MemorySegment[n];
-        b.dictValidity = new MemorySegment[n];
+        b.ids = new int[n][];
       }
       for (int c = 0; c < n; c++) {
         VectorBuffers k = keys[c];
@@ -310,14 +257,13 @@ public final class GroupKeyTable {
         b.data[c] = k.data();
         b.offsets[c] = k.offsets();
         b.validity[c] = k.validity();
-        boolean dict = k.isDictionaryEncoded();
-        b.dictEncoded[c] = dict;
-        VectorBuffers d = dict ? k.dictionary() : null;
-        b.dictData[c] = d == null ? null : d.data();
-        b.dictOffsets[c] = d == null ? null : d.offsets();
-        b.dictValidity[c] = d == null ? null : d.validity();
+        b.ids[c] = idScratch == null ? null : idScratch.ids[c];
       }
       return b;
+    }
+
+    int getId(int c, int row) {
+      return ids[c][row];
     }
 
     boolean isNull(int c, int row) {
@@ -341,10 +287,6 @@ public final class GroupKeyTable {
       return Bitmap.isSet(data[c], row);
     }
 
-    boolean dictIsNull(int c, int idx) {
-      MemorySegment v = dictValidity[c];
-      return v != null && !Bitmap.isSet(v, idx);
-    }
   }
 
   private static final class ProbeKeys {
@@ -455,17 +397,17 @@ public final class GroupKeyTable {
     }
   }
 
-  /** Product of (dictionary size + 1) over the keys, or 0 if any key is not dictionary encoded. */
-  private static long dictionaryCombinations(VectorBuffers[] keys) {
-    if (keys.length == 0) {
+  /**
+   * Product of (dictionary size + 1) over the UTF8 keys after the batch's ids were assigned, or 0
+   * if a key is not UTF8 (the memoised path needs every key to have a small dictionary).
+   */
+  private long dictionaryCombinations() {
+    if (types.length == 0 || strCols != types.length) {
       return 0;
     }
     long combinations = 1;
-    for (VectorBuffers k : keys) {
-      if (!k.isDictionaryEncoded()) {
-        return 0;
-      }
-      combinations *= k.dictionary().length() + 1L;
+    for (StringDictionary d : dicts) {
+      combinations *= d.size() + 1L;
       if (combinations > MEMO_MAX_COMBINATIONS) {
         return combinations;
       }
@@ -474,242 +416,158 @@ public final class GroupKeyTable {
   }
 
   /**
-   * Returns {@code keys} with every plain UTF8 column replaced by a dictionary-encoded view over a
-   * {@link PlainStringDict}, or {@code null} when that does not apply: no plain UTF8 key, a key of
-   * another type (the memoised path needs every key dictionary encoded), or a dictionary that has
-   * grown past {@link #plainDictMaxEntries} -- from then on every batch takes the hashing path.
+   * Per-thread scratch of {@link #toIds}: the key columns with every UTF8 column replaced by an
+   * INT32 column of dictionary ids (a heap array, also kept as such for {@link Bound}), plus the
+   * per-column maps from an input dictionary's entries to ids. Per thread because a broadcast
+   * join's tasks probe one table concurrently.
    */
-  private VectorBuffers[] encodeShortStrings(VectorBuffers[] keys, int n) {
-    if (plainDictOverflowed) {
-      return null;
+  private static final class IdScratch {
+    VectorBuffers[] keys = new VectorBuffers[0];
+    int[][] ids = new int[0][];
+    int[][] entryIds = new int[0][]; // per column: input dictionary entry -> id
+    int[][] entryGen = new int[0][]; // per column: the generation entryIds[c][e] was computed in
+    int[] gen = new int[0];
+    VectorBuffers[] lastDict = new VectorBuffers[0];
+    int[] offs = new int[0];
+    byte[] bytes = new byte[0];
+    final StringDictionary.Scratch entryBytes = new StringDictionary.Scratch();
+
+    private static final ThreadLocal<IdScratch> SCRATCH = ThreadLocal.withInitial(IdScratch::new);
+
+    static IdScratch get(int k) {
+      IdScratch s = SCRATCH.get();
+      if (s.keys.length != k) {
+        s.keys = new VectorBuffers[k]; // exactly k: callers iterate it as the key columns
+      }
+      if (s.ids.length < k) {
+        s.ids = Arrays.copyOf(s.ids, k);
+        s.entryIds = Arrays.copyOf(s.entryIds, k);
+        s.entryGen = Arrays.copyOf(s.entryGen, k);
+        s.gen = Arrays.copyOf(s.gen, k);
+        s.lastDict = Arrays.copyOf(s.lastDict, k);
+      }
+      return s;
     }
-    boolean any = false;
-    for (VectorBuffers k : keys) {
-      if (k.isDictionaryEncoded()) {
-        continue;
-      }
-      if (k.type() != VecType.UTF8) {
-        return null;
-      }
-      any = true;
-    }
-    if (!any || n == 0) {
-      return null;
-    }
-    int k = keys.length;
-    if (shortDicts == null) {
-      shortDicts = new PlainStringDict[k];
-      encodedKeys = new VectorBuffers[k];
-      indexScratch = new int[k][];
-    }
-    if (offsetScratch.length < n + 1) {
-      offsetScratch = new int[Math.max(n + 1, offsetScratch.length * 2)];
-    }
-    int[] offs = offsetScratch;
-    for (int c = 0; c < k; c++) {
-      VectorBuffers key = keys[c];
-      if (key.isDictionaryEncoded()) {
-        encodedKeys[c] = key;
-        continue;
-      }
-      MemorySegment.copy(key.offsets(), VectorBuffers.LE_INT, 0, offs, 0, n + 1);
-      int first = offs[0];
-      int total = offs[n] - first;
-      if (byteScratch.length < total) {
-        byteScratch = new byte[Math.max(total, byteScratch.length * 2)];
-      }
-      byte[] bytes = byteScratch;
-      MemorySegment.copy(key.data(), ValueLayout.JAVA_BYTE, first, bytes, 0, total);
-      if (shortDicts[c] == null) {
-        shortDicts[c] = new PlainStringDict();
-      }
-      PlainStringDict dict = shortDicts[c];
-      if (indexScratch[c] == null || indexScratch[c].length < n) {
-        indexScratch[c] = new int[Math.max(n, indexScratch[c] == null ? 0 : indexScratch[c].length * 2)];
-      }
-      int[] idx = indexScratch[c];
-      MemorySegment validity = key.validity();
-      for (int i = 0; i < n; i++) {
-        int start = offs[i] - first;
-        int len = offs[i + 1] - offs[i];
-        if (validity != null && !Bitmap.isSet(validity, i)) {
-          idx[i] = 0;
-          continue;
-        }
-        idx[i] = dict.indexOf(PlainStringDict.fingerprint(bytes, start, len), len, bytes, start);
-        if (dict.size() > plainDictMaxEntries) {
-          // Too many distinct values for the memo to pay: hash and compare from now on. The groups
-          // already assigned are unaffected -- the dictionary only ever named this batch's rows,
-          // never the table's keys.
-          plainDictOverflowed = true;
-          return null;
-        }
-      }
-      encodedKeys[c] = SegmentVectorBuffers.dictionaryUtf8(n, validity, MemorySegment.ofArray(idx), dict.view());
-    }
-    return encodedKeys;
   }
 
   /**
-   * Distinct plain strings of any length, stored contiguously so the dictionary can be read as a
-   * UTF8 {@link VectorBuffers}. Each entry is keyed by its length and a 64-bit fingerprint: the
-   * packed bytes themselves for values of up to {@link #PACKED_KEY_BYTES} bytes (so equality is a
-   * long compare), a hash of the bytes for longer ones (confirmed by a byte compare on a hit).
+   * Maps every UTF8 key column of the batch to ids in the column's dictionary: a plain column row
+   * by row (one fingerprint and probe per row), a dictionary-encoded column entry by entry (one
+   * probe per distinct entry the batch uses, remembered while the same dictionary keeps arriving)
+   * and then a gather. With {@code insert} false (a join probe) an unknown value gets id -1, which
+   * no group carries. Returns null when the table has no UTF8 key or the batch is empty.
    */
-  static final class PlainStringDict {
-    private long[] bits = new long[64];
-    private int[] lens = new int[64];
-    private int[] ids = new int[64];
-    private int mask = 63;
-    private int size;
-    private byte[] data = new byte[256];
-    private int used;
-    private int[] offsets = new int[33];
-    private MemorySegment dataSegment = MemorySegment.ofArray(data);
-    private MemorySegment offsetSegment = MemorySegment.ofArray(offsets);
-
-    int size() {
-      return size;
+  private IdScratch toIds(VectorBuffers[] keys, int n, boolean insert) {
+    if (strCols == 0 || n == 0) {
+      return null;
     }
-
-    /** Direct index for single-byte values (TPC-H's flag columns), bypassing the probe. */
-    private final int[] singleByte = new int[256];
-
-    PlainStringDict() {
-      Arrays.fill(ids, -1);
-      Arrays.fill(singleByte, -1);
+    int k = keys.length;
+    IdScratch s = IdScratch.get(k);
+    System.arraycopy(keys, 0, s.keys, 0, k);
+    if (s.offs.length < n + 1) {
+      s.offs = new int[Math.max(n + 1, s.offs.length * 2)];
     }
-
-    private static final VarHandle LONG_LE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
-
-    /**
-     * The 64-bit key of a value: its bytes packed little-endian when they fit in a long, otherwise
-     * a multiply-xorshift mix over the bytes taken eight at a time (a collision between two long
-     * values is caught by the byte compare).
-     */
-    static long fingerprint(byte[] src, int from, int len) {
-      if (len <= PACKED_KEY_BYTES) {
-        long packed = 0L;
-        for (int b = len - 1; b >= 0; b--) {
-          packed = (packed << 8) | (src[from + b] & 0xFFL);
+    for (int c = 0; c < k; c++) {
+      if (types[c] != VecType.UTF8) {
+        s.ids[c] = null;
+        continue;
+      }
+      VectorBuffers key = keys[c];
+      StringDictionary dict = dicts[c];
+      int[] ids = s.ids[c];
+      if (ids == null || ids.length < n) {
+        ids = new int[Math.max(n, ids == null ? 4096 : ids.length * 2)];
+        s.ids[c] = ids;
+      }
+      MemorySegment validity = key.validity();
+      if (key.isDictionaryEncoded()) {
+        VectorBuffers d = key.dictionary();
+        int m = d.length();
+        int[] entryIds = s.entryIds[c];
+        int[] entryGen = s.entryGen[c];
+        if (entryIds == null || entryIds.length < m) {
+          entryIds = new int[Math.max(m, entryIds == null ? 256 : entryIds.length * 2)];
+          entryGen = new int[entryIds.length];
+          s.entryIds[c] = entryIds;
+          s.entryGen[c] = entryGen;
+          s.gen[c] = 0;
+          s.lastDict[c] = null;
         }
-        return packed;
-      }
-      long h = 0x9E3779B97F4A7C15L ^ len;
-      int end = from + len;
-      int p = from;
-      for (; p + 8 <= end; p += 8) {
-        h = (h ^ (long) LONG_LE.get(src, p)) * 0xBF58476D1CE4E5B9L;
-        h ^= h >>> 31;
-      }
-      if (p < end) {
-        long tail = 0L;
-        for (int b = end - 1; b >= p; b--) {
-          tail = (tail << 8) | (src[b] & 0xFFL);
+        // A new dictionary object invalidates the entry map by bumping the generation: entries are
+        // mapped when first used, so a batch costs its rows plus its distinct entries, never the
+        // whole dictionary. (Ids only ever grow, so a map of a dictionary that keeps arriving stays right.)
+        if (s.lastDict[c] != d) {
+          s.lastDict[c] = d;
+          if (++s.gen[c] == 0) {
+            Arrays.fill(entryGen, 0);
+            s.gen[c] = 1;
+          }
         }
-        h = (h ^ tail) * 0x94D049BB133111EBL;
-        h ^= h >>> 29;
-      }
-      return h;
-    }
-
-    int indexOf(long packed, int len, byte[] src, int from) {
-      if (len == 1) {
-        int b = (int) packed; // 0..255
-        int id = singleByte[b];
-        if (id < 0) {
-          id = probe(packed, len, src, from);
-          singleByte[b] = id;
+        int gen = s.gen[c];
+        MemorySegment dOff = d.offsets();
+        MemorySegment dData = d.data();
+        MemorySegment dValidity = d.validity();
+        MemorySegment idx = key.data();
+        for (int i = 0; i < n; i++) {
+          if (validity != null && !Bitmap.isSet(validity, i)) {
+            ids[i] = 0;
+            continue;
+          }
+          int e = idx.get(VectorBuffers.LE_INT, (long) i << 2);
+          if (entryGen[e] != gen) {
+            int id;
+            if (dValidity != null && !Bitmap.isSet(dValidity, e)) {
+              id = 0; // a null entry: the row is null through the dictionary; not a key value
+            } else {
+              int start = dOff.get(VectorBuffers.LE_INT, (long) e << 2);
+              int len = dOff.get(VectorBuffers.LE_INT, (long) (e + 1) << 2) - start;
+              id = dict.indexOf(dData, start, len, insert, s.entryBytes);
+            }
+            entryIds[e] = id;
+            entryGen[e] = gen;
+          }
+          ids[i] = entryIds[e];
         }
-        return id;
-      }
-      return probe(packed, len, src, from);
-    }
-
-    private int probe(long packed, int len, byte[] src, int from) {
-      int pos = HashKernels.finish(HashKernels.mix32(HashKernels.fold(packed), len)) & mask;
-      while (true) {
-        int id = ids[pos];
-        if (id < 0) {
-          return insert(packed, len, src, from, pos);
+      } else {
+        int[] offs = s.offs;
+        MemorySegment.copy(key.offsets(), VectorBuffers.LE_INT, 0, offs, 0, n + 1);
+        int first = offs[0];
+        int total = offs[n] - first;
+        if (s.bytes.length < total) {
+          s.bytes = new byte[Math.max(total, s.bytes.length * 2)];
         }
-        if (bits[id] == packed && lens[id] == len && (len <= PACKED_KEY_BYTES || sameBytes(id, src, from, len))) {
-          return id;
+        byte[] bytes = s.bytes;
+        MemorySegment.copy(key.data(), ValueLayout.JAVA_BYTE, first, bytes, 0, total);
+        for (int i = 0; i < n; i++) {
+          if (validity != null && !Bitmap.isSet(validity, i)) {
+            ids[i] = 0;
+            continue;
+          }
+          int start = offs[i] - first;
+          int len = offs[i + 1] - offs[i];
+          ids[i] = dict.indexOf(StringDictionary.fingerprint(bytes, start, len), len, bytes, start, insert);
         }
-        pos = (pos + 1) & mask;
       }
+      s.keys[c] = SegmentVectorBuffers.fixedWidth(VecType.INT32, n, validity, MemorySegment.ofArray(ids));
     }
-
-    private boolean sameBytes(int id, byte[] src, int from, int len) {
-      int off = offsets[id];
-      return Arrays.equals(data, off, off + len, src, from, from + len);
-    }
-
-    private int insert(long packed, int len, byte[] src, int from, int pos) {
-      int id = size;
-      if (id == bits.length) {
-        bits = Arrays.copyOf(bits, id * 2);
-        lens = Arrays.copyOf(lens, id * 2);
-      }
-      if (id + 1 >= offsets.length) {
-        offsets = Arrays.copyOf(offsets, offsets.length * 2);
-        offsetSegment = MemorySegment.ofArray(offsets);
-      }
-      if (used + len > data.length) {
-        data = Arrays.copyOf(data, Math.max(data.length * 2, used + len));
-        dataSegment = MemorySegment.ofArray(data);
-      }
-      bits[id] = packed;
-      lens[id] = len;
-      System.arraycopy(src, from, data, used, len);
-      used += len;
-      offsets[id + 1] = used;
-      ids[pos] = id;
-      size++;
-      if (size * 2 > ids.length) {
-        rehash();
-      }
-      return id;
-    }
-
-    private void rehash() {
-      int[] newIds = new int[ids.length * 2];
-      Arrays.fill(newIds, -1);
-      int newMask = newIds.length - 1;
-      for (int id = 0; id < size; id++) {
-        int pos = HashKernels.finish(HashKernels.mix32(HashKernels.fold(bits[id]), lens[id])) & newMask;
-        while (newIds[pos] >= 0) {
-          pos = (pos + 1) & newMask;
-        }
-        newIds[pos] = id;
-      }
-      ids = newIds;
-      mask = newMask;
-    }
-
-    /** The dictionary as a UTF8 column; valid until the next {@link #indexOf} that inserts. */
-    VectorBuffers view() {
-      return SegmentVectorBuffers.utf8(size, null, offsetSegment, dataSegment);
-    }
+    return s;
   }
 
-  private int assignMemoised(VectorBuffers[] keys, int n, int[] outIds, int combinations, MemorySegment selection) {
-    Bound b = Bound.of(keys);
+  private int assignMemoised(VectorBuffers[] keys, IdScratch ids, int n, int[] outIds, int combinations, MemorySegment selection) {
+    Bound b = Bound.of(keys, ids);
     if (memo.length < combinations) {
       memo = new int[Math.max(combinations, memo.length * 2)];
     }
     Arrays.fill(memo, 0, combinations, -1);
     int k = keys.length;
-    // Fold the per-column dictionary indices (0 = null, i + 1 otherwise) into one combined index
-    // per row, column by column, so the hot loop runs over plain int arrays.
+    // Fold the per-column ids (0 = null, id + 1 otherwise) into one combined index per row, column
+    // by column, so the hot loop runs over plain int arrays.
     int[] combined = combinedScratch(n);
     Arrays.fill(combined, 0, n, 0);
-    int[] idx = idxScratch(n);
     for (int c = 0; c < k; c++) {
-      VectorBuffers key = keys[c];
-      int size = key.dictionary().length() + 1;
-      MemorySegment.copy(key.data(), VectorBuffers.LE_INT, 0, idx, 0, n);
-      MemorySegment validity = key.validity();
+      int size = dicts[c].size() + 1;
+      int[] idx = ids.ids[c];
+      MemorySegment validity = keys[c].validity();
       if (validity == null) {
         for (int i = 0; i < n; i++) {
           combined[i] = combined[i] * size + idx[i] + 1;
@@ -725,7 +583,7 @@ public final class GroupKeyTable {
       for (int i = 0; i < n; i++) {
         int gid = memo[combined[i]];
         if (gid < 0) {
-          gid = lookupOrInsert(b, i, dictionaryRowHash(b, i));
+          gid = lookupOrInsert(b, i, idRowHash(b, i));
           memo[combined[i]] = gid;
         }
         outIds[i] = gid;
@@ -739,7 +597,7 @@ public final class GroupKeyTable {
           bits &= bits - 1;
           int gid = memo[combined[i]];
           if (gid < 0) {
-            gid = lookupOrInsert(b, i, dictionaryRowHash(b, i));
+            gid = lookupOrInsert(b, i, idRowHash(b, i));
             memo[combined[i]] = gid;
           }
           outIds[i] = gid;
@@ -756,32 +614,11 @@ public final class GroupKeyTable {
     return hashScratch;
   }
 
-  private int[] idxScratch(int n) {
-    if (idxScratch.length < n) {
-      idxScratch = new int[Math.max(n, idxScratch.length * 2)];
-    }
-    return idxScratch;
-  }
-
-  /** Same hash {@link HashKernels#mixColumn} produces for the row, computed for one row. */
-  private static int dictionaryRowHash(Bound keys, int row) {
+  /** Same hash {@link HashKernels#mixColumn} produces for a row of INT32 id columns, computed for one row. */
+  private static int idRowHash(Bound keys, int row) {
     int h = HashKernels.SEED;
     for (int c = 0; c < keys.count; c++) {
-      int v;
-      if (keys.isNull(c, row)) {
-        v = HashKernels.NULL_MARK;
-      } else {
-        int idx = keys.getInt(c, row);
-        if (keys.dictIsNull(c, idx)) {
-          v = HashKernels.NULL_MARK;
-        } else {
-          MemorySegment off = keys.dictOffsets[c];
-          int start = off.get(VectorBuffers.LE_INT, (long) idx << 2);
-          int len = off.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - start;
-          v = HashKernels.hashBytes(keys.dictData[c], start, len);
-        }
-      }
-      h = HashKernels.mix32(h, v);
+      h = HashKernels.mix32(h, keys.isNull(c, row) ? HashKernels.NULL_MARK : keys.getId(c, row));
     }
     return HashKernels.finish(h);
   }
@@ -837,7 +674,7 @@ public final class GroupKeyTable {
           }
         }
         case UTF8 -> {
-          if (!utf8Equals(c, gid, keys, row)) {
+          if (strIds[c][gid] != keys.getId(c, row)) {
             return false;
           }
         }
@@ -846,52 +683,10 @@ public final class GroupKeyTable {
     return true;
   }
 
-  private boolean utf8Equals(int c, int gid, Bound keys, int row) {
-    int j = strCol[c];
-    int end = colEnd[gid * strCols + j];
-    int start = j == 0 ? recStart[gid] : colEnd[gid * strCols + j - 1];
-    int len = end - start;
-    MemorySegment data;
-    long rowStart;
-    int rowLen;
-    if (keys.dictEncoded[c]) {
-      int idx = keys.getInt(c, row);
-      MemorySegment off = keys.dictOffsets[c];
-      rowStart = off.get(VectorBuffers.LE_INT, (long) idx << 2);
-      rowLen = off.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) rowStart;
-      data = keys.dictData[c];
-    } else {
-      MemorySegment off = keys.offsets[c];
-      rowStart = off.get(VectorBuffers.LE_INT, (long) row << 2);
-      rowLen = off.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) rowStart;
-      data = keys.data[c];
-    }
-    if (rowLen != len) {
-      return false;
-    }
-    if (len <= SHORT_KEY_BYTES) {
-      // Group-by strings are mostly codes of a few bytes. MemorySegment.mismatch costs more in
-      // set-up (two liveness checks, a vectorized-mismatch call) than the comparison itself at
-      // these lengths; TPC-H Q1 over plain (non-dictionary) Arrow strings spent a third of the
-      // aggregate's time there.
-      byte[] store = keyBytes;
-      for (int i = 0; i < len; i++) {
-        if (store[start + i] != data.get(ValueLayout.JAVA_BYTE, rowStart + i)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    return MemorySegment.mismatch(keySegment, start, end, data, rowStart, rowStart + len) == -1;
-  }
-
   private int insert(Bound keys, int row, int hash, int pos) {
     int gid = size;
     ensureGroupCapacity(gid + 1);
     groupHashes[gid] = hash;
-    if (strCols > 0) {
-      recStart[gid] = keyUsed;
-    }
     for (int c = 0; c < types.length; c++) {
       boolean isNull = keys.isNull(c, row);
       nulls[c].set(gid, isNull);
@@ -904,11 +699,8 @@ public final class GroupKeyTable {
           longKeys[c][gid] = isNull ? 0L : Decimal128.lo(keys.data[c], row);
           hiKeys[c][gid] = isNull ? 0L : Decimal128.hi(keys.data[c], row);
         }
-        case UTF8 -> appendUtf8(c, gid, keys, row, isNull);
+        case UTF8 -> strIds[c][gid] = isNull ? 0 : keys.getId(c, row);
       }
-    }
-    if (strCols > 0) {
-      recStart[gid + 1] = keyUsed;
     }
     slots[pos] = gid;
     size++;
@@ -916,35 +708,6 @@ public final class GroupKeyTable {
       rehash();
     }
     return gid;
-  }
-
-  private void appendUtf8(int c, int gid, Bound keys, int row, boolean isNull) {
-    int used = keyUsed;
-    if (!isNull) {
-      MemorySegment data;
-      long start;
-      int len;
-      if (keys.dictEncoded[c]) {
-        int idx = keys.getInt(c, row);
-        MemorySegment off = keys.dictOffsets[c];
-        start = off.get(VectorBuffers.LE_INT, (long) idx << 2);
-        len = off.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) start;
-        data = keys.dictData[c];
-      } else {
-        MemorySegment off = keys.offsets[c];
-        start = off.get(VectorBuffers.LE_INT, (long) row << 2);
-        len = off.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) start;
-        data = keys.data[c];
-      }
-      if (used + len > keyBytes.length) {
-        keyBytes = Arrays.copyOf(keyBytes, Math.max(keyBytes.length * 2, used + len));
-        keySegment = MemorySegment.ofArray(keyBytes);
-      }
-      MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, keyBytes, used, len);
-      used += len;
-    }
-    keyUsed = used;
-    colEnd[gid * strCols + strCol[c]] = used;
   }
 
   private void ensureGroupCapacity(int needed) {
@@ -961,18 +724,14 @@ public final class GroupKeyTable {
           longKeys[c] = Arrays.copyOf(longKeys[c], cap);
           hiKeys[c] = Arrays.copyOf(hiKeys[c], cap);
         }
-        case UTF8 -> { }
+        case UTF8 -> strIds[c] = Arrays.copyOf(strIds[c], cap);
       }
-    }
-    if (strCols > 0) {
-      recStart = Arrays.copyOf(recStart, cap + 1);
-      colEnd = Arrays.copyOf(colEnd, cap * strCols);
     }
   }
 
   /**
    * The heap the table holds right now, as allocated (#367): the slots and hashes at capacity, the
-   * key arrays at capacity, the string bytes as reserved. The next growth step doubles the array it
+   * key arrays at capacity, the string dictionaries as allocated. The next growth step doubles the array it
    * touches and holds both copies for its duration -- the caller adds that headroom.
    */
   public long memoryBytes() {
@@ -982,11 +741,11 @@ public final class GroupKeyTable {
         case INT32, BOOL -> bytes += 4L * intKeys[c].length;
         case INT64, FLOAT64 -> bytes += 8L * longKeys[c].length;
         case DECIMAL128 -> bytes += 16L * longKeys[c].length;
-        case UTF8 -> { }
+        case UTF8 -> bytes += 4L * strIds[c].length + dicts[c].memoryBytes();
       }
     }
     if (strCols > 0) {
-      bytes += 4L * recStart.length + 4L * colEnd.length + keyBytes.length + emitScratch.length;
+      bytes += emitScratch.length;
     }
     return bytes;
   }
@@ -1034,23 +793,56 @@ public final class GroupKeyTable {
   }
 
   public String getString(int c, int gid) {
-    int start = strStart(c, gid);
-    return new String(keyBytes, start, colEnd[gid * strCols + strCol[c]] - start, java.nio.charset.StandardCharsets.UTF_8);
+    StringDictionary d = dicts[c];
+    int id = strIds[c][gid];
+    return new String(d.bytes(), d.offset(id), d.length(id), java.nio.charset.StandardCharsets.UTF_8);
   }
 
-  /** Start of the UTF8 value of column {@code c} in group {@code gid}'s record. */
-  private int strStart(int c, int gid) {
-    int j = strCol[c];
-    return j == 0 ? recStart[gid] : colEnd[gid * strCols + j - 1];
+  /** The dictionary id of group {@code gid}'s value in UTF8 column {@code c} (0 for a null). */
+  public int getStringId(int c, int gid) {
+    return strIds[c][gid];
+  }
+
+  /** Number of distinct values UTF8 column {@code c} has seen. */
+  public int dictionarySize(int c) {
+    return dicts[c].size();
+  }
+
+  /** Bytes of the distinct values of UTF8 column {@code c}. */
+  public long dictionaryBytes(int c) {
+    return dicts[c].valueBytes();
+  }
+
+  /**
+   * The distinct values of UTF8 column {@code c} as a plain UTF8 column, indexed by id (#377): the
+   * dictionary the ids {@link #writeKeyIds} emits refer to. Valid until the next {@link #assign}.
+   */
+  public VectorBuffers dictionary(int c) {
+    return dicts[c].view();
+  }
+
+  /**
+   * Writes the dictionary ids of groups {@code [from, to)} of UTF8 column {@code c} as an INT32
+   * Arrow-layout column (validity bits for every row, id 0 under a null).
+   */
+  public void writeKeyIds(int c, int from, int to, MemorySegment validity, MemorySegment ids) {
+    int count = to - from;
+    for (int o = 0; o < count; o++) {
+      Bitmap.setTo(validity, o, !nulls[c].get(from + o));
+    }
+    MemorySegment.copy(strIds[c], from, ids, VectorBuffers.LE_INT, 0, count);
   }
 
   /** Total UTF-8 bytes of the keys in {@code [from, to)} of column {@code c}. */
   public long utf8Bytes(int c, int from, int to) {
-    int j = strCol[c];
+    StringDictionary d = dicts[c];
+    int[] ids = strIds[c];
+    BitSet nul = nulls[c];
     long total = 0;
     for (int gid = from; gid < to; gid++) {
-      int base = gid * strCols + j;
-      total += colEnd[base] - (j == 0 ? recStart[gid] : colEnd[base - 1]);
+      if (!nul.get(gid)) {
+        total += d.length(ids[gid]);
+      }
     }
     return total;
   }
@@ -1078,24 +870,28 @@ public final class GroupKeyTable {
         }
       }
       case UTF8 -> {
-        // Gather the column's values from the records into a heap buffer (System.arraycopy, no
-        // per-value segment checks) and copy them out once: one small MemorySegment.copy per value
-        // was 15% of an executor's time in q67 at 1 TB, whose finest level emits nearly every row.
-        int j = strCol[c];
+        // Gather the values from the dictionary into a heap buffer (System.arraycopy, no per-value
+        // segment checks) and copy them out once: one small MemorySegment.copy per value was 15% of
+        // an executor's time in q67 at 1 TB, whose finest level emits nearly every row.
+        StringDictionary d = dicts[c];
+        int[] ids = strIds[c];
+        BitSet nul = nulls[c];
         int total = (int) utf8Bytes(c, from, to);
         if (emitScratch.length < total) {
           emitScratch = new byte[Math.max(total, emitScratch.length * 2)];
         }
         byte[] scratch = emitScratch;
+        byte[] store = d.bytes();
         int out = 0;
         offsets.set(VectorBuffers.LE_INT, 0L, 0);
         for (int o = 0; o < count; o++) {
           int gid = from + o;
-          int base = gid * strCols + j;
-          int start = j == 0 ? recStart[gid] : colEnd[base - 1];
-          int len = colEnd[base] - start;
-          System.arraycopy(keyBytes, start, scratch, out, len);
-          out += len;
+          if (!nul.get(gid)) {
+            int id = ids[gid];
+            int len = d.length(id);
+            System.arraycopy(store, d.offset(id), scratch, out, len);
+            out += len;
+          }
           offsets.set(VectorBuffers.LE_INT, (long) (o + 1) << 2, out);
         }
         MemorySegment.copy(scratch, 0, data, ValueLayout.JAVA_BYTE, 0, out);

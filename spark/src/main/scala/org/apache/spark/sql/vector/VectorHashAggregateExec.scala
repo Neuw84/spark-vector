@@ -3,7 +3,10 @@ package org.apache.spark.sql.vector
 import io.sparkvector.kernels.{Bitmap, GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.agg.{AggState, GroupedAggState, VectorAggFunction, VectorAggregates}
-import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators}
+import io.sparkvector.spark.VectorConf
+import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators, VectorDictionaryColumnVector}
+import java.lang.foreign.MemorySegment
+import org.apache.arrow.vector.{IntVector, VarCharVector}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
@@ -14,7 +17,7 @@ import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistrib
 import org.apache.spark.sql.execution.{PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, HashAggregateExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{DataType, DecimalType}
+import org.apache.spark.sql.types.{DataType, DecimalType, IntegerType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /** Where an output column of the partial aggregate comes from. */
@@ -310,6 +313,8 @@ private[vector] class VectorGroupedAggregateIterator(
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
   private var table = new GroupKeyTable(keyExprs.map(_.vecType))
+  private val dictionaryKeys = VectorConf.aggDictionaryKeys(org.apache.spark.sql.internal.SQLConf.get)
+  private val keyDicts = new Array[SharedDictionary](keyExprs.length)
   private var states: Array[GroupedAggState] = aggs.map(_.newGroupedState())
   private var idScratch = new Array[Int](0)
   private var inputDone = false
@@ -405,6 +410,7 @@ private[vector] class VectorGroupedAggregateIterator(
 
   private def reset(): Unit = {
     releaseMemory()
+    releaseDictionaries()
     table = new GroupKeyTable(keyExprs.map(_.vecType))
     states = aggs.map(_.newGroupedState())
     emittedGroups = 0
@@ -536,14 +542,65 @@ private[vector] class VectorGroupedAggregateIterator(
   private def keyColumn(name: String, dt: DataType, k: Int, from: Int, to: Int): ColumnVector = {
     val count = to - from
     if (table.`type`(k) == VecType.UTF8) {
-      val out = ArrowOutput.allocateUtf8(name, count, table.utf8Bytes(k, from, to), allocator)
-      table.writeKeys(k, from, to, out.validity(), out.data(), out.offsets())
-      ArrowOutput.finish(out, count, false)
+      val dict = sharedDictionary(name, k)
+      if (dict != null) {
+        // The keys as ids over the table's dictionary (#377): 4 bytes a row, and the consumers --
+        // the shuffle writer, the final aggregate -- work on the ids and read the dictionary once.
+        val ids = ArrowOutput.allocateFixed(name, IntegerType, count, allocator)
+        table.writeKeyIds(k, from, to, ids.validity(), ids.data())
+        ArrowOutput.finish(ids, count, false)
+        dict.retain()
+        new VectorDictionaryColumnVector(ids.vector().asInstanceOf[IntVector], dict.vector, () => dict.release())
+      } else {
+        val out = ArrowOutput.allocateUtf8(name, count, table.utf8Bytes(k, from, to), allocator)
+        table.writeKeys(k, from, to, out.validity(), out.data(), out.offsets())
+        ArrowOutput.finish(out, count, false)
+      }
     } else {
       val out = ArrowOutput.allocateFixed(name, dt, count, allocator)
       table.writeKeys(k, from, to, out.validity(), out.data(), null)
       ArrowOutput.finish(out, count, false)
     }
+  }
+
+  /**
+   * One Arrow vector of UTF8 key column {@code k}'s dictionary per emission, shared by the key
+   * batches through a reference count (the batches of an emit-and-reset burst outlive the reset),
+   * or null when the column goes out plain (dictionary encoding is off, or the column has no
+   * value). The dictionary's bytes never exceed the plain column's -- it holds each distinct value
+   * once -- and the consumers work on the ids: the shuffle writer stages them and remaps per block
+   * (going plain itself when a block's dictionary does not pay, #356), the final aggregate maps the
+   * dictionary's entries rather than the rows.
+   */
+  private def sharedDictionary(name: String, k: Int): SharedDictionary = {
+    if (!dictionaryKeys) return null
+    val distinct = table.dictionarySize(k)
+    if (distinct == 0) return null
+    var d = keyDicts(k)
+    if (d != null && d.size != distinct) { d.release(); d = null; keyDicts(k) = null }
+    if (d == null) {
+      val view = table.dictionary(k)
+      val bytes = view.offsets().get(VectorBuffers.LE_INT, distinct.toLong << 2)
+      val out = ArrowOutput.allocateUtf8(name, distinct, bytes, allocator)
+      MemorySegment.copy(view.offsets(), 0L, out.offsets(), 0L, (distinct + 1).toLong << 2)
+      MemorySegment.copy(view.data(), 0L, out.data(), 0L, bytes.toLong)
+      ArrowOutput.finish(out, distinct, true)
+      d = new SharedDictionary(out.vector().asInstanceOf[VarCharVector], distinct)
+      keyDicts(k) = d
+    }
+    d
+  }
+
+  /** The dictionary vector of one key column for one emission; closed when the iterator and every batch let go. */
+  private final class SharedDictionary(val vector: VarCharVector, val size: Int) {
+    private var refs = 1
+    def retain(): Unit = synchronized { refs += 1 }
+    def release(): Unit = synchronized { if (refs <= 0) throw new IllegalStateException(s"dictionary released $refs"); refs -= 1; if (refs == 0) vector.close() }
+  }
+
+  private def releaseDictionaries(): Unit = {
+    var k = 0
+    while (k < keyDicts.length) { if (keyDicts(k) != null) { keyDicts(k).release(); keyDicts(k) = null }; k += 1 }
   }
 
   private def bufferColumn(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int): ColumnVector =
@@ -560,6 +617,7 @@ private[vector] class VectorGroupedAggregateIterator(
       if (bucketInput != null) { try bucketInput.close() catch { case _: Exception => }; bucketInput = null }
       if (spill != null) { try spill.close() catch { case _: Exception => }; spill = null }
       releaseMemory()
+      releaseDictionaries()
       allocator.close()
     }
   }
