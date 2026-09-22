@@ -791,8 +791,15 @@ object VectorAggregatePlanner {
 
 /** Boxed buffer values of a run of groups `[from, to)` as one Arrow column; shared with the window aggregate. */
 object AggBufferColumns {
-  def column(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int, allocator: BufferAllocator): ColumnVector =
+  def column(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int, allocator: BufferAllocator): ColumnVector = {
+    // A state that can write its lane directly does (#416); the rest go value by value, boxed.
+    if (dt != org.apache.spark.sql.types.StringType) {
+      val out = ArrowOutput.allocateFixed(name, dt, to - from, allocator)
+      if (state.writeBuffer(slot, from, to, out)) return ArrowOutput.finish(out, to - from, false)
+      out.vector().close()
+    }
     values(name, dt, to - from, o => state.bufferValue(from + o, slot), allocator)
+  }
 
   /** Boxed values `get(0 until count)` (Spark's internal representation, or null) as one Arrow column. */
   def values(name: String, dt: DataType, count: Int, get: Int => Any, allocator: BufferAllocator): ColumnVector = {
