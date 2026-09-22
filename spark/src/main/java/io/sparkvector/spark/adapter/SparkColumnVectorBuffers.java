@@ -299,6 +299,109 @@ public final class SparkColumnVectorBuffers {
   private static final ThreadLocal<long[]> DICTIONARY_TABLE = ThreadLocal.withInitial(() -> new long[256]);
 
   /**
+   * A dictionary's decoded values, kept across the batches the dictionary serves (#416). Spark's
+   * parquet reader wraps a column chunk's dictionary in a new {@code ParquetDictionary} for every
+   * batch it reads, and the fast path decoded the ids up to the batch's largest for each 4096-row
+   * batch anew: for a fact table's key columns, whose chunk dictionaries run to hundreds of thousands
+   * of entries, that was more work than the rows themselves -- 7% of q18's task time at SF10, most of
+   * the adapter's share. The cache is keyed on the parquet dictionary behind the wrapper (the stable
+   * object, one per column chunk) and decodes it whole on first sight; a dictionary of another kind is
+   * keyed on itself and decoded as far as each batch needs.
+   */
+  private static final class DecodedDictionary {
+    /** The identity the cache is keyed on: the parquet dictionary behind a {@code ParquetDictionary}, else the dictionary itself. */
+    final Object key;
+    final boolean transform;
+    /** The lane type the table was decoded for (a dictionary object serving two types is not a parquet one, but a test's). */
+    final VecType type;
+    long[] table;
+    /** Ids {@code [0, decoded)} are in {@code table}. */
+    int decoded;
+
+    DecodedDictionary(Object key, boolean transform, VecType type) {
+      this.key = key;
+      this.transform = transform;
+      this.type = type;
+      this.table = new long[256];
+    }
+
+    long[] upTo(Dictionary dictionary, int maxId, VecType type) {
+      if (maxId < decoded) {
+        return table;
+      }
+      if (key instanceof org.apache.parquet.column.Dictionary parquet) {
+        maxId = Math.max(maxId, parquet.getMaxId()); // the whole chunk dictionary, once
+      }
+      if (table.length <= maxId) {
+        table = Arrays.copyOf(table, Integer.highestOneBit(maxId) << 1);
+      }
+      switch (type) {
+        case INT32 -> {
+          for (int id = decoded; id <= maxId; id++) {
+            table[id] = dictionary.decodeToInt(id);
+          }
+        }
+        case INT64 -> {
+          for (int id = decoded; id <= maxId; id++) {
+            table[id] = dictionary.decodeToLong(id);
+          }
+        }
+        default -> {
+          for (int id = decoded; id <= maxId; id++) {
+            table[id] = Double.doubleToRawLongBits(dictionary.decodeToDouble(id));
+          }
+        }
+      }
+      decoded = maxId + 1;
+      return table;
+    }
+  }
+
+  /** The thread's recently seen dictionaries (one per column of the task's current chunk, a handful). */
+  private static final ThreadLocal<DecodedDictionary[]> DECODED_DICTIONARIES = ThreadLocal.withInitial(() -> new DecodedDictionary[16]);
+  private static final Class<?> PARQUET_DICTIONARY = classOrNull("org.apache.spark.sql.execution.datasources.parquet.ParquetDictionary");
+  private static final Field PARQUET_DICTIONARY_INNER = PARQUET_DICTIONARY == null ? null : field(PARQUET_DICTIONARY, "dictionary");
+  private static final Field PARQUET_DICTIONARY_TRANSFORM = PARQUET_DICTIONARY == null ? null : field(PARQUET_DICTIONARY, "needTransform");
+
+  private static Class<?> classOrNull(String name) {
+    try {
+      return Class.forName(name);
+    } catch (ClassNotFoundException e) {
+      return null;
+    }
+  }
+
+  private static DecodedDictionary decodedDictionary(Dictionary dict, VecType type) {
+    Object key = dict;
+    boolean transform = false;
+    if (PARQUET_DICTIONARY_INNER != null && PARQUET_DICTIONARY.isInstance(dict)) {
+      Object inner = get(PARQUET_DICTIONARY_INNER, dict);
+      if (inner != null) {
+        key = inner;
+        transform = get(PARQUET_DICTIONARY_TRANSFORM, dict) instanceof Boolean b && b;
+      }
+    }
+    DecodedDictionary[] recent = DECODED_DICTIONARIES.get();
+    for (int i = 0; i < recent.length; i++) {
+      DecodedDictionary d = recent[i];
+      if (d == null) {
+        break;
+      }
+      if (d.key == key && d.transform == transform && d.type == type) {
+        if (i > 0) { // most recently used first, so a chunk's columns stay at the front
+          System.arraycopy(recent, 0, recent, 1, i);
+          recent[0] = d;
+        }
+        return d;
+      }
+    }
+    DecodedDictionary d = new DecodedDictionary(key, transform, type);
+    System.arraycopy(recent, 0, recent, 1, recent.length - 1); // the oldest falls off the end
+    recent[0] = d;
+    return d;
+  }
+
+  /**
    * Numeric column left dictionary encoded by the Parquet reader: decodes the dictionary once (ids
    * are dense, so every id up to the largest one referenced exists) and gathers straight into the
    * arena segment. Nothing is allocated on the heap: the earlier form built three arrays per column
@@ -324,16 +427,10 @@ public final class SparkColumnVectorBuffers {
         maxId = Math.max(maxId, idArray[i]);
       }
     }
-    long[] table = DICTIONARY_TABLE.get();
-    if (table.length <= maxId) {
-      table = new long[Integer.highestOneBit(maxId) << 1];
-      DICTIONARY_TABLE.set(table);
-    }
+    // The dictionary decoded once per column chunk, not once per batch (#416).
+    long[] table = decodedDictionary(dict, type).upTo(dict, maxId, type);
     switch (type) {
       case INT32 -> {
-        for (int id = 0; id <= maxId; id++) {
-          table[id] = dict.decodeToInt(id);
-        }
         int[] out = intScratch(numRows);
         for (int i = 0; i < numRows; i++) {
           out[i] = nulls == null || nulls[i] == 0 ? (int) table[idArray[i]] : 0;
@@ -341,9 +438,6 @@ public final class SparkColumnVectorBuffers {
         MemorySegment.copy(out, 0, data, VectorBuffers.LE_INT, 0, numRows);
       }
       case INT64 -> {
-        for (int id = 0; id <= maxId; id++) {
-          table[id] = dict.decodeToLong(id);
-        }
         long[] out = longScratch(numRows);
         for (int i = 0; i < numRows; i++) {
           out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
@@ -351,9 +445,6 @@ public final class SparkColumnVectorBuffers {
         MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
       }
       default -> {
-        for (int id = 0; id <= maxId; id++) {
-          table[id] = Double.doubleToRawLongBits(dict.decodeToDouble(id));
-        }
         long[] out = longScratch(numRows);
         for (int i = 0; i < numRows; i++) {
           out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
