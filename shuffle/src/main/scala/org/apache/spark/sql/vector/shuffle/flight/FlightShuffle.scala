@@ -137,7 +137,8 @@ object FlightShuffle extends Logging {
           // One lookup and one open per map for the task's whole partition range (#411): the
           // partitions are consecutive in the data file, and an empty one is a zero-length span.
           val buf = blockData(shuffleId, mapId, reduce, endReduce)
-          val in = buf.createInputStream()
+          // The map file's dictionary section ahead of the range (#416): once per map output, not per block.
+          val in = io.sparkvector.shuffle.PartitionedIpcFile.blockStream(buf)
           try {
             var more = true
             while (more) {

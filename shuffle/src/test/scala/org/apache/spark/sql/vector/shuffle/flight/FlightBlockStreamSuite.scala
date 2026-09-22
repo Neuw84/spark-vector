@@ -58,9 +58,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
       }
       writer.finish()
     } finally { arena.close(); writer.close() }
-    val index = { val ch = java.nio.channels.FileChannel.open(path); try PartitionedIpcFile.readIndex(ch) finally ch.close() }
-    val all = Files.readAllBytes(path)
-    val block = java.util.Arrays.copyOfRange(all, index.offsets(0).toInt, (index.offsets(0) + index.lengths(0)).toInt)
+    val block = PartitionedIpcFile.blockBytes(path, 0, 1) // the dictionary section, then partition 0 (#416)
 
     val producer = new FlightShuffle.Producer((_, _, _) => new NioManagedBuffer(ByteBuffer.wrap(block)), allocator)
     val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer).build()
@@ -100,9 +98,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
           try { writer.write(b, new Array[Int](b.numRows())); expected(mapId) = rows } finally b.close()
           writer.finish()
         } finally writer.close()
-        val index = { val ch = java.nio.channels.FileChannel.open(path); try PartitionedIpcFile.readIndex(ch) finally ch.close() }
-        val all = Files.readAllBytes(path)
-        blocks(mapId) = java.util.Arrays.copyOfRange(all, index.offsets(0).toInt, (index.offsets(0) + index.lengths(0)).toInt)
+        blocks(mapId) = PartitionedIpcFile.blockBytes(path, 0, 1)
       }
       blocks(1L) = Array.emptyByteArray
       expected(1L) = IndexedSeq.empty
@@ -161,11 +157,8 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     val asked = mutable.ArrayBuffer.empty[(Long, Int, Int)]
     val producer = new FlightShuffle.Producer((_: Int, mapId: Long, start: Int, end: Int) => {
       asked += ((mapId, start, end))
-      val (path, index) = files(mapId)
-      val from = index.offsets(start)
-      val to = index.offsets(end - 1) + index.lengths(end - 1)
-      val all = Files.readAllBytes(path)
-      new NioManagedBuffer(ByteBuffer.wrap(java.util.Arrays.copyOfRange(all, from.toInt, to.toInt)))
+      val (path, _) = files(mapId)
+      new NioManagedBuffer(ByteBuffer.wrap(PartitionedIpcFile.blockBytes(path, start, end)))
     }, allocator)
     val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer).build()
     server.start()
