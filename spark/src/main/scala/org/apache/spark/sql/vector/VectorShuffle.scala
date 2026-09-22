@@ -50,9 +50,9 @@ object VectorShuffle {
   }
 
   /** `VectorShuffleExchangeExec(partitioning, child, origin, advisoryPartitionSize)` over the same child. */
-  def exchange(s: ShuffleExchangeExec): SparkPlan = {
+  def exchange(s: ShuffleExchangeExec, materializedKeys: Int = 0): SparkPlan = {
     val cls = Class.forName(ExchangeClass, true, getClass.getClassLoader)
-    val ctor = cls.getConstructors.find(_.getParameterCount == 4).get
-    ctor.newInstance(s.outputPartitioning, s.child, s.shuffleOrigin, s.advisoryPartitionSize).asInstanceOf[SparkPlan]
+    val ctor = cls.getConstructors.find(_.getParameterCount == 5).get
+    ctor.newInstance(s.outputPartitioning, s.child, s.shuffleOrigin, s.advisoryPartitionSize, Integer.valueOf(materializedKeys)).asInstanceOf[SparkPlan]
   }
 }
