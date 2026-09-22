@@ -135,16 +135,22 @@ RUN chmod g+w /opt/spark/work-dir && chown -R spark:spark /opt/spark/work-dir /o
 # options and class path the executor starts with, so executors begin with our kernels linked and
 # profiled instead of spending a query's first stages in the interpreter. render-run.sh points the
 # executors at it (-XX:AOTCache); the build fails when the cache holds no linked class.
+# The class path is an explicit, sorted list of the jars rather than the directory wildcard: the JVM
+# expands a wildcard in directory order, which differs between the build's filesystem and the
+# container's overlay, and the cache is refused when the order at run time is not the training run's.
 COPY benchmarks/k8s/aot/train.sh /opt/spark/aot/train.sh
-RUN chmod a+rx /opt/spark/aot/train.sh && /opt/spark/aot/train.sh /opt/spark/aot/executor.aot --rounds 3 \
-    && chmod a+r /opt/spark/aot/executor.aot
+RUN ls /opt/spark/jars/*.jar | LC_ALL=C sort | paste -sd: > /opt/spark/aot/classpath \
+    && chmod a+rx /opt/spark/aot/train.sh && /opt/spark/aot/train.sh /opt/spark/aot/executor.aot --rounds 3 \
+    && chmod a+r /opt/spark/aot/executor.aot /opt/spark/aot/classpath
 # The executor's class path from entrypoint.sh carries its conf directory (on Kubernetes a mounted
 # ConfigMap with spark.properties), its working directory (where the executor fetches the job's jars)
 # and empty entries (the working directory again), and the JDK's AOT cache / CDS refuses a non-empty
 # directory on the class path (#416). The executor reads its properties through --properties-file
-# and the job's jars through its own class loader: its class path is the jars directory alone. The
-# driver's class path is left as the distribution builds it.
-RUN sed -i '/^  executor)$/{n;s|^    shift 1$|    shift 1\n    SPARK_CLASSPATH="$SPARK_HOME/jars/*"; SPARK_DIST_CLASSPATH="$SPARK_HOME/jars/*"|}' /opt/entrypoint.sh \
-    && grep -q 'SPARK_CLASSPATH="$SPARK_HOME/jars/\*"; SPARK_DIST_CLASSPATH' /opt/entrypoint.sh
+# and the job's jars through its own class loader: its class path is the jars alone, the explicit
+# sorted list the AOT cache was trained on, as both halves of entrypoint.sh's
+# `-cp "$SPARK_CLASSPATH:$SPARK_DIST_CLASSPATH"` so no empty entry appears. The driver's class path
+# is left as the distribution builds it.
+RUN sed -i '/^  executor)$/{n;s|^    shift 1$|    shift 1\n    SPARK_CLASSPATH="$(cat /opt/spark/aot/classpath)"; SPARK_DIST_CLASSPATH="$SPARK_CLASSPATH"|}' /opt/entrypoint.sh \
+    && grep -q 'SPARK_CLASSPATH="$(cat /opt/spark/aot/classpath)"; SPARK_DIST_CLASSPATH' /opt/entrypoint.sh
 USER spark
 ENTRYPOINT ["/opt/entrypoint.sh"]

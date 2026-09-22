@@ -6,8 +6,10 @@
 #   - Spark's launcher module options (JavaModuleOptions.defaultModuleOptions(), the same list the
 #     launcher prepends to every driver and executor JVM), read from the Spark on the class path;
 #   - the flags submit-cluster.sh sets through spark.executor.extraJavaOptions (JVM_FLAGS there);
-#   - the class path entrypoint.sh gives an executor in this image: the jars directory, wildcard,
-#     as SPARK_CLASSPATH and again as SPARK_DIST_CLASSPATH (see the sed in the Dockerfile).
+#   - the class path entrypoint.sh gives an executor in this image: the explicit sorted jar list in
+#     /opt/spark/aot/classpath, as SPARK_CLASSPATH and again as SPARK_DIST_CLASSPATH (the sed in the
+#     Dockerfile). Not the directory wildcard: the JVM expands that in directory order, which is not
+#     the same on the build's filesystem and the container's overlay, and the cache checks the order.
 # Heap and system properties are not part of the match and are free.
 #
 #   train.sh <output .aot> [--rounds N] [--rows N]
@@ -15,7 +17,8 @@ set -euo pipefail
 OUT="${1:?output .aot path}"; shift
 SPARK_HOME="${SPARK_HOME:-/opt/spark}"
 JAVA="${JAVA_HOME:-/opt/java/openjdk}/bin/java"
-CP="$SPARK_HOME/jars/*:$SPARK_HOME/jars/*"
+LIST="$(cat "${CLASSPATH_FILE:-$SPARK_HOME/aot/classpath}")"
+CP="$LIST:$LIST"
 
 mapfile -t MODULE_OPTS < <("$JAVA" -cp "$CP" io.sparkvector.benchmarks.AotTraining --module-options)
 # Keep in step with JVM_FLAGS in benchmarks/scripts/submit-cluster.sh.
