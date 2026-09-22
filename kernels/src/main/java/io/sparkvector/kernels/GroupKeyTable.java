@@ -33,7 +33,7 @@ public final class GroupKeyTable {
   private final long[][] longKeys; // INT64 and FLOAT64 (raw bits); the low limb of DECIMAL128
   private final long[][] hiKeys; // the high limb of DECIMAL128
   private final int[][] strIds; // UTF8: the id of the group's value in dicts[c]
-  private final PlainStringDict[] dicts; // UTF8: the column's distinct values
+  private final StringDictionary[] dicts; // UTF8: the column's distinct values
   private final int strCols; // number of UTF8 columns
   private final int[] strCol; // column -> index among the UTF8 columns, or -1
   private final BitSet[] nulls;
@@ -48,12 +48,6 @@ public final class GroupKeyTable {
    * combination of dictionary indices for the batch, so most rows never probe the table.
    */
   private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
-
-  /**
-   * Values of up to this many bytes are keyed in a column's dictionary by their packed bytes (so
-   * equality is a long compare); longer values by a 64-bit hash plus a byte compare.
-   */
-  private static final int PACKED_KEY_BYTES = 8;
 
   public GroupKeyTable(VecType[] types) {
     this(types, true);
@@ -75,7 +69,7 @@ public final class GroupKeyTable {
     longKeys = new long[k][];
     hiKeys = new long[k][];
     strIds = new int[k][];
-    dicts = new PlainStringDict[k];
+    dicts = new StringDictionary[k];
     strCol = new int[k];
     nulls = new BitSet[k];
     int s = 0;
@@ -92,7 +86,7 @@ public final class GroupKeyTable {
         case UTF8 -> {
           strCol[c] = s++;
           strIds[c] = new int[INITIAL_CAPACITY];
-          dicts[c] = new PlainStringDict();
+          dicts[c] = new StringDictionary();
         }
       }
     }
@@ -412,7 +406,7 @@ public final class GroupKeyTable {
       return 0;
     }
     long combinations = 1;
-    for (PlainStringDict d : dicts) {
+    for (StringDictionary d : dicts) {
       combinations *= d.size() + 1L;
       if (combinations > MEMO_MAX_COMBINATIONS) {
         return combinations;
@@ -436,6 +430,7 @@ public final class GroupKeyTable {
     VectorBuffers[] lastDict = new VectorBuffers[0];
     int[] offs = new int[0];
     byte[] bytes = new byte[0];
+    final StringDictionary.Scratch entryBytes = new StringDictionary.Scratch();
 
     private static final ThreadLocal<IdScratch> SCRATCH = ThreadLocal.withInitial(IdScratch::new);
 
@@ -478,7 +473,7 @@ public final class GroupKeyTable {
         continue;
       }
       VectorBuffers key = keys[c];
-      PlainStringDict dict = dicts[c];
+      StringDictionary dict = dicts[c];
       int[] ids = s.ids[c];
       if (ids == null || ids.length < n) {
         ids = new int[Math.max(n, ids == null ? 4096 : ids.length * 2)];
@@ -526,7 +521,7 @@ public final class GroupKeyTable {
             } else {
               int start = dOff.get(VectorBuffers.LE_INT, (long) e << 2);
               int len = dOff.get(VectorBuffers.LE_INT, (long) (e + 1) << 2) - start;
-              id = dict.indexOf(dData, start, len, insert, s);
+              id = dict.indexOf(dData, start, len, insert, s.entryBytes);
             }
             entryIds[e] = id;
             entryGen[e] = gen;
@@ -550,182 +545,12 @@ public final class GroupKeyTable {
           }
           int start = offs[i] - first;
           int len = offs[i + 1] - offs[i];
-          ids[i] = dict.indexOf(PlainStringDict.fingerprint(bytes, start, len), len, bytes, start, insert);
+          ids[i] = dict.indexOf(StringDictionary.fingerprint(bytes, start, len), len, bytes, start, insert);
         }
       }
       s.keys[c] = SegmentVectorBuffers.fixedWidth(VecType.INT32, n, validity, MemorySegment.ofArray(ids));
     }
     return s;
-  }
-
-  static final class PlainStringDict {
-    private long[] bits = new long[64];
-    private int[] lens = new int[64];
-    private int[] ids = new int[64];
-    private int mask = 63;
-    private int size;
-    private byte[] data = new byte[256];
-    private int used;
-    private int[] offsets = new int[33];
-    private MemorySegment dataSegment = MemorySegment.ofArray(data);
-    private MemorySegment offsetSegment = MemorySegment.ofArray(offsets);
-
-    int size() {
-      return size;
-    }
-
-    /** Direct index for single-byte values (TPC-H's flag columns), bypassing the probe. */
-    private final int[] singleByte = new int[256];
-
-    PlainStringDict() {
-      Arrays.fill(ids, -1);
-      Arrays.fill(singleByte, -1);
-    }
-
-    private static final VarHandle LONG_LE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
-
-    /**
-     * The 64-bit key of a value: its bytes packed little-endian when they fit in a long, otherwise
-     * a multiply-xorshift mix over the bytes taken eight at a time (a collision between two long
-     * values is caught by the byte compare).
-     */
-    static long fingerprint(byte[] src, int from, int len) {
-      if (len <= PACKED_KEY_BYTES) {
-        long packed = 0L;
-        for (int b = len - 1; b >= 0; b--) {
-          packed = (packed << 8) | (src[from + b] & 0xFFL);
-        }
-        return packed;
-      }
-      long h = 0x9E3779B97F4A7C15L ^ len;
-      int end = from + len;
-      int p = from;
-      for (; p + 8 <= end; p += 8) {
-        h = (h ^ (long) LONG_LE.get(src, p)) * 0xBF58476D1CE4E5B9L;
-        h ^= h >>> 31;
-      }
-      if (p < end) {
-        long tail = 0L;
-        for (int b = end - 1; b >= p; b--) {
-          tail = (tail << 8) | (src[b] & 0xFFL);
-        }
-        h = (h ^ tail) * 0x94D049BB133111EBL;
-        h ^= h >>> 29;
-      }
-      return h;
-    }
-
-    /** The id of the value, inserting it when absent if {@code insert}; -1 when absent otherwise. */
-    int indexOf(long packed, int len, byte[] src, int from, boolean insert) {
-      if (len == 1) {
-        int b = (int) packed; // 0..255
-        int id = singleByte[b];
-        if (id < 0) {
-          id = probe(packed, len, src, from, insert);
-          if (id >= 0) {
-            singleByte[b] = id;
-          }
-        }
-        return id;
-      }
-      return probe(packed, len, src, from, insert);
-    }
-
-    /** {@link #indexOf} over a value that lives in a segment (an input dictionary's entry). */
-    int indexOf(MemorySegment data, long start, int len, boolean insert, IdScratch s) {
-      if (s.bytes.length < len) {
-        s.bytes = new byte[Math.max(len, s.bytes.length * 2)];
-      }
-      MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, s.bytes, 0, len);
-      return indexOf(fingerprint(s.bytes, 0, len), len, s.bytes, 0, insert);
-    }
-
-    private int probe(long packed, int len, byte[] src, int from, boolean insert) {
-      int pos = HashKernels.finish(HashKernels.mix32(HashKernels.fold(packed), len)) & mask;
-      while (true) {
-        int id = ids[pos];
-        if (id < 0) {
-          return insert ? insert(packed, len, src, from, pos) : -1;
-        }
-        if (bits[id] == packed && lens[id] == len && (len <= PACKED_KEY_BYTES || sameBytes(id, src, from, len))) {
-          return id;
-        }
-        pos = (pos + 1) & mask;
-      }
-    }
-
-    private boolean sameBytes(int id, byte[] src, int from, int len) {
-      int off = offsets[id];
-      return Arrays.equals(data, off, off + len, src, from, from + len);
-    }
-
-    private int insert(long packed, int len, byte[] src, int from, int pos) {
-      int id = size;
-      if (id == bits.length) {
-        bits = Arrays.copyOf(bits, id * 2);
-        lens = Arrays.copyOf(lens, id * 2);
-      }
-      if (id + 1 >= offsets.length) {
-        offsets = Arrays.copyOf(offsets, offsets.length * 2);
-        offsetSegment = MemorySegment.ofArray(offsets);
-      }
-      if (used + len > data.length) {
-        data = Arrays.copyOf(data, Math.max(data.length * 2, used + len));
-        dataSegment = MemorySegment.ofArray(data);
-      }
-      bits[id] = packed;
-      lens[id] = len;
-      System.arraycopy(src, from, data, used, len);
-      used += len;
-      offsets[id + 1] = used;
-      ids[pos] = id;
-      size++;
-      if (size * 2 > ids.length) {
-        rehash();
-      }
-      return id;
-    }
-
-    private void rehash() {
-      int[] newIds = new int[ids.length * 2];
-      Arrays.fill(newIds, -1);
-      int newMask = newIds.length - 1;
-      for (int id = 0; id < size; id++) {
-        int pos = HashKernels.finish(HashKernels.mix32(HashKernels.fold(bits[id]), lens[id])) & newMask;
-        while (newIds[pos] >= 0) {
-          pos = (pos + 1) & newMask;
-        }
-        newIds[pos] = id;
-      }
-      ids = newIds;
-      mask = newMask;
-    }
-
-    /** The dictionary as a UTF8 column; valid until the next {@link #indexOf} that inserts. */
-    VectorBuffers view() {
-      return SegmentVectorBuffers.utf8(size, null, offsetSegment, dataSegment);
-    }
-
-    int offset(int id) {
-      return offsets[id];
-    }
-
-    int length(int id) {
-      return offsets[id + 1] - offsets[id];
-    }
-
-    byte[] bytes() {
-      return data;
-    }
-
-    /** Bytes of the distinct values held. */
-    long valueBytes() {
-      return used;
-    }
-
-    long memoryBytes() {
-      return 8L * bits.length + 4L * lens.length + 4L * ids.length + data.length + 4L * offsets.length + 4L * singleByte.length;
-    }
   }
 
   private int assignMemoised(VectorBuffers[] keys, IdScratch ids, int n, int[] outIds, int combinations, MemorySegment selection) {
@@ -968,7 +793,7 @@ public final class GroupKeyTable {
   }
 
   public String getString(int c, int gid) {
-    PlainStringDict d = dicts[c];
+    StringDictionary d = dicts[c];
     int id = strIds[c][gid];
     return new String(d.bytes(), d.offset(id), d.length(id), java.nio.charset.StandardCharsets.UTF_8);
   }
@@ -1010,7 +835,7 @@ public final class GroupKeyTable {
 
   /** Total UTF-8 bytes of the keys in {@code [from, to)} of column {@code c}. */
   public long utf8Bytes(int c, int from, int to) {
-    PlainStringDict d = dicts[c];
+    StringDictionary d = dicts[c];
     int[] ids = strIds[c];
     BitSet nul = nulls[c];
     long total = 0;
@@ -1048,7 +873,7 @@ public final class GroupKeyTable {
         // Gather the values from the dictionary into a heap buffer (System.arraycopy, no per-value
         // segment checks) and copy them out once: one small MemorySegment.copy per value was 15% of
         // an executor's time in q67 at 1 TB, whose finest level emits nearly every row.
-        PlainStringDict d = dicts[c];
+        StringDictionary d = dicts[c];
         int[] ids = strIds[c];
         BitSet nul = nulls[c];
         int total = (int) utf8Bytes(c, from, to);
