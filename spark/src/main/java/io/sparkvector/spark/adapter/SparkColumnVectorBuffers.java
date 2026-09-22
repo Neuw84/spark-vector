@@ -102,7 +102,7 @@ public final class SparkColumnVectorBuffers {
       }
       if (dict != null) {
         MemorySegment data = ArrowLayout.allocateData(arena, type, numRows);
-        if (decodeDictionaryInto(w, dict, type, numRows, validity, data)) {
+        if (decodeDictionaryInto(w, dict, type, numRows, validity, data, false)) {
           return SegmentVectorBuffers.fixedWidth(type, numRows, validity, data);
         }
       } else {
@@ -166,7 +166,18 @@ public final class SparkColumnVectorBuffers {
       return copyWideDecimal(cv, dec, numRows, arena, validity);
     }
     MemorySegment data = ArrowLayout.allocateData(arena, VecType.INT64, numRows);
-    if (cv instanceof WritableColumnVector) {
+    if (cv instanceof WritableColumnVector w) {
+      // A dictionary-encoded decimal column through the bulk dictionary path (#416): the reader's
+      // bulk getInts/getLongs decode a dictionary value by value through the virtual getters --
+      // q18's five decimal(7,2) measures were 5% of its task time at SF10 that way. The int-backed
+      // dictionary (up to 9 digits) is widened into the INT64 lane as it is written.
+      Dictionary dict = w.hasDictionary() ? dictionaryOf(w) : null;
+      if (dict != null) {
+        boolean ints = dec.precision() <= Decimal.MAX_INT_DIGITS();
+        if (decodeDictionaryInto(w, dict, ints ? VecType.INT32 : VecType.INT64, numRows, validity, data, ints)) {
+          return SegmentVectorBuffers.fixedWidth(VecType.INT64, numRows, validity, data);
+        }
+      }
       if (dec.precision() <= Decimal.MAX_INT_DIGITS()) {
         int[] ints = cv.getInts(0, numRows);
         for (int i = 0; i < numRows; i++) {
@@ -409,15 +420,18 @@ public final class SparkColumnVectorBuffers {
    */
   private static boolean decodeDictionaryInto(
       WritableColumnVector cv, Dictionary dict, VecType type, int numRows, MemorySegment validity,
-      MemorySegment data) {
+      MemorySegment data, boolean widenToLong) {
     if (type != VecType.INT32 && type != VecType.INT64 && type != VecType.FLOAT64) {
+      return false;
+    }
+    if (widenToLong && type != VecType.INT32) {
       return false;
     }
     WritableColumnVector ids = cv.getDictionaryIds();
     int[] idArray = heapIds(ids, numRows);
     byte[] nulls = validity != null ? heapNulls(cv, numRows) : null;
     if (idArray == null || idArray.length < numRows || (validity != null && (nulls == null || nulls.length < numRows))) {
-      return decodeDictionaryIntoSlow(cv, dict, type, numRows, validity, data);
+      return !widenToLong && decodeDictionaryIntoSlow(cv, dict, type, numRows, validity, data);
     }
     // The reader's own arrays, a heap staging array and one copy out (#398): the per-row virtual
     // getInt, Bitmap.isSet and setAtIndex were 7% of an executor's time in q8 at SF10.
@@ -431,11 +445,19 @@ public final class SparkColumnVectorBuffers {
     long[] table = decodedDictionary(dict, type).upTo(dict, maxId, type);
     switch (type) {
       case INT32 -> {
-        int[] out = intScratch(numRows);
-        for (int i = 0; i < numRows; i++) {
-          out[i] = nulls == null || nulls[i] == 0 ? (int) table[idArray[i]] : 0;
+        if (widenToLong) {
+          long[] out = longScratch(numRows);
+          for (int i = 0; i < numRows; i++) {
+            out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
+          }
+          MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
+        } else {
+          int[] out = intScratch(numRows);
+          for (int i = 0; i < numRows; i++) {
+            out[i] = nulls == null || nulls[i] == 0 ? (int) table[idArray[i]] : 0;
+          }
+          MemorySegment.copy(out, 0, data, VectorBuffers.LE_INT, 0, numRows);
         }
-        MemorySegment.copy(out, 0, data, VectorBuffers.LE_INT, 0, numRows);
       }
       case INT64 -> {
         long[] out = longScratch(numRows);
