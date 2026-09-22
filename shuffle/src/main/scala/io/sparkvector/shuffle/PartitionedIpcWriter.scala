@@ -9,7 +9,10 @@ import scala.jdk.CollectionConverters._
 
 import io.sparkvector.kernels.{Bitmap, CompactKernels, GatherKernels, PartitionKernels, VectorBuffers}
 import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
+import io.sparkvector.spark.arrow.{ArrowOutput, ArrowSegments, ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
+import org.apache.arrow.memory.ArrowBuf
+import org.apache.arrow.vector.ipc.WriteChannel
+import org.apache.arrow.vector.ipc.message.{ArrowFieldNode, ArrowRecordBatch, MessageSerializer}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.compression.CompressionUtil
@@ -344,8 +347,16 @@ final class PartitionedIpcWriter(
   private val staging: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
   private var stagedIds: Array[Int] = new Array[Int](0)
   private var stagedRows: Int = 0
-  /** The vectors a partition's rows are gathered into for one record batch, reused for every partition and flush. */
+  /** The vectors a large partition's rows are gathered into for one record batch, reused for every partition and flush. */
   private val batchBuilders: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
+  /**
+   * The staged rows in partition order, one gather per column per flush (#416), from which a small
+   * partition's record batch is cut as slices. Gathering per partition per column -- a kernel call
+   * for a handful of rows, 18 columns x 1000 partitions per flush -- paid the kernel's fixed cost, not
+   * the rows': at 1 TB the rollup partial aggregate's tasks (55 k rows each, 4 strings, 7 DECIMAL128
+   * sums, 7 counts) reported ~1 s of shuffle write time each, 20 us a row, against Spark's 7 ms.
+   */
+  private val orderedBuilders: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
   /** Staged data before a flush. A smaller staging (12.8 MB at 200 partitions) gave more, smaller record batches and cost q67 a further 8%. */
   private val stagingBytes: Long = bufferBytes
   private var heldBytes = 0L
@@ -463,28 +474,129 @@ final class PartitionedIpcWriter(
    */
   private def flushStaging(): Unit = if (stagedRows > 0) {
     val scratch = Arena.ofConfined()
+    val n = schema.fields.length
     try {
       if (order.length < stagedRows) order = new Array[Int](stagedRows)
       PartitionKernels.partitionOrder(stagedIds, stagedRows, numPartitions, starts, order)
-      val source: Array[VectorBuffers] = Array.tabulate(schema.fields.length)(c => staging(c).finished())
+      val source: Array[VectorBuffers] = Array.tabulate(n)(c => staging(c).finished())
+      // Every staged row into partition order, one gather per column (#416).
+      var c = 0
+      while (c < n) { orderedBuilders(c).appendIndexed(source(c), order, 0, stagedRows, scratch); c += 1 }
+      val ordered: Array[FieldVector] = Array.tabulate(n)(c => orderedBuilders(c).finish())
       var p = 0
       while (p < numPartitions) {
         var from = starts(p)
         val end = starts(p + 1)
-        while (from < end) {
-          val to = math.min(end, from + batchRows)
-          var c = 0
-          while (c < schema.fields.length) { batchBuilders(c).appendIndexed(source(c), order, from, to, scratch); c += 1 }
-          flush(segments(p), to - from, batchBuilders)
-          from = to
+        if (end - from > 0 && end - from < PartitionedIpcWriter.DictionaryMinRows) {
+          // A small partition (its strings stay plain, #426): its record batch is slices of the ordered vectors.
+          flushSlice(segments(p), ordered, from, end)
+        } else {
+          while (from < end) {
+            val to = math.min(end, from + batchRows)
+            c = 0
+            while (c < n) { batchBuilders(c).appendIndexed(source(c), order, from, to, scratch); c += 1 }
+            flush(segments(p), to - from, batchBuilders)
+            from = to
+          }
         }
         p += 1
       }
-    } finally scratch.close()
+    } finally {
+      scratch.close()
+      var c = 0
+      while (c < n) { orderedBuilders(c).recycle(); c += 1 }
+    }
     var c = 0
-    while (c < schema.fields.length) { staging(c).recycle(); c += 1 }
+    while (c < n) { staging(c).recycle(); c += 1 }
     stagedRows = 0
     heldBytes = 0L
+  }
+
+  /** Per column, scratch for a small partition's validity bits (and a BOOL column's data bits, a string column's offsets). */
+  private var sliceValidity: Array[ArrowBuf] = _
+  private var sliceOffsets: Array[ArrowBuf] = _
+  private var sliceBits: Array[ArrowBuf] = _
+  private def sliceScratch(): Unit = if (sliceValidity == null) {
+    val n = schema.fields.length
+    val bitBytes = Bitmap.bytesFor(PartitionedIpcWriter.DictionaryMinRows) + 8 // whole words at the tail
+    sliceValidity = Array.fill(n)(allocator.buffer(bitBytes))
+    sliceOffsets = Array.tabulate(n)(c => if (schema.fields(c).dataType == StringType) allocator.buffer((PartitionedIpcWriter.DictionaryMinRows + 1).toLong * 4) else null)
+    sliceBits = Array.tabulate(n)(c => if (schema.fields(c).dataType == BooleanType) allocator.buffer(bitBytes) else null)
+  }
+
+  /** Copies `count` bits from `src` at `from` to the start of `dst`, whole words at a time; returns how many are set. */
+  private def copyBitRange(src: MemorySegment, srcBits: Int, from: Int, count: Int, dst: MemorySegment): Int = {
+    val shift = from & 63
+    var w = from >>> 6
+    var k = 0
+    var produced = 0
+    var set = 0
+    while (produced < count) {
+      val lo = Bitmap.wordAt(src, w, srcBits)
+      var word = if (shift == 0) lo else (lo >>> shift) | (Bitmap.wordAt(src, w + 1, srcBits) << (64 - shift))
+      val take = math.min(64, count - produced)
+      if (take < 64) word &= Bitmap.lowBits(take)
+      Bitmap.setWord(dst, k, count, word)
+      set += java.lang.Long.bitCount(word)
+      produced += take
+      k += 1
+      w += 1
+    }
+    set
+  }
+
+  /**
+   * A small partition's record batch straight from slices of the ordered vectors (#416): the data
+   * buffers are zero-copy slices, the validity bits and string offsets a short copy into scratch,
+   * and the batch is serialised as a record batch message of the all-plain shape -- no gather, no
+   * vector and no root per partition.
+   */
+  private def flushSlice(seg: Segment, ordered: Array[FieldVector], from: Int, to: Int): Unit = {
+    sliceScratch()
+    val rows = to - from
+    val n = schema.fields.length
+    val nodes = new java.util.ArrayList[ArrowFieldNode](n)
+    val buffers = new java.util.ArrayList[ArrowBuf](3 * n)
+    var bytes = 0L
+    var c = 0
+    while (c < n) {
+      val v = ordered(c)
+      val dt = schema.fields(c).dataType
+      val set = copyBitRange(ArrowSegments.of(v.getValidityBuffer), v.getValueCount, from, rows, ArrowSegments.of(sliceValidity(c)))
+      val nullCount = rows - set
+      nodes.add(new ArrowFieldNode(rows, nullCount))
+      buffers.add(if (nullCount == 0) allocator.getEmpty else sliceValidity(c).slice(0, Bitmap.bytesFor(rows)))
+      if (nullCount != 0) bytes += Bitmap.bytesFor(rows)
+      dt match {
+        case StringType =>
+          val vc = v.asInstanceOf[VarCharVector]
+          val off = vc.getOffsetBuffer
+          val start = off.getInt(from.toLong * 4)
+          val end = off.getInt(to.toLong * 4)
+          val odst = sliceOffsets(c)
+          var i = 0
+          while (i <= rows) { odst.setInt(i.toLong * 4, off.getInt((from + i).toLong * 4) - start); i += 1 }
+          buffers.add(odst.slice(0, (rows + 1).toLong * 4))
+          buffers.add(vc.getDataBuffer.slice(start.toLong, (end - start).toLong))
+          bytes += (rows + 1).toLong * 4 + (end - start)
+        case BooleanType =>
+          copyBitRange(ArrowSegments.of(v.getDataBuffer), v.getValueCount, from, rows, ArrowSegments.of(sliceBits(c)))
+          buffers.add(sliceBits(c).slice(0, Bitmap.bytesFor(rows)))
+          bytes += Bitmap.bytesFor(rows)
+        case _ =>
+          val w = PartitionedIpcWriter.byteWidth(dt)
+          buffers.add(v.getDataBuffer.slice(from.toLong * w, rows.toLong * w))
+          bytes += rows.toLong * w
+      }
+      c += 1
+    }
+    // No schema message, no dictionaries (the strings are plain): the record batch alone, as `flush` writes one.
+    val batch = new ArrowRecordBatch(rows, nodes, buffers)
+    try MessageSerializer.serialize(new WriteChannel(seg.sink), batch, IpcOption.DEFAULT) finally batch.close()
+    seg.endStream()
+    seg.rows += rows
+    rawBytesWritten += bytes
+    seg.spillIfNeeded()
   }
 
   /** What the writer's allocator holds right now (pending slices; the roots are emptied after each batch). */
@@ -624,6 +736,11 @@ final class PartitionedIpcWriter(
     segments.foreach(_.release())
     if (staging != null) staging.foreach(b => try b.close() catch { case _: Exception => })
     if (batchBuilders != null) batchBuilders.foreach(b => try b.close() catch { case _: Exception => })
+    if (orderedBuilders != null) orderedBuilders.foreach(b => try b.close() catch { case _: Exception => })
+    if (sliceValidity != null) {
+      (sliceValidity ++ sliceOffsets ++ sliceBits).foreach(b => if (b != null) try b.close() catch { case _: Exception => })
+      sliceValidity = null; sliceOffsets = null; sliceBits = null
+    }
     dictScratch.foreach(sc => if (sc != null) { sc._1.close(); sc._2.close() })
     frameCompressor.close()
   }
