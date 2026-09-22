@@ -36,6 +36,41 @@ RUN mvn -B -q -pl shuffle dependency:copy-dependencies -DincludeScope=runtime -D
 RUN git clone --depth 1 https://github.com/databricks/tpcds-kit /opt/tpcds-kit \
     && make -C /opt/tpcds-kit/tools OS=LINUX LINUX_CFLAGS="-O3 -std=gnu89 -Wno-implicit-int -Wno-implicit-function-declaration -Wno-return-mismatch" -j"$(nproc)" >/dev/null
 
+# ---- jre: the JDK 25 runtime with the Vector API as an ordinary module (#416) -----------------------
+# The JDK's AOT cache (JEP 483/515) archives the boot layer -- and with it every AOT-linked class and
+# method profile -- only when the module configuration contains no incubator module, and the Vector API
+# is one until it leaves incubation. The runtime is therefore linked from jmods with jdk.incubator.vector
+# rebuilt without its ModuleResolution attribute (neither incubating nor do-not-resolve-by-default: the
+# module resolves on its own, --add-modules is redundant but harmless) and java.base without its
+# ModuleHashes attribute (the rebuilt module no longer matches the recorded hash). Same JDK build, same
+# JIT; only the module metadata changes. Corretto because its tarball still ships jmods (Temurin stopped
+# at 24, and jlink from a run-time image takes the image's own copy over the module path).
+FROM eclipse-temurin:25-jdk AS jre
+ARG CORRETTO_VERSION=25.0.4.8.1
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://corretto.aws/downloads/resources/${CORRETTO_VERSION}/amazon-corretto-${CORRETTO_VERSION}-linux-x64.tar.gz" \
+      | tar -xz -C /opt \
+    && mv "/opt/amazon-corretto-${CORRETTO_VERSION}-linux-x64" /opt/corretto
+COPY benchmarks/k8s/aot /aot
+RUN set -e; J=/opt/corretto; cd /aot \
+    && $J/bin/javac -d classes StripModuleResolution.java StripModuleHashes.java \
+    && mkdir jmods && cp $J/jmods/*.jmod jmods/ \
+    && $J/bin/jmod extract --dir vector $J/jmods/jdk.incubator.vector.jmod \
+    && $J/bin/java -cp classes StripModuleResolution vector/classes/module-info.class \
+    && rm jmods/jdk.incubator.vector.jmod \
+    && $J/bin/jmod create --class-path vector/classes --legal-notices vector/legal \
+         --module-version "${CORRETTO_VERSION}" --target-platform linux-amd64 jmods/jdk.incubator.vector.jmod \
+    && $J/bin/jmod extract --dir base $J/jmods/java.base.jmod \
+    && $J/bin/java -cp classes StripModuleHashes base/classes/module-info.class \
+    && rm jmods/java.base.jmod \
+    && $J/bin/jmod create --class-path base/classes --libs base/lib --cmds base/bin --config base/conf \
+         --header-files base/include --legal-notices base/legal --man-pages base/man \
+         --module-version "${CORRETTO_VERSION}" --target-platform linux-amd64 jmods/java.base.jmod \
+    && $J/bin/jlink --module-path jmods --add-modules ALL-MODULE-PATH --output /opt/jre \
+    && /opt/jre/bin/java -version \
+    && /opt/jre/bin/java --show-module-resolution -version 2>&1 | grep -q "^root jdk.incubator.vector" \
+    && ! /opt/jre/bin/java --show-module-resolution -version 2>&1 | grep -q "Using incubator modules"
+
 # ---- runtime -----------------------------------------------------------------------------------------
 FROM eclipse-temurin:25-jre
 ARG SPARK_VERSION
@@ -50,6 +85,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       bash tini libc6 libpam-modules krb5-user libnss3 procps net-tools gosu curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid=185 spark && useradd --system --uid=185 --gid=spark spark
+
+# The linked runtime replaces the base image's JRE under the same JAVA_HOME (the base image's PATH and
+# JAVA_HOME stay valid).
+RUN rm -rf /opt/java/openjdk
+COPY --from=jre /opt/jre /opt/java/openjdk
+RUN java -version && java --show-module-resolution -version 2>&1 | grep -q "^root jdk.incubator.vector"
 
 RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz" \
       | tar -xz -C /opt \
