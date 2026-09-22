@@ -182,9 +182,10 @@ public final class GroupKeyTable {
     for (VectorBuffers key : keys) {
       HashKernels.mixColumn(key, hashes);
     }
+    Bound b = Bound.of(keys);
     if (selection == null) {
       for (int i = 0; i < n; i++) {
-        outIds[i] = lookupOrInsert(keys, i, HashKernels.finish(hashes[i]));
+        outIds[i] = lookupOrInsert(b, i, HashKernels.finish(hashes[i]));
       }
     } else {
       Arrays.fill(outIds, 0, n, -1);
@@ -193,7 +194,7 @@ public final class GroupKeyTable {
         while (bits != 0L) {
           int i = (w << 6) + Long.numberOfTrailingZeros(bits);
           bits &= bits - 1;
-          outIds[i] = lookupOrInsert(keys, i, HashKernels.finish(hashes[i]));
+          outIds[i] = lookupOrInsert(b, i, HashKernels.finish(hashes[i]));
         }
       }
     }
@@ -228,10 +229,11 @@ public final class GroupKeyTable {
       HashKernels.mixColumn(key, hashes);
     }
     ProbeKeys heap = ProbeKeys.of(keys, n, types);
+    Bound b = heap != null ? null : Bound.of(keys);
     int matched = 0;
     if (selection == null) {
       for (int i = 0; i < n; i++) {
-        int gid = heap != null ? lookupOnly(heap, i, HashKernels.finish(hashes[i])) : lookupOnly(keys, i, HashKernels.finish(hashes[i]));
+        int gid = heap != null ? lookupOnly(heap, i, HashKernels.finish(hashes[i])) : lookupOnly(b, i, HashKernels.finish(hashes[i]));
         outIds[i] = gid;
         if (gid >= 0) {
           matched++;
@@ -244,7 +246,7 @@ public final class GroupKeyTable {
         while (bits != 0L) {
           int i = (w << 6) + Long.numberOfTrailingZeros(bits);
           bits &= bits - 1;
-          int gid = heap != null ? lookupOnly(heap, i, HashKernels.finish(hashes[i])) : lookupOnly(keys, i, HashKernels.finish(hashes[i]));
+          int gid = heap != null ? lookupOnly(heap, i, HashKernels.finish(hashes[i])) : lookupOnly(b, i, HashKernels.finish(hashes[i]));
           outIds[i] = gid;
           if (gid >= 0) {
             matched++;
@@ -265,6 +267,86 @@ public final class GroupKeyTable {
    * with one bulk move per column and compared from the arrays; any other key type keeps the
    * segment path. Per thread, since a broadcast table is probed by several tasks at once.
    */
+  /**
+   * The batch's key columns bound once per call (#377): each column's data, offsets and validity
+   * segments -- and its dictionary's -- as fields of the concrete segment type. The per-row path
+   * (hash slot, compare, insert, append) read every key through {@link VectorBuffers#isNull},
+   * {@link VectorBuffers#getInt} and {@code offsets()}/{@code data()}: interface calls whose receiver
+   * profile mixes the adapters' buffers, Arrow-backed buffers and encoded short strings, so they
+   * stayed virtual, and each carried a segment liveness and bounds check of its own -- 34% of an
+   * executor's samples in q67's rollup at 1 TB were those checks. Per thread, as {@link ProbeKeys}.
+   */
+  private static final class Bound {
+    /** Columns bound by the last {@link #of}; the arrays may be longer. */
+    int count;
+    VectorBuffers[] keys = new VectorBuffers[0];
+    MemorySegment[] data = new MemorySegment[0];
+    MemorySegment[] offsets = new MemorySegment[0];
+    MemorySegment[] validity = new MemorySegment[0];
+    boolean[] dictEncoded = new boolean[0];
+    MemorySegment[] dictData = new MemorySegment[0];
+    MemorySegment[] dictOffsets = new MemorySegment[0];
+    MemorySegment[] dictValidity = new MemorySegment[0];
+
+    private static final ThreadLocal<Bound> SCRATCH = ThreadLocal.withInitial(Bound::new);
+
+    static Bound of(VectorBuffers[] keys) {
+      Bound b = SCRATCH.get();
+      int n = keys.length;
+      b.count = n;
+      if (b.data.length < n) {
+        b.keys = new VectorBuffers[n];
+        b.data = new MemorySegment[n];
+        b.offsets = new MemorySegment[n];
+        b.validity = new MemorySegment[n];
+        b.dictEncoded = new boolean[n];
+        b.dictData = new MemorySegment[n];
+        b.dictOffsets = new MemorySegment[n];
+        b.dictValidity = new MemorySegment[n];
+      }
+      for (int c = 0; c < n; c++) {
+        VectorBuffers k = keys[c];
+        b.keys[c] = k;
+        b.data[c] = k.data();
+        b.offsets[c] = k.offsets();
+        b.validity[c] = k.validity();
+        boolean dict = k.isDictionaryEncoded();
+        b.dictEncoded[c] = dict;
+        VectorBuffers d = dict ? k.dictionary() : null;
+        b.dictData[c] = d == null ? null : d.data();
+        b.dictOffsets[c] = d == null ? null : d.offsets();
+        b.dictValidity[c] = d == null ? null : d.validity();
+      }
+      return b;
+    }
+
+    boolean isNull(int c, int row) {
+      MemorySegment v = validity[c];
+      return v != null && !Bitmap.isSet(v, row);
+    }
+
+    int getInt(int c, int row) {
+      return data[c].get(VectorBuffers.LE_INT, (long) row << 2);
+    }
+
+    long getLong(int c, int row) {
+      return data[c].get(VectorBuffers.LE_LONG, (long) row << 3);
+    }
+
+    double getDouble(int c, int row) {
+      return data[c].get(VectorBuffers.LE_DOUBLE, (long) row << 3);
+    }
+
+    boolean getBoolean(int c, int row) {
+      return Bitmap.isSet(data[c], row);
+    }
+
+    boolean dictIsNull(int c, int idx) {
+      MemorySegment v = dictValidity[c];
+      return v != null && !Bitmap.isSet(v, idx);
+    }
+  }
+
   private static final class ProbeKeys {
     int[][] ints = new int[0][];
     long[][] longs = new long[0][];
@@ -359,7 +441,7 @@ public final class GroupKeyTable {
     return true;
   }
 
-  private int lookupOnly(VectorBuffers[] keys, int row, int hash) {
+  private int lookupOnly(Bound keys, int row, int hash) {
     int pos = hash & mask;
     while (true) {
       int gid = slots[pos];
@@ -612,6 +694,7 @@ public final class GroupKeyTable {
   }
 
   private int assignMemoised(VectorBuffers[] keys, int n, int[] outIds, int combinations, MemorySegment selection) {
+    Bound b = Bound.of(keys);
     if (memo.length < combinations) {
       memo = new int[Math.max(combinations, memo.length * 2)];
     }
@@ -642,7 +725,7 @@ public final class GroupKeyTable {
       for (int i = 0; i < n; i++) {
         int gid = memo[combined[i]];
         if (gid < 0) {
-          gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));
+          gid = lookupOrInsert(b, i, dictionaryRowHash(b, i));
           memo[combined[i]] = gid;
         }
         outIds[i] = gid;
@@ -656,7 +739,7 @@ public final class GroupKeyTable {
           bits &= bits - 1;
           int gid = memo[combined[i]];
           if (gid < 0) {
-            gid = lookupOrInsert(keys, i, dictionaryRowHash(keys, i));
+            gid = lookupOrInsert(b, i, dictionaryRowHash(b, i));
             memo[combined[i]] = gid;
           }
           outIds[i] = gid;
@@ -681,21 +764,21 @@ public final class GroupKeyTable {
   }
 
   /** Same hash {@link HashKernels#mixColumn} produces for the row, computed for one row. */
-  private static int dictionaryRowHash(VectorBuffers[] keys, int row) {
+  private static int dictionaryRowHash(Bound keys, int row) {
     int h = HashKernels.SEED;
-    for (VectorBuffers k : keys) {
+    for (int c = 0; c < keys.count; c++) {
       int v;
-      if (k.isNull(row)) {
+      if (keys.isNull(c, row)) {
         v = HashKernels.NULL_MARK;
       } else {
-        VectorBuffers dict = k.dictionary();
-        int idx = k.getInt(row);
-        if (dict.isNull(idx)) {
+        int idx = keys.getInt(c, row);
+        if (keys.dictIsNull(c, idx)) {
           v = HashKernels.NULL_MARK;
         } else {
-          int start = dict.offsets().get(VectorBuffers.LE_INT, (long) idx << 2);
-          int len = dict.offsets().get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - start;
-          v = HashKernels.hashBytes(dict.data(), start, len);
+          MemorySegment off = keys.dictOffsets[c];
+          int start = off.get(VectorBuffers.LE_INT, (long) idx << 2);
+          int len = off.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - start;
+          v = HashKernels.hashBytes(keys.dictData[c], start, len);
         }
       }
       h = HashKernels.mix32(h, v);
@@ -703,7 +786,7 @@ public final class GroupKeyTable {
     return HashKernels.finish(h);
   }
 
-  private int lookupOrInsert(VectorBuffers[] keys, int row, int hash) {
+  private int lookupOrInsert(Bound keys, int row, int hash) {
     int pos = hash & mask;
     while (true) {
       int gid = slots[pos];
@@ -717,10 +800,9 @@ public final class GroupKeyTable {
     }
   }
 
-  private boolean equals(int gid, VectorBuffers[] keys, int row) {
+  private boolean equals(int gid, Bound keys, int row) {
     for (int c = 0; c < types.length; c++) {
-      VectorBuffers k = keys[c];
-      boolean rowNull = k.isNull(row);
+      boolean rowNull = keys.isNull(c, row);
       if (rowNull != nulls[c].get(gid)) {
         return false;
       }
@@ -729,33 +811,33 @@ public final class GroupKeyTable {
       }
       switch (types[c]) {
         case INT32 -> {
-          if (intKeys[c][gid] != k.getInt(row)) {
+          if (intKeys[c][gid] != keys.getInt(c, row)) {
             return false;
           }
         }
         case BOOL -> {
-          if (intKeys[c][gid] != (k.getBoolean(row) ? 1 : 0)) {
+          if (intKeys[c][gid] != (keys.getBoolean(c, row) ? 1 : 0)) {
             return false;
           }
         }
         case INT64 -> {
-          if (longKeys[c][gid] != k.getLong(row)) {
+          if (longKeys[c][gid] != keys.getLong(c, row)) {
             return false;
           }
         }
         case FLOAT64 -> {
-          if (longKeys[c][gid] != Double.doubleToRawLongBits(k.getDouble(row))) {
+          if (longKeys[c][gid] != Double.doubleToRawLongBits(keys.getDouble(c, row))) {
             return false;
           }
         }
         case DECIMAL128 -> {
-          MemorySegment d = k.data();
+          MemorySegment d = keys.data[c];
           if (longKeys[c][gid] != Decimal128.lo(d, row) || hiKeys[c][gid] != Decimal128.hi(d, row)) {
             return false;
           }
         }
         case UTF8 -> {
-          if (!utf8Equals(c, gid, k, row)) {
+          if (!utf8Equals(c, gid, keys, row)) {
             return false;
           }
         }
@@ -764,7 +846,7 @@ public final class GroupKeyTable {
     return true;
   }
 
-  private boolean utf8Equals(int c, int gid, VectorBuffers k, int row) {
+  private boolean utf8Equals(int c, int gid, Bound keys, int row) {
     int j = strCol[c];
     int end = colEnd[gid * strCols + j];
     int start = j == 0 ? recStart[gid] : colEnd[gid * strCols + j - 1];
@@ -772,16 +854,17 @@ public final class GroupKeyTable {
     MemorySegment data;
     long rowStart;
     int rowLen;
-    if (k.isDictionaryEncoded()) {
-      VectorBuffers dict = k.dictionary();
-      int idx = k.getInt(row);
-      rowStart = dict.offsets().get(VectorBuffers.LE_INT, (long) idx << 2);
-      rowLen = dict.offsets().get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) rowStart;
-      data = dict.data();
+    if (keys.dictEncoded[c]) {
+      int idx = keys.getInt(c, row);
+      MemorySegment off = keys.dictOffsets[c];
+      rowStart = off.get(VectorBuffers.LE_INT, (long) idx << 2);
+      rowLen = off.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) rowStart;
+      data = keys.dictData[c];
     } else {
-      rowStart = k.offsets().get(VectorBuffers.LE_INT, (long) row << 2);
-      rowLen = k.offsets().get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) rowStart;
-      data = k.data();
+      MemorySegment off = keys.offsets[c];
+      rowStart = off.get(VectorBuffers.LE_INT, (long) row << 2);
+      rowLen = off.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) rowStart;
+      data = keys.data[c];
     }
     if (rowLen != len) {
       return false;
@@ -802,7 +885,7 @@ public final class GroupKeyTable {
     return MemorySegment.mismatch(keySegment, start, end, data, rowStart, rowStart + len) == -1;
   }
 
-  private int insert(VectorBuffers[] keys, int row, int hash, int pos) {
+  private int insert(Bound keys, int row, int hash, int pos) {
     int gid = size;
     ensureGroupCapacity(gid + 1);
     groupHashes[gid] = hash;
@@ -810,19 +893,18 @@ public final class GroupKeyTable {
       recStart[gid] = keyUsed;
     }
     for (int c = 0; c < types.length; c++) {
-      VectorBuffers k = keys[c];
-      boolean isNull = k.isNull(row);
+      boolean isNull = keys.isNull(c, row);
       nulls[c].set(gid, isNull);
       switch (types[c]) {
-        case INT32 -> intKeys[c][gid] = isNull ? 0 : k.getInt(row);
-        case BOOL -> intKeys[c][gid] = isNull ? 0 : (k.getBoolean(row) ? 1 : 0);
-        case INT64 -> longKeys[c][gid] = isNull ? 0L : k.getLong(row);
-        case FLOAT64 -> longKeys[c][gid] = isNull ? 0L : Double.doubleToRawLongBits(k.getDouble(row));
+        case INT32 -> intKeys[c][gid] = isNull ? 0 : keys.getInt(c, row);
+        case BOOL -> intKeys[c][gid] = isNull ? 0 : (keys.getBoolean(c, row) ? 1 : 0);
+        case INT64 -> longKeys[c][gid] = isNull ? 0L : keys.getLong(c, row);
+        case FLOAT64 -> longKeys[c][gid] = isNull ? 0L : Double.doubleToRawLongBits(keys.getDouble(c, row));
         case DECIMAL128 -> {
-          longKeys[c][gid] = isNull ? 0L : Decimal128.lo(k.data(), row);
-          hiKeys[c][gid] = isNull ? 0L : Decimal128.hi(k.data(), row);
+          longKeys[c][gid] = isNull ? 0L : Decimal128.lo(keys.data[c], row);
+          hiKeys[c][gid] = isNull ? 0L : Decimal128.hi(keys.data[c], row);
         }
-        case UTF8 -> appendUtf8(c, gid, isNull ? null : k, row);
+        case UTF8 -> appendUtf8(c, gid, keys, row, isNull);
       }
     }
     if (strCols > 0) {
@@ -836,22 +918,23 @@ public final class GroupKeyTable {
     return gid;
   }
 
-  private void appendUtf8(int c, int gid, VectorBuffers k, int row) {
+  private void appendUtf8(int c, int gid, Bound keys, int row, boolean isNull) {
     int used = keyUsed;
-    if (k != null) {
+    if (!isNull) {
       MemorySegment data;
       long start;
       int len;
-      if (k.isDictionaryEncoded()) {
-        VectorBuffers dict = k.dictionary();
-        int idx = k.getInt(row);
-        start = dict.offsets().get(VectorBuffers.LE_INT, (long) idx << 2);
-        len = dict.offsets().get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) start;
-        data = dict.data();
+      if (keys.dictEncoded[c]) {
+        int idx = keys.getInt(c, row);
+        MemorySegment off = keys.dictOffsets[c];
+        start = off.get(VectorBuffers.LE_INT, (long) idx << 2);
+        len = off.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) start;
+        data = keys.dictData[c];
       } else {
-        start = k.offsets().get(VectorBuffers.LE_INT, (long) row << 2);
-        len = k.offsets().get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) start;
-        data = k.data();
+        MemorySegment off = keys.offsets[c];
+        start = off.get(VectorBuffers.LE_INT, (long) row << 2);
+        len = off.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) start;
+        data = keys.data[c];
       }
       if (used + len > keyBytes.length) {
         keyBytes = Arrays.copyOf(keyBytes, Math.max(keyBytes.length * 2, used + len));
