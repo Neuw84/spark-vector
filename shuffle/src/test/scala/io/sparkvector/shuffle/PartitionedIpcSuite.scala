@@ -341,6 +341,33 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 64, batches = Seq((3, false)), flushBytes = 1L << 20)
   }
 
+  test("#416: small blocks whose strings arrived dictionary-encoded are decoded into the coalesced batch") {
+    // batchRows = 400: the 1200 staged rows leave as three record batches, each above DictionaryMinRows
+    // (so the five-word column is encoded per batch, with its own dictionary) and below CoalesceRows (so
+    // the reader accumulates them) -- one 1200-row batch comes out, every column plain, the rows in order.
+    val dir = Files.createTempDirectory("svipc")
+    val path = dir.resolve("map.ipc")
+    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchRows = 400)
+    val arena = Arena.ofConfined()
+    val expected = mutable.ArrayBuffer.empty[Row]
+    try {
+      (0 until 3).foreach { _ =>
+        val (b, rows) = batch(400, arena, dictStrings = false)
+        try writer.write(b, new Array[Int](400)) finally b.close()
+        expected ++= rows
+      }
+      writer.finish()
+      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
+      try {
+        val got = reader.next()
+        assert(got.numRows() === 1200, "three blocks coalesced into one batch")
+        assert(got.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "the encoded column comes out plain")
+        assert(read(got) === expected)
+        assert(!reader.hasNext)
+      } finally reader.close()
+    } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+  }
+
   test("#356: a record batch's string column is dictionary-encoded only when the dictionary pays; the reader takes either per batch") {
     import org.apache.arrow.vector.{IntVector, VarCharVector}
     // The encoder itself: all-distinct gives up at the sample (nothing allocated stays behind), repeats encode.

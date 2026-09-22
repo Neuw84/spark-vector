@@ -62,6 +62,16 @@ public final class GroupKeyTable {
    */
   private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
 
+  /**
+   * The memo is also bounded by the batch (#416): it is reset -- {@code combinations} ints filled --
+   * for every batch, and a batch of a few dozen rows (a block at 1000 shuffle partitions) cannot
+   * use more entries than it has rows. Filling four ints per row is cheaper than a probe per row;
+   * past that the plain path is.
+   */
+  private static long memoLimit(int rows) {
+    return Math.max(256L, 4L * rows);
+  }
+
   public GroupKeyTable(VecType[] types) {
     this(types, true);
   }
@@ -174,7 +184,7 @@ public final class GroupKeyTable {
       keys = ids.keys;
     }
     long combinations = dictionaryCombinations();
-    if (combinations > 0 && combinations <= MEMO_MAX_COMBINATIONS) {
+    if (combinations > 0 && combinations <= MEMO_MAX_COMBINATIONS && combinations <= memoLimit(n)) {
       return assignMemoised(keys, ids, n, outIds, (int) combinations, selection);
     }
     if (hashScratch.length < n) {

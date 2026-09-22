@@ -76,7 +76,7 @@ class FlightBlockStreamSuite extends AnyFunSuite {
           batches += 1
           (0 until b.numRows()).foreach(r => got += ((b.column(0).getInt(r), b.column(1).getUTF8String(r).toString)))
         }
-        assert(batches === 3, "three record batches were written, one per dictionary")
+        assert(batches === 1, "three 500-row record batches, each with its own dictionary, are decoded into one coalesced batch (#416)")
         assert(got === expected)
       } finally stream.close()
     } finally {
