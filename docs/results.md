@@ -1016,9 +1016,9 @@ handful of generic kernels (`gatherFixed`, `decodeDictionaryInto`, the string so
 wide-decimal average) as each stage brought a new combination of buffer type, lane type and call
 shape. Every single-query 1 TB figure in this series is a cold first iteration (`run-matrix.sh`
 runs one iteration, no warm-up); the campaign's single application amortises the warm-up unevenly
-across its query list. None of the JVM's levers move it: the JDK 25 AOT cache maps but carries no
-AOT-linked classes and no method profiles because `--add-modules=jdk.incubator.vector` disables the
-archived boot layer; compile thresholds and speculation knobs were flat across six legs. Making the
+across its query list. None of the JVM's levers moved it at first: the JDK 25 AOT cache mapped but carried no
+AOT-linked classes and no method profiles (the incubator module in the graph -- see the v7 passage
+below), and compile thresholds and speculation knobs were flat across six legs. Making the
 two hottest kernels branchless, each shape its own method (#432), halved their deoptimisations and
 took 4-6% off the cold stage at no warm cost; the rest is first execution itself, and whether the
 per-query legs should warm up first is a measurement decision, not an engine one.
@@ -1030,6 +1030,51 @@ batch's key columns once per assign (#433, the build-side twin of #409's `ProbeK
 per-row interface calls and their segment checks, 3.5x on a gather microbenchmark, and moved q67 2%.
 The strings the aggregate emits are the table's own distinct values; carrying them through the
 writer as dictionary ids is the change that fits.
+
+**v7: the suite at 1000 and at 300 partitions, both engines in one window each.** The image is
+main after the #416 series and #433; the methodology is v5/v6's (one application per engine, one
+iteration per query, no warm-up). At 1000 partitions, over 98 comparable queries, Spark took 3128.9 s
+and we took 2578.0 -- 1.21x -- where v6 had us 1.05x behind at the same setting; query by query
+against v6 (84 queries with a median in both) we improved 11.3% (2606.7 -> 2313.0 s) while Spark's
+leg regressed 12.1%, so the honest reading of that pass is "we improved 11% and Spark had a bad
+hour". At 300 partitions, over 102 comparable queries with both legs healthy, Spark took 3537.3 s
+and we took 2936.3 -- 1.20x, 17% less time, 49 queries at least 10% faster (38 of them 20%), 45
+within 10%, 8 slower. The partition count now moves us less than it moves Spark (ours 2606 -> 2562 s
+from 1000 to 300 over the 99 queries in both passes, Spark 3161 -> 3039), the reverse of v6; Spark
+itself is 8.6% slower at 300 than at 200 because 300 is above `spark.shuffle.sort.bypassMergeThreshold`
+and its map side changes writer. The v6 losers moved as intended -- q67 142 -> 97 s (1.25x over Spark
+at 1000 partitions, level at 300), q4 122 -> 77, q18 30.5 -> 9.2 (within 6% at 300), q84 32 -> 20,
+q35 26 -> 13, q19 7.1 -> 3.4 -- and the ones that survive both settings are a short list: q99 (73%
+behind at both), q36, q72, q47/q57 (the Sort fallback after `AQEShuffleRead`), q88, q30.
+
+Spark's "bad hour" had a cause worth recording because it will return at 3 TB. In its 1000-partition
+leg it lost q23b, q24a, q24b and q25: the kubelet evicted three executors for **ephemeral storage** --
+the bench nodes have a 20 GB root volume, Spark's shuffle directory is an `emptyDir` on it, q23a and
+q23b each write 83 GB of shuffle (10.4 GB per node) and the finished query's files stay two minutes,
+so the two overlap and cross the kubelet's 10%-free threshold; the node sits under `DiskPressure` for
+the five-minute transition period, every replacement executor is refused at admission, the next three
+queries fail within a second on the dying executors, and q26-q28 run on five executors (q28 287 s
+against 165 in v6). The same eviction happened in v6's Spark leg (q23b, q24a) and reproduced on demand
+with the free-space curve sampled: all eight nodes within 0.2-1.0 GB of the threshold sixteen seconds
+into q23b's map stage. Our leg never gets there because our shuffle for the same two queries is 38 GB
+each, 46% of Spark's bytes. The fix is a larger root volume for the node group, not code.
+
+**The AOT cache, second attempt (#416).** The earlier conclusion -- that `--add-modules` disables the
+archived boot layer -- was wrong in its cause: JEP 483 allows `--add-modules`; what `ModuleBootstrap`
+refuses is a configuration containing an *incubator* module, and `jdk.incubator.vector` is one until it
+leaves incubation. A runtime linked from Corretto 25's jmods (Temurin stopped shipping jmods at 24)
+with `jdk.incubator.vector` rebuilt without its `ModuleResolution` attribute and `java.base` without
+its `ModuleHashes` attribute -- same JDK build, same JIT, only module metadata -- archives the boot
+layer: the executor cache holds 18,970 AOT-linked classes (14,396 of them ours and Spark's) and the
+JEP 515 method profiles, 190 MB. q18 at 1000 partitions, cold, alternating with the plain image in one
+window: 15.9/16.2 s wall and 1155/1167 s of executor time without the cache, 10.7/11.0 s and 702/707 s
+with it (-39%); the two reduce stages that carried the deoptimisation storm halve (296 -> 123 s,
+238 -> 109 s), about halfway to their warm figures, and the gap to Spark's cold q18 goes from 2.3x to
+1.6x with no kernel change. That cache was trained on q18 itself; a cache trained on q67, q22 and q4 and measured on q18, which it never saw, still gives
+12.0/12.3 s and 828/816 s against 15.1 s and 1120 s in the same window (-27% executor time), the
+class linking being shared by every query and the query-specific profiles adding the rest. The
+cache is therefore worth baking into the image at build time from a synthetic training workload
+over every operator; it is the cheap half of the cold-start cost, the branchless kernels the other.
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
