@@ -108,7 +108,9 @@ object FlightShuffle extends Logging {
    * [[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader]] a local block goes through, and the
    * server neither decodes nor re-encodes anything.
    */
-  final class Producer(blockData: (Int, Long, Int, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) extends NoOpFlightProducer {
+  final class Producer(blockData: (Int, Long, Int, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator,
+      /** Bytes per gRPC message; a parameter so the transport benchmark can sweep it (default [[ChunkBytes]]). */
+      chunkBytes: Int = ChunkBytes) extends NoOpFlightProducer {
     /** A producer serving single partitions: `blockData(shuffleId, mapId, reduce)`. */
     def this(single: (Int, Long, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) =
       this((shuffleId: Int, mapId: Long, start: Int, end: Int) => {
@@ -123,7 +125,7 @@ object FlightShuffle extends Logging {
       var current = -1L
       try {
         listener.start(root)
-        val chunk = new Array[Byte](ChunkBytes)
+        val chunk = new Array[Byte](chunkBytes)
         var filled = 0
         // The blocks back to back: each is a sequence of IPC streams and the client's reader decodes
         // concatenated streams, so where one block ends and the next begins needs no marker -- and a
@@ -137,7 +139,8 @@ object FlightShuffle extends Logging {
           // One lookup and one open per map for the task's whole partition range (#411): the
           // partitions are consecutive in the data file, and an empty one is a zero-length span.
           val buf = blockData(shuffleId, mapId, reduce, endReduce)
-          val in = buf.createInputStream()
+          // The map file's dictionary section ahead of the range (#416): once per map output, not per block.
+          val in = io.sparkvector.shuffle.PartitionedIpcFile.blockStream(buf)
           try {
             var more = true
             while (more) {

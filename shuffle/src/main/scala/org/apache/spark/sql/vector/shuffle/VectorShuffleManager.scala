@@ -162,7 +162,12 @@ final class VectorShuffleWriter(
       VectorShuffleWriter.flushBytes(conf), VectorShuffleWriter.compression(conf),
       conf.getInt(VectorShuffleWriter.BatchRowsKey, 8192), conf.getSizeAsBytes(VectorShuffleWriter.BatchBytesKey, "1m"),
       conf.getSizeAsBytes(VectorShuffleWriter.BufferBytesKey, "64m"),
-      conf.getDouble(VectorShuffleWriter.DictionaryMaxRatioKey, PartitionedIpcWriter.DefaultDictionaryMaxRatio))
+      conf.getDouble(VectorShuffleWriter.DictionaryMaxRatioKey, PartitionedIpcWriter.DefaultDictionaryMaxRatio),
+      PartitionedIpcWriter.DictionaryCapBytes,
+      // One dictionary per map file (#416) needs the reader to see the file: the Flight producer and the
+      // local reader prepend it; Spark's block transfer delivers a block's bytes alone, so it keeps the
+      // per-block dictionaries.
+      fileDictionary = VectorShuffleBackend.backendName(conf).equalsIgnoreCase("flight"))
   }
   private var lengths: Array[Long] = _
   private var stopped = false
@@ -357,13 +362,9 @@ object VectorShuffleReader {
       compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType]): Iterator[ColumnarBatch] with AutoCloseable =
     new Iterator[ColumnarBatch] with AutoCloseable {
       // A file segment is read with positional reads straight into Arrow memory; an InputStream
-      // channel would copy every byte through a heap array first (the GC behind Q19/Q20's 1.15x).
-      private val channel = buf match {
-        case f: org.apache.spark.network.buffer.FileSegmentManagedBuffer =>
-          new PartitionedIpcFile.RangeChannel(
-            java.nio.channels.FileChannel.open(f.getFile.toPath, java.nio.file.StandardOpenOption.READ), f.getOffset, f.getLength)
-        case other => Channels.newChannel(other.createInputStream())
-      }
+      // channel would copy every byte through a heap array first (the GC behind Q19/Q20's 1.15x). The
+      // map file's dictionary section comes first (#416).
+      private val channel = PartitionedIpcFile.blockChannel(buf)
       private val inner = new PartitionedIpcFile.StreamReader(channel, allocator, schema, compression)
       private var released = false
       override def hasNext: Boolean = inner.hasNext

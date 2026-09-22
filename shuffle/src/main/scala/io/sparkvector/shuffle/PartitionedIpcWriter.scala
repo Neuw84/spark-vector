@@ -68,8 +68,15 @@ final class PartitionedIpcWriter(
      * hash per row buys nothing and the column goes plain. 0 never encodes, 1 always does.
      */
     dictionaryMaxRatio: Double = PartitionedIpcWriter.DefaultDictionaryMaxRatio,
-    /** Bytes of distinct values a string column's staging dictionary (#377) holds before everything pending is flushed and it is emptied. */
-    dictionaryCapBytes: Long = PartitionedIpcWriter.DictionaryCapBytes) extends AutoCloseable {
+    /** Bytes of distinct values a string column's staging dictionary (#377) holds before the column goes plain for the rest of the task (#416). */
+    dictionaryCapBytes: Long = PartitionedIpcWriter.DictionaryCapBytes,
+    /**
+     * One dictionary per string column per map file (#416): the task's staging dictionary is written
+     * once, after the partition streams, and every record batch carries ids over it -- no per-block
+     * dictionary, no per-block remap. `false` keeps a dictionary per record batch (the used entries,
+     * #345), for a transport that delivers a block's bytes alone (Spark's block transfer).
+     */
+    fileDictionary: Boolean = true) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
   /**
@@ -265,6 +272,9 @@ final class PartitionedIpcWriter(
       if (vector != null) vector.close()
       vector = null; buffers = null; rows = 0; dataBytes = 0L
     }
+
+    /** After a column's mode changed (#416: its dictionary froze): the vector dropped so the next rows settle the builder anew. */
+    def resettle(): Unit = { close(); idsMode = false }
   }
 
   private final class Segment(val partition: Int) {
@@ -379,6 +389,8 @@ final class PartitionedIpcWriter(
    */
   private final class IdColumn(c: Int) {
     val dict = new StringDictionary()
+    /** Non-null rows mapped so far: the denominator of the task-level distinct ratio (#416). */
+    var rowsSeen: Long = 0L
     private val scratch = new StringDictionary.Scratch()
     private var rowIds = new Array[Int](0)
     // Input dictionary entries -> staging ids, remembered while the same dictionary keeps arriving --
@@ -415,6 +427,7 @@ final class PartitionedIpcWriter(
       if (rowIds.length < n) rowIds = new Array[Int](math.max(n, rowIds.length * 2))
       val ids = rowIds
       val validity = in.validity()
+      rowsSeen += (if (validity == null) n else Bitmap.popcount(validity, n))
       if (in.isDictionaryEncoded) {
         val d = in.dictionary()
         val m = d.length()
@@ -523,9 +536,17 @@ final class PartitionedIpcWriter(
 
     def reset(): Unit = { dict.clear(); gen += 1; lastDict = null; lastVector = null; lastLength = -1 }
   }
-  private val idColumns = new Array[IdColumn](schema.fields.length)
-  private val idsMode = new Array[Boolean](schema.fields.length)
-  private val modeSettled = new Array[Boolean](schema.fields.length)
+  /**
+   * Every string column starts in ids mode (#416): its rows become staging ids over the column's
+   * dictionary whatever the input's encoding -- a dictionary-encoded batch by its entries, a plain one
+   * row by row (the hash `encodeStrings` did per block, into one dictionary per task instead). A
+   * column whose dictionary stops paying -- past `dictionaryCapBytes`, or more distinct values than
+   * `dictionaryMaxRatio` of its rows once `FreezeSampleRows` have been seen -- is frozen: everything
+   * pending is flushed as ids (they stay valid: the dictionary is written whole at `finish`) and the
+   * column travels plain for the rest of the task.
+   */
+  private val idColumns: Array[IdColumn] = Array.tabulate(schema.fields.length)(c => if (schema.fields(c).dataType == StringType) new IdColumn(c) else null)
+  private val frozen = new Array[Boolean](schema.fields.length)
   /** Per ids-mode string column, the plain vector of a batch that goes plain (#356), reused across blocks. */
   private val plainScratch = new Array[VarCharVector](schema.fields.length)
   private def plainScratchFor(c: Int): VarCharVector = {
@@ -571,8 +592,7 @@ final class PartitionedIpcWriter(
     while (col < buffers.length) {
       val b = buffers(col)
       plain(col) = if (b.`type`() != VecType.UTF8) b else {
-        if (!modeSettled(col)) { modeSettled(col) = true; idsMode(col) = b.isDictionaryEncoded(); if (idsMode(col)) idColumns(col) = new IdColumn(col) }
-        if (idsMode(col)) idColumns(col).map(b, n)
+        if (!frozen(col)) idColumns(col).map(b, n)
         else if (b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, scratch)
         else b
       }
@@ -609,20 +629,38 @@ final class PartitionedIpcWriter(
   }
 
   /**
-   * A staging dictionary past its cap (a high-cardinality column in ids mode: every value stays in
-   * it as long as rows may refer to it) is emptied once nothing pending refers to it any more: every
-   * partition's rows are flushed first. Rare, and the equivalent of the memory-bound flush the plain
-   * path makes anyway.
+   * A string column whose dictionary stops paying (#416) -- a high-cardinality column: past
+   * `dictionaryCapBytes` of distinct values, or more distinct values than `dictionaryMaxRatio` of its
+   * rows once `FreezeSampleRows` have been mapped -- is frozen: every partition's pending rows are
+   * flushed first (as ids over the dictionary, which stays whole until `finish`), then the column's
+   * builders drop their id vectors and its rows travel plain from here on. Rare, and the equivalent
+   * of the memory-bound flush the plain path makes anyway.
    */
   private def capDictionaries(): Unit = {
     var c = 0
-    var over = false
-    while (c < idColumns.length) { val ic = idColumns(c); if (ic != null && ic.dict.valueBytes() > dictionaryCapBytes) over = true; c += 1 }
-    if (!over) return
+    var any = false
+    while (c < idColumns.length) {
+      val ic = idColumns(c)
+      if (ic != null && !frozen(c) && mustFreeze(ic)) any = true
+      c += 1
+    }
+    if (!any) return
     if (staged) flushStaging() else { var p = 0; while (p < numPartitions) { flushPartition(segments(p)); p += 1 } }
     c = 0
-    while (c < idColumns.length) { if (idColumns(c) != null) idColumns(c).reset(); c += 1 }
+    while (c < idColumns.length) {
+      val ic = idColumns(c)
+      if (ic != null && !frozen(c) && mustFreeze(ic)) {
+        frozen(c) = true
+        if (staged) { staging(c).resettle(); batchBuilders(c).resettle() }
+        else { var p = 0; while (p < numPartitions) { segments(p).builders(c).resettle(); p += 1 } }
+      }
+      c += 1
+    }
   }
+
+  private def mustFreeze(ic: IdColumn): Boolean =
+    dictionaryMaxRatio <= 0.0 || ic.dict.valueBytes() > dictionaryCapBytes ||
+      (dictionaryMaxRatio < 1.0 && ic.rowsSeen >= PartitionedIpcWriter.FreezeSampleRows && ic.dict.size() > ic.rowsSeen * dictionaryMaxRatio)
 
   private val starts = new Array[Int](numPartitions + 1)
   private var order = new Array[Int](0)
@@ -700,28 +738,36 @@ final class PartitionedIpcWriter(
     try {
       var c = 0
       while (c < schema.fields.length) { taken(c) = builders(c).finish(); c += 1 }
-      // Pass 1: the record batch's dictionaries into the provider -- all of them before the stream
-      // writer exists, since it converts the schema with the dictionaries' types at construction.
-      // A string column whose distinct values are too many for the dictionary to pay stays plain
-      // (#356), and the batch's schema says which is which: every batch is its own stream.
+      // The batch's shape (#416): a string column is int32 ids over its dictionary when its builder
+      // holds ids (the column is in ids mode), plain UTF8 otherwise (frozen, or a per-block dictionary
+      // that did not pay). With `fileDictionary` the ids index the task's dictionary, written once at
+      // `finish`; without it each batch's used entries are remapped dense and sent as a dictionary
+      // unit ahead of the record batch (#345, #356).
       var batchFields: java.util.List[Field] = null // built only when a column goes plain
+      java.util.Arrays.fill(shapeBytes, 0.toByte)
       c = 0
       while (c < schema.fields.length) {
         val encoding = arrowSchema.getFields.get(c).getDictionary
         if (encoding != null) {
-          val (sids, sdict) = scratchFor(c)
-          // A batch of a few rows keeps its strings plain (#416): its dictionary would cost more than it
-          // saves, and only plain batches can be coalesced by the reader before the operators see them.
           val ic = idColumns(c)
-          val encoded = if (rows < PartitionedIpcWriter.DictionaryMinRows) null
-            else if (ic != null) ic.remap(taken(c).asInstanceOf[IntVector], rows, sids, sdict)
-            else PartitionedIpcWriter.encodeStrings(taken(c).asInstanceOf[VarCharVector], schema.fields(c).name, allocator, dictionaryMaxRatio, sids, sdict)
-          if (encoded != null) {
-            val (ids, dictionary) = encoded
-            taken(c) = ids
-            batchDictionaries += ((dictionary, encoding.getId))
-          } else {
-            if (ic != null) taken(c) = ic.decode(taken(c).asInstanceOf[IntVector], rows, plainScratchFor(c))
+          var encodedColumn = false
+          taken(c) match {
+            case staged: IntVector =>
+              if (fileDictionary) encodedColumn = true
+              else {
+                val (sids, sdict) = scratchFor(c)
+                val encoded = if (rows < PartitionedIpcWriter.DictionaryMinRows) null else ic.remap(staged, rows, sids, sdict)
+                if (encoded != null) {
+                  val (ids, dictionary) = encoded
+                  taken(c) = ids
+                  batchDictionaries += ((dictionary, c))
+                  encodedColumn = true
+                } else taken(c) = ic.decode(staged, rows, plainScratchFor(c))
+              }
+            case _ => // plain strings: the column is frozen
+          }
+          if (encodedColumn) shapeBytes(c >> 3) = (shapeBytes(c >> 3) | (1 << (c & 7))).toByte
+          else {
             if (batchFields == null) batchFields = new java.util.ArrayList[Field](arrowSchema.getFields)
             batchFields.set(c, plainFields(c))
           }
@@ -731,17 +777,18 @@ final class PartitionedIpcWriter(
       val batchSchema = if (batchFields == null) arrowSchema else new Schema(batchFields)
       val out = new org.apache.arrow.vector.ipc.WriteChannel(seg.sink)
       // No schema message and no end-of-stream marker (#411): the reader knows the shuffle's schema
-      // from the dependency, and a string column is dictionary-encoded in a batch exactly when a
-      // dictionary batch with its id precedes the record batch -- that is the batch's shape signal.
-      // The dictionaries, one batch each, then the record batch, over roots that wrap the vectors.
+      // from the dependency. Each IPC message follows a unit header of ours (#416) -- a dictionary unit
+      // names its column, a record batch unit carries the shape bitmap.
       var d = 0
       while (d < batchDictionaries.length) {
-        val (vector, id) = batchDictionaries(d)
-        val droot = new VectorSchemaRoot(java.util.List.of(vector.getField), java.util.List.of[FieldVector](vector), vector.getValueCount)
-        val dbatch = new org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch(id, new org.apache.arrow.vector.VectorUnloader(droot, true, codec, true).getRecordBatch, false)
-        try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, dbatch, IpcOption.DEFAULT) finally dbatch.close()
+        val (vector, column) = batchDictionaries(d)
+        PartitionedIpcFile.writeUnitHeader(seg.sink, PartitionedIpcFile.UnitDictionary, column)
+        writeDictionary(out, vector, PartitionedIpcFile.dictionaryEncoding(column).getId)
         d += 1
       }
+      PartitionedIpcFile.writeUnitHeader(seg.sink, PartitionedIpcFile.UnitRecordBatch, shapeBytes.length)
+      val shape = ByteBuffer.wrap(shapeBytes)
+      while (shape.hasRemaining) seg.sink.write(shape)
       val root = new VectorSchemaRoot(batchSchema.getFields, java.util.Arrays.asList(taken: _*), rows)
       val batch = new org.apache.arrow.vector.VectorUnloader(root, true, codec, true).getRecordBatch
       try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, batch, IpcOption.DEFAULT) finally batch.close()
@@ -763,6 +810,47 @@ final class PartitionedIpcWriter(
     }
   }
 
+  private val shapeBytes = new Array[Byte](math.max(1, (schema.fields.length + 7) / 8))
+
+  /** One dictionary as an IPC `DictionaryBatch` message with `id`, over a root that wraps the vector. */
+  private def writeDictionary(out: org.apache.arrow.vector.ipc.WriteChannel, vector: VarCharVector, id: Long): Unit = {
+    val droot = new VectorSchemaRoot(java.util.List.of(vector.getField), java.util.List.of[FieldVector](vector), vector.getValueCount)
+    val dbatch = new org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch(id, new org.apache.arrow.vector.VectorUnloader(droot, true, codec, true).getRecordBatch, false)
+    try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, dbatch, IpcOption.DEFAULT) finally dbatch.close()
+  }
+
+  /**
+   * The map file's dictionary section (#416): a dictionary unit per string column whose task dictionary
+   * has values -- the whole dictionary, dense in first-seen order, exactly what the batches' ids index --
+   * as one compressed frame. Empty (no unit) when nothing was encoded or the format is per block.
+   */
+  private def dictionarySection(): Array[Byte] = {
+    val raw = new ByteArrayOutputStream()
+    if (fileDictionary) {
+      val sink = new PartitionedIpcWriter.NonClosing(Channels.newChannel(raw))
+      val out = new org.apache.arrow.vector.ipc.WriteChannel(sink)
+      var c = 0
+      while (c < idColumns.length) {
+        val ic = idColumns(c)
+        if (ic != null && ic.dict.size() > 0) {
+          val vector = new VarCharVector(schema.fields(c).name + ".dictionary", allocator)
+          try {
+            val n = ic.dict.size()
+            vector.allocateNew(math.max(ic.dict.valueBytes(), 1L), n)
+            val store = ic.dict.bytes()
+            var i = 0
+            while (i < n) { vector.setSafe(i, store, ic.dict.offset(i), ic.dict.length(i)); i += 1 }
+            vector.setValueCount(n)
+            PartitionedIpcFile.writeUnitHeader(sink, PartitionedIpcFile.UnitDictionary, c)
+            writeDictionary(out, vector, PartitionedIpcFile.dictionaryEncoding(c).getId)
+          } finally vector.close()
+        }
+        c += 1
+      }
+    }
+    if (raw.size() == 0) Array.emptyByteArray else compressFrame(raw.toByteArray)
+  }
+
   /** The record batch's data bytes as written (the exchange's `dataSize`, see `rawBytes`). */
   private def batchBytesOf(vectors: Array[FieldVector]): Long = {
     var t = 0L
@@ -771,7 +859,7 @@ final class PartitionedIpcWriter(
     t
   }
 
-  private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Long)]
+  private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Int)]
 
   /** No per-buffer body compression: the partition's stream is compressed in frames (see `Segment.sink`). */
   private val codec: org.apache.arrow.vector.compression.CompressionCodec = org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
@@ -818,6 +906,14 @@ final class PartitionedIpcWriter(
         lengths(p) = pos - offsets(p)
         p += 1
       }
+      // The dictionary section and its trailer (#416), then the index footer when there is one.
+      val section = ByteBuffer.wrap(dictionarySection())
+      val sectionOffset = pos
+      while (section.hasRemaining) out.write(section)
+      pos += section.limit()
+      val trailer = ByteBuffer.wrap(PartitionedIpcFile.encodeDictTrailer(sectionOffset, section.limit()))
+      while (trailer.hasRemaining) out.write(trailer)
+      pos += trailer.limit()
       val index = PartitionedIpcFile.Index(offsets, lengths, rowsPerPartition)
       if (withFooter) {
         val footer = ByteBuffer.wrap(PartitionedIpcFile.encodeIndex(index))
@@ -873,8 +969,10 @@ object PartitionedIpcWriter {
   val DictionaryMinRows: Int = 256
   /** Rows hashed before the first distinct-ratio check: enough to tell a name column from a state column. */
   val DictionarySampleRows: Int = 512
-  /** Bytes of distinct values a staging dictionary (#377) holds before the writer flushes everything and empties it. */
+  /** Bytes of distinct values a string column's task dictionary (#377) holds before the column is frozen and goes plain (#416). */
   val DictionaryCapBytes: Long = 32L << 20
+  /** Non-null rows a string column maps before its task-level distinct ratio is judged against `dictionaryMaxRatio` (#416). */
+  val FreezeSampleRows: Long = 4096L
 
   /**
    * Dictionary-encodes a plain string vector: the distinct values in first-seen order, int32 ids,

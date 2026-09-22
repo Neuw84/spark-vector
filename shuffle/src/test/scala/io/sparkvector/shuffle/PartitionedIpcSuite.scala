@@ -284,13 +284,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           writer.finish()
         } finally { arena.close(); writer.close() }
       }
-      val indexes = paths.map { p =>
-        val ch = java.nio.channels.FileChannel.open(p, java.nio.file.StandardOpenOption.READ)
-        try PartitionedIpcFile.readIndex(ch) finally ch.close()
-      }
-      val bytes = paths.zip(indexes).map { case (p, ix) =>
-        val all = Files.readAllBytes(p); java.util.Arrays.copyOfRange(all, ix.offsets(0).toInt, (ix.offsets(0) + ix.lengths(0)).toInt)
-      }
+      // Each map output as a transport delivers it (#416): its dictionary section, then partition 0's stream.
+      val bytes = paths.map(p => PartitionedIpcFile.blockBytes(p, 0, 1))
       val channel = java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(bytes.reduce(_ ++ _)))
       val reader = new PartitionedIpcFile.StreamReader(channel, allocator, schema)
       try {
@@ -393,23 +388,35 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       assert(PartitionedIpcWriter.encodeStrings(repeats, "t", allocator, maxRatio = 0.0) == null)
     } finally repeats.close()
 
-    // Through the writer and the reader: `s` (random alphanumerics, nearly all distinct) comes back plain,
-    // `sd` (five words) comes back dictionary-encoded, in the same record batch; values survive either way.
+    // Through the writer and the reader (#416: the ratio is judged per task once FreezeSampleRows are
+    // seen): `s` (random alphanumerics, nearly all distinct) rides the task dictionary in the first
+    // batch, then the column is frozen and comes back plain; `sd` (five words) stays dictionary-encoded
+    // over the map file's one dictionary throughout; values survive either way.
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20)
     val arena = Arena.ofConfined()
     try {
-      val (b, rows) = batch(3000, arena, dictStrings = false)
-      try writer.write(b, new Array[Int](3000)) finally b.close()
+      val expected = mutable.ArrayBuffer.empty[Row]
+      (0 until 3).foreach { _ =>
+        val (b, rows) = batch(3000, arena, dictStrings = false)
+        try writer.write(b, new Array[Int](3000)) finally b.close()
+        expected ++= rows
+      }
       writer.finish()
       val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
       try {
-        val got = reader.next()
-        assert(got.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "plain UTF8 for the high-cardinality column")
-        assert(got.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
-        assert(read(got) === rows)
-        assert(!reader.hasNext)
+        val got = mutable.ArrayBuffer.empty[Row]
+        var plainS = 0; var encodedS = 0; var batches = 0
+        while (reader.hasNext) {
+          val b = reader.next()
+          batches += 1
+          if (b.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainS += 1 else encodedS += 1
+          assert(b.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
+          got ++= read(b)
+        }
+        assert(got === expected)
+        assert(batches >= 2 && plainS >= 1 && encodedS >= 1, s"the high-cardinality column rides the dictionary before the sample and goes plain after it ($batches batches: $encodedS encoded, $plainS plain)")
       } finally reader.close()
     } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
   }
