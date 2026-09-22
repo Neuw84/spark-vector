@@ -151,6 +151,98 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("#377: a dictionary-encoded column is staged as ids and remapped per block -- the aggregate's shared dictionary across batches") {
+    import org.apache.arrow.vector.{IntVector, VarCharVector}
+    // One Arrow dictionary vector shared by every batch, as the grouped aggregate emits its keys: the
+    // writer maps its entries once and every later batch costs its rows only. Two partitions so a
+    // block never sees the whole dictionary, and the blocks' dictionaries must be the used entries.
+    val dir = Files.createTempDirectory("svipc")
+    val path = dir.resolve("map.ipc")
+    val words = Array.tabulate(500)(i => s"product-$i")
+    val dictionary = new VarCharVector("k.dictionary", allocator)
+    dictionary.allocateNew(words.map(_.length).sum, words.length)
+    words.zipWithIndex.foreach { case (w, i) => dictionary.setSafe(i, w.getBytes("UTF-8")) }
+    dictionary.setValueCount(words.length)
+    val small = StructType(Seq(StructField("k", StringType), StructField("v", IntegerType)))
+    val writer = new PartitionedIpcWriter(small, 2, allocator, path, 1L << 20)
+    val expected = Array.fill(2)(mutable.ArrayBuffer.empty[(String, Int)])
+    try {
+      for (batchNo <- 0 until 6) {
+        val n = 2000
+        val indices = new IntVector("k", allocator)
+        indices.allocateNew(n)
+        val values = new IntVector("v", allocator)
+        values.allocateNew(n)
+        val ids = new Array[Int](n)
+        (0 until n).foreach { r =>
+          val e = (r * 7 + batchNo * 13) % 60 + batchNo * 60 // 60 entries per batch, disjoint across batches
+          if (r % 11 == 0) indices.setNull(r) else indices.set(r, e)
+          values.set(r, r)
+          ids(r) = r % 2
+          expected(ids(r)) += ((if (r % 11 == 0) null else words(e), r))
+        }
+        indices.setValueCount(n); values.setValueCount(n)
+        val batch = new ColumnarBatch(Array[ColumnVector](
+          new VectorDictionaryColumnVector(indices, dictionary, () => ()), // borrowed dictionary: the aggregate's release hook shape
+          new io.sparkvector.spark.arrow.VectorArrowColumnVector(values)), n)
+        try writer.write(batch, ids) finally batch.close()
+      }
+      writer.finish()
+      for (p <- 0 until 2) {
+        val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator, small)
+        val got = mutable.ArrayBuffer.empty[(String, Int)]
+        var blocks = 0
+        try while (reader.hasNext) {
+          val b = reader.next()
+          try {
+            blocks += 1
+            val k = b.column(0)
+            assert(k.isInstanceOf[VectorDictionaryColumnVector], "ids over a per-block dictionary")
+            val d = k.asInstanceOf[VectorDictionaryColumnVector].dictionary()
+            assert(d.getValueCount <= 60 * 6 && d.getValueCount > 0, s"a block's dictionary holds the entries it uses, got ${d.getValueCount}")
+            (0 until b.numRows()).foreach(r => got += ((if (k.isNullAt(r)) null else k.getUTF8String(r).toString, b.column(1).getInt(r))))
+          } finally b.close()
+        } finally reader.close()
+        assert(got === expected(p), s"partition $p")
+      }
+    } finally { writer.close(); dictionary.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+  }
+
+  test("#377: in ids mode a block whose distinct values exceed the ratio goes plain from the staging dictionary, and the cap empties it") {
+    // `sd` dictionary-encoded at the source with the 3000-name dictionary and 3000-row batches: every
+    // block is nearly all distinct, so #356 sends it plain -- gathered from the staging dictionary, not
+    // decoded from the input. A cap of a few kilobytes forces the flush-and-clear between batches; the
+    // values must survive both.
+    bigDictionary = true
+    val dir = Files.createTempDirectory("svipc")
+    val path = dir.resolve("map.ipc")
+    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, dictionaryCapBytes = 4096)
+    val expected = mutable.ArrayBuffer.empty[Row]
+    try {
+      for (_ <- 0 until 3) {
+        val arena = Arena.ofConfined()
+        try {
+          val (b, rows) = batch(3000, arena, dictStrings = true)
+          try writer.write(b, new Array[Int](3000)) finally b.close()
+          expected ++= rows
+        } finally arena.close()
+      }
+      writer.finish()
+      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
+      val got = mutable.ArrayBuffer.empty[Row]
+      var plainBlocks = 0
+      try while (reader.hasNext) {
+        val b = reader.next()
+        try {
+          if (b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainBlocks += 1
+          got ++= read(b)
+        } finally b.close()
+      } finally reader.close()
+      assert(plainBlocks > 0, "the nearly-distinct column went plain in at least one block")
+      assert(got === expected)
+    } finally { bigDictionary = false; writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+  }
+
   test("#345: a slice smaller than its dictionary carries only the entries it uses -- 200 partitions, a 3000-name dictionary") {
     bigDictionary = true
     try {
