@@ -27,16 +27,28 @@ public final class VectorDictionaryColumnVector extends ColumnVector {
   private final IntVector indices;
   private final VarCharVector dictionary;
   private final boolean owns;
+  private final Runnable dictionaryRelease;
+  private boolean closed; // non-null: the indices are owned, the dictionary is shared and released through this
 
   public VectorDictionaryColumnVector(IntVector indices, VarCharVector dictionary) {
-    this(indices, dictionary, true);
+    this(indices, dictionary, true, null);
   }
 
-  private VectorDictionaryColumnVector(IntVector indices, VarCharVector dictionary, boolean owns) {
+  /**
+   * A column owning its indices over a dictionary shared with other columns (#377: the grouped
+   * aggregate's key batches share one dictionary vector per emission): {@link #close} closes the
+   * indices and runs {@code dictionaryRelease}, whose owner closes the dictionary on the last release.
+   */
+  public VectorDictionaryColumnVector(IntVector indices, VarCharVector dictionary, Runnable dictionaryRelease) {
+    this(indices, dictionary, true, dictionaryRelease);
+  }
+
+  private VectorDictionaryColumnVector(IntVector indices, VarCharVector dictionary, boolean owns, Runnable dictionaryRelease) {
     super(DataTypes.StringType);
     this.indices = indices;
     this.dictionary = dictionary;
     this.owns = owns;
+    this.dictionaryRelease = dictionaryRelease;
   }
 
   public IntVector indices() {
@@ -53,7 +65,7 @@ public final class VectorDictionaryColumnVector extends ColumnVector {
 
   /** Same vectors, not owned. */
   public VectorDictionaryColumnVector borrow() {
-    return new VectorDictionaryColumnVector(indices, dictionary, false);
+    return new VectorDictionaryColumnVector(indices, dictionary, false, null);
   }
 
   /** Zero-copy dictionary-encoded UTF8 buffers over the two vectors. */
@@ -65,9 +77,14 @@ public final class VectorDictionaryColumnVector extends ColumnVector {
 
   @Override
   public void close() {
-    if (owns) {
+    if (owns && !closed) {
+      closed = true;
       indices.close();
-      dictionary.close();
+      if (dictionaryRelease != null) {
+        dictionaryRelease.run();
+      } else {
+        dictionary.close();
+      }
     }
   }
 

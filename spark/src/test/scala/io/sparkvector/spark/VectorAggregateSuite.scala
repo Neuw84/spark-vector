@@ -48,6 +48,31 @@ class VectorAggregateSuite extends VectorQuerySuite {
     checkVectorized("SELECT s AS key_s, count(*) AS n, sum(d) AS total FROM t GROUP BY s", Seq(Agg))
   }
 
+  test("#377: string keys are emitted dictionary-encoded, ids over the group table's dictionary") {
+    import org.apache.spark.sql.vectorized.ColumnarBatch
+    import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDictionaryColumnVector}
+    def keyColumns(sql: String): Seq[Class[_]] = withPlugin(enabled = true) {
+      val plan = finalPlan { val d = spark.sql(sql); d.collect(); d }
+      val agg = org.apache.spark.sql.vector.PlanUtils.allNodes(plan).collect { case a: VectorHashAggregateExec => a }.last // the partial, over the scan
+      // Classified inside the task: a ColumnarBatch does not travel to the driver.
+      org.apache.spark.sql.execution.SQLExecution.withSQLConfPropagated(spark.asInstanceOf[org.apache.spark.sql.classic.SparkSession]) {
+        agg.executeColumnar().mapPartitions(_.filter(_.numRows() > 0).map(_.column(0).getClass.getName)).collect().toSeq.distinct
+      }.map(Class.forName)
+    }
+    // 45 distinct strings (plus the null) over 20000 rows in the partial, 45 groups in the final.
+    checkVectorized("SELECT s, count(*) AS n, sum(d) AS total FROM t GROUP BY s", Seq(Agg))
+    assert(keyColumns("SELECT s, count(*) AS n FROM t GROUP BY s") == Seq(classOf[VectorDictionaryColumnVector]),
+      "a low-cardinality key goes out as ids over the table's dictionary")
+    // Every row its own key: still ids plus a dictionary of the same bytes; the shuffle writer decides per block.
+    checkVectorized("SELECT concat(s, '-', i) AS k, count(*) AS n FROM t GROUP BY concat(s, '-', i)", Seq(Agg))
+    assert(keyColumns("SELECT concat(s, '-', i) AS k, count(*) AS n FROM t GROUP BY concat(s, '-', i)") == Seq(classOf[VectorDictionaryColumnVector]))
+    // Switched off, the low-cardinality key is plain too, and the results are the same.
+    withConf(VectorConf.AggDictionaryKeys -> "false") {
+      checkVectorized("SELECT s, count(*) AS n, sum(d) AS total FROM t GROUP BY s", Seq(Agg))
+      assert(keyColumns("SELECT s, count(*) AS n FROM t GROUP BY s") == Seq(classOf[VectorArrowColumnVector]))
+    }
+  }
+
   test("count(*) over a scan with no projected columns") {
     checkVectorized("SELECT count(*) FROM t", Seq(Agg))
   }
