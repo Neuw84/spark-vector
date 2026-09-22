@@ -269,8 +269,17 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
   var head: Array[Int] = new Array[Int](0)
   /** Next build row with the same key, -1 at the end. */
   val next: Array[Int] = new Array[Int](numRows)
+  /**
+   * The build rows clustered by key: the rows of key `g`, in build order, are
+   * `rangeRows(rangeStart(g) until rangeStart(g + 1))`. The residual of an inner join is tested over
+   * such a range as one array scan instead of a walk of the chain (q72's 10^10 candidate pairs).
+   */
+  var rangeStart: Array[Int] = new Array[Int](0)
+  var rangeRows: Array[Int] = new Array[Int](0)
   /** Heap mirrors of the fixed-width columns a join condition reads, made on first use (#332). */
   private val mirrors = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
+  /** The same lanes in key-clustered order (`rangeRows`), for the range scan; made on first use. */
+  private val clustered = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
 
   /** The heap mirror of column `c`, or null when the column is not one a mirror covers. A shared table may race to make it; the result is the same. */
   def mirror(c: Int): io.sparkvector.kernels.HeapMirror = {
@@ -278,6 +287,19 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
     if (m == null && io.sparkvector.kernels.HeapMirror.mirrors(columns(c))) {
       m = io.sparkvector.kernels.HeapMirror.of(columns(c))
       mirrors(c) = m
+    }
+    m
+  }
+
+  /** The mirror of column `c` in key-clustered order, or null when the column has no mirror. Same race note as `mirror`. */
+  def clusteredMirror(c: Int): io.sparkvector.kernels.HeapMirror = {
+    var m = clustered(c)
+    if (m == null) {
+      val plain = mirror(c)
+      if (plain != null) {
+        m = io.sparkvector.kernels.RangeResidual.cluster(plain, rangeRows)
+        clustered(c) = m
+      }
     }
     m
   }
@@ -296,6 +318,16 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
         if (g >= 0) { next(i) = head(g); head(g) = i } else next(i) = -1
         i -= 1
       }
+      // The same rows clustered by key (a counting sort by group id keeps build order within a key).
+      rangeStart = new Array[Int](groups + 1)
+      i = 0
+      while (i < numRows) { val g = ids(i); if (g >= 0) rangeStart(g + 1) += 1; i += 1 }
+      var g = 0
+      while (g < groups) { rangeStart(g + 1) += rangeStart(g); g += 1 }
+      val fill = java.util.Arrays.copyOf(rangeStart, groups)
+      rangeRows = new Array[Int](rangeStart(groups))
+      i = 0
+      while (i < numRows) { val g = ids(i); if (g >= 0) { rangeRows(fill(g)) = i; fill(g) += 1 }; i += 1 }
     }
     this
   }
@@ -658,26 +690,68 @@ private[vector] class VectorHashJoinIterator(
     // A simple residual over integer lanes is tested per candidate pair on the heap mirrors, so a
     // failing pair is never appended, gathered or compacted (#332: q72's 10^9 pairs, a few percent kept).
     val fused = fusedPredicate(ctx)
+    // When exactly one side of it is a build lane, the test runs as one array scan over the key's
+    // clustered build rows instead of a walk of the chain with a call per pair (q72).
+    val ranged = if (fused != null && !nestedLoop && fused.rangeable) fused else null
     var count = 0
     var i = from
     while (i < until) {
       if (selected(ctx, i)) {
-        var r = firstCandidate(i)
-        if (r < 0) {
-          if (preservesStreamed) { count = append(count, i, -1); }
+        if (ranged != null) {
+          val g = idScratch(i)
+          if (g >= 0) count = scanRange(ranged, i, build.rangeStart(g), build.rangeStart(g + 1), count)
         } else {
-          while (r >= 0) {
-            if (fused == null || fused.test(i, r)) {
-              count = append(count, i, r)
-              if (buildMatched != null) buildMatched(r) = true
+          var r = firstCandidate(i)
+          if (r < 0) {
+            if (preservesStreamed) { count = append(count, i, -1); }
+          } else {
+            while (r >= 0) {
+              if (fused == null || fused.test(i, r)) {
+                count = append(count, i, r)
+                if (buildMatched != null) buildMatched(r) = true
+              }
+              r = nextCandidate(r)
             }
-            r = nextCandidate(r)
           }
         }
       }
       i += 1
     }
     if (count > 0) flush(ctx, probeIdx, buildIdx, count, filter = spec.condition.isDefined && fused == null)
+  }
+
+  /** Positions of the clustered build rows that passed the residual for one streamed row (scratch). */
+  private var rangeHits = new Array[Int](0)
+
+  /**
+   * The residual over the clustered build rows `[s, e)` of streamed row `i`: the streamed operand is
+   * one value for the row (null: no pairs), the build operand a clustered lane, and the survivors are
+   * appended as (streamed row, build row) pairs in build order, as the chain walk would have.
+   */
+  private def scanRange(p: PairPredicate, i: Int, s: Int, e: Int, count0: Int): Int = {
+    val n = e - s
+    if (n <= 0 || !p.streamedValid(i)) return count0
+    if (rangeHits.length < n) rangeHits = new Array[Int](math.max(n, rangeHits.length * 2))
+    val hits = p.scan(i, s, e, rangeHits)
+    var count = count0
+    if (hits > 0) {
+      if (count + hits > probeIdx.length) {
+        val cap = math.max(count + hits, probeIdx.length * 2)
+        probeIdx = java.util.Arrays.copyOf(probeIdx, cap)
+        buildIdx = java.util.Arrays.copyOf(buildIdx, cap)
+      }
+      val rows = build.rangeRows
+      var h = 0
+      while (h < hits) {
+        val r = rows(rangeHits(h))
+        probeIdx(count) = i
+        buildIdx(count) = r
+        if (buildMatched != null) buildMatched(r) = true
+        count += 1
+        h += 1
+      }
+    }
+    count
   }
 
   /**
@@ -692,7 +766,7 @@ private[vector] class VectorHashJoinIterator(
         if isSemiOrAnti == false && !keepUnmatched && !isExistence =>
       val ma = mirrorOf(ctx, a); val mb = mirrorOf(ctx, b)
       if (ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)) null
-      else new PairPredicate(op, ma, isBuildColumn(a), ao, mb, isBuildColumn(b), bo)
+      else new PairPredicate(op, ma, isBuildColumn(a), a, ao, mb, isBuildColumn(b), b, bo)
     case _ => null
   }
 
@@ -721,8 +795,8 @@ private[vector] class VectorHashJoinIterator(
 
   /** `left [+ lo] OP right [+ ro]` per pair; each side reads the build row or the streamed row of the pair. */
   private final class PairPredicate(
-      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean, leftOffset: Long,
-      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean, rightOffset: Long) {
+      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean, leftOrdinal: Int, leftOffset: Long,
+      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean, rightOrdinal: Int, rightOffset: Long) {
     private val ints = left.`type` == io.sparkvector.kernels.VecType.INT32
     def test(streamed: Int, buildRow: Int): Boolean = {
       val li = if (leftIsBuild) buildRow else streamed
@@ -742,6 +816,34 @@ private[vector] class VectorHashJoinIterator(
           case io.sparkvector.kernels.CompareOp.GE => cmp >= 0
         }
       }
+    }
+
+    /** One build lane against one streamed value: the shape the range scan handles. */
+    val rangeable: Boolean = leftIsBuild != rightIsBuild
+    /** The streamed operand's mirror and offset, and the build lane's ordinal and offset. */
+    private val streamedMirror = if (leftIsBuild) right else left
+    private val streamedOffset = if (leftIsBuild) rightOffset else leftOffset
+    private val buildColumn = buildOrdinal(if (leftIsBuild) leftOrdinal else rightOrdinal)
+    private val laneOffset = if (leftIsBuild) leftOffset else rightOffset
+    /** `build OP streamed` when the build lane is the left operand; the mirrored operator otherwise. */
+    private val mask = io.sparkvector.kernels.RangeResidual.mask(if (leftIsBuild) op else op match {
+      case io.sparkvector.kernels.CompareOp.LT => io.sparkvector.kernels.CompareOp.GT
+      case io.sparkvector.kernels.CompareOp.LE => io.sparkvector.kernels.CompareOp.GE
+      case io.sparkvector.kernels.CompareOp.GT => io.sparkvector.kernels.CompareOp.LT
+      case io.sparkvector.kernels.CompareOp.GE => io.sparkvector.kernels.CompareOp.LE
+      case other => other
+    })
+    private var lane: io.sparkvector.kernels.HeapMirror = null
+
+    def streamedValid(streamed: Int): Boolean = streamedMirror.isValid(streamed)
+
+    /** The positions in `[s, e)` of the clustered build lane passing the residual against streamed row `i`, into `hits`; their count. */
+    def scan(streamed: Int, s: Int, e: Int, hits: Array[Int]): Int = {
+      if (lane == null) lane = build.clusteredMirror(buildColumn)
+      if (ints)
+        io.sparkvector.kernels.RangeResidual.scanInts(lane.ints, lane.validity, s, e, laneOffset.toInt, streamedMirror.ints(streamed) + streamedOffset.toInt, mask, hits, 0)
+      else
+        io.sparkvector.kernels.RangeResidual.scanLongs(lane.longs, lane.validity, s, e, laneOffset, streamedMirror.longs(streamed) + streamedOffset, mask, hits, 0)
     }
   }
 

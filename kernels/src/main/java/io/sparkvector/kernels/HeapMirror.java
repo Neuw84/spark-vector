@@ -36,6 +36,11 @@ public final class HeapMirror {
     this.validity = validity;
   }
 
+  /** A mirror over arrays already laid out by the caller ({@link RangeResidual#cluster}). */
+  static HeapMirror clustered(VecType type, int length, int[] ints, long[] longs, long[] validity) {
+    return new HeapMirror(type, length, ints, longs, validity);
+  }
+
   /** Whether {@code in} is a column this mirrors: plain INT32, INT64 or FLOAT64. */
   public static boolean mirrors(VectorBuffers in) {
     if (in.isDictionaryEncoded()) {
