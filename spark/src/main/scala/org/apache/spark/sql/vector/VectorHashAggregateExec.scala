@@ -312,7 +312,8 @@ private[vector] class VectorGroupedAggregateIterator(
   private val OutputBatchSize = 4096
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
-  private var table = new GroupKeyTable(keyExprs.map(_.vecType))
+  private val dictionaryLimit = VectorConf.aggDictionaryLimit(org.apache.spark.sql.internal.SQLConf.get)
+  private var table = new GroupKeyTable(keyExprs.map(_.vecType), dictionaryLimit)
   private val dictionaryKeys = VectorConf.aggDictionaryKeys(org.apache.spark.sql.internal.SQLConf.get)
   private val keyDicts = new Array[SharedDictionary](keyExprs.length)
   private var states: Array[GroupedAggState] = aggs.map(_.newGroupedState())
@@ -411,7 +412,7 @@ private[vector] class VectorGroupedAggregateIterator(
   private def reset(): Unit = {
     releaseMemory()
     releaseDictionaries()
-    table = new GroupKeyTable(keyExprs.map(_.vecType))
+    table = new GroupKeyTable(keyExprs.map(_.vecType), dictionaryLimit)
     states = aggs.map(_.newGroupedState())
     emittedGroups = 0
     fillRows = 0L
@@ -573,7 +574,7 @@ private[vector] class VectorGroupedAggregateIterator(
    * dictionary's entries rather than the rows.
    */
   private def sharedDictionary(name: String, k: Int): SharedDictionary = {
-    if (!dictionaryKeys) return null
+    if (!dictionaryKeys || !table.isDictionaryColumn(k)) return null
     val distinct = table.dictionarySize(k)
     if (distinct == 0) return null
     var d = keyDicts(k)

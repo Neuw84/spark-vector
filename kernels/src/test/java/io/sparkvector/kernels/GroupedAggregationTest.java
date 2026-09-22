@@ -495,6 +495,132 @@ class GroupedAggregationTest {
     }
   }
 
+
+
+  private static VectorBuffers dictionaryEncoded(Arena arena, String[] values) {
+    java.util.List<String> alphabet = new java.util.ArrayList<>();
+    int n = values.length;
+    int[] idx = new int[n];
+    boolean[] nulls = new boolean[n];
+    for (int i = 0; i < n; i++) {
+      if (values[i] == null) {
+        nulls[i] = true;
+      } else {
+        int j = alphabet.indexOf(values[i]);
+        if (j < 0) {
+          j = alphabet.size();
+          alphabet.add(values[i]);
+        }
+        idx[i] = j;
+      }
+    }
+    SegmentVectorBuffers indices = ArrowLayout.ofInts(arena, idx, nulls);
+    return SegmentVectorBuffers.dictionaryUtf8(n, indices.validity(), indices.data(), ArrowLayout.ofStrings(arena, alphabet.toArray(new String[0])));
+  }
+
+  @Test
+  void aStringKeyWhoseDictionaryOutgrowsTheLimitSwitchesToRecordsAndKeepsEveryGroup() {
+    try (Arena arena = Arena.ofConfined()) {
+      // Limit 100: the first batch (60 distinct names) stays in dictionary mode, the second (200 more)
+      // finds the dictionary over the limit and converts before it is assigned. A second string key
+      // stays small and keeps its ids; an int key rides along. Group ids never move, every earlier
+      // group is found again, and the keys read back plain and equal.
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.UTF8, VecType.INT32}, 100);
+      int n = 240;
+      String[] names = new String[n];
+      String[] kinds = new String[n];
+      int[] ints = new int[n];
+      for (int i = 0; i < n; i++) {
+        names[i] = i % 4 == 3 ? null : "product name number " + (i % 60) + " padded past the packed key";
+        kinds[i] = "k" + (i % 5);
+        ints[i] = i % 2;
+      }
+      int[] ids1 = new int[n];
+      VectorBuffers[] batch1 = {ArrowLayout.ofStrings(arena, names), ArrowLayout.ofStrings(arena, kinds), ArrowLayout.ofInts(arena, ints, null)};
+      int groups1 = table.assign(batch1, n, ids1);
+      assertTrue(table.isDictionaryColumn(0));
+      assertEquals(45, table.dictionarySize(0), "45 distinct non-null names; a null takes no entry");
+      int[] again = new int[n];
+      assertEquals(groups1, table.assign(batch1, n, again), "the same batch creates no group");
+      assertArrayEquals(ids1, again);
+
+      // Batch 2: 200 new names -> over the limit -> record mode for column 0 only.
+      String[] names2 = new String[n];
+      for (int i = 0; i < n; i++) {
+        names2[i] = "another product name " + (i % 200) + " also long enough to skip the packed key";
+      }
+      int[] ids2 = new int[n];
+      VectorBuffers[] batch2 = {ArrowLayout.ofStrings(arena, names2), ArrowLayout.ofStrings(arena, kinds), ArrowLayout.ofInts(arena, ints, null)};
+      int groups2 = table.assign(batch2, n, ids2);
+      assertTrue(groups2 > groups1);
+      // (name, kind, int) of batch 2 repeats with period lcm(200, 5, 2) = 200: 200 new groups from 240 rows.
+      assertEquals(groups1 + 200, groups2);
+      // The batch that pushed the dictionary over the limit still ran by ids; the next inserting
+      // batch finds it over the limit and converts column 0 -- and only column 0 -- before it runs.
+      assertTrue(table.isDictionaryColumn(0));
+      assertEquals(245, table.dictionarySize(0));
+      assertEquals(groups2, table.assign(batch1, n, again));
+      assertArrayEquals(ids1, again);
+      assertFalse(table.isDictionaryColumn(0));
+      assertTrue(table.isDictionaryColumn(1));
+      assertEquals(0, table.dictionarySize(0));
+      assertEquals(5, table.dictionarySize(1));
+
+      // Every group is found again after the conversion, with its original id -- through a plain
+      // column and through a dictionary-encoded one -- and new groups still insert.
+      assertEquals(groups2, table.assign(batch1, n, again));
+      assertArrayEquals(ids1, again);
+      VectorBuffers encodedNames = dictionaryEncoded(arena, names);
+      VectorBuffers[] batch1Enc = {encodedNames, ArrowLayout.ofStrings(arena, kinds), ArrowLayout.ofInts(arena, ints, null)};
+      assertEquals(groups2, table.assign(batch1Enc, n, again));
+      assertArrayEquals(ids1, again);
+      assertEquals(groups2, table.assign(batch2, n, again));
+      assertArrayEquals(ids2, again);
+      String[] names3 = new String[n];
+      for (int i = 0; i < n; i++) {
+        names3[i] = "a third family of names " + (i % 7) + ", inserted in record mode";
+      }
+      int[] ids3 = new int[n];
+      int groups3 = table.assign(new VectorBuffers[] {ArrowLayout.ofStrings(arena, names3), ArrowLayout.ofStrings(arena, kinds), ArrowLayout.ofInts(arena, ints, null)}, n, ids3);
+      assertEquals(groups2 + 70, groups3, "lcm(7, 5, 2) = 70 new groups");
+      for (int i = 0; i < n; i++) {
+        assertEquals(names3[i], table.getString(0, ids3[i]));
+      }
+      groups2 = groups3;
+
+      for (int i = 0; i < n; i++) {
+        if (names[i] == null) {
+          assertTrue(table.isNull(0, ids1[i]));
+        } else {
+          assertEquals(names[i], table.getString(0, ids1[i]));
+        }
+        assertEquals(kinds[i], table.getString(1, ids1[i]));
+        assertEquals(names2[i], table.getString(0, ids2[i]));
+      }
+
+      // writeKeys reads the record column back plain, nulls included.
+      int from = 0, to = groups2;
+      long bytes = table.utf8Bytes(0, from, to);
+      var offsets = ArrowLayout.allocateOffsets(arena, to - from);
+      var data = ArrowLayout.allocateBytes(arena, bytes);
+      var validity = ArrowLayout.allocateBitmap(arena, to - from);
+      table.writeKeys(0, from, to, validity, data, offsets);
+      VectorBuffers out = SegmentVectorBuffers.utf8(to - from, validity, offsets, data);
+      for (int gid = from; gid < to; gid++) {
+        if (table.isNull(0, gid)) {
+          assertTrue(out.isNull(gid - from));
+        } else {
+          assertEquals(table.getString(0, gid), out.getString(gid - from));
+        }
+      }
+      // A join-style probe with unknown values finds nothing and inserts nothing.
+      String[] unknown = new String[n];
+      Arrays.fill(unknown, "never seen before, long enough to skip the packed key");
+      int[] probe = new int[n];
+      assertEquals(0, table.lookup(new VectorBuffers[] {ArrowLayout.ofStrings(arena, unknown), ArrowLayout.ofStrings(arena, kinds), ArrowLayout.ofInts(arena, ints, null)}, n, probe, null));
+      assertEquals(groups2, table.size());
+    }
+  }
   @Test
   void longKeysAndBooleanKeysDistinguishNullFromZero() {
     try (Arena arena = Arena.ofConfined()) {

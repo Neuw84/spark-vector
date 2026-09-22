@@ -17,6 +17,12 @@ object VectorConf {
   val ShuffleEnabled = "spark.vector.shuffle.enabled"
   /** The grouped aggregate emits its UTF8 keys dictionary-encoded, ids over the group table's own dictionary (#377). */
   val AggDictionaryKeys = "spark.vector.agg.dictionaryKeys"
+  /**
+   * Entries a UTF8 key's dictionary may reach before the group table keeps that key as record bytes
+   * instead of ids (#377): a probe into a dictionary that no longer fits the cache costs a miss per row.
+   * 0 keeps every string key as records from the start.
+   */
+  val AggDictionaryLimit = "spark.vector.agg.dictionaryKeys.limit"
   val SortEnabled = "spark.vector.exec.sort.enabled"
   val SortRunRows = "spark.vector.sort.runRows"
   val TakeOrderedEnabled = "spark.vector.exec.takeOrdered.enabled"
@@ -57,6 +63,9 @@ object VectorConf {
   def cometShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometShuffleEnabled, default = true)
   def shuffleEnabled(conf: SQLConf): Boolean = bool(conf, ShuffleEnabled, default = true)
   def aggDictionaryKeys(conf: SQLConf): Boolean = bool(conf, AggDictionaryKeys, default = true)
+  def aggDictionaryLimit(conf: SQLConf): Int =
+    scala.util.Try(conf.getConfString(AggDictionaryLimit, "").trim.toInt).toOption.filter(_ >= 0)
+      .getOrElse(io.sparkvector.kernels.GroupKeyTable.DEFAULT_DICTIONARY_LIMIT)
   /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */
   def selectionEnabled(conf: SQLConf): Boolean = bool(conf, SelectionEnabled, default = true)
   /** Convert SortExec over a columnar child (in-memory, no spill). */
