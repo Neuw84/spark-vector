@@ -88,11 +88,13 @@ ENV SPARK_HOME=/opt/spark
 WORKDIR /opt/spark/work-dir
 RUN chmod g+w /opt/spark/work-dir && chown -R spark:spark /opt/spark/work-dir /opt/tpcds-kit \
     && chmod a+rx /opt/tpcds-kit/tools/dsdgen
-# The executor's class path carries its conf directory (entrypoint.sh; on Kubernetes a mounted ConfigMap
-# with spark.properties), and the JDK's AOT cache / CDS refuses a non-empty directory on the class path
-# (#416). The executor reads its properties through --properties-file, not the class path: leave the
-# directory off for executors only.
-RUN sed -i 's|^if ! \[ -z ${SPARK_CONF_DIR+x} \]; then$|if [ "$1" = executor ]; then :; elif ! [ -z ${SPARK_CONF_DIR+x} ]; then|' /opt/entrypoint.sh \
-    && grep -q 'if \[ "$1" = executor \]; then :;' /opt/entrypoint.sh
+# The executor's class path from entrypoint.sh carries its conf directory (on Kubernetes a mounted
+# ConfigMap with spark.properties), its working directory (where the executor fetches the job's jars)
+# and empty entries (the working directory again), and the JDK's AOT cache / CDS refuses a non-empty
+# directory on the class path (#416). The executor reads its properties through --properties-file
+# and the job's jars through its own class loader: its class path is the jars directory alone. The
+# driver's class path is left as the distribution builds it.
+RUN sed -i '/^  executor)$/{n;s|^    shift 1$|    shift 1\n    SPARK_CLASSPATH="$SPARK_HOME/jars/*"; SPARK_DIST_CLASSPATH="$SPARK_HOME/jars/*"|}' /opt/entrypoint.sh \
+    && grep -q 'SPARK_CLASSPATH="$SPARK_HOME/jars/\*"; SPARK_DIST_CLASSPATH' /opt/entrypoint.sh
 USER spark
 ENTRYPOINT ["/opt/entrypoint.sh"]
