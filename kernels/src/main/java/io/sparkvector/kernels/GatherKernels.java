@@ -24,37 +24,77 @@ public final class GatherKernels {
   public static void gatherFixed(
       VectorBuffers in, int[] idx, int from, int to, MemorySegment outData, MemorySegment outValidity) {
     VecType type = in.isDictionaryEncoded() ? VecType.INT32 : in.type();
-    MemorySegment data = in.data();
+    if (outValidity == null) {
+      // No validity asked for: the input has no nulls and no index is padded -- the plain loop.
+      gatherFixedPlain(type, in.data(), idx, from, to, outData);
+    } else {
+      gatherFixed(type, in.data(), idx, from, to, outData);
+      gatherValidity(in.validity(), idx, from, to, outValidity);
+    }
+  }
+
+  /** The data lanes of real indices only (no {@code -1}): the loop is a load and a store per row. */
+  public static void gatherFixedPlain(VecType type, MemorySegment data, int[] idx, int from, int to, MemorySegment outData) {
+    int count = to - from;
+    switch (type) {
+      case INT32 -> {
+        for (int o = 0; o < count; o++) {
+          outData.set(VectorBuffers.LE_INT, (long) o << 2, data.get(VectorBuffers.LE_INT, (long) idx[from + o] << 2));
+        }
+      }
+      case INT64, FLOAT64 -> {
+        for (int o = 0; o < count; o++) {
+          outData.set(VectorBuffers.LE_LONG, (long) o << 3, data.get(VectorBuffers.LE_LONG, (long) idx[from + o] << 3));
+        }
+      }
+      case BOOL -> gatherBits(data, idx, from, to, outData, false);
+      case DECIMAL128 -> {
+        for (int o = 0; o < count; o++) {
+          Decimal128.copy(data, idx[from + o], outData, o);
+        }
+      }
+      default -> throw new IllegalArgumentException("not fixed width: " + type);
+    }
+  }
+
+  /**
+   * The data lanes alone, from a segment, indices possibly padded ({@code -1}). The loops carry no
+   * data-dependent branch: a padded index reads slot 0 and masks the value to zero (#416 -- the
+   * {@code i < 0} branch, never taken in a sort's gathers and taken in an outer join's, had C2
+   * speculate on it and deoptimise the kernel forty times in q18's first iteration, every task on the
+   * executor running it interpreted until the recompile; the same for the null branch of the
+   * dictionary decode). Gathers that produce no validity take {@link #gatherFixedPlain}, whose loops
+   * are the unmasked load and store.
+   */
+  public static void gatherFixed(VecType type, MemorySegment data, int[] idx, int from, int to, MemorySegment outData) {
     int count = to - from;
     switch (type) {
       case INT32 -> {
         for (int o = 0; o < count; o++) {
           int i = idx[from + o];
-          outData.set(VectorBuffers.LE_INT, (long) o << 2, i < 0 ? 0 : data.get(VectorBuffers.LE_INT, (long) i << 2));
+          int keep = ~(i >> 31); // all ones for a real index, zero for -1
+          outData.set(VectorBuffers.LE_INT, (long) o << 2, data.get(VectorBuffers.LE_INT, (long) (i & keep) << 2) & keep);
         }
       }
       case INT64, FLOAT64 -> {
         for (int o = 0; o < count; o++) {
           int i = idx[from + o];
-          outData.set(VectorBuffers.LE_LONG, (long) o << 3, i < 0 ? 0L : data.get(VectorBuffers.LE_LONG, (long) i << 3));
+          long keep = ~(long) (i >> 31);
+          outData.set(VectorBuffers.LE_LONG, (long) o << 3, data.get(VectorBuffers.LE_LONG, (long) (i & (int) keep) << 3) & keep);
         }
       }
       case BOOL -> gatherBits(data, idx, from, to, outData, false);
       case DECIMAL128 -> {
-        // Two limbs per value; a padded (-1) index leaves the slot zero like the other lanes.
         for (int o = 0; o < count; o++) {
           int i = idx[from + o];
-          if (i < 0) {
-            Decimal128.set(outData, o, 0L, 0L);
-          } else {
-            Decimal128.copy(data, i, outData, o);
-          }
+          long keep = ~(long) (i >> 31);
+          long src = (long) (i & (int) keep) << 4;
+          long dst = (long) o << 4;
+          outData.set(VectorBuffers.LE_LONG, dst, data.get(VectorBuffers.LE_LONG, src) & keep);
+          outData.set(VectorBuffers.LE_LONG, dst + 8, data.get(VectorBuffers.LE_LONG, src + 8) & keep);
         }
       }
       default -> throw new IllegalArgumentException("not fixed width: " + type);
-    }
-    if (outValidity != null) {
-      gatherValidity(in.validity(), idx, from, to, outValidity);
     }
   }
 
@@ -66,9 +106,7 @@ public final class GatherKernels {
         int limit = Math.min(64, count - base);
         long word = 0L;
         for (int j = 0; j < limit; j++) {
-          if (idx[from + base + j] >= 0) {
-            word |= 1L << j;
-          }
+          word |= ((~idx[from + base + j] >>> 31) & 1L) << j;
         }
         Bitmap.setWord(outValidity, base >>> 6, count, word);
       }
@@ -80,15 +118,16 @@ public final class GatherKernels {
   /** Gathers bits; a negative index yields {@code padValue}. */
   static void gatherBits(MemorySegment bits, int[] idx, int from, int to, MemorySegment out, boolean padValue) {
     int count = to - from;
+    int pad = padValue ? 1 : 0;
     for (int base = 0; base < count; base += 64) {
       int limit = Math.min(64, count - base);
       long word = 0L;
       for (int j = 0; j < limit; j++) {
         int i = idx[from + base + j];
-        boolean bit = i < 0 ? padValue : Bitmap.isSet(bits, i);
-        if (bit) {
-          word |= 1L << j;
-        }
+        int neg = i >>> 31; // 1 for a padded index
+        int ci = i & ~(i >> 31);
+        int bit = ((bits.get(ValueLayout.JAVA_BYTE, ci >>> 3) >>> (ci & 7)) & 1 & (neg ^ 1)) | (neg & pad);
+        word |= (long) bit << j;
       }
       Bitmap.setWord(out, base >>> 6, count, word);
     }

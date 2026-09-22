@@ -441,38 +441,41 @@ public final class SparkColumnVectorBuffers {
         maxId = Math.max(maxId, idArray[i]);
       }
     }
+    if (maxId < 0) {
+      // Every row null: the lanes are zero, nothing to decode.
+      data.asSlice(0, (long) numRows * type.byteWidth()).fill((byte) 0);
+      return true;
+    }
     // The dictionary decoded once per column chunk, not once per batch (#416).
     long[] table = decodedDictionary(dict, type).upTo(dict, maxId, type);
-    switch (type) {
-      case INT32 -> {
-        if (widenToLong) {
-          long[] out = longScratch(numRows);
-          for (int i = 0; i < numRows; i++) {
-            out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
-          }
-          MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
-        } else {
-          int[] out = intScratch(numRows);
-          for (int i = 0; i < numRows; i++) {
-            out[i] = nulls == null || nulls[i] == 0 ? (int) table[idArray[i]] : 0;
-          }
-          MemorySegment.copy(out, 0, data, VectorBuffers.LE_INT, 0, numRows);
-        }
-      }
-      case INT64 -> {
-        long[] out = longScratch(numRows);
+    // Two loops per lane width, one without nulls and one with, the latter without a branch: a null
+    // row reads table entry 0 and is masked to zero (#416, see GatherKernels.gatherFixed).
+    if (type == VecType.INT32 && !widenToLong) {
+      int[] out = intScratch(numRows);
+      if (nulls == null) {
         for (int i = 0; i < numRows; i++) {
-          out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
+          out[i] = (int) table[idArray[i]];
         }
-        MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
-      }
-      default -> {
-        long[] out = longScratch(numRows);
+      } else {
         for (int i = 0; i < numRows; i++) {
-          out[i] = nulls == null || nulls[i] == 0 ? table[idArray[i]] : 0L;
+          int keep = ((nulls[i] & 0xFF) - 1) >> 31; // 0 -> all ones, any null marker -> zero
+          out[i] = (int) table[idArray[i] & keep] & keep;
         }
-        MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
       }
+      MemorySegment.copy(out, 0, data, VectorBuffers.LE_INT, 0, numRows);
+    } else {
+      long[] out = longScratch(numRows);
+      if (nulls == null) {
+        for (int i = 0; i < numRows; i++) {
+          out[i] = table[idArray[i]];
+        }
+      } else {
+        for (int i = 0; i < numRows; i++) {
+          int keep = ((nulls[i] & 0xFF) - 1) >> 31;
+          out[i] = table[idArray[i] & keep] & keep;
+        }
+      }
+      MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
     }
     return true;
   }
