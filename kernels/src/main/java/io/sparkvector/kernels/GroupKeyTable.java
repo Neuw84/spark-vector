@@ -32,8 +32,21 @@ public final class GroupKeyTable {
   private final int[][] intKeys; // INT32 and BOOL (0/1)
   private final long[][] longKeys; // INT64 and FLOAT64 (raw bits); the low limb of DECIMAL128
   private final long[][] hiKeys; // the high limb of DECIMAL128
-  private final int[][] strIds; // UTF8: the id of the group's value in dicts[c]
-  private final StringDictionary[] dicts; // UTF8: the column's distinct values
+  private final int[][] strIds; // UTF8 in dictionary mode: the id of the group's value in dicts[c]
+  private final StringDictionary[] dicts; // UTF8 in dictionary mode: the column's distinct values; null once in record mode
+  /**
+   * UTF8 columns in record mode: the group's value bytes appended to a per-column arena, {@code
+   * recOff[c][gid] .. recOff[c][gid + 1]}. A column starts in dictionary mode and switches here once its
+   * dictionary passes {@link #dictionaryLimit} entries: a probe into a dictionary that no longer fits the
+   * cache is a cache miss per row (q67's {@code i_product_name} at 1 TB: ~300k entries, +36% on the final
+   * aggregate), where the bytes compare against one contiguous record costs one.
+   */
+  private final boolean[] record;
+  private final byte[][] recBytes;
+  private final MemorySegment[] recSeg;
+  private final int[][] recOff;
+  private final int[] recUsed;
+  private final int dictionaryLimit;
   private final int strCols; // number of UTF8 columns
   private final int[] strCol; // column -> index among the UTF8 columns, or -1
   private final BitSet[] nulls;
@@ -54,13 +67,28 @@ public final class GroupKeyTable {
   }
 
   /**
-   * @param encodePlainStrings kept for the callers' sake; every UTF8 key is stored by id now, and a
-   *     table is immutable once {@link #assign} is done (a probe inserts nothing, not even into the
-   *     dictionaries), so {@link #lookup(VectorBuffers[], int, int[], MemorySegment, int[])} may run
-   *     concurrently from several threads whichever way it was built.
+   * @param dictionaryStrings how UTF8 keys are kept. {@code true}: by id in a per-column dictionary of the
+   *     distinct values (#377) -- the table's key output can then be emitted dictionary-encoded, which is what
+   *     pays when the consumer is the shuffle writer (a partial aggregate, a join's build side). {@code false}:
+   *     as contiguous byte records per group, compared byte for byte -- the cheaper probe when the output is
+   *     consumed plain (a final aggregate feeding a sort, a window or the result projection), and the layout
+   *     that does not pay a cache miss per row once a key's distinct values outgrow the cache (q67's
+   *     {@code i_product_name} at 1 TB: ~300k entries, +36% on the final aggregate by ids). Either way the
+   *     table is immutable once {@link #assign} is done (a probe inserts nothing), so
+   *     {@link #lookup(VectorBuffers[], int, int[], MemorySegment, int[])} may run concurrently from several threads.
    */
-  public GroupKeyTable(VecType[] types, boolean encodePlainStrings) {
+  public GroupKeyTable(VecType[] types, boolean dictionaryStrings) {
+    this(types, dictionaryStrings ? Integer.MAX_VALUE : 0);
+  }
+
+  /**
+   * Package-private: the mode switch mid-stream, exercised by the tests. {@code dictionaryLimit} is the
+   * number of distinct values a UTF8 key's dictionary may reach before the column converts to records
+   * ({@link #toRecord}); callers choose a mode up front through {@link #GroupKeyTable(VecType[], boolean)}.
+   */
+  GroupKeyTable(VecType[] types, int dictionaryLimit) {
     this.types = types.clone();
+    this.dictionaryLimit = dictionaryLimit;
     this.slots = new int[INITIAL_CAPACITY * 2];
     Arrays.fill(slots, -1);
     this.mask = slots.length - 1;
@@ -70,6 +98,11 @@ public final class GroupKeyTable {
     hiKeys = new long[k][];
     strIds = new int[k][];
     dicts = new StringDictionary[k];
+    record = new boolean[k];
+    recBytes = new byte[k][];
+    recSeg = new MemorySegment[k];
+    recOff = new int[k][];
+    recUsed = new int[k];
     strCol = new int[k];
     nulls = new BitSet[k];
     int s = 0;
@@ -85,12 +118,29 @@ public final class GroupKeyTable {
         }
         case UTF8 -> {
           strCol[c] = s++;
-          strIds[c] = new int[INITIAL_CAPACITY];
-          dicts[c] = new StringDictionary();
+          if (dictionaryLimit > 0) {
+            strIds[c] = new int[INITIAL_CAPACITY];
+            dicts[c] = new StringDictionary();
+          } else {
+            startRecord(c);
+          }
         }
       }
     }
     strCols = s;
+  }
+
+  private void startRecord(int c) {
+    record[c] = true;
+    recBytes[c] = new byte[Math.max(256, INITIAL_CAPACITY * 8)];
+    recSeg[c] = MemorySegment.ofArray(recBytes[c]);
+    recOff[c] = new int[Math.max(groupHashes.length, INITIAL_CAPACITY) + 1];
+    recUsed[c] = 0;
+  }
+
+  /** Whether UTF8 key column {@code c} is (still) kept by dictionary id, so {@link #dictionary} and {@link #writeKeyIds} apply. */
+  public boolean isDictionaryColumn(int c) {
+    return types[c] == VecType.UTF8 && !record[c];
   }
 
   public int size() {
@@ -236,7 +286,10 @@ public final class GroupKeyTable {
     MemorySegment[] data = new MemorySegment[0];
     MemorySegment[] offsets = new MemorySegment[0];
     MemorySegment[] validity = new MemorySegment[0];
-    int[][] ids = new int[0][]; // UTF8 columns: the rows' dictionary ids as a heap array
+    int[][] ids = new int[0][]; // UTF8 columns in dictionary mode: the rows' dictionary ids as a heap array
+    boolean[] dictEncoded = new boolean[0]; // UTF8 columns in record mode: the input's own encoding
+    MemorySegment[] dictData = new MemorySegment[0];
+    MemorySegment[] dictOffsets = new MemorySegment[0];
 
     private static final ThreadLocal<Bound> SCRATCH = ThreadLocal.withInitial(Bound::new);
 
@@ -250,6 +303,9 @@ public final class GroupKeyTable {
         b.offsets = new MemorySegment[n];
         b.validity = new MemorySegment[n];
         b.ids = new int[n][];
+        b.dictEncoded = new boolean[n];
+        b.dictData = new MemorySegment[n];
+        b.dictOffsets = new MemorySegment[n];
       }
       for (int c = 0; c < n; c++) {
         VectorBuffers k = keys[c];
@@ -258,6 +314,11 @@ public final class GroupKeyTable {
         b.offsets[c] = k.offsets();
         b.validity[c] = k.validity();
         b.ids[c] = idScratch == null ? null : idScratch.ids[c];
+        boolean dict = k.type() == VecType.UTF8 && k.isDictionaryEncoded();
+        b.dictEncoded[c] = dict;
+        VectorBuffers d = dict ? k.dictionary() : null;
+        b.dictData[c] = d == null ? null : d.data();
+        b.dictOffsets[c] = d == null ? null : d.offsets();
       }
       return b;
     }
@@ -406,8 +467,11 @@ public final class GroupKeyTable {
       return 0;
     }
     long combinations = 1;
-    for (StringDictionary d : dicts) {
-      combinations *= d.size() + 1L;
+    for (int c = 0; c < types.length; c++) {
+      if (record[c]) {
+        return 0;
+      }
+      combinations *= dicts[c].size() + 1L;
       if (combinations > MEMO_MAX_COMBINATIONS) {
         return combinations;
       }
@@ -470,6 +534,13 @@ public final class GroupKeyTable {
     for (int c = 0; c < k; c++) {
       if (types[c] != VecType.UTF8) {
         s.ids[c] = null;
+        continue;
+      }
+      if (!record[c] && insert && dicts[c].size() > dictionaryLimit) {
+        toRecord(c);
+      }
+      if (record[c]) {
+        s.ids[c] = null; // the UTF8 column itself is hashed and compared, byte for byte
         continue;
       }
       VectorBuffers key = keys[c];
@@ -674,13 +745,148 @@ public final class GroupKeyTable {
           }
         }
         case UTF8 -> {
-          if (strIds[c][gid] != keys.getId(c, row)) {
+          if (record[c] ? !recordEquals(c, gid, keys, row) : strIds[c][gid] != keys.getId(c, row)) {
             return false;
           }
         }
       }
     }
     return true;
+  }
+
+  private static final int SHORT_KEY_BYTES = 16;
+
+  private boolean recordEquals(int c, int gid, Bound keys, int row) {
+    int[] off = recOff[c];
+    int start = off[gid];
+    int len = off[gid + 1] - start;
+    MemorySegment data;
+    long rowStart;
+    int rowLen;
+    if (keys.dictEncoded[c]) {
+      int idx = keys.getInt(c, row);
+      MemorySegment o = keys.dictOffsets[c];
+      rowStart = o.get(VectorBuffers.LE_INT, (long) idx << 2);
+      rowLen = o.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) rowStart;
+      data = keys.dictData[c];
+    } else {
+      MemorySegment o = keys.offsets[c];
+      rowStart = o.get(VectorBuffers.LE_INT, (long) row << 2);
+      rowLen = o.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) rowStart;
+      data = keys.data[c];
+    }
+    if (rowLen != len) {
+      return false;
+    }
+    if (len <= SHORT_KEY_BYTES) {
+      byte[] store = recBytes[c];
+      for (int i = 0; i < len; i++) {
+        if (store[start + i] != data.get(ValueLayout.JAVA_BYTE, rowStart + i)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return MemorySegment.mismatch(recSeg[c], start, start + len, data, rowStart, rowStart + len) == -1;
+  }
+
+  private void appendRecord(int c, int gid, Bound keys, int row, boolean isNull) {
+    int used = recUsed[c];
+    if (!isNull) {
+      MemorySegment data;
+      long start;
+      int len;
+      if (keys.dictEncoded[c]) {
+        int idx = keys.getInt(c, row);
+        MemorySegment o = keys.dictOffsets[c];
+        start = o.get(VectorBuffers.LE_INT, (long) idx << 2);
+        len = o.get(VectorBuffers.LE_INT, (long) (idx + 1) << 2) - (int) start;
+        data = keys.dictData[c];
+      } else {
+        MemorySegment o = keys.offsets[c];
+        start = o.get(VectorBuffers.LE_INT, (long) row << 2);
+        len = o.get(VectorBuffers.LE_INT, (long) (row + 1) << 2) - (int) start;
+        data = keys.data[c];
+      }
+      ensureRecordBytes(c, used + len);
+      MemorySegment.copy(data, ValueLayout.JAVA_BYTE, start, recBytes[c], used, len);
+      used += len;
+    }
+    recUsed[c] = used;
+    recOff[c][gid + 1] = used;
+  }
+
+  private void ensureRecordBytes(int c, int needed) {
+    if (needed > recBytes[c].length) {
+      recBytes[c] = Arrays.copyOf(recBytes[c], Math.max(recBytes[c].length * 2, needed));
+      recSeg[c] = MemorySegment.ofArray(recBytes[c]);
+    }
+  }
+
+  /**
+   * Switches UTF8 column {@code c} from dictionary ids to record bytes: every group's value is copied
+   * out of the dictionary into the column's arena, the dictionary is dropped, and -- since a record
+   * column hashes its bytes where an id column hashed the id -- every group hash is recomputed and the
+   * slots rebuilt. Runs between two batches, once per column at most.
+   */
+  private void toRecord(int c) {
+    StringDictionary d = dicts[c];
+    int[] ids = strIds[c];
+    BitSet nul = nulls[c];
+    startRecord(c);
+    if (recOff[c].length < size + 1) {
+      recOff[c] = new int[Math.max(size + 1, groupHashes.length + 1)];
+    }
+    ensureRecordBytes(c, (int) Math.min(Integer.MAX_VALUE - 8, Math.max(256, d.valueBytes() * 2)));
+    byte[] store = d.bytes();
+    int[] off = recOff[c];
+    int used = 0;
+    for (int gid = 0; gid < size; gid++) {
+      if (!nul.get(gid)) {
+        int id = ids[gid];
+        int len = d.length(id);
+        ensureRecordBytes(c, used + len);
+        System.arraycopy(store, d.offset(id), recBytes[c], used, len);
+        used += len;
+      }
+      off[gid + 1] = used;
+    }
+    recUsed[c] = used;
+    dicts[c] = null;
+    strIds[c] = null;
+    for (int gid = 0; gid < size; gid++) {
+      groupHashes[gid] = groupHash(gid);
+    }
+    Arrays.fill(slots, -1);
+    for (int gid = 0; gid < size; gid++) {
+      int pos = groupHashes[gid] & mask;
+      while (slots[pos] >= 0) {
+        pos = (pos + 1) & mask;
+      }
+      slots[pos] = gid;
+    }
+  }
+
+  /** The row hash {@link HashKernels#mixColumn} gives a row equal to group {@code gid}, from the stored keys. */
+  private int groupHash(int gid) {
+    int h = HashKernels.SEED;
+    for (int c = 0; c < types.length; c++) {
+      int v;
+      if (nulls[c].get(gid)) {
+        v = HashKernels.NULL_MARK;
+      } else {
+        v = switch (types[c]) {
+          case INT32, BOOL -> intKeys[c][gid];
+          case INT64, FLOAT64 -> HashKernels.fold(longKeys[c][gid]);
+          case DECIMAL128 -> HashKernels.fold(Decimal128.hash(hiKeys[c][gid], longKeys[c][gid]));
+          case UTF8 -> record[c]
+              ? HashKernels.hashBytes(recSeg[c], recOff[c][gid], recOff[c][gid + 1] - recOff[c][gid])
+              : strIds[c][gid];
+        };
+      }
+      h = HashKernels.mix32(h, v);
+    }
+    return HashKernels.finish(h);
   }
 
   private int insert(Bound keys, int row, int hash, int pos) {
@@ -699,7 +905,13 @@ public final class GroupKeyTable {
           longKeys[c][gid] = isNull ? 0L : Decimal128.lo(keys.data[c], row);
           hiKeys[c][gid] = isNull ? 0L : Decimal128.hi(keys.data[c], row);
         }
-        case UTF8 -> strIds[c][gid] = isNull ? 0 : keys.getId(c, row);
+        case UTF8 -> {
+          if (record[c]) {
+            appendRecord(c, gid, keys, row, isNull);
+          } else {
+            strIds[c][gid] = isNull ? 0 : keys.getId(c, row);
+          }
+        }
       }
     }
     slots[pos] = gid;
@@ -724,14 +936,20 @@ public final class GroupKeyTable {
           longKeys[c] = Arrays.copyOf(longKeys[c], cap);
           hiKeys[c] = Arrays.copyOf(hiKeys[c], cap);
         }
-        case UTF8 -> strIds[c] = Arrays.copyOf(strIds[c], cap);
+        case UTF8 -> {
+          if (record[c]) {
+            recOff[c] = Arrays.copyOf(recOff[c], cap + 1);
+          } else {
+            strIds[c] = Arrays.copyOf(strIds[c], cap);
+          }
+        }
       }
     }
   }
 
   /**
    * The heap the table holds right now, as allocated (#367): the slots and hashes at capacity, the
-   * key arrays at capacity, the string dictionaries as allocated. The next growth step doubles the array it
+   * key arrays at capacity, the string dictionaries and record arenas as allocated. The next growth step doubles the array it
    * touches and holds both copies for its duration -- the caller adds that headroom.
    */
   public long memoryBytes() {
@@ -741,7 +959,7 @@ public final class GroupKeyTable {
         case INT32, BOOL -> bytes += 4L * intKeys[c].length;
         case INT64, FLOAT64 -> bytes += 8L * longKeys[c].length;
         case DECIMAL128 -> bytes += 16L * longKeys[c].length;
-        case UTF8 -> bytes += 4L * strIds[c].length + dicts[c].memoryBytes();
+        case UTF8 -> bytes += record[c] ? 4L * recOff[c].length + recBytes[c].length : 4L * strIds[c].length + dicts[c].memoryBytes();
       }
     }
     if (strCols > 0) {
@@ -793,39 +1011,50 @@ public final class GroupKeyTable {
   }
 
   public String getString(int c, int gid) {
+    if (record[c]) {
+      int start = recOff[c][gid];
+      return new String(recBytes[c], start, recOff[c][gid + 1] - start, java.nio.charset.StandardCharsets.UTF_8);
+    }
     StringDictionary d = dicts[c];
     int id = strIds[c][gid];
     return new String(d.bytes(), d.offset(id), d.length(id), java.nio.charset.StandardCharsets.UTF_8);
   }
 
-  /** The dictionary id of group {@code gid}'s value in UTF8 column {@code c} (0 for a null). */
+  /** The dictionary id of group {@code gid}'s value in UTF8 column {@code c} (0 for a null); -1 for a column in record mode. */
   public int getStringId(int c, int gid) {
-    return strIds[c][gid];
+    return record[c] ? -1 : strIds[c][gid];
   }
 
-  /** Number of distinct values UTF8 column {@code c} has seen. */
+  /** Number of distinct values UTF8 column {@code c} has seen; 0 for a column in record mode (see {@link #isDictionaryColumn}). */
   public int dictionarySize(int c) {
-    return dicts[c].size();
+    return record[c] ? 0 : dicts[c].size();
   }
 
-  /** Bytes of the distinct values of UTF8 column {@code c}. */
+  /** Bytes of the distinct values of UTF8 column {@code c}; the arena's bytes for a column in record mode. */
   public long dictionaryBytes(int c) {
-    return dicts[c].valueBytes();
+    return record[c] ? recUsed[c] : dicts[c].valueBytes();
   }
 
   /**
    * The distinct values of UTF8 column {@code c} as a plain UTF8 column, indexed by id (#377): the
-   * dictionary the ids {@link #writeKeyIds} emits refer to. Valid until the next {@link #assign}.
+   * dictionary the ids {@link #writeKeyIds} emits refer to. Valid until the next {@link #assign};
+   * only for a column {@link #isDictionaryColumn} says is in dictionary mode.
    */
   public VectorBuffers dictionary(int c) {
+    if (record[c]) {
+      throw new IllegalStateException("UTF8 key " + c + " is in record mode: no dictionary");
+    }
     return dicts[c].view();
   }
 
   /**
    * Writes the dictionary ids of groups {@code [from, to)} of UTF8 column {@code c} as an INT32
-   * Arrow-layout column (validity bits for every row, id 0 under a null).
+   * Arrow-layout column (validity bits for every row, id 0 under a null). Dictionary mode only.
    */
   public void writeKeyIds(int c, int from, int to, MemorySegment validity, MemorySegment ids) {
+    if (record[c]) {
+      throw new IllegalStateException("UTF8 key " + c + " is in record mode: no ids");
+    }
     int count = to - from;
     for (int o = 0; o < count; o++) {
       Bitmap.setTo(validity, o, !nulls[c].get(from + o));
@@ -835,6 +1064,9 @@ public final class GroupKeyTable {
 
   /** Total UTF-8 bytes of the keys in {@code [from, to)} of column {@code c}. */
   public long utf8Bytes(int c, int from, int to) {
+    if (record[c]) {
+      return (long) recOff[c][to] - recOff[c][from];
+    }
     StringDictionary d = dicts[c];
     int[] ids = strIds[c];
     BitSet nul = nulls[c];
@@ -870,6 +1102,16 @@ public final class GroupKeyTable {
         }
       }
       case UTF8 -> {
+        if (record[c]) {
+          // Groups are appended in id order, so [from, to) is one contiguous range of the arena.
+          int[] off = recOff[c];
+          int base = off[from];
+          for (int o = 0; o <= count; o++) {
+            offsets.set(VectorBuffers.LE_INT, (long) o << 2, off[from + o] - base);
+          }
+          MemorySegment.copy(recBytes[c], base, data, ValueLayout.JAVA_BYTE, 0, off[to] - base);
+          return;
+        }
         // Gather the values from the dictionary into a heap buffer (System.arraycopy, no per-value
         // segment checks) and copy them out once: one small MemorySegment.copy per value was 15% of
         // an executor's time in q67 at 1 TB, whose finest level emits nearly every row.
