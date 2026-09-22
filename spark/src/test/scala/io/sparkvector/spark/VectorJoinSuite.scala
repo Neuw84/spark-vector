@@ -71,6 +71,40 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di AND 7 + dim.di >= tk.i", Seq(BHJ))
   }
 
+  test("the fused residual scans the key's clustered build rows: many rows per key, every operator, nulls, longs (q72)") {
+    // `inv` plays q72's inventory: 400 rows per key (`ik` = 0..49), a quantity lane with nulls every
+    // 7th row and a long lane, joined to `tk` on the key with a residual on the quantity -- so every
+    // streamed row has 400 candidates of which the residual keeps a slice. The build side is `inv`
+    // under a broadcast (build right) and, hinted the other way, `tk` (build left) so the streamed
+    // operand sits on either side of the comparison.
+    val inv = newTempPath("join/inv")
+    spark
+      .range(0, 20000)
+      .selectExpr(
+        "cast(id % 50 as int) as ik",
+        "if(id % 7 = 0, null, cast((id * 37) % 20000 as int)) as qty",
+        "cast((id * 91) % 20000 as bigint) as lq",
+        "concat('w', id % 5) as wname")
+      .write
+      .mode("overwrite")
+      .parquet(inv)
+    spark.read.parquet(inv).createOrReplaceTempView("inv")
+    for (op <- Seq("<", "<=", "=", "!=", ">", ">=")) {
+      checkVectorized(s"SELECT count(*), sum(tk.i), sum(inv.qty) FROM tk JOIN inv ON tk.i50 = inv.ik AND inv.qty $op tk.i", Seq(BHJ, classOf[VectorHashAggregateExec]))
+      checkVectorized(s"SELECT count(*), sum(tk.i), sum(inv.qty) FROM tk JOIN inv ON tk.i50 = inv.ik AND tk.i $op inv.qty + 100", Seq(BHJ, classOf[VectorHashAggregateExec]))
+    }
+    // Longs, and a null on the streamed side (tk.l is null for some rows).
+    checkVectorized("SELECT count(*), sum(inv.lq) FROM tk JOIN inv ON tk.i50 = inv.ik AND inv.lq < tk.l", Seq(BHJ, classOf[VectorHashAggregateExec]))
+    checkVectorized("SELECT count(*), sum(inv.lq) FROM tk JOIN inv ON tk.i50 = inv.ik AND tk.l - 5 >= inv.lq", Seq(BHJ, classOf[VectorHashAggregateExec]))
+    // The pairs themselves, in order, for a slice.
+    checkVectorized("SELECT tk.i, inv.qty, inv.wname FROM tk JOIN inv ON tk.i50 = inv.ik AND inv.qty < tk.i WHERE tk.i < 300", Seq(BHJ, classOf[VectorFilterExec]))
+    // The same join shuffled (q72's shape), both build sides.
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "false") {
+      checkVectorized("SELECT count(*), sum(tk.i), sum(inv.qty) FROM tk JOIN inv ON tk.i50 = inv.ik AND inv.qty < tk.i", Seq(SHJ, classOf[VectorHashAggregateExec]))
+      checkVectorized("SELECT count(*), sum(tk.i), sum(inv.qty) FROM inv JOIN tk ON inv.ik = tk.i50 AND tk.i > inv.qty + 1", Seq(SHJ, classOf[VectorHashAggregateExec]))
+    }
+  }
+
   // `tk.i50 = dim.di` gives every streamed row one or two candidates (ten dimension keys appear
   // twice); `tk.d > dim.weight` passes for some candidates and fails for others, `dim.dl` is null
   // for every ninth dimension row so a condition on it is null for those candidates, and
