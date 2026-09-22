@@ -5,6 +5,7 @@ import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, Lit
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import io.sparkvector.spark.adapter.TypeMapping
+import io.sparkvector.spark.arrow.ArrowVectorBuffers
 import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, DoubleType, LongType, StringType}
 
 /**
@@ -20,6 +21,13 @@ trait AggState {
 /** Running state of one aggregate function over many groups (see [[GroupAssignment]]). */
 trait GroupedAggState {
   def update(ctx: EvalContext, groups: GroupAssignment): Unit
+  /**
+   * Writes slot `slot` of groups `[from, to)` straight into `out` -- a lane of the slot's emitted
+   * type, validity bits included -- and answers true; false leaves the column to the boxed path
+   * (#416: the rollup partial aggregate of q18 at 1 TB emitted 5.5 M rows x 7 wide averages through a
+   * BigDecimal, a BigInteger and a Long per value, most of that stage's excess over Spark).
+   */
+  def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = false
   /** Buffer slot value of group `g` in Spark's internal representation, or `null`. */
   def bufferValue(g: Int, slot: Int): Any
 }
@@ -122,6 +130,39 @@ private[agg] final class Escalation {
   }
   def count(g: Int): Long = if (g < counts.length) counts(g) else 0L
   def total(g: Int, base: java.math.BigInteger): java.math.BigInteger = if (g < totals.length && totals(g) != null) base.add(totals(g)) else base
+  /** Whether any row of group `g` was escalated (its total then needs the `BigInteger` path). */
+  def hasTotal(g: Int): Boolean = g < totals.length && totals(g) != null
+}
+
+/**
+ * Writes of a wide decimal buffer straight into its DECIMAL128 lane (#416): the group's 128-bit total
+ * as two limbs when it is within the buffer precision, null past it -- the limit compared as limbs, so
+ * no `BigInteger` is made for the common group -- and the count and empty flags into their lanes.
+ */
+private[agg] final class WideLimbs(limit: java.math.BigInteger) extends Serializable {
+  private val limitHi = Decimal128.hiOf(limit)
+  private val limitLo = Decimal128.loOf(limit)
+  private val negLimit = limit.negate()
+  private val negHi = Decimal128.hiOf(negLimit)
+  private val negLo = Decimal128.loOf(negLimit)
+
+  /** `(hi, lo)` at `o`, or null when `|total| >= limit`. */
+  def checked(out: ArrowVectorBuffers, o: Int, hi: Long, lo: Long): Unit =
+    if (Decimal128.compare(hi, lo, limitHi, limitLo) >= 0 || Decimal128.compare(hi, lo, negHi, negLo) <= 0) nul(out, o)
+    else { Bitmap.set(out.validity(), o); Decimal128.set(out.data(), o, hi, lo) }
+
+  /** An exact total that needed a `BigInteger` (escalated rows, or past 128 bits), the same check. */
+  def big(out: ArrowVectorBuffers, o: Int, t: java.math.BigInteger): Unit =
+    if (t.abs.compareTo(limit) >= 0) nul(out, o)
+    else { Bitmap.set(out.validity(), o); Decimal128.set(out.data(), o, Decimal128.hiOf(t), Decimal128.loOf(t)) }
+
+  def zero(out: ArrowVectorBuffers, o: Int): Unit = { Bitmap.set(out.validity(), o); Decimal128.set(out.data(), o, 0L, 0L) }
+  def nul(out: ArrowVectorBuffers, o: Int): Unit = { Bitmap.clear(out.validity(), o); Decimal128.set(out.data(), o, 0L, 0L) }
+}
+
+private[agg] object WideLimbs {
+  def long(out: ArrowVectorBuffers, o: Int, v: Long): Unit = { Bitmap.set(out.validity(), o); out.data().setAtIndex(VectorBuffers.LE_LONG, o.toLong, v) }
+  def bool(out: ArrowVectorBuffers, o: Int, v: Boolean): Unit = { Bitmap.set(out.validity(), o); Bitmap.setTo(out.data(), o, v) }
 }
 
 private[agg] object Escalation {
@@ -217,7 +258,23 @@ final case class WideDecimalSumAgg(
       val count = acc.count(g) + extra.count(g)
       if (slot == 0) sumValue(count, Escalation.total(acc, extra, g)) else java.lang.Boolean.valueOf(count == 0)
     }
+    /** The buffer as lanes (#416): the sum as limbs -- zero while empty, null past the precision -- and the empty flag. */
+    override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
+      if (finalResult) return false
+      var g = from
+      while (g < to) {
+        val o = g - from
+        val count = acc.count(g) + extra.count(g)
+        if (slot == 1) WideLimbs.bool(out, o, count == 0)
+        else if (count == 0) limbs.zero(out, o)
+        else if (acc.overflowed(g) || extra.hasTotal(g)) limbs.big(out, o, Escalation.total(acc, extra, g))
+        else limbs.checked(out, o, acc.hi(g), acc.lo(g))
+        g += 1
+      }
+      true
+    }
   }
+  private val limbs = new WideLimbs(limit)
 }
 
 /**
@@ -307,7 +364,23 @@ final case class WideDecimalAvgAgg(input: VectorExpr, bufferType: DecimalType, r
       val count = acc.count(g) + extra.count(g)
       if (slot == 0) sumValue(count, Escalation.total(acc, extra, g), ungrouped = false) else java.lang.Long.valueOf(count)
     }
+    /** The buffer as lanes (#416): the sum as limbs -- zero while empty, null past the precision -- and the count. */
+    override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
+      if (finalResult) return false
+      var g = from
+      while (g < to) {
+        val o = g - from
+        val count = acc.count(g) + extra.count(g)
+        if (slot == 1) WideLimbs.long(out, o, count)
+        else if (count == 0) limbs.zero(out, o)
+        else if (acc.overflowed(g) || extra.hasTotal(g)) limbs.big(out, o, Escalation.total(acc, extra, g))
+        else limbs.checked(out, o, acc.hi(g), acc.lo(g))
+        g += 1
+      }
+      true
+    }
   }
+  private val limbs = new WideLimbs(limit)
 }
 
 /**
@@ -412,7 +485,22 @@ final case class WideDecimalAvgMergeAgg(
       state.merge(ctx, i => ids(i))
     }
     override def bufferValue(g: Int, slot: Int): Any = state.value(g, slot)
+    /** The merged buffer as lanes (#416): the sum as limbs -- null once overflowed or past the precision -- and the count. */
+    override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
+      if (finalResult) return false
+      var g = from
+      while (g < to) {
+        val o = g - from
+        if (slot == 1) WideLimbs.long(out, o, state.counts(g))
+        else if (state.overflowed(g)) limbs.nul(out, o)
+        else if (state.wide != null && state.wide(g) != null) limbs.big(out, o, state.wide(g))
+        else limbs.checked(out, o, state.hi(g), state.lo(g))
+        g += 1
+      }
+      true
+    }
   }
+  private val limbs = new WideLimbs(limit)
 }
 
 /**
@@ -508,7 +596,20 @@ final case class WideDecimalSumMergeAgg(
           if (t.abs.compareTo(limit) >= 0) null else new java.math.BigDecimal(t, bufferType.scale)
         }
       }
+    /** The merged buffer as lanes (#416): the sum as limbs -- zero while empty, null once overflowed or past the precision -- and the empty flag. */
+    def write(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Unit = {
+      var g = from
+      while (g < to) {
+        val o = g - from
+        if (slot == 1) WideLimbs.bool(out, o, !nonEmpty(g))
+        else if (!nonEmpty(g)) limbs.zero(out, o)
+        else if (overflowed(g)) limbs.nul(out, o)
+        else limbs.checked(out, o, hi(g), lo(g))
+        g += 1
+      }
+    }
   }
+  private val limbs = new WideLimbs(limit)
 
   override def newState(): AggState = new AggState {
     private val state = new State(1)
@@ -524,6 +625,11 @@ final case class WideDecimalSumMergeAgg(
       state.merge(ctx, i => ids(i))
     }
     override def bufferValue(g: Int, slot: Int): Any = state.value(g, slot)
+    override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
+      if (finalResult) return false
+      state.write(slot, from, to, out)
+      true
+    }
   }
 }
 
