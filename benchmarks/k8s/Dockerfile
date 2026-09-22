@@ -88,5 +88,8 @@ ENV SPARK_HOME=/opt/spark
 WORKDIR /opt/spark/work-dir
 RUN chmod g+w /opt/spark/work-dir && chown -R spark:spark /opt/spark/work-dir /opt/tpcds-kit \
     && chmod a+rx /opt/tpcds-kit/tools/dsdgen
+# The conf directory is on the executor's class path (entrypoint.sh) and holds only the distribution's
+# templates; the JDK's AOT cache / CDS refuses a non-empty directory on the class path (#416).
+RUN rm -f /opt/spark/conf/*.template
 USER spark
 ENTRYPOINT ["/opt/entrypoint.sh"]
