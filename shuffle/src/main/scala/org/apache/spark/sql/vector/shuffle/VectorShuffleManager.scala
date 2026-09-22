@@ -187,7 +187,8 @@ final class VectorShuffleWriter(
         try {
           val buffers = Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
           val ids = partitionIds(batch, buffers, n)
-          writer.write(buffers, n, ids, arena)
+          // Trailing columns beyond the schema hold materialised hash keys: partitioned on, not written.
+          writer.write(if (buffers.length > dep.schema.fields.length) buffers.take(dep.schema.fields.length) else buffers, n, ids, arena)
         } finally arena.close()
         rows += n
         written += System.nanoTime() - start

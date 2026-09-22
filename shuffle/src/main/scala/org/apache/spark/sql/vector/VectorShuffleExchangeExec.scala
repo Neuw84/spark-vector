@@ -36,7 +36,15 @@ case class VectorShuffleExchangeExec(
     override val outputPartitioning: Partitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin,
-    advisoryPartitionSize: Option[Long] = None) extends Exchange with ShuffleExchangeLike with VectorPlan {
+    advisoryPartitionSize: Option[Long] = None,
+    /**
+     * Trailing columns of the child that exist only to hold computed hash keys (the columnar rule
+     * materialises `rn + 1` and the like in a projection under the exchange): they partition the rows
+     * and are not written, so the exchange's output is the child's without them.
+     */
+    materializedKeys: Int = 0) extends Exchange with ShuffleExchangeLike with VectorPlan {
+
+  override def output: Seq[Attribute] = child.output.dropRight(materializedKeys)
 
   override def nodeName: String = "VectorShuffleExchange"
   override def supportsColumnar: Boolean = true
@@ -74,7 +82,7 @@ case class VectorShuffleExchangeExec(
   }
 
   @transient lazy val shuffleDependency: VectorShuffleDependency = {
-    val dep = VectorShuffleExchangeExec.prepareShuffleDependency(inputRDD, child.output, outputPartitioning, writeMetrics, metrics("dataSize"))
+    val dep = VectorShuffleExchangeExec.prepareShuffleDependency(inputRDD, child.output, output, VectorShuffleExchangeExec.keysAsColumns(outputPartitioning, child), writeMetrics, metrics("dataSize"))
     metrics("numPartitions").set(dep.partitioner.numPartitions)
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics("numPartitions") :: Nil)
@@ -107,13 +115,37 @@ object VectorShuffleExchangeExec {
     })
   }
 
+  /**
+   * The partitioning with every computed hash key replaced by the column that holds its value: the
+   * columnar rule materialises such keys in a [[VectorProjectExec]] directly under the exchange while
+   * the exchange keeps declaring the original expressions (so the requirements it satisfies do not
+   * change). A key that is neither a column nor an alias of the projection is an error here, since
+   * the rule only takes the exchange when every key has one.
+   */
+  def keysAsColumns(partitioning: Partitioning, child: SparkPlan): Partitioning = partitioning match {
+    case h: HashPartitioning if h.expressions.exists(!_.isInstanceOf[Attribute]) =>
+      val aliases = child match {
+        case p: VectorProjectExec => p.projectList.collect { case a: org.apache.spark.sql.catalyst.expressions.Alias => a }
+        case _ => Nil
+      }
+      h.copy(expressions = h.expressions.map {
+        case a: Attribute => a
+        case e => aliases.find(_.child.semanticEquals(e)).map(_.toAttribute)
+          .getOrElse(throw new IllegalStateException(s"hash key $e is not a column of the exchange's input"))
+      })
+    case other => other
+  }
+
   def prepareShuffleDependency(
       rdd: RDD[ColumnarBatch],
       output: Seq[Attribute],
+      written: Seq[Attribute],
       partitioning: Partitioning,
       writeMetrics: Map[String, SQLMetric],
       dataSize: SQLMetric): VectorShuffleDependency = {
-    val schema = org.apache.spark.sql.catalyst.types.DataTypeUtils.fromAttributes(output)
+    // `output` is the child's (keys are resolved against it); `written` is what the shuffle carries --
+    // the same, less the trailing materialised key columns.
+    val schema = org.apache.spark.sql.catalyst.types.DataTypeUtils.fromAttributes(written)
     val spec: VectorPartitioning = partitioning match {
       case HashPartitioning(expressions, n) =>
         val ordinals = expressions.map { case a: Attribute => output.indexWhere(_.exprId == a.exprId) }.toArray

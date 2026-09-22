@@ -101,6 +101,27 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
     checkAgainstSpark(sql)
   }
 
+  test("hash keys that are expressions (q47's self-join on rn + 1) are materialised under our exchange") {
+    // A sort-merge self-join whose one side partitions on `k + 1`: without the materialised key the
+    // exchange stayed Spark's, with a row Sort and a RowToColumnar over it.
+    val sql = "select a.k, a.c, b.c from (select k, count(*) c from t group by k) a join (select k, count(*) c from t group by k) b on a.k = b.k + 1"
+    spark.sessionState.conf.setConfString("spark.sql.autoBroadcastJoinThreshold", "-1")
+    try {
+      val plan = assertOurExchange(spark.sql(sql), expectedCount = 2) // the aggregate's exchange is reused for the other side
+      assert(nodes(plan).collect { case r: RowToColumnarExec => r }.isEmpty, s"RowToColumnar in\n$plan")
+      assert(nodes(plan).collect { case s: org.apache.spark.sql.execution.SortExec => s }.isEmpty, s"Spark's Sort in\n$plan")
+      // The exchange declares the original keys (what the join required); the projection under it holds the value.
+      val computed = nodes(plan).collect { case e: VectorShuffleExchangeExec => e }.filter(_.outputPartitioning.toString.contains("+ 1"))
+      assert(computed.size === 1, s"expected one exchange on k + 1 in\n$plan")
+      assert(computed.head.child.output.exists(_.name.startsWith("_shuffle_key_")), s"no materialised key under\n${computed.head}")
+      checkAgainstSpark(sql)
+      // The same key with the plain side of the join the other way round, and a wider expression.
+      val sql2 = "select a.k, b.c from (select k, count(*) c from t group by k) a join (select k, count(*) c from t group by k) b on a.k - 2 = b.k * 1"
+      assertOurExchange(spark.sql(sql2), expectedCount = 3) // b.k * 1 folds to b.k: its aggregate's exchange serves the join
+      checkAgainstSpark(sql2)
+    } finally spark.sessionState.conf.unsetConf("spark.sql.autoBroadcastJoinThreshold")
+  }
+
   test("single partition: a global aggregate") {
     val sql = "select count(*), sum(x), min(d), max(dec) from t"
     assertOurExchange(spark.sql(sql))

@@ -2,6 +2,7 @@ package org.apache.spark.sql.vector
 
 import io.sparkvector.spark.VectorConf
 import io.sparkvector.spark.adapter.TypeMapping
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute}
 import io.sparkvector.spark.expr.ExpressionCompiler
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
@@ -360,6 +361,12 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       val withOurShuffles =
         if (VectorConf.shuffleEnabled(conf) && VectorShuffle.isAvailable(session.sparkContext.getConf))
           withShuffles.transformUp {
+            // Hash keys that are expressions rather than columns (q47/q57's self-join on `rn + 1`):
+            // the keys are materialised by a projection under the exchange, which declares the
+            // original partitioning, and dropped by a projection above it. Otherwise the shuffle
+            // stays Spark's row exchange and drags a row Sort and a RowToColumnar with it.
+            case s: ShuffleExchangeExec if s.child.supportsColumnar && VectorConf.projectEnabled(conf) && computedHashKeys(s, conf).isDefined =>
+              computedHashKeys(s, conf).get
             case s: ShuffleExchangeExec if s.child.supportsColumnar && VectorShuffle.supports(s.outputPartitioning, s.child.output) =>
               VectorShuffle.exchange(s)
           }
@@ -628,6 +635,36 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   /** Why a filter's predicate would not compile over its child's output, input aside. */
   private def filterReason(f: FilterExec): Option[String] =
     ExpressionCompiler.compilePredicate(f.condition, f.child.output).left.toOption
+
+  /**
+   * Our exchange for a hash shuffle whose keys include computed expressions, when every such key
+   * compiles to a lane: `VectorShuffleExchange(original partitioning, materializedKeys = n) <-
+   * VectorProject(child.output ++ keys) <- child`. The exchange finds a computed key's column in the
+   * projection under it (`keysAsColumns`), partitions on it, and neither writes nor outputs it, so
+   * its output is the original and AQE's stage root stays an exchange. It hashes the same values
+   * Spark's expression would have, so it pairs with the other side of a join whichever exchange that
+   * side runs on. None when the keys are plain columns (the plain case applies) or one does not compile.
+   */
+  private def computedHashKeys(s: ShuffleExchangeExec, conf: SQLConf): Option[SparkPlan] = s.outputPartitioning match {
+    case h: org.apache.spark.sql.catalyst.plans.physical.HashPartitioning if h.expressions.exists(!_.isInstanceOf[Attribute]) =>
+      val input = s.child.output
+      val compiles = h.expressions.forall {
+        case _: Attribute => true
+        case e => TypeMapping.isSupported(e.dataType) && ExpressionCompiler.compile(e, input).isRight
+      }
+      if (!compiles) None
+      else {
+        val keys = h.expressions.zipWithIndex.collect { case (e, i) if !e.isInstanceOf[Attribute] => Alias(e, s"_shuffle_key_$i")() }
+        val projected = VectorProjectExec(input ++ keys, s.child)
+        val asColumns = h.copy(expressions = h.expressions.map {
+          case a: Attribute => a
+          case e => keys.find(_.child.semanticEquals(e)).get.toAttribute
+        })
+        if (!VectorShuffle.supports(asColumns, projected.output)) None
+        else Some(VectorShuffle.exchange(s.copy(child = projected), keys.size))
+      }
+    case _ => None
+  }
 
   /** Why a projection would not compile over its child's output (an expression, an output type), input aside. */
   private def projectReason(p: ProjectExec): Option[String] = {
