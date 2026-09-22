@@ -88,8 +88,11 @@ ENV SPARK_HOME=/opt/spark
 WORKDIR /opt/spark/work-dir
 RUN chmod g+w /opt/spark/work-dir && chown -R spark:spark /opt/spark/work-dir /opt/tpcds-kit \
     && chmod a+rx /opt/tpcds-kit/tools/dsdgen
-# The conf directory is on the executor's class path (entrypoint.sh) and holds only the distribution's
-# templates; the JDK's AOT cache / CDS refuses a non-empty directory on the class path (#416).
-RUN rm -f /opt/spark/conf/*.template
+# The executor's class path carries its conf directory (entrypoint.sh; on Kubernetes a mounted ConfigMap
+# with spark.properties), and the JDK's AOT cache / CDS refuses a non-empty directory on the class path
+# (#416). The executor reads its properties through --properties-file, not the class path: leave the
+# directory off for executors only.
+RUN sed -i 's|^if ! \[ -z ${SPARK_CONF_DIR+x} \]; then$|if [ "$1" = executor ]; then :; elif ! [ -z ${SPARK_CONF_DIR+x} ]; then|' /opt/entrypoint.sh \
+    && grep -q 'if \[ "$1" = executor \]; then :;' /opt/entrypoint.sh
 USER spark
 ENTRYPOINT ["/opt/entrypoint.sh"]
