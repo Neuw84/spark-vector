@@ -139,10 +139,11 @@ public final class GatherKernels {
       throw new IllegalArgumentException("expected plain UTF8");
     }
     MemorySegment off = in.offsets();
+    MemorySegment validity = in.validity();
     long total = 0;
     for (int o = from; o < to; o++) {
       int i = idx[o];
-      if (i >= 0 && !in.isNull(i)) {
+      if (i >= 0 && (validity == null || Bitmap.isSet(validity, i))) {
         total += off.get(VectorBuffers.LE_INT, (long) (i + 1) << 2) - off.get(VectorBuffers.LE_INT, (long) i << 2);
       }
     }
@@ -158,12 +159,16 @@ public final class GatherKernels {
     }
     MemorySegment off = in.offsets();
     MemorySegment data = in.data();
+    // The validity as a local segment: `in.isNull(i)` per row is an interface call whose receiver
+    // profile mixes every buffer implementation, so it stays virtual and repeats the segment checks
+    // (#377: 3.5x on this loop at SF10).
+    MemorySegment validity = in.validity();
     int count = to - from;
     int pos = 0;
     for (int o = 0; o < count; o++) {
       int i = idx[from + o];
       outOffsets.set(VectorBuffers.LE_INT, (long) o << 2, pos);
-      if (i >= 0 && !in.isNull(i)) {
+      if (i >= 0 && (validity == null || Bitmap.isSet(validity, i))) {
         int start = off.get(VectorBuffers.LE_INT, (long) i << 2);
         int len = off.get(VectorBuffers.LE_INT, (long) (i + 1) << 2) - start;
         ByteCopy.copy(data, start, outData, pos, len);

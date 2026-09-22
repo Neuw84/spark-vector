@@ -166,8 +166,9 @@ public final class HashKernels {
   static void mixUtf8(VectorBuffers col, int[] hashes, int n) {
     MemorySegment off = col.offsets();
     MemorySegment data = col.data();
+    MemorySegment validity = col.validity();
     for (int i = 0; i < n; i++) {
-      if (col.isNull(i)) {
+      if (validity != null && !Bitmap.isSet(validity, i)) {
         hashes[i] = mix32(hashes[i], NULL_MARK);
       } else {
         int start = off.get(VectorBuffers.LE_INT, (long) i << 2);
@@ -182,13 +183,17 @@ public final class HashKernels {
     VectorBuffers dict = col.dictionary();
     int[] dictHashes = new int[dict.length()];
     MemorySegment off = dict.offsets();
+    MemorySegment dictData = dict.data();
+    MemorySegment dictValidity = dict.validity();
     for (int k = 0; k < dictHashes.length; k++) {
       int start = off.get(VectorBuffers.LE_INT, (long) k << 2);
       int len = off.get(VectorBuffers.LE_INT, (long) (k + 1) << 2) - start;
-      dictHashes[k] = dict.isNull(k) ? NULL_MARK : hashBytes(dict.data(), start, len);
+      dictHashes[k] = dictValidity != null && !Bitmap.isSet(dictValidity, k) ? NULL_MARK : hashBytes(dictData, start, len);
     }
+    MemorySegment ids = col.data();
+    MemorySegment validity = col.validity();
     for (int i = 0; i < n; i++) {
-      hashes[i] = mix32(hashes[i], col.isNull(i) ? NULL_MARK : dictHashes[col.getInt(i)]);
+      hashes[i] = mix32(hashes[i], validity != null && !Bitmap.isSet(validity, i) ? NULL_MARK : dictHashes[ids.get(VectorBuffers.LE_INT, (long) i << 2)]);
     }
   }
 }
