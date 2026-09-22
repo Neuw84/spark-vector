@@ -131,6 +131,13 @@ ENV SPARK_HOME=/opt/spark
 WORKDIR /opt/spark/work-dir
 RUN chmod g+w /opt/spark/work-dir && chown -R spark:spark /opt/spark/work-dir /opt/tpcds-kit \
     && chmod a+rx /opt/tpcds-kit/tools/dsdgen
+# The executor's AOT cache (#416): a training run of every operator on our engine, under the JVM
+# options and class path the executor starts with, so executors begin with our kernels linked and
+# profiled instead of spending a query's first stages in the interpreter. render-run.sh points the
+# executors at it (-XX:AOTCache); the build fails when the cache holds no linked class.
+COPY benchmarks/k8s/aot/train.sh /opt/spark/aot/train.sh
+RUN chmod a+rx /opt/spark/aot/train.sh && /opt/spark/aot/train.sh /opt/spark/aot/executor.aot --rounds 3 \
+    && chmod a+r /opt/spark/aot/executor.aot
 # The executor's class path from entrypoint.sh carries its conf directory (on Kubernetes a mounted
 # ConfigMap with spark.properties), its working directory (where the executor fetches the job's jars)
 # and empty entries (the working directory again), and the JDK's AOT cache / CDS refuses a non-empty

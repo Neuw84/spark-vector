@@ -18,6 +18,8 @@
 #   EXEC_JAVA_OPTS (extra executor JVM options, e.g. a JFR recording: -XX:StartFlightRecording=duration=300s,filename=/tmp/exec.jfr,settings=profile)
 #   KEEP_EXECUTORS (unset; set to 1 to keep dead executor pods for their logs)
 #   DIRECT_MEM (EXEC_OVERHEAD minus 2g; the executors' -XX:MaxDirectMemorySize)
+#   AOT_CACHE (1; the executors start from the image's AOT cache, /opt/spark/aot/executor.aot -- #416.
+#             0 leaves it out, for an A/B or an image built without one)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CONFIG="${1:?config}"; TABLES="${2:?tables}"; DATASET="${3:?dataset}"; OUT="${4:?out}"; IMAGE="${5:?image}"; shift 5
@@ -107,6 +109,10 @@ done
 # the first in the YAML map (it did: the direct-memory bound never reached the executors before this).
 EXEC_OPTS="${SEEN[spark.executor.extraJavaOptions]:-}"
 EXEC_OPTS="${EXEC_OPTS:+$EXEC_OPTS }-XX:MaxDirectMemorySize=$DIRECT_MEM${EXEC_JAVA_OPTS:+ $EXEC_JAVA_OPTS}"
+# The image's AOT cache (#416): classes linked and profiled by the build-time training run. A JVM
+# whose class path or module options differ from the training run's, or an image without the file,
+# logs a warning and runs without it -- AOTMode stays auto, so nothing fails.
+if [ "${AOT_CACHE:-1}" = "1" ]; then EXEC_OPTS="$EXEC_OPTS -XX:AOTCache=/opt/spark/aot/executor.aot"; fi
 if [ -z "${SEEN[spark.executor.extraJavaOptions]+x}" ]; then ORDER+=("spark.executor.extraJavaOptions"); fi
 SEEN[spark.executor.extraJavaOptions]="$EXEC_OPTS"
 for k in "${ORDER[@]}"; do
