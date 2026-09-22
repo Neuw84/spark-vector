@@ -306,6 +306,50 @@ object PartitionedIpcFile {
         dataBytes += bytes
       }
 
+      /**
+       * Appends all `n` rows of a dictionary-encoded string column (`indices` over `dictionary`), decoded
+       * into the pending plain column: a block of a few hundred rows that the writer still encoded (#356's
+       * ratio) joins the coalesced batch like a plain one instead of reaching the operators on its own.
+       */
+      def appendEncoded(indices: IntVector, dictionary: VarCharVector, n: Int): Unit = {
+        val idx = ArrowVectorBuffers.forRead(indices)
+        val dict = ArrowVectorBuffers.forRead(dictionary)
+        val dOff = dict.offsets()
+        val dData = dict.data()
+        val ids = idx.data()
+        val valid = idx.validity()
+        var bytes = 0L
+        var i = 0
+        while (i < n) {
+          if (valid == null || Bitmap.isSet(valid, i)) {
+            val e = ids.get(VectorBuffers.LE_INT, i.toLong << 2)
+            bytes += dOff.get(VectorBuffers.LE_INT, (e + 1).toLong << 2) - dOff.get(VectorBuffers.LE_INT, e.toLong << 2)
+          }
+          i += 1
+        }
+        ensure(n, bytes)
+        val offsets = buffers.offsets()
+        var out = dataBytes
+        i = 0
+        while (i < n) {
+          val row = rows + i
+          if (valid == null || Bitmap.isSet(valid, i)) {
+            val e = ids.get(VectorBuffers.LE_INT, i.toLong << 2)
+            val start = dOff.get(VectorBuffers.LE_INT, e.toLong << 2)
+            val len = dOff.get(VectorBuffers.LE_INT, (e + 1).toLong << 2) - start
+            java.lang.foreign.MemorySegment.copy(dData, start.toLong, buffers.data(), out, len.toLong)
+            out += len
+            Bitmap.setTo(buffers.validity(), row, true)
+          } else {
+            Bitmap.setTo(buffers.validity(), row, false)
+          }
+          offsets.set(VectorBuffers.LE_INT, (row + 1).toLong << 2, out.toInt)
+          i += 1
+        }
+        rows += n
+        dataBytes = out
+      }
+
       /** The accumulated vector (value count set), the column emptied for the next accumulation. */
       def take(): FieldVector = {
         val v = vector
@@ -323,7 +367,11 @@ object PartitionedIpcFile {
     private def append(root: org.apache.arrow.vector.VectorSchemaRoot): Unit = {
       val n = root.getRowCount
       var c = 0
-      while (c < fields.length) { pending(c).append(root.getVector(c), n); c += 1 }
+      while (c < fields.length) {
+        if (encoded.get(c)) pending(c).appendEncoded(root.getVector(c).asInstanceOf[IntVector], dictionaries(c), n)
+        else pending(c).append(root.getVector(c), n)
+        c += 1
+      }
       pendingRows += n
       root.clear()
     }
@@ -377,11 +425,12 @@ object PartitionedIpcFile {
             try {
               val (root, loader) = rootFor(encoded)
               loader.load(batch)
-              if (root.getRowCount < CoalesceRows && encoded.isEmpty) {
-                // A small, plain batch (a block of a few dozen rows at 1000 partitions) is appended to
-                // the pending batch instead of reaching the operators on its own: their per-batch
-                // costs -- kernel set-up, a hash table's probe round, an output batch per input batch
-                // -- were most of a reduce task's time over ten-row blocks (#411).
+              if (root.getRowCount < CoalesceRows) {
+                // A small batch (a block of a few dozen rows at 1000 partitions) is appended to the
+                // pending batch instead of reaching the operators on its own: their per-batch costs --
+                // kernel set-up, a hash table's probe round, an output batch per input batch -- were
+                // most of a reduce task's time over ten-row blocks (#411). A dictionary-encoded column
+                // of such a block is decoded into the pending plain column (#416).
                 append(root)
                 if (pendingRows >= CoalesceRows) nextBatch = takePending()
               } else {
