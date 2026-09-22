@@ -184,7 +184,9 @@ case class VectorHashAggregateExec(
     (iter: Iterator[ColumnarBatch]) => {
       val buffers: Iterator[ColumnarBatch] =
         if (keys.isEmpty) new VectorUngroupedAggregateIterator(iter, aggs, l, bufferAttrs, m)
-        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics))
+        // Buffer-emitting modes feed our shuffle writer, which stages dictionary ids per block (#377); result
+        // modes feed a sort, a window or the projection plain, where byte records probe cheaper (#377, 1 TB q67).
+        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics), dictionaryStrings = !finalMode)
       if (finalMode) {
         // The projection's own bookkeeping goes to unregistered metrics so rows are not counted twice.
         val scratch = new VectorMetrics(new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("timing"))
@@ -306,14 +308,14 @@ private[vector] class VectorGroupedAggregateIterator(
     outputAttrs: Array[(String, DataType)],
     metrics: VectorMetrics,
     policy: AggSpillPolicy = AggSpillPolicy.InMemory,
-    spillMetrics: Option[(SQLMetric, SQLMetric)] = None)
+    spillMetrics: Option[(SQLMetric, SQLMetric)] = None,
+    dictionaryStrings: Boolean = true)
     extends RollupLevel {
 
   private val OutputBatchSize = 4096
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
-  private val dictionaryLimit = VectorConf.aggDictionaryLimit(org.apache.spark.sql.internal.SQLConf.get)
-  private var table = new GroupKeyTable(keyExprs.map(_.vecType), dictionaryLimit)
+  private var table = new GroupKeyTable(keyExprs.map(_.vecType), dictionaryStrings)
   private val dictionaryKeys = VectorConf.aggDictionaryKeys(org.apache.spark.sql.internal.SQLConf.get)
   private val keyDicts = new Array[SharedDictionary](keyExprs.length)
   private var states: Array[GroupedAggState] = aggs.map(_.newGroupedState())
@@ -412,7 +414,7 @@ private[vector] class VectorGroupedAggregateIterator(
   private def reset(): Unit = {
     releaseMemory()
     releaseDictionaries()
-    table = new GroupKeyTable(keyExprs.map(_.vecType), dictionaryLimit)
+    table = new GroupKeyTable(keyExprs.map(_.vecType), dictionaryStrings)
     states = aggs.map(_.newGroupedState())
     emittedGroups = 0
     fillRows = 0L

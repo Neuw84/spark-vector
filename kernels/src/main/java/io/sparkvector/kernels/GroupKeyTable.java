@@ -62,25 +62,31 @@ public final class GroupKeyTable {
    */
   private static final long MEMO_MAX_COMBINATIONS = 1 << 16;
 
-  /** Entries a UTF8 key's dictionary may reach before the column switches to record mode (a few MB: still cache-resident). */
-  public static final int DEFAULT_DICTIONARY_LIMIT = 1 << 16;
-
   public GroupKeyTable(VecType[] types) {
-    this(types, DEFAULT_DICTIONARY_LIMIT);
+    this(types, true);
   }
 
   /**
-   * @param encodePlainStrings kept for the callers' sake; every UTF8 key starts by id, and a
-   *     table is immutable once {@link #assign} is done (a probe inserts nothing, not even into the
-   *     dictionaries, and never switches a column's mode), so {@link #lookup(VectorBuffers[], int, int[], MemorySegment, int[])} may run
-   *     concurrently from several threads whichever way it was built.
+   * @param dictionaryStrings how UTF8 keys are kept. {@code true}: by id in a per-column dictionary of the
+   *     distinct values (#377) -- the table's key output can then be emitted dictionary-encoded, which is what
+   *     pays when the consumer is the shuffle writer (a partial aggregate, a join's build side). {@code false}:
+   *     as contiguous byte records per group, compared byte for byte -- the cheaper probe when the output is
+   *     consumed plain (a final aggregate feeding a sort, a window or the result projection), and the layout
+   *     that does not pay a cache miss per row once a key's distinct values outgrow the cache (q67's
+   *     {@code i_product_name} at 1 TB: ~300k entries, +36% on the final aggregate by ids). Either way the
+   *     table is immutable once {@link #assign} is done (a probe inserts nothing), so
+   *     {@link #lookup(VectorBuffers[], int, int[], MemorySegment, int[])} may run concurrently from several threads.
    */
-  public GroupKeyTable(VecType[] types, boolean encodePlainStrings) {
-    this(types, DEFAULT_DICTIONARY_LIMIT);
+  public GroupKeyTable(VecType[] types, boolean dictionaryStrings) {
+    this(types, dictionaryStrings ? Integer.MAX_VALUE : 0);
   }
 
-  /** @param dictionaryLimit see {@link #DEFAULT_DICTIONARY_LIMIT}; 0 puts every UTF8 key in record mode from the start. */
-  public GroupKeyTable(VecType[] types, int dictionaryLimit) {
+  /**
+   * Package-private: the mode switch mid-stream, exercised by the tests. {@code dictionaryLimit} is the
+   * number of distinct values a UTF8 key's dictionary may reach before the column converts to records
+   * ({@link #toRecord}); callers choose a mode up front through {@link #GroupKeyTable(VecType[], boolean)}.
+   */
+  GroupKeyTable(VecType[] types, int dictionaryLimit) {
     this.types = types.clone();
     this.dictionaryLimit = dictionaryLimit;
     this.slots = new int[INITIAL_CAPACITY * 2];

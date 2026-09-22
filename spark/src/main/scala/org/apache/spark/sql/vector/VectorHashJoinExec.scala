@@ -260,11 +260,12 @@ case class VectorShuffledHashJoinExec(
  */
 final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val numRows: Int, spec: JoinSpec, val shared: Boolean = false) extends AutoCloseable {
   /**
-   * The key table of an equi-join; a nested loop join (no keys) never builds one. Built without
-   * on-the-fly string dictionaries: build keys are mostly distinct, and the table stays immutable
-   * after `build()`, which is what makes concurrent probing of a shared table safe.
+   * The key table of an equi-join; a nested loop join (no keys) never builds one. String keys by
+   * dictionary id (#377): a probe maps its rows read-only (an unseen value gets id -1, which no group
+   * carries) and compares ints, and the table stays immutable after `build()`, which is what makes
+   * concurrent probing of a shared table safe.
    */
-  lazy val table = new GroupKeyTable(spec.buildKeys.map(_.vecType), false)
+  lazy val table = new GroupKeyTable(spec.buildKeys.map(_.vecType), true)
   /** First build row of each key, -1 for none. */
   var head: Array[Int] = new Array[Int](0)
   /** Next build row with the same key, -1 at the end. */

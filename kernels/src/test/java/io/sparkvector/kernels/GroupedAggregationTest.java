@@ -519,6 +519,49 @@ class GroupedAggregationTest {
   }
 
   @Test
+  void aTableBuiltForRecordsKeepsStringKeysAsBytesFromTheStart() {
+    try (Arena arena = Arena.ofConfined()) {
+      GroupKeyTable table = new GroupKeyTable(new VecType[] {VecType.UTF8, VecType.INT32}, false);
+      int n = 500;
+      String[] names = new String[n];
+      int[] ints = new int[n];
+      for (int i = 0; i < n; i++) {
+        names[i] = i % 7 == 6 ? null : "name " + (i % 50) + " long enough not to pack into a long";
+        ints[i] = i % 3;
+      }
+      int[] ids = new int[n];
+      VectorBuffers plain = ArrowLayout.ofStrings(arena, names);
+      int groups = table.assign(new VectorBuffers[] {plain, ArrowLayout.ofInts(arena, ints, null)}, n, ids);
+      assertFalse(table.isDictionaryColumn(0));
+      assertEquals(0, table.dictionarySize(0));
+      assertEquals(153, groups, "50 x 3 (name, int) combinations plus (null, int) for the three ints");
+      int[] again = new int[n];
+      assertEquals(groups, table.assign(new VectorBuffers[] {dictionaryEncoded(arena, names), ArrowLayout.ofInts(arena, ints, null)}, n, again),
+          "the same keys dictionary-encoded find the same groups");
+      assertArrayEquals(ids, again);
+      for (int i = 0; i < n; i++) {
+        if (names[i] == null) {
+          assertTrue(table.isNull(0, ids[i]));
+        } else {
+          assertEquals(names[i], table.getString(0, ids[i]));
+        }
+      }
+      long bytes = table.utf8Bytes(0, 0, groups);
+      var offsets = ArrowLayout.allocateOffsets(arena, groups);
+      var data = ArrowLayout.allocateBytes(arena, bytes);
+      var validity = ArrowLayout.allocateBitmap(arena, groups);
+      table.writeKeys(0, 0, groups, validity, data, offsets);
+      VectorBuffers out = SegmentVectorBuffers.utf8(groups, validity, offsets, data);
+      for (int gid = 0; gid < groups; gid++) {
+        assertEquals(table.isNull(0, gid), out.isNull(gid));
+        if (!out.isNull(gid)) {
+          assertEquals(table.getString(0, gid), out.getString(gid));
+        }
+      }
+    }
+  }
+
+  @Test
   void aStringKeyWhoseDictionaryOutgrowsTheLimitSwitchesToRecordsAndKeepsEveryGroup() {
     try (Arena arena = Arena.ofConfined()) {
       // Limit 100: the first batch (60 distinct names) stays in dictionary mode, the second (200 more)
