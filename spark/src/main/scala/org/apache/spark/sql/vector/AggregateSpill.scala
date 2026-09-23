@@ -101,7 +101,9 @@ final class AggregateSpill(
           var c = 0
           while (c < columns.length) {
             val (name, dt) = columns(c)
-            val col = ArrowOutput.compact(name, dt, buffers(c), masks(b), n, allocator)
+            // Sized by the bucket's rows (compact's contract), not the batch's: `n` here allocated and
+            // zeroed every bucket's vectors for the whole batch -- `numBuckets` times the rows written.
+            val col = ArrowOutput.compact(name, dt, buffers(c), masks(b), counts(b), allocator)
             // The compacted vector moves into the bucket's root (the root's previous buffers are released by the transfer).
             try AggregateSpill.vectorOf(col).makeTransferPair(root.getVector(c)).transfer()
             finally col.close()

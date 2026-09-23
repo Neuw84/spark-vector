@@ -122,7 +122,9 @@ object GraceHashJoin extends Logging {
             try BuildTable.fromBatches(buildRows, spec)
             finally buildRows.close()
           currentProbe = probeSpill.read(b)
-          current = new VectorHashJoinIterator(currentProbe, table, spec, metrics)
+          // Closed by this iterator (closeCurrent, and the one task listener above), never by a listener
+          // of its own: one per bucket kept every bucket's table on the heap until the task ended.
+          current = new VectorHashJoinIterator(currentProbe, table, spec, metrics, closeOnTaskEnd = false)
           if (current.hasNext) return true
           closeCurrent()
         }
