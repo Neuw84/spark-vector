@@ -389,35 +389,44 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally repeats.close()
 
     // Through the writer and the reader (#416: the ratio is judged per task once FreezeSampleRows are
-    // seen): `s` (random alphanumerics, nearly all distinct) rides the task dictionary in the first
-    // batch, then the column is frozen and comes back plain; `sd` (five words) stays dictionary-encoded
-    // over the map file's one dictionary throughout; values survive either way.
-    val dir = Files.createTempDirectory("svipc")
-    val path = dir.resolve("map.ipc")
-    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20)
-    val arena = Arena.ofConfined()
-    try {
-      val expected = mutable.ArrayBuffer.empty[Row]
-      (0 until 3).foreach { _ =>
-        val (b, rows) = batch(3000, arena, dictStrings = false)
-        try writer.write(b, new Array[Int](3000)) finally b.close()
-        expected ++= rows
-      }
-      writer.finish()
-      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
+    // seen): `s` (random alphanumerics, nearly all distinct) is frozen during the second batch. With
+    // the default batch size nothing has been flushed by then, so its pending ids are decoded in place
+    // and every batch comes back plain -- no dictionary section for it (item 5). With 1000-row batches
+    // ids reach the file before the freeze: those batches stay encoded over the map file's dictionary
+    // and the later ones are plain. `sd` (five words) stays dictionary-encoded throughout; values survive
+    // either way.
+    def roundTripFreeze(batchRows: Int): (Int, Int, Int) = {
+      val dir = Files.createTempDirectory("svipc")
+      val path = dir.resolve("map.ipc")
+      val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchRows = batchRows)
+      val arena = Arena.ofConfined()
       try {
-        val got = mutable.ArrayBuffer.empty[Row]
-        var plainS = 0; var encodedS = 0; var batches = 0
-        while (reader.hasNext) {
-          val b = reader.next()
-          batches += 1
-          if (b.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainS += 1 else encodedS += 1
-          assert(b.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
-          got ++= read(b)
+        val expected = mutable.ArrayBuffer.empty[Row]
+        (0 until 3).foreach { _ =>
+          val (b, rows) = batch(3000, arena, dictStrings = false)
+          try writer.write(b, new Array[Int](3000)) finally b.close()
+          expected ++= rows
         }
-        assert(got === expected)
-        assert(batches >= 2 && plainS >= 1 && encodedS >= 1, s"the high-cardinality column rides the dictionary before the sample and goes plain after it ($batches batches: $encodedS encoded, $plainS plain)")
-      } finally reader.close()
-    } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+        writer.finish()
+        val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
+        try {
+          val got = mutable.ArrayBuffer.empty[Row]
+          var plainS = 0; var encodedS = 0; var batches = 0
+          while (reader.hasNext) {
+            val b = reader.next()
+            batches += 1
+            if (b.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainS += 1 else encodedS += 1
+            assert(b.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
+            got ++= read(b)
+          }
+          assert(got === expected)
+          (batches, encodedS, plainS)
+        } finally reader.close()
+      } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+    }
+    val (b1, e1, p1) = roundTripFreeze(8192)
+    assert(e1 == 0 && p1 >= 1, s"frozen before the first flush: every batch plain ($b1 batches: $e1 encoded, $p1 plain)")
+    val (b2, e2, p2) = roundTripFreeze(1000)
+    assert(e2 >= 1 && p2 >= 1, s"ids flushed before the freeze stay encoded, the rest plain ($b2 batches: $e2 encoded, $p2 plain)")
   }
 }
