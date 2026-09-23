@@ -184,9 +184,10 @@ case class VectorHashAggregateExec(
     (iter: Iterator[ColumnarBatch]) => {
       val buffers: Iterator[ColumnarBatch] =
         if (keys.isEmpty) new VectorUngroupedAggregateIterator(iter, aggs, l, bufferAttrs, m)
-        // Buffer-emitting modes feed our shuffle writer, which stages dictionary ids per block (#377); result
-        // modes feed a sort, a window or the projection plain, where byte records probe cheaper (#377, 1 TB q67).
-        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics), dictionaryStrings = !finalMode)
+        // Every mode keeps UTF8 keys by id (#377): buffer-emitting modes feed our shuffle writer, which
+        // stages the ids per block, and the result modes' byte-record layout (#437) read slower at 1 TB
+        // than ids -- q67's final stage 59 -> 67 s, GC 22 -> 38 s -- so it is kept for tests only.
+        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics), dictionaryStrings = true)
       if (finalMode) {
         // The projection's own bookkeeping goes to unregistered metrics so rows are not counted twice.
         val scratch = new VectorMetrics(new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("timing"))
