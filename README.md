@@ -86,7 +86,7 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.exec.sortMergeJoin.enabled` | compatibility alias: `false` reads as `spark.vector.exec.sortMergeJoin.mode=off`, `true` as `auto` (the default since #311). Kept for compatibility -- set the mode instead. The hash rewrite (#10): `SortMergeJoinExec` re-expressed as our shuffled hash join when the smaller side's statistics fit `spark.vector.join.maxBuildSize` and no parent relies on the merge's ordering; tie order under `ORDER BY` and the rows an unordered `LIMIT` picks can differ from Spark's order-preserving merge, which is why `auto` sends such joins to the merge join instead. Comet's equivalent replacement, `spark.comet.exec.forceShuffledHashJoin`, is also off by default (experimental); Comet executes the merge join natively (`spark.comet.exec.sortMergeJoin.enabled`, on by default), as `mode=merge` does here since #286. |
 | `spark.vector.exec.sortMergeJoin.mode` | `auto` (default since #311; was `off`), `off`, `hash` (the rewrite above), `merge` (our order-preserving merge join over Spark's sorted inputs, #286 -- every join type, no statistics needed, Spark's row order kept) or `auto` (#287): per join, the merge join where a parent relies on the ordering, where the row order can reach a `LIMIT` or a sort without an exchange in between (the hash rewrite's tie order would show), or where the hash rewrite is not allowed -- no statistics, both sides over the budget, a skew join -- and the hash rewrite where a side's statistics fit. The boolean flag reads as `auto`. The plan prints the decision on the join (`Sort-merge join as hash join: right side fits ...`). |
-| `spark.vector.exec.sortMergeJoin.maxInputSize` | under `auto`, the largest input (by statistics) our merge join is taken for; above it, or without statistics, the join is left to Spark's sort-merge join, which beats ours on large inputs while Spark's row sort feeds it (#311; default: the join budget `spark.vector.join.maxBuildSize`) |
+| `spark.vector.sort.spillBytes` | the sort's memory budget per task (#416): runs past it are written to local disk in sorted order and merged from there, which is what lets our merge join take inputs of any size; default the join build budget (a per-core share of the off-heap size when configured, else 1 GiB); `0` turns spilling off |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
 | `spark.vector.comet.mixed.enabled` | `false`; with Comet on the classpath, a Spark operator left to Spark whose children are ours goes to Comet's native operator through the sink leaf (`docs/comet.md`, #280) -- for the operator kinds `spark.vector.comet.preferComet` names. |
 | `spark.vector.comet.preferComet` | empty; the allowlist of the mixed pass (#281): comma-separated operator kinds (`filter`, `project`, `sort`, `sortMergeJoin`, `hashJoin`, `broadcastHashJoin`, `window`, `expand`, `union`, `limit`, or `all`), each optionally qualified (`project:wideDecimal`, `filter:strings`, `sort:estimatedRows>1000000`). A listed operator above one of our chains is offered to Comet first and ours steps aside with the reason `delegated to Comet (spark.vector.comet.preferComet)`; one Comet declines is ours after all, never Spark's. Empty = mixed plans allowed, none requested. An entry is added only when it meets the three-part rule of `docs/comet.md`, whose decision table (TPC-H SF10, #281) found none that does as written: the default stays empty; Comet's join (2-3.6x ours where it fires) and Comet's scan-side filter (-8% over TPC-H, the #14 dictionary decode) name the two costs to remove on our side first. |
@@ -470,7 +470,7 @@ tuning), `DRIVER_CORES=2`, `DRIVER_MEM=4g`, `KEEP_EXECUTORS=1`, 200 shuffle part
 iteration per query. `EXEC_JAVA_OPTS` appends executor JVM options (a JFR recording:
 `-XX:StartFlightRecording=delay=55s,duration=60s,filename=/tmp/exec.jfr,settings=profile`, copied
 out of the executor pods with `kubectl cp` before the application ends), `SUBMIT_ARGS` extra
-`--conf` pairs for one run (`--conf spark.vector.exec.sortMergeJoin.maxInputSize=64g`). Read a
+`--conf` pairs for one run (`--conf spark.vector.sort.spillBytes=4g`). Read a
 run's medians from the driver log before the next run of the same configuration replaces the pod,
 and know that the container log rotates at 10 MB; the `.jsonl` results in `<out>` and
 `run-tpcds.sh --cluster-report` are the durable record.
@@ -685,10 +685,10 @@ by run (the rows sharing one key), the current run is the only buffered state, e
 cross product in Spark's order, every join type is covered and no statistics are needed. `hash`
 (#10) re-expresses the join as the shuffled hash join when AQE statistics say the smaller side fits
 `spark.vector.join.maxBuildSize`, dropping the sorts -- same rows, but tied rows can come out in
-another order than Spark's, so it is never chosen automatically. Under `auto` the merge join is taken
-up to `spark.vector.exec.sortMergeJoin.maxInputSize`; above it, or without statistics, the join stays
-Spark's, which beats ours on very large inputs while Spark's row shuffle feeds it (#361 studies the
-estimate that keeps q35's join at Spark's).
+another order than Spark's, so it is never chosen automatically. Under `auto` every other sort-merge
+join is ours: since #416 the sort below it spills past `spark.vector.sort.spillBytes`, so no input is
+too large and nothing is left to Spark's own operator (#311's size gate, set when Spark's row sort fed
+our join, is gone).
 
 ### Spark's SQL test suite
 

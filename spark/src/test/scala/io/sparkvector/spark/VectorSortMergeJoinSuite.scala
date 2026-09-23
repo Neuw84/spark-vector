@@ -158,22 +158,15 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       // An aggregate above ends the visibility: the join's order cannot show through a GROUP BY.
       checkVectorized("SELECT a.ki, count(*) AS n FROM a JOIN b ON a.ki = b.ki GROUP BY a.ki ORDER BY a.ki", Seq(classOf[VectorShuffledHashJoinExec]))
     }
-    // No statistics (adaptive execution off): neither the hash rewrite nor -- under the size gate (#311)
-    // -- our merge join: the join is left to Spark, and the fallback reason says why.
+    // No statistics (adaptive execution off): the hash rewrite needs them, our merge join does not
+    // (#416: the sort below it spills, so no input size is too large).
     withConf((auto :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
-      val df = spark.sql("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki")
-      df.collect()
-      assert(nodesOf[VectorSortMergeJoinExec](df).isEmpty && nodesOf[VectorShuffledHashJoinExec](df).isEmpty, df.queryExecution.executedPlan.treeString)
-      val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ")
-      assert(reasons.contains("left to Spark: no size statistics for the merge join's inputs"), reasons)
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
     }
-    // Inputs over the merge join's input budget: left to Spark even where the order can show.
-    withConf((auto :+ (VectorConf.SortMergeJoinMaxInputSize -> "1")): _*) {
-      val df = spark.sql("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20")
-      df.collect()
-      assert(nodesOf[VectorSortMergeJoinExec](df).isEmpty && nodesOf[VectorShuffledHashJoinExec](df).isEmpty, df.queryExecution.executedPlan.treeString)
-      val choice = nodesOf[SortMergeJoinExec](df).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeChoice)).map(_.swap.getOrElse("")).mkString("; ")
-      assert(choice.contains("left to Spark: inputs too large for the merge join"), choice + "\n" + finalPlan(df).treeString)
+    // A tiny sort budget: the merge join's inputs spill and the join still answers.
+    withConf((auto :+ (VectorConf.SortSpillBytes -> "1") :+ (VectorConf.SortRunRows -> "64")): _*) {
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20", Seq(SMJ))
+      checkVectorized("SELECT a.ki, a.v, b.w FROM a FULL OUTER JOIN b ON a.ki = b.ki ORDER BY a.ki, a.v, b.w", Seq(SMJ))
     }
     // The boolean flag reads as auto.
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinEnabled -> "true") {
@@ -181,7 +174,7 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     }
   }
 
-  test("the size gate reads the stage that has run, not a sort's product estimate (#329)") {
+  test("the join's input estimate reads the stage that has run, not a sort's product estimate (#329)") {
     import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
     import org.apache.spark.sql.vector.VectorJoinPlanner
     // The q1/q30/q81 shape: an aggregate self-joined against its own average, a sort above the join.
@@ -207,9 +200,7 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
           assert(est.isDefined && runtime.exists(_ >= est.get), s"estimate $est, stage $runtime\n${plan.treeString}")
         }
       }
-      // And the join is ours, not left to Spark for its size.
-      val left = org.apache.spark.sql.vector.VectorFallback.reasons(plan).map(_._2).filter(_.contains("inputs too large"))
-      assert(left.isEmpty, left.mkString("; ") + "\n" + plan.treeString)
+      // And the join is ours.
       assert(nodesOf[VectorSortMergeJoinExec](df).nonEmpty || nodesOf[VectorShuffledHashJoinExec](df).nonEmpty, plan.treeString)
     }
   }
