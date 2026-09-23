@@ -69,12 +69,16 @@ object VectorConf {
   /**
    * The sort's memory budget per task (bytes, size strings accepted; #416): past it, sealed runs are
    * written to local disk in sorted order and merged from there, so a partition of any size sorts in
-   * bounded memory. Default: the join build budget ([[joinMaxBuildSize]], a per-core share of the
-   * off-heap size when configured, else 1 GiB). `0` or negative turns spilling off.
+   * bounded memory. `0` or negative turns spilling off. The default is small on purpose: at 1 TB
+   * the merge join's inputs sorted in 32 MB runs and merged from disk ran 25-45% faster than sorted in
+   * gigabyte runs under the join budget (q14a 131 -> 83 s, q14b 132 -> 72 s, q23a 133 -> 109 s), on
+   * less CPU -- a sort over a run that outgrows the caches pays more than the sequential write and
+   * read of the run. 16 MB was slower again on q14a (105 s); 128 and 256 MB within noise of 32.
    */
+  val DefaultSortSpillBytes: Long = 32L << 20
   def sortSpillBytes(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
     val explicit = conf.getConfString(SortSpillBytes, "").trim
-    val v = if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit) else joinMaxBuildSize(conf, sparkConf)
+    val v = if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit) else DefaultSortSpillBytes
     if (v <= 0) Long.MaxValue else v
   }
   def sortRunRows(conf: SQLConf): Int =
