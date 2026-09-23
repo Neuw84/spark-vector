@@ -102,6 +102,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           orderVisible = false,
           sortMergeMode == "auto",
           maxBuildSize,
+          HashBudget(
+            VectorConf.joinSpillBytes(conf, session.sparkContext.getConf),
+            VectorConf.joinSpillBuckets(conf),
+            VectorConf.joinHashMaxBuildBytes(conf, session.sparkContext.getConf)
+          ),
           new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]]
         )
       }
@@ -775,6 +780,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   private type SortMergeMemo =
     java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]]
 
+  /** The hash join's per-task budgets `mode=auto` judges a build side by: in memory, one bucketing pass, cap. */
+  private case class HashBudget(spillBytes: Long, buckets: Int, hashMaxBuildBytes: Long)
+
   /**
    * Whether a sort-merge join could become our hash join, ordering aside: its inputs (sorts stripped)
    * are exchanges, or merge joins that could themselves convert -- a chain of merge joins on the same
@@ -856,6 +864,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       orderVisible: Boolean,
       auto: Boolean,
       maxBuildSize: Long,
+      budget: HashBudget,
       memo: SortMergeMemo
   ): Unit = {
     // Order visibility (#287): below a limit, a take-ordered, a sort, or a range-partitioned exchange (a
@@ -878,18 +887,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             if (orderingNeeded) Left("as merge join: ordering relied on by the parent")
             else if (visibleHere) Left("as merge join: the row order reaches a limit or a sort")
             else eligibility match {
-              case Right(side) => Right((
-                  side,
-                  s"as hash join: built from the ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left"
-                    else "right"} side (split into buckets on disk past ${VectorConf.JoinSpillBytes})"
-                ))
+              case Right(side) => hashOrMerge(j, side, budget)
               case Left(reason) => Left(s"as merge join: $reason")
             }
-          // No size gate any more (#416): the sort below the merge join spills past its memory budget,
-          // so our merge join takes inputs of any size; #311's gate existed because it could not.
-          val gated = choice
-          j.setTagValue(VectorExecRule.SortMergeChoice, gated)
-          gated.isRight
+          j.setTagValue(VectorExecRule.SortMergeChoice, choice)
+          choice.isRight
         } else decision.isRight
       case _ => false
     }
@@ -904,7 +906,44 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       val required = !converts && plan.requiredChildOrdering(i).nonEmpty
       val passes = orderingNeeded && plan.outputOrdering.nonEmpty &&
         org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, plan.outputOrdering)
-      markSortMergeJoins(child, required || passes, childVisible, auto, maxBuildSize, memo)
+      markSortMergeJoins(child, required || passes, childVisible, auto, maxBuildSize, budget, memo)
+    }
+  }
+
+  /**
+   * The size rule of `mode=auto` (#416), once the order is known not to show and a build side is chosen:
+   * what the build side weighs per task, by statistics, against the hash join's two budgets. Within
+   * `spark.vector.join.spillBytes` it builds in memory; within `spark.vector.join.hashMaxBuildSize`
+   * (one bucketing pass: `spillBuckets` buckets of at most `spillBytes`) it splits into buckets on
+   * disk; past that, or with no estimate to judge by, the merge join over the spilling sort takes it --
+   * its memory is bounded by the sort's budget whatever the inputs weigh, where a hash join's grows
+   * with the build side.
+   */
+  private def hashOrMerge(
+      j: SortMergeJoinExec,
+      side: org.apache.spark.sql.catalyst.optimizer.BuildSide,
+      budget: HashBudget
+  ): Either[String, (org.apache.spark.sql.catalyst.optimizer.BuildSide, String)] = {
+    val name = if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"
+    val buildPlan = if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) j.left else j.right
+    val tasks = math.max(1, buildPlan.outputPartitioning.numPartitions)
+    VectorJoinPlanner.estimatedBuildSize(buildPlan).map(total => (total, total / tasks)) match {
+      case Some((total, perTask)) if perTask <= budget.spillBytes =>
+        Right((side, s"as hash join: built from the $name side in memory ($total bytes over $tasks tasks)"))
+      case Some((total, perTask)) if perTask <= budget.hashMaxBuildBytes =>
+        Right((
+          side,
+          s"as hash join: built from the $name side, split into ${budget.buckets} buckets on disk " +
+            s"($total bytes over $tasks tasks, past ${VectorConf.JoinSpillBytes})"
+        ))
+      case Some((total, _)) =>
+        Left(
+          s"as merge join: the $name side weighs $total bytes over $tasks tasks, past the hash join's " +
+            s"${VectorConf.JoinHashMaxBuildSize} (${budget.hashMaxBuildBytes} per task)"
+        )
+      case None if budget.hashMaxBuildBytes == Long.MaxValue =>
+        Right((side, s"as hash join: built from the $name side (no size cap)"))
+      case None => Left(s"as merge join: no size estimate for the $name side to judge the hash join's budget by")
     }
   }
 
