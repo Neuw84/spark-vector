@@ -275,6 +275,23 @@ final class PartitionedIpcWriter(
 
     /** After a column's mode changed (#416: its dictionary froze): the vector dropped so the next rows settle the builder anew. */
     def resettle(): Unit = { close(); idsMode = false }
+
+    /**
+     * The pending ids decoded into plain strings in place (#416, item 5): a column frozen before any of
+     * its ids reached the file needs no dictionary section -- its pending rows leave as UTF8 like the
+     * rows after it. The builder continues as a plain string builder.
+     */
+    def decodeIds(ic: IdColumn): Unit = {
+      if (!idsMode) return
+      if (vector == null || rows == 0) { resettle(); return }
+      if (retained) { retainedBytes -= capacityBytes; retained = false }
+      val decoded = ic.decode(vector.asInstanceOf[IntVector], rows, new VarCharVector(field.name, allocator))
+      vector.close()
+      vector = decoded
+      idsMode = false
+      buffers = ArrowVectorBuffers.forWrite(vector, vector.getValueCapacity, field.dataType)
+      dataBytes = decoded.getOffsetBuffer.getInt(rows.toLong << 2)
+    }
   }
 
   private final class Segment(val partition: Int) {
@@ -391,6 +408,8 @@ final class PartitionedIpcWriter(
     val dict = new StringDictionary()
     /** Non-null rows mapped so far: the denominator of the task-level distinct ratio (#416). */
     var rowsSeen: Long = 0L
+    /** Whether a record batch carrying this column's ids has been written: then the dictionary section must hold the dictionary. */
+    var flushedIds: Boolean = false
     private val scratch = new StringDictionary.Scratch()
     private var rowIds = new Array[Int](0)
     // Input dictionary entries -> staging ids, remembered while the same dictionary keeps arriving --
@@ -645,14 +664,30 @@ final class PartitionedIpcWriter(
       c += 1
     }
     if (!any) return
-    if (staged) flushStaging() else { var p = 0; while (p < numPartitions) { flushPartition(segments(p)); p += 1 } }
+    // A freezing column whose ids already reached the file keeps its dictionary (the section serves
+    // those batches), and its pending rows leave as ids too: everything pending is flushed first. A
+    // column frozen before any flush -- the usual case, the sample is smaller than a batch -- has its
+    // pending ids decoded in place instead and writes no dictionary section at all (item 5): at 1000
+    // partitions every reduce task received every map's dictionary, and for a near-distinct column
+    // that section was most of a narrow task's bytes.
+    var anyFlushed = false
+    c = 0
+    while (c < idColumns.length) { val ic = idColumns(c); if (ic != null && !frozen(c) && mustFreeze(ic) && ic.flushedIds) anyFlushed = true; c += 1 }
+    if (anyFlushed) {
+      if (staged) flushStaging() else { var p = 0; while (p < numPartitions) { flushPartition(segments(p)); p += 1 } }
+    }
     c = 0
     while (c < idColumns.length) {
       val ic = idColumns(c)
       if (ic != null && !frozen(c) && mustFreeze(ic)) {
         frozen(c) = true
-        if (staged) { staging(c).resettle(); batchBuilders(c).resettle() }
-        else { var p = 0; while (p < numPartitions) { segments(p).builders(c).resettle(); p += 1 } }
+        if (ic.flushedIds) {
+          if (staged) { staging(c).resettle(); batchBuilders(c).resettle() }
+          else { var p = 0; while (p < numPartitions) { segments(p).builders(c).resettle(); p += 1 } }
+        } else {
+          if (staged) { staging(c).decodeIds(ic); batchBuilders(c).resettle() }
+          else { var p = 0; while (p < numPartitions) { segments(p).builders(c).decodeIds(ic); p += 1 } }
+        }
       }
       c += 1
     }
@@ -753,7 +788,7 @@ final class PartitionedIpcWriter(
           var encodedColumn = false
           taken(c) match {
             case staged: IntVector =>
-              if (fileDictionary) encodedColumn = true
+              if (fileDictionary) { encodedColumn = true; ic.flushedIds = true }
               else {
                 val (sids, sdict) = scratchFor(c)
                 val encoded = if (rows < PartitionedIpcWriter.DictionaryMinRows) null else ic.remap(staged, rows, sids, sdict)
@@ -832,7 +867,7 @@ final class PartitionedIpcWriter(
       var c = 0
       while (c < idColumns.length) {
         val ic = idColumns(c)
-        if (ic != null && ic.dict.size() > 0) {
+        if (ic != null && ic.dict.size() > 0 && ic.flushedIds) {
           val vector = new VarCharVector(schema.fields(c).name + ".dictionary", allocator)
           try {
             val n = ic.dict.size()
