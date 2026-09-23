@@ -178,6 +178,21 @@ if [ "$AOT_MODE" = fetch ]; then
           - name: aot
             mountPath: /aot
 EOF
+elif [ "$AOT_MODE" = record ]; then
+  # The node directory is created root-owned by the kubelet and the executor runs as the image's
+  # user: a JVM in record mode that cannot open its configuration file exits at start, so a root
+  # init container opens the directory first.
+  cat <<EOF
+    initContainers:
+      - name: aot-prep
+        image: public.ecr.aws/aws-cli/aws-cli:latest
+        command: ["sh", "-c", "chmod 1777 /aot"]
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+          - name: aot
+            mountPath: /aot
+EOF
 fi
 if [ -n "$NODE_SELECTOR" ]; then
   echo "    nodeSelector:"; echo "      ${NODE_SELECTOR%%=*}: \"${NODE_SELECTOR#*=}\""
