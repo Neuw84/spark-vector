@@ -39,9 +39,22 @@ public final class RunMerge {
    * @param rows the number of rows of every run
    */
   public RunMerge(VectorBuffers[][] keys, int[][] perm, int[] rows, boolean[] ascending, boolean[] nullsFirst) {
+    this(keys, perm, rows, ascending, nullsFirst, null);
+  }
+
+  /**
+   * As above, with {@code refillable[r]} marking a run that arrives in pieces (a spilled run read
+   * back batch by batch): {@code keys[r]} / {@code perm[r]} / {@code rows[r]} describe its current
+   * piece, {@code perm[r] == null} meaning the piece is already in order. When such a run's piece is
+   * used up, {@link #next} returns early with {@link #exhausted()} naming it, and the caller either
+   * {@link #refill}s it with the next piece or {@link #finish}es it -- so every row emitted by one
+   * {@code next} call refers to the pieces the caller still holds.
+   */
+  public RunMerge(VectorBuffers[][] keys, int[][] perm, int[] rows, boolean[] ascending, boolean[] nullsFirst, boolean[] refillable) {
     this.keys = keys;
     this.perm = perm;
     this.rows = rows;
+    this.refillable = refillable == null ? new boolean[rows.length] : refillable;
     this.pos = new int[rows.length];
     this.descending = new boolean[ascending.length];
     for (int k = 0; k < ascending.length; k++) {
@@ -97,34 +110,36 @@ public final class RunMerge {
   private void normalise(int r, int k) {
     VectorBuffers col = keys[r][k];
     int n = rows[r];
-    int[] p = perm[r];
+    int[] p = perm[r]; // null: the run is already in order
     long[] out;
     switch (col.type()) {
       case INT32 -> {
         out = new long[n];
         for (int i = 0; i < n; i++) {
-          out[i] = (col.getInt(p[i]) ^ Integer.MIN_VALUE) & 0xFFFFFFFFL;
+          out[i] = (col.getInt(p == null ? i : p[i]) ^ Integer.MIN_VALUE) & 0xFFFFFFFFL;
         }
       }
       case INT64 -> {
         out = new long[n];
         for (int i = 0; i < n; i++) {
-          out[i] = col.getLong(p[i]) ^ Long.MIN_VALUE;
+          out[i] = col.getLong(p == null ? i : p[i]) ^ Long.MIN_VALUE;
         }
       }
       case FLOAT64 -> {
         out = new long[n];
         for (int i = 0; i < n; i++) {
-          out[i] = SortKernels.doubleKey(col.getDouble(p[i]));
+          out[i] = SortKernels.doubleKey(col.getDouble(p == null ? i : p[i]));
         }
       }
       case BOOL -> {
         out = new long[n];
         for (int i = 0; i < n; i++) {
-          out[i] = col.getBoolean(p[i]) ? 1L : 0L;
+          out[i] = col.getBoolean(p == null ? i : p[i]) ? 1L : 0L;
         }
       }
       default -> {
+        norm[r][k] = null;
+        nullAt[r][k] = null;
         return;
       }
     }
@@ -137,15 +152,54 @@ public final class RunMerge {
     if (col.hasNulls()) {
       boolean[] nulls = new boolean[n];
       for (int i = 0; i < n; i++) {
-        nulls[i] = col.isNull(p[i]);
+        nulls[i] = col.isNull(p == null ? i : p[i]);
       }
       nullAt[r][k] = nulls;
+    } else {
+      nullAt[r][k] = null;
     }
   }
 
-  /** Rows left to emit. */
-  public boolean hasNext() {
-    return tree[0] >= 0;
+  /** Row index into run {@code r}'s columns at sorted position {@code at}. */
+  private int rowAt(int r, int at) {
+    int[] p = perm[r];
+    return p == null ? at : p[at];
+  }
+
+  /**
+   * The refillable run whose current piece the last {@link #next} used up, or -1. The caller must
+   * {@link #refill} or {@link #finish} it before the next {@link #next}.
+   */
+  public int exhausted() {
+    return exhausted;
+  }
+
+  /** Gives refillable run {@code r} its next piece ({@code perm} null when already in order) and re-seats it. */
+  public void refill(int r, VectorBuffers[] pieceKeys, int[] piecePerm, int pieceRows) {
+    if (exhausted != r) {
+      throw new IllegalStateException("run " + r + " is not the exhausted run (" + exhausted + ")");
+    }
+    keys[r] = pieceKeys;
+    perm[r] = piecePerm;
+    rows[r] = pieceRows;
+    pos[r] = 0;
+    for (int k = 0; k < descending.length; k++) {
+      if (pieceRows > 0) {
+        normalise(r, k);
+      }
+    }
+    exhausted = -1;
+    replay(r, pieceRows > 0 ? r : -1);
+  }
+
+  /** Refillable run {@code r} has no more pieces. */
+  public void finish(int r) {
+    if (exhausted != r) {
+      throw new IllegalStateException("run " + r + " is not the exhausted run (" + exhausted + ")");
+    }
+    rows[r] = 0;
+    exhausted = -1;
+    replay(r, -1);
   }
 
   /**
@@ -153,6 +207,9 @@ public final class RunMerge {
    * within that run (the permutation already applied). Returns the number emitted.
    */
   public int next(int[] runOf, int[] rowOf, int max) {
+    if (exhausted >= 0) {
+      throw new IllegalStateException("run " + exhausted + " must be refilled or finished first");
+    }
     int o = 0;
     while (o < max && tree[0] >= 0) {
       int w = tree[0];
@@ -167,17 +224,41 @@ public final class RunMerge {
       }
       lastBlock = block;
       emitted += block;
-      for (int j = 0; j < block; j++) {
-        runOf[o] = w;
-        rowOf[o] = p[at + j];
-        o++;
+      if (p == null) {
+        for (int j = 0; j < block; j++) {
+          runOf[o] = w;
+          rowOf[o] = at + j;
+          o++;
+        }
+      } else {
+        for (int j = 0; j < block; j++) {
+          runOf[o] = w;
+          rowOf[o] = p[at + j];
+          o++;
+        }
       }
       pos[w] = at + block;
-      replay(w, pos[w] < rows[w] ? w : -1);
+      if (pos[w] < rows[w]) {
+        replay(w, w);
+      } else if (refillable[w]) {
+        // The piece is used up: the rows emitted so far refer to it, so stop here and let the caller
+        // gather them before the piece is replaced.
+        exhausted = w;
+        return o;
+      } else {
+        replay(w, -1);
+      }
     }
     return o;
   }
 
+  /** Rows left to emit, or a refillable run waiting for its next piece. */
+  public boolean hasNext() {
+    return tree[0] >= 0 || exhausted >= 0;
+  }
+
+  private final boolean[] refillable;
+  private int exhausted = -1;
   private final int[] tree; // losers per internal node, tree[0] the winner; -1 an exhausted run
   private final boolean wideKey;
   private int lastBlock = 1;
@@ -269,7 +350,7 @@ public final class RunMerge {
           c = Long.compareUnsigned(na[k][pa], nb[k][pb]);
         }
       } else {
-        c = compareKeys(keys[a][k], perm[a][pa], keys[b][k], perm[b][pb], descending[k], nullsFirst[k]);
+        c = compareKeys(keys[a][k], rowAt(a, pa), keys[b][k], rowAt(b, pb), descending[k], nullsFirst[k]);
       }
       if (c != 0) {
         return c < 0;
