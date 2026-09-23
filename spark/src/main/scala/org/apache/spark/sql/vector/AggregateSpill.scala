@@ -36,9 +36,12 @@ final class AggregateSpill(
     columns: Array[(String, DataType)],
     keyOrdinals: Array[Int],
     allocator: BufferAllocator,
-    seed: Int = AggregateSpill.BucketSeed) extends AutoCloseable {
+    seed: Int = AggregateSpill.BucketSeed,
+    /** The key types when the keys are not columns of the batch but values given to `writeBuffers` (the join, #416). */
+    keyTypes: Array[DataType] = null) extends AutoCloseable {
 
-  private val kinds: Array[KeyKind] = keyOrdinals.map(o => AggregateSpill.keyKind(columns(o)._2))
+  private val kinds: Array[KeyKind] =
+    (if (keyTypes != null) keyTypes else keyOrdinals.map(o => columns(o)._2)).map(AggregateSpill.keyKind)
   private val files = new Array[File](numBuckets)
   private val channels = new Array[FileChannel](numBuckets)
   private val roots = new Array[VectorSchemaRoot](numBuckets)
@@ -59,13 +62,31 @@ final class AggregateSpill(
         // The buckets are written plain: a dictionary-encoded key column is decoded once here.
         if (b.`type`() == VecType.UTF8 && b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, arena) else b
       }
+      writeBuffers(buffers, keyOrdinals.map(buffers(_)), n, arena)
+    } finally arena.close()
+  }
+
+  /**
+   * Writes `n` rows given as column buffers into their buckets, bucketed by `keys` -- values hashed
+   * like the shuffle's partitioning under this spill's seed; for the aggregate they are columns of
+   * the batch, for the join (#416) the evaluated key expressions. `arena` holds the scratch (masks).
+   * A dictionary-encoded string column among `buffers` must already be decoded (the buckets are plain).
+   */
+  def writeBuffers(buffers: Array[VectorBuffers], keys: Array[VectorBuffers], n: Int, arena: Arena,
+      selection: java.lang.foreign.MemorySegment = null): Unit = {
+    if (n == 0) return
+    {
       val ids = new Array[Int](n)
-      PartitionKernels.hashPartitionIds(keyOrdinals.map(buffers(_)), kinds, n, numBuckets, seed, new Array[Int](n), ids)
-      // One selection mask per bucket, from one pass over the ids (a fresh segment is all clear).
+      PartitionKernels.hashPartitionIds(keys, kinds, n, numBuckets, seed, new Array[Int](n), ids)
+      // One selection mask per bucket, from one pass over the ids (a fresh segment is all clear); a row
+      // outside `selection` goes nowhere.
       val masks = Array.fill(numBuckets)(arena.allocate(Bitmap.bytesFor(n), 8))
       val counts = new Array[Int](numBuckets)
       var i = 0
-      while (i < n) { Bitmap.set(masks(ids(i)), i); counts(ids(i)) += 1; i += 1 }
+      while (i < n) {
+        if (selection == null || Bitmap.isSet(selection, i)) { Bitmap.set(masks(ids(i)), i); counts(ids(i)) += 1 }
+        i += 1
+      }
       var b = 0
       while (b < numBuckets) {
         if (counts(b) > 0) {
@@ -86,7 +107,7 @@ final class AggregateSpill(
         }
         b += 1
       }
-    } finally arena.close()
+    }
   }
 
   private def open(b: Int): Unit = if (writers(b) == null) {
