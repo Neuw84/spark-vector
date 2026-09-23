@@ -476,7 +476,7 @@ that pin it.
   to Spark's, and TPC-H SF10 under `auto` not slower than `off` under our shuffle -- see results.md,
   "auto by default"). One size rule guards `auto` since #416 (the second, #311's input-size gate that
   left large merge joins to Spark, went when the sort learned to spill -- `spark.vector.sort.spillBytes`
-  bounds a task's sort memory, runs past it are merged from local disk): the hash rewrite declines a build side larger
+  bounds a task's sort memory at 32 MB by default -- the sweep at 1 TB had gigabyte runs 25-45% slower -- and runs past it are merged from local disk): the hash rewrite declines a build side larger
   than the streamed side by statistics (`VectorJoinPlanner.sortMergeBuildSide`: a semi or anti join may
   only build its right side; q4 hashed lineitem and ran 14% slower than Spark's merge -- with the rule
   `auto` takes our merge join there and is at parity, fully accelerated). Both rules read
