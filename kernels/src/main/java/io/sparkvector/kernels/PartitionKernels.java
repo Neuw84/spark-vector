@@ -289,7 +289,24 @@ public final class PartitionKernels {
    */
   public static void hashPartitionIds(
       VectorBuffers[] keys, KeyKind[] kinds, int n, int numPartitions, int[] hashes, int[] ids) {
-    init(hashes, n, SPARK_SEED);
+    hashPartitionIds(keys, kinds, n, numPartitions, SPARK_SEED, hashes, ids);
+  }
+
+  /**
+   * The same partitioning under another {@code seed}. An operator that buckets the rows of one
+   * reduce task by their keys must not reuse the shuffle's seed: every row it holds already has the
+   * same Spark hash modulo the partition count, so the same hash modulo a bucket count fills only
+   * {@code buckets / gcd(partitions, buckets)} buckets -- two of sixteen at 200 or 1000 partitions.
+   */
+  public static void hashPartitionIds(
+      VectorBuffers[] keys,
+      KeyKind[] kinds,
+      int n,
+      int numPartitions,
+      int seed,
+      int[] hashes,
+      int[] ids) {
+    init(hashes, n, seed);
     for (int k = 0; k < keys.length; k++) {
       mixColumn(keys[k], kinds[k], hashes, n);
     }
