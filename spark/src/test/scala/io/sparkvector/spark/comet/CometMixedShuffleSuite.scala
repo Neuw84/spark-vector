@@ -40,7 +40,8 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
     VectorConf.AggregateEnabled -> "false",
     VectorConf.ProjectEnabled -> "false",
     VectorConf.BroadcastHashJoinEnabled -> "false",
-    VectorConf.ShuffledHashJoinEnabled -> "false")
+    VectorConf.ShuffledHashJoinEnabled -> "false"
+  )
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
@@ -59,7 +60,9 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
   private val Join = "SELECT a.i, b.s FROM t a JOIN t b ON a.i = b.i WHERE a.d > 0.5 AND b.l IS NOT NULL"
 
   private def reasonsOf(df: org.apache.spark.sql.DataFrame): String =
-    org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) => s"${n.nodeName}: $r" }.mkString("; ")
+    org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) =>
+      s"${n.nodeName}: $r"
+    }.mkString("; ")
 
   test("Comet's broadcast join above our filters, its broadcast over our chain (adaptive execution off)", CometTest) {
     // Under adaptive execution the broadcast stage is planned and run before the join's stage, with Spark's
@@ -68,7 +71,10 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
     withConf("spark.sql.adaptive.enabled" -> "false") {
       val df = checkVectorized(Join, Seq(Filter))
       val plan = finalPlan(df)
-      assert(nodesNamed(df, "CometBroadcastHashJoin").nonEmpty, s"expected Comet's broadcast join above our filters; reasons: ${reasonsOf(df)}\n${plan.treeString}")
+      assert(
+        nodesNamed(df, "CometBroadcastHashJoin").nonEmpty,
+        s"expected Comet's broadcast join above our filters; reasons: ${reasonsOf(df)}\n${plan.treeString}"
+      )
       assert(nodesNamed(df, "CometBroadcastExchange").nonEmpty, plan.treeString)
       assert(nodesOf[VectorToCometExec](df).nonEmpty, plan.treeString)
       awaitReleased()
@@ -79,7 +85,10 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1") {
       val df = checkVectorized(Join.replace("SELECT a.i", "SELECT /*+ SHUFFLE_HASH(b) */ a.i"), Seq(Filter))
       val plan = finalPlan(df)
-      assert(nodesNamed(df, "CometHashJoin").nonEmpty, s"expected Comet's hash join above its shuffle over our filters:\n${plan.treeString}")
+      assert(
+        nodesNamed(df, "CometHashJoin").nonEmpty,
+        s"expected Comet's hash join above its shuffle over our filters:\n${plan.treeString}"
+      )
       assert(nodesOf[VectorToCometExec](df).nonEmpty, plan.treeString)
       awaitReleased()
     }
@@ -89,7 +98,10 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
     val df = checkVectorized("SELECT s, sum(d), max(i) FROM t WHERE i > 100 GROUP BY s", Seq(Filter))
     val plan = finalPlan(df)
     assert(nodesNamed(df, "CometHashAggregate").size == 2, s"expected both halves Comet's:\n${plan.treeString}")
-    assert(nodesNamed(df, "CometShuffleExchange").nonEmpty || nodesNamed(df, "CometColumnarExchange").nonEmpty, plan.treeString)
+    assert(
+      nodesNamed(df, "CometShuffleExchange").nonEmpty || nodesNamed(df, "CometColumnarExchange").nonEmpty,
+      plan.treeString
+    )
     awaitReleased()
   }
 }

@@ -44,7 +44,8 @@ class VectorAccelerationListener(store: VectorAccelerationStore) extends SparkLi
       failed = false,
       plan = livePlan(e.executionId).getOrElse(PlanAcceleration.fromInfo(e.sparkPlanInfo)),
       exact = livePlan(e.executionId).isDefined,
-      physicalPlanDescription = e.physicalPlanDescription))
+      physicalPlanDescription = e.physicalPlanDescription
+    ))
   }
 
   /** AQE replans mid-flight; each update supersedes what we recorded before. */
@@ -55,7 +56,8 @@ class VectorAccelerationListener(store: VectorAccelerationStore) extends SparkLi
         existing.copy(
           plan = exact.getOrElse(PlanAcceleration.fromInfo(e.sparkPlanInfo)),
           exact = exact.isDefined,
-          physicalPlanDescription = e.physicalPlanDescription)
+          physicalPlanDescription = e.physicalPlanDescription
+        )
       }
     }
 
@@ -67,7 +69,8 @@ class VectorAccelerationListener(store: VectorAccelerationStore) extends SparkLi
         completionTime = Some(e.time),
         failed = e.errorMessage.exists(_.nonEmpty),
         plan = finalPlan.getOrElse(existing.plan),
-        exact = finalPlan.isDefined || existing.exact)
+        exact = finalPlan.isDefined || existing.exact
+      )
     }
   }
 

@@ -33,24 +33,39 @@ class VectorCacheSuite extends VectorQuerySuite {
   }
 
   override protected def afterAll(): Unit = {
-    try spark.catalog.clearCache() finally super.afterAll()
+    try spark.catalog.clearCache()
+    finally super.afterAll()
   }
 
   private def scanIsInput(df: DataFrame): Unit = {
     val scans = nodesOf[InMemoryTableScanExec](df)
     assert(scans.nonEmpty && scans.forall(_.supportsColumnar), finalPlan(df).treeString)
-    assert(nodesOf[RowToColumnarExec](df).forall(!_.child.isInstanceOf[InMemoryTableScanExec]),
-      "the cache's batches should be consumed directly\n" + finalPlan(df).treeString)
+    assert(
+      nodesOf[RowToColumnarExec](df).forall(!_.child.isInstanceOf[InMemoryTableScanExec]),
+      "the cache's batches should be consumed directly\n" + finalPlan(df).treeString
+    )
   }
 
   test("a primitive-only cached table is a columnar input: our operators sit on the scan, copied once per batch") {
     val copiedBefore = ColumnVectorAdapters.copiedColumns()
     scanIsInput(checkVectorized("SELECT i, l, d FROM t_num WHERE i % 3 = 0 AND l IS NOT NULL", Seq(Filter)))
-    scanIsInput(checkVectorized("SELECT i + 1 AS j, d * 2 AS e, d2, b, NOT b2 AS nb2 FROM t_num WHERE i < 5000", Seq(Filter, Project)))
-    scanIsInput(checkVectorized("SELECT b, count(*) AS n, sum(l) AS sl, avg(d) AS ad, sum(d2) AS sd, max(i) AS mi FROM t_num GROUP BY b", Seq(Agg)))
+    scanIsInput(checkVectorized(
+      "SELECT i + 1 AS j, d * 2 AS e, d2, b, NOT b2 AS nb2 FROM t_num WHERE i < 5000",
+      Seq(Filter, Project)
+    ))
+    scanIsInput(checkVectorized(
+      "SELECT b, count(*) AS n, sum(l) AS sl, avg(d) AS ad, sum(d2) AS sd, max(i) AS mi FROM t_num GROUP BY b",
+      Seq(Agg)
+    ))
     scanIsInput(checkVectorized("SELECT count(*) AS n, count(l) AS nl, count(d) AS nd FROM t_num", Seq(Agg)))
-    scanIsInput(checkVectorized("SELECT b2, count(*) AS n FROM t_num WHERE d IS NULL OR l IS NULL GROUP BY b2", Seq(Filter, Agg)))
-    assert(ColumnVectorAdapters.copiedColumns() > copiedBefore, "cache vectors are Spark's on-heap vectors, copied once per batch")
+    scanIsInput(checkVectorized(
+      "SELECT b2, count(*) AS n FROM t_num WHERE d IS NULL OR l IS NULL GROUP BY b2",
+      Seq(Filter, Agg)
+    ))
+    assert(
+      ColumnVectorAdapters.copiedColumns() > copiedBefore,
+      "cache vectors are Spark's on-heap vectors, copied once per batch"
+    )
   }
 
   test("df.cache() over primitives, and the cache's own filter pushdown beneath our filter") {
@@ -58,11 +73,16 @@ class VectorCacheSuite extends VectorQuerySuite {
     df.count()
     df.createOrReplaceTempView("t_df_cached")
     scanIsInput(checkVectorized("SELECT i, l, d, d2, b FROM t_df_cached WHERE i % 2 = 0", Seq(Filter)))
-    scanIsInput(checkVectorized("SELECT d2 + 1 AS d1, NOT b AS nb, l * 2 AS l2 FROM t_df_cached WHERE i < 100 AND d > 1", Seq(Filter, Project)))
+    scanIsInput(checkVectorized(
+      "SELECT d2 + 1 AS d1, NOT b AS nb, l * 2 AS l2 FROM t_df_cached WHERE i < 100 AND d > 1",
+      Seq(Filter, Project)
+    ))
     df.unpersist()
   }
 
-  test("a cached relation with a string or date column is a row scan (Spark's serializer), as is the reader switched off") {
+  test(
+    "a cached relation with a string or date column is a row scan (Spark's serializer), as is the reader switched off"
+  ) {
     val df = checkFallback("SELECT i, l FROM t_cached WHERE i % 5 = 0", Seq(Filter), "is not columnar")
     assert(nodesOf[InMemoryTableScanExec](df).forall(!_.supportsColumnar), finalPlan(df).treeString)
     // Projecting only primitives does not help: the serializer decides on the cached relation's schema.

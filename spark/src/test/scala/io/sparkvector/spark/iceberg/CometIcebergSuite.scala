@@ -27,7 +27,8 @@ class CometIcebergSuite extends IcebergMorSuiteBase {
   override protected def extraSparkConf: Map[String, String] =
     CometTestConf.scanOnly ++ icebergConf ++ Map(
       "spark.comet.scan.icebergNative.enabled" -> "true",
-      "spark.comet.scan.icebergNative.dataFileConcurrencyLimit" -> "2")
+      "spark.comet.scan.icebergNative.dataFileConcurrencyLimit" -> "2"
+    )
 
   icebergTest("Comet's vectors are adapted zero-copy") {
     useTable("t_pos")

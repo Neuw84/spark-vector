@@ -22,7 +22,9 @@ class AggregateSpillSuite extends AnyFunSuite {
     val out = new Array[Int](n)
     var i = 0; var v = 1
     while (i < n) {
-      if (PartitionKernels.pmod(PartitionKernels.hashInt(v, PartitionKernels.SPARK_SEED), partitions) == 7) { out(i) = v; i += 1 }
+      if (PartitionKernels.pmod(PartitionKernels.hashInt(v, PartitionKernels.SPARK_SEED), partitions) == 7) {
+        out(i) = v; i += 1
+      }
       v += 1
     }
     out
@@ -31,7 +33,10 @@ class AggregateSpillSuite extends AnyFunSuite {
   private def bucketsFilled(seed: Int, partitions: Int, buckets: Int): Int = {
     val allocator = VectorAllocators.newChild("AggregateSpillSuite")
     val arena = Arena.ofConfined()
-    val columns = Array(("k", IntegerType: org.apache.spark.sql.types.DataType), ("sum", LongType: org.apache.spark.sql.types.DataType))
+    val columns = Array(
+      ("k", IntegerType: org.apache.spark.sql.types.DataType),
+      ("sum", LongType: org.apache.spark.sql.types.DataType)
+    )
     val spill = new AggregateSpill(buckets, columns, Array(0), allocator, seed)
     try {
       val n = 8192
@@ -40,9 +45,18 @@ class AggregateSpillSuite extends AnyFunSuite {
       Bitmap.fill(all, n, true)
       val cols: Array[ColumnVector] = Array(
         ArrowOutput.compact("k", IntegerType, ArrowLayout.ofInts(arena, keys, Array.fill(n)(false)), all, n, allocator),
-        ArrowOutput.compact("sum", LongType, ArrowLayout.ofLongs(arena, keys.map(_.toLong), Array.fill(n)(false)), all, n, allocator))
+        ArrowOutput.compact(
+          "sum",
+          LongType,
+          ArrowLayout.ofLongs(arena, keys.map(_.toLong), Array.fill(n)(false)),
+          all,
+          n,
+          allocator
+        )
+      )
       val batch = new ColumnarBatch(cols, n)
-      try spill.write(batch) finally batch.close()
+      try spill.write(batch)
+      finally batch.close()
       var filled = 0
       var rows = 0L
       (0 until buckets).foreach { b =>
@@ -65,6 +79,8 @@ class AggregateSpillSuite extends AnyFunSuite {
   }
 
   test("#416: under the spill's own seed a task's rows fill every bucket") {
-    Seq(1000, 300, 200).foreach { p => assert(bucketsFilled(AggregateSpill.BucketSeed, p, 16) === 16, s"$p partitions") }
+    Seq(1000, 300, 200).foreach { p =>
+      assert(bucketsFilled(AggregateSpill.BucketSeed, p, 16) === 16, s"$p partitions")
+    }
   }
 }

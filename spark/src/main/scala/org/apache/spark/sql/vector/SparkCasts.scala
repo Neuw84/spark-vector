@@ -11,6 +11,7 @@ import org.apache.spark.unsafe.types.UTF8String
 
 /** Exactly the helpers Spark's `Cast` calls for the string casts, so our per-row results are Spark's. */
 object SparkCasts {
+
   /** ANSI `string -> int / bigint`: Spark's exact parsers, raising CAST_INVALID_INPUT themselves. */
   def toIntExact(s: UTF8String, context: QueryContext): Int = UTF8StringUtils.toIntExact(s, context)
   def toLongExact(s: UTF8String, context: QueryContext): Long = UTF8StringUtils.toLongExact(s, context)
@@ -30,5 +31,6 @@ object SparkCasts {
   def stringToDate(s: UTF8String): Option[Int] = DateTimeUtils.stringToDate(s)
   def stringToDateAnsi(s: UTF8String, context: QueryContext): Int = DateTimeUtils.stringToDateAnsi(s, context)
   def stringToTimestamp(s: UTF8String, zone: ZoneId): Option[Long] = DateTimeUtils.stringToTimestamp(s, zone)
-  def stringToTimestampAnsi(s: UTF8String, zone: ZoneId, context: QueryContext): Long = DateTimeUtils.stringToTimestampAnsi(s, zone, context)
+  def stringToTimestampAnsi(s: UTF8String, zone: ZoneId, context: QueryContext): Long =
+    DateTimeUtils.stringToTimestampAnsi(s, zone, context)
 }

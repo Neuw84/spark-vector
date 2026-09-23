@@ -22,13 +22,20 @@ final class EvalContext(
     adaptColumn: Int => VectorBuffers,
     val selection: java.lang.foreign.MemorySegment,
     val selectedCount: Int,
-    rawColumn: Int => org.apache.spark.sql.vectorized.ColumnVector) {
+    rawColumn: Int => org.apache.spark.sql.vectorized.ColumnVector
+) {
   private val adapted = new java.util.HashMap[Int, VectorBuffers]()
 
   /** Rows whose values matter for the sub-expression under evaluation (null = all). */
   var active: java.lang.foreign.MemorySegment = selection
 
-  def this(arena: Arena, numRows: Int, adaptColumn: Int => VectorBuffers, selection: java.lang.foreign.MemorySegment, selectedCount: Int) =
+  def this(
+      arena: Arena,
+      numRows: Int,
+      adaptColumn: Int => VectorBuffers,
+      selection: java.lang.foreign.MemorySegment,
+      selectedCount: Int
+  ) =
     this(arena, numRows, adaptColumn, selection, selectedCount, null)
 
   def this(arena: Arena, numRows: Int, adaptColumn: Int => VectorBuffers) =
@@ -46,7 +53,8 @@ final class EvalContext(
   /** `v` with the batch selection folded into its validity, so reductions skip unselected rows. */
   def masked(v: VectorBuffers): VectorBuffers = {
     if (selection == null) v
-    else if (v.validity() == null) new SegmentVectorBuffers(v.`type`(), numRows, selection, v.data(), v.offsets(), v.dictionary())
+    else if (v.validity() == null)
+      new SegmentVectorBuffers(v.`type`(), numRows, selection, v.data(), v.offsets(), v.dictionary())
     else {
       val combined = bitmap()
       BitmapKernels.and(v.validity(), selection, combined, numRows)
@@ -58,7 +66,8 @@ final class EvalContext(
   def withActive[T](rows: java.lang.foreign.MemorySegment)(f: => T): T = {
     val saved = active
     active = rows
-    try f finally active = saved
+    try f
+    finally active = saved
   }
 
   def input(ordinal: Int): VectorBuffers = {
@@ -96,16 +105,21 @@ final case class ColumnRef(ordinal: Int, dataType: DataType) extends VectorExpr 
  * materialised as a column on their own, which is why [[eval]] throws.
  */
 final case class LiteralExpr(value: Any, dataType: DataType) extends VectorExpr {
+
   /**
    * The literal as a lane value: decimals are their unscaled value -- a long on the INT64 lane, a
    * `BigInteger` for a wide decimal on the DECIMAL128 lane (the kernels split it into limbs).
    */
   def number: Number = value match {
-    case d: org.apache.spark.sql.types.Decimal if dataType.asInstanceOf[org.apache.spark.sql.types.DecimalType].precision > TypeMapping.MAX_DECIMAL_PRECISION =>
+    case d: org.apache.spark.sql.types.Decimal
+        if dataType.asInstanceOf[
+          org.apache.spark.sql.types.DecimalType
+        ].precision > TypeMapping.MAX_DECIMAL_PRECISION =>
       d.toJavaBigDecimal.unscaledValue()
     case d: org.apache.spark.sql.types.Decimal => java.lang.Long.valueOf(d.toUnscaledLong)
     case n: Number => n
   }
+
   /** A string literal's UTF-8 bytes. */
   def utf8Bytes: Array[Byte] = value match {
     case s: org.apache.spark.unsafe.types.UTF8String => s.getBytes
@@ -262,7 +276,8 @@ final case class StringInSetExpr(child: VectorExpr, values: Seq[LiteralExpr]) ex
  * exactly where the child is null (the pattern is a non-null literal), so the child's validity is
  * shared; the match runs once per dictionary entry on a dictionary-encoded column.
  */
-final case class StringMatchExpr(kind: StringMatchKernels.Kind, child: VectorExpr, pattern: LiteralExpr) extends VectorExpr {
+final case class StringMatchExpr(kind: StringMatchKernels.Kind, child: VectorExpr, pattern: LiteralExpr)
+    extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(child, pattern)
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -277,7 +292,8 @@ final case class StringMatchExpr(kind: StringMatchKernels.Kind, child: VectorExp
  * `LIKE '[prefix%]tok1%tok2[%...][%suffix]'` with several wildcards and no `_` or escapes, as a
  * multi-token matcher over the string column (#264). Null lanes share the child's validity.
  */
-final case class LikeTokensExpr(child: VectorExpr, prefix: Array[Byte], tokens: Array[Array[Byte]], suffix: Array[Byte]) extends VectorExpr {
+final case class LikeTokensExpr(child: VectorExpr, prefix: Array[Byte], tokens: Array[Array[Byte]], suffix: Array[Byte])
+    extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -322,6 +338,7 @@ final case class IsNotNullExpr(child: VectorExpr) extends VectorExpr {
 }
 
 private[expr] object LogicalExprs {
+
   /**
    * Rows still undecided after seeing `a` as the left operand of AND (`keepTrue`: rows where `a`
    * is true or null) or OR (rows where `a` is false or null), intersected with the current active
@@ -375,8 +392,8 @@ final case class ArithExpr(
     dataType: DataType,
     ansiDivideByZero: Boolean,
     queryContext: org.apache.spark.QueryContext,
-    nullOnOverflow: Boolean = false)
-    extends VectorExpr {
+    nullOnOverflow: Boolean = false
+) extends VectorExpr {
 
   override def children: Seq[VectorExpr] = Seq(left, right)
 
@@ -398,13 +415,17 @@ final case class ArithExpr(
           divisorZero = ctx.bitmap()
           Bitmap.fill(divisorZero, n, true)
         }
-        if (checkOverflow) { overflow = ctx.bitmap(); OverflowKernels.overflowScalar(op, a, lit.number, data, overflow) }
+        if (checkOverflow) {
+          overflow = ctx.bitmap(); OverflowKernels.overflowScalar(op, a, lit.number, data, overflow)
+        }
       case (lit: LiteralExpr, r) =>
         val b = r.eval(ctx)
         ArithKernels.scalarArith(op, lit.number, b, data)
         validity = b.validity()
         if (op == ArithOp.DIV) divisorZero = zeroMask(b, ctx)
-        if (checkOverflow) { overflow = ctx.bitmap(); OverflowKernels.scalarOverflow(op, lit.number, b, data, overflow) }
+        if (checkOverflow) {
+          overflow = ctx.bitmap(); OverflowKernels.scalarOverflow(op, lit.number, b, data, overflow)
+        }
       case (l, r) =>
         val a = l.eval(ctx)
         val b = r.eval(ctx)
@@ -422,7 +443,11 @@ final case class ArithExpr(
       else BitmapKernels.andNot(validity, overflow, newValidity, n)
       validity = newValidity
     } else if (overflow != null && ArithExpr.anyActive(overflow, validity, ctx)) {
-      throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(vecType), ArithExpr.hint(op), queryContext)
+      throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(
+        ArithExpr.overflowMessage(vecType),
+        ArithExpr.hint(op),
+        queryContext
+      )
     }
     if (divisorZero != null) {
       // Lanes that are otherwise valid but divide by zero.
@@ -454,11 +479,16 @@ final case class ArithExpr(
 }
 
 object ArithExpr {
+
   /**
    * Whether any lane flagged in `mask` is both valid and active. Rows a filter removed or an earlier
    * conjunct decided must not raise, exactly as Spark never evaluates them.
    */
-  private[expr] def anyActive(mask: java.lang.foreign.MemorySegment, validity: java.lang.foreign.MemorySegment, ctx: EvalContext): Boolean = {
+  private[expr] def anyActive(
+      mask: java.lang.foreign.MemorySegment,
+      validity: java.lang.foreign.MemorySegment,
+      ctx: EvalContext
+  ): Boolean = {
     val n = ctx.numRows
     if (validity != null) BitmapKernels.and(mask, validity, mask, n)
     if (ctx.active != null) BitmapKernels.and(mask, ctx.active, mask, n)
@@ -494,7 +524,11 @@ final case class CastExpr(child: VectorExpr, dataType: DataType) extends VectorE
  * error for active rows (`Math.negateExact`'s message, no `try_*` hint); doubles and decimals of at
  * most 18 digits never overflow here.
  */
-final case class NegateExpr(child: VectorExpr, ansi: Boolean = false, queryContext: org.apache.spark.QueryContext = null) extends VectorExpr {
+final case class NegateExpr(
+    child: VectorExpr,
+    ansi: Boolean = false,
+    queryContext: org.apache.spark.QueryContext = null
+) extends VectorExpr {
   override def dataType: DataType = child.dataType
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -505,7 +539,11 @@ final case class NegateExpr(child: VectorExpr, ansi: Boolean = false, queryConte
       val overflow = ctx.bitmap()
       OverflowKernels.negateOverflow(a, overflow)
       if (ArithExpr.anyActive(overflow, a.validity(), ctx)) {
-        throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(vecType), "", queryContext)
+        throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(
+          ArithExpr.overflowMessage(vecType),
+          "",
+          queryContext
+        )
       }
     }
     SegmentVectorBuffers.fixedWidth(vecType, ctx.numRows, a.validity(), data)

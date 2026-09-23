@@ -33,7 +33,8 @@ object TestTables {
         "cast(id % 13 as double) / 4 as d2",
         "date_add(date '2020-01-01', cast(id % 730 as int)) as dt",
         "id % 3 = 0 as b",
-        "if(id % 10 = 0, null, concat('s', id % 50)) as s")
+        "if(id % 10 = 0, null, concat('s', id % 50)) as s"
+      )
 
   /**
    * `lineitem`: a TPC-H shaped table with decimals replaced by doubles (the benchmark variant we
@@ -66,7 +67,8 @@ object TestTables {
         "date_add(date '1992-01-01', cast(pmod(id * 2654435761, 2557) as int)) as l_shipdate",
         "date_add(date '1992-01-01', cast(pmod(id * 40503, 2557) as int)) as l_commitdate",
         "date_add(date '1992-01-01', cast(pmod(id * 69069, 2557) as int)) as l_receiptdate",
-        "concat('cmt', id % 97) as l_comment")
+        "concat('cmt', id % 97) as l_comment"
+      )
 
   val TpchQ6: String =
     """SELECT sum(l_extendedprice * l_discount) AS revenue

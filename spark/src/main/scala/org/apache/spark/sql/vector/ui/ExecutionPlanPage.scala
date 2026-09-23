@@ -67,16 +67,20 @@ class ExecutionPlanPage(parent: VectorAccelerationTab) extends WebUIPage("execut
         </li>
         <li>
           <strong>Operators:</strong>{" "}
-          {Engine.all.filter(en => plan.countBy(en) > 0).map { en =>
-            <span class={s"sv-count ${en.cssClass}"}>{en.label} {plan.countBy(en)}</span>
-          }}
+          {
+      Engine.all.filter(en => plan.countBy(en) > 0).map { en =>
+        <span class={s"sv-count ${en.cssClass}"}>{en.label} {plan.countBy(en)}</span>
+      }
+    }
         </li>
-        {if (!e.exact) {
-          <li class="sv-muted">
+        {
+      if (!e.exact) {
+        <li class="sv-muted">
             Classified from the plan attached to the listener event: node names were matched rather
             than operator types, so fallback reasons are not available for this query.
           </li>
-        } else scala.xml.NodeSeq.Empty}
+      } else scala.xml.NodeSeq.Empty
+    }
       </ul>
     </div>
   }
@@ -92,9 +96,11 @@ class ExecutionPlanPage(parent: VectorAccelerationTab) extends WebUIPage("execut
         <table class="table table-bordered table-sm sv-table">
           <thead><tr><th>Operator</th><th>Reason</th></tr></thead>
           <tbody>
-            {fallbacks.map { case (name, reason) =>
-              <tr><td>{name}</td><td>{reason}</td></tr>
-            }}
+            {
+        fallbacks.map { case (name, reason) =>
+          <tr><td>{name}</td><td>{reason}</td></tr>
+        }
+      }
           </tbody>
         </table>
       </div>

@@ -23,7 +23,10 @@ import org.apache.spark.sql.types.{DataType, DoubleType, LongType}
  */
 final case class MomentsAgg(inputs: Seq[VectorExpr], kind: MomentsAgg.Kind, merge: Boolean) extends VectorAggFunction {
   private val slots = kind.slots
-  require(inputs.length == (if (merge) slots else kind.arity), s"${kind} takes ${kind.arity} arguments / $slots buffers, got ${inputs.length}")
+  require(
+    inputs.length == (if (merge) slots else kind.arity),
+    s"${kind} takes ${kind.arity} arguments / $slots buffers, got ${inputs.length}"
+  )
 
   override def bufferTypes: Seq[DataType] = Seq.fill(slots)(DoubleType)
 
@@ -83,7 +86,8 @@ final case class CountAllAgg(inputs: Seq[VectorExpr]) extends VectorAggFunction 
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
     private var counts = new Array[Long](16)
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit = {
-      if (groups.numGroups() > counts.length) counts = java.util.Arrays.copyOf(counts, math.max(groups.numGroups(), counts.length * 2))
+      if (groups.numGroups() > counts.length)
+        counts = java.util.Arrays.copyOf(counts, math.max(groups.numGroups(), counts.length * 2))
       val vs = inputs.map(_.eval(ctx)).toArray
       Rows.grouped(ctx, groups) { (g, i) => if (allValid(vs, i)) counts(g) += 1 }
     }
@@ -92,6 +96,7 @@ final case class CountAllAgg(inputs: Seq[VectorExpr]) extends VectorAggFunction 
 }
 
 object MomentsAgg {
+
   /** A state layout with Spark's update and merge formulas, written in Spark's evaluation order. */
   sealed trait Kind extends Serializable {
     def slots: Int

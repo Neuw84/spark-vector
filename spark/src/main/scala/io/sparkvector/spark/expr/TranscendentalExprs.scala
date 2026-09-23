@@ -2,7 +2,14 @@ package io.sparkvector.spark.expr
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.{ArrowLayout, BitmapKernels, SegmentVectorBuffers, TranscendentalKernels, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  ArrowLayout,
+  BitmapKernels,
+  SegmentVectorBuffers,
+  TranscendentalKernels,
+  VecType,
+  VectorBuffers
+}
 import io.sparkvector.kernels.TranscendentalKernels.{Fn, Fn2}
 import org.apache.spark.sql.types.{DataType, DoubleType}
 
@@ -65,13 +72,19 @@ final case class BinaryMathExpr(fn: Fn2, left: VectorExpr, right: VectorExpr) ex
           validity = ctx.bitmap()
           BitmapKernels.combineValidity(a.validity(), b.validity(), validity, n)
         }
-        if (fn == Fn2.LOG_BASE) validity = positive(b, positive(a, validity, ctx, literalPositive = true), ctx, literalPositive = true)
+        if (fn == Fn2.LOG_BASE)
+          validity = positive(b, positive(a, validity, ctx, literalPositive = true), ctx, literalPositive = true)
     }
     SegmentVectorBuffers.fixedWidth(VecType.FLOAT64, n, validity, data)
   }
 
   /** The validity narrowed to the lanes where `!(v <= 0)` (NaN kept, as Spark); all null when the literal side is non-positive. */
-  private def positive(v: VectorBuffers, validity: MemorySegment, ctx: EvalContext, literalPositive: Boolean): MemorySegment = {
+  private def positive(
+      v: VectorBuffers,
+      validity: MemorySegment,
+      ctx: EvalContext,
+      literalPositive: Boolean
+  ): MemorySegment = {
     val n = ctx.numRows
     val out = ctx.bitmap()
     if (!literalPositive) return out // freshly allocated bitmaps are all clear: every lane null

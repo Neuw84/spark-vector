@@ -116,7 +116,9 @@ class VectorFilterSuite extends VectorQuerySuite {
     val prefix = checkVectorized("SELECT i FROM t WHERE s LIKE 's1%'", Seq(Filter))
     assert(prefix.count() === 4000) // s1 and s10..s19: 11 values, 400 rows each, minus the null value s10
     val notLike = checkVectorized("SELECT i FROM t WHERE s NOT LIKE '%3%'", Seq(Filter))
-    assert(notLike.count() === 20000 - 2000 - 5200) // nulls drop; s3, s13, s23, s43 and s30..s39 minus the null s30 = 13 values
+    assert(
+      notLike.count() === 20000 - 2000 - 5200
+    ) // nulls drop; s3, s13, s23, s43 and s30..s39 minus the null s30 = 13 values
   }
 
   test("multi-wildcard LIKE as a multi-token matcher (#264): the Q13/Q16 shapes, dictionary columns, NOT LIKE") {
@@ -130,7 +132,8 @@ class VectorFilterSuite extends VectorQuerySuite {
         "     when id % 7 = 3 then concat('specialrequests', id) " +
         "     when id % 7 = 4 then concat('special ', id, ' request') " +
         "     when id % 7 = 5 then concat('日本語 special 本 requests ', id) " +
-        "     else concat('nothing here ', id) end as c")
+        "     else concat('nothing here ', id) end as c"
+    )
       .repartition(2).write.mode("overwrite").parquet(newTempPath("filter/comments"))
     spark.read.parquet(newTempPath("filter/comments")).createOrReplaceTempView("comments")
     checkVectorized("SELECT i, c FROM comments WHERE c LIKE '%special%requests%'", Seq(Filter))
@@ -180,22 +183,51 @@ class VectorFilterSuite extends VectorQuerySuite {
     // BETWEEN is two comparisons after Spark's rewrite; pin it.
     checkVectorized("SELECT i FROM t WHERE i BETWEEN 100 AND 200 AND d NOT BETWEEN 1.5 AND 2.5", Seq(Filter))
     // InSet: the optimizer rewrites lists above spark.sql.optimizer.inSetConversionThreshold (10).
-    checkVectorized("SELECT i FROM t WHERE i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946)", Seq(Filter))
-    checkVectorized("SELECT i FROM t WHERE l IN (0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45)", Seq(Filter))
-    checkVectorized("SELECT i FROM t WHERE d2 IN (0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75) AND s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12')", Seq(Filter))
+    checkVectorized(
+      "SELECT i FROM t WHERE i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946)",
+      Seq(Filter)
+    )
+    checkVectorized(
+      "SELECT i FROM t WHERE l IN (0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45)",
+      Seq(Filter)
+    )
+    checkVectorized(
+      "SELECT i FROM t WHERE d2 IN (0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75) AND s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12')",
+      Seq(Filter)
+    )
     checkVectorized("SELECT i FROM t WHERE i NOT IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)", Seq(Filter))
-    val hits = checkVectorized("SELECT i FROM t WHERE i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946)", Seq(Filter)).count()
+    val hits = checkVectorized(
+      "SELECT i FROM t WHERE i IN (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946)",
+      Seq(Filter)
+    ).count()
     assert(hits === 20, "every Fibonacci number below 20000 is a row")
   }
 
-  test("string IN lists go through the hash set (#371): dictionary and plain columns, duplicates, misses, the empty string") {
+  test(
+    "string IN lists go through the hash set (#371): dictionary and plain columns, duplicates, misses, the empty string"
+  ) {
     // s is dictionary encoded ('s0'..'s49' with nulls); substr(s, 2) is a plain computed column, as q8's substr(ca_zip, 1, 5) is.
     val zips = (0 until 400).map(z => s"'$z'").mkString(", ")
-    checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12', 's13')", Seq(Filter))
-    checkVectorized("SELECT i FROM t WHERE s NOT IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12', 's13')", Seq(Filter))
-    checkVectorized("SELECT i FROM t WHERE substr(s, 2) IN ('1', '2', '3', '4', '17', '18', '19', '20', '21', '22', '23', '49')", Seq(Filter))
-    checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's1', 's1', 's2', 's2')", Seq(Filter)) // duplicates, below the InSet threshold
-    checkVectorized("SELECT i FROM t WHERE s IN ('', 's', 'S1', 's1 ', ' s1', 's100', 's001', 'nowhere', 'x', 'y', 'z')", Seq(Filter)) // near misses only
+    checkVectorized(
+      "SELECT i FROM t WHERE s IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12', 's13')",
+      Seq(Filter)
+    )
+    checkVectorized(
+      "SELECT i FROM t WHERE s NOT IN ('s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's11', 's12', 's13')",
+      Seq(Filter)
+    )
+    checkVectorized(
+      "SELECT i FROM t WHERE substr(s, 2) IN ('1', '2', '3', '4', '17', '18', '19', '20', '21', '22', '23', '49')",
+      Seq(Filter)
+    )
+    checkVectorized(
+      "SELECT i FROM t WHERE s IN ('s1', 's1', 's1', 's2', 's2')",
+      Seq(Filter)
+    ) // duplicates, below the InSet threshold
+    checkVectorized(
+      "SELECT i FROM t WHERE s IN ('', 's', 'S1', 's1 ', ' s1', 's100', 's001', 'nowhere', 'x', 'y', 'z')",
+      Seq(Filter)
+    ) // near misses only
     checkVectorized(s"SELECT i FROM t WHERE CAST(i AS STRING) IN ($zips)", Seq(Filter)) // q8's shape: 400 literals
     val four = checkVectorized("SELECT i FROM t WHERE s IN ('s1', 's17', 's30', 's49')", Seq(Filter)).count()
     assert(four === 1200) // 400 each for s1, s17 and s49; s30 never occurs
@@ -222,30 +254,48 @@ class VectorFilterSuite extends VectorQuerySuite {
   }
 
   test("explain shows the vectorized operator") {
-    val plan = withPlugin(enabled = true)(spark.sql("SELECT * FROM t WHERE i > 5 AND l IS NOT NULL")).queryExecution.executedPlan
+    val plan =
+      withPlugin(enabled = true)(spark.sql("SELECT * FROM t WHERE i > 5 AND l IS NOT NULL")).queryExecution.executedPlan
     val text = plan.treeString
     assert(text.contains("VectorFilter"), text)
   }
 
-  test("scalar subqueries are literals by execution time: filters, projections, aggregates, merged struct fields, nulls") {
+  test(
+    "scalar subqueries are literals by execution time: filters, projections, aggregates, merged struct fields, nulls"
+  ) {
     val Project = classOf[org.apache.spark.sql.vector.VectorProjectExec]
     val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
     // In a filter, alone and combined; a string-valued and a boolean-valued subquery.
     checkVectorized("SELECT i, d2 FROM t WHERE d2 > (SELECT avg(d2) FROM t)", Seq(Filter))
-    checkVectorized("SELECT count(*) FROM t WHERE l > (SELECT avg(l) FROM t) OR s = (SELECT max(s) FROM t)", Seq(Filter, Agg))
+    checkVectorized(
+      "SELECT count(*) FROM t WHERE l > (SELECT avg(l) FROM t) OR s = (SELECT max(s) FROM t)",
+      Seq(Filter, Agg)
+    )
     checkVectorized("SELECT i FROM t WHERE (SELECT bool_or(b) FROM t WHERE i < 3) AND i < 20", Seq(Filter))
     // In a projection, in arithmetic and in a CASE over the result.
-    checkVectorized("SELECT i, (SELECT max(l) FROM t) AS m, i + (SELECT min(i) FROM t WHERE b) AS j, CASE WHEN (SELECT count(*) FROM t) > 10 THEN i ELSE -i END AS c FROM t WHERE i < 100", Seq(Project, Filter))
+    checkVectorized(
+      "SELECT i, (SELECT max(l) FROM t) AS m, i + (SELECT min(i) FROM t WHERE b) AS j, CASE WHEN (SELECT count(*) FROM t) > 10 THEN i ELSE -i END AS c FROM t WHERE i < 100",
+      Seq(Project, Filter)
+    )
     // Two subqueries over the same table are merged by Spark into one struct-valued subquery read through GetStructField.
-    val merged = checkVectorized("SELECT i FROM t WHERE d2 > (SELECT avg(d2) FROM t) AND i > (SELECT count(*) FROM t) / 3", Seq(Filter))
+    val merged = checkVectorized(
+      "SELECT i FROM t WHERE d2 > (SELECT avg(d2) FROM t) AND i > (SELECT count(*) FROM t) / 3",
+      Seq(Filter)
+    )
     assert(finalPlan(merged).toString.contains("Subquery subquery"), finalPlan(merged).treeString)
     // Under an aggregate and as an aggregate's input.
-    checkVectorized("SELECT i % 3 AS g, sum(d2 - (SELECT avg(d2) FROM t)) AS s, count(*) FROM t WHERE i < (SELECT max(i) FROM t) / 2 GROUP BY i % 3", Seq(Filter, Agg))
+    checkVectorized(
+      "SELECT i % 3 AS g, sum(d2 - (SELECT avg(d2) FROM t)) AS s, count(*) FROM t WHERE i < (SELECT max(i) FROM t) / 2 GROUP BY i % 3",
+      Seq(Filter, Agg)
+    )
     // A null result: no row passes the filter; the projected value is null.
     checkVectorized("SELECT i FROM t WHERE i < (SELECT max(i) FROM t WHERE i < 0)", Seq(Filter))
     checkVectorized("SELECT i, (SELECT max(d2) FROM t WHERE i < 0) AS nn FROM t WHERE i < 5", Seq(Project, Filter))
     // A string subquery in a projection and in a LIKE-free comparison.
-    checkVectorized("SELECT i, (SELECT min(s) FROM t WHERE s IS NOT NULL) AS ms FROM t WHERE s > (SELECT min(s) FROM t WHERE s IS NOT NULL)", Seq(Project, Filter))
+    checkVectorized(
+      "SELECT i, (SELECT min(s) FROM t WHERE s IS NOT NULL) AS ms FROM t WHERE s > (SELECT min(s) FROM t WHERE s IS NOT NULL)",
+      Seq(Project, Filter)
+    )
   }
 
   test("runtime bloom filter: the injected probe above the scan is ours") {
@@ -255,15 +305,24 @@ class VectorFilterSuite extends VectorQuerySuite {
     withConf(
       "spark.sql.optimizer.runtime.bloomFilter.enabled" -> "true",
       "spark.sql.optimizer.runtime.bloomFilter.applicationSideScanSizeThreshold" -> "0",
-      "spark.sql.autoBroadcastJoinThreshold" -> "-1") {
-      val sql = "SELECT count(*), sum(l_quantity) FROM lineitem JOIN t ON lineitem.l_partkey = t.i WHERE t.b AND t.i < 500"
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1"
+    ) {
+      val sql =
+        "SELECT count(*), sum(l_quantity) FROM lineitem JOIN t ON lineitem.l_partkey = t.i WHERE t.b AND t.i < 500"
       val df = checkVectorized(sql, Seq(Filter))
       val probes = nodesOf[VectorFilterExec](df).filter(_.condition.exists(_.isInstanceOf[BloomFilterMightContain]))
       assert(probes.nonEmpty, "Spark injected no bloom filter probe, or it is not ours:\n" + finalPlan(df).treeString)
-      assert(!nodesOf[FilterExec](df).exists(_.condition.exists(_.isInstanceOf[BloomFilterMightContain])), finalPlan(df).treeString)
+      assert(
+        !nodesOf[FilterExec](df).exists(_.condition.exists(_.isInstanceOf[BloomFilterMightContain])),
+        finalPlan(df).treeString
+      )
       // A probe over a string key (a self-join whose small side is the filtered one).
-      val df2 = checkVectorized("SELECT count(*), sum(a.i) FROM t a JOIN t b ON a.s = b.s WHERE b.i < 40 AND b.b", Seq(Filter))
-      assert(nodesOf[VectorFilterExec](df2).exists(_.condition.exists(_.isInstanceOf[BloomFilterMightContain])), finalPlan(df2).treeString)
+      val df2 =
+        checkVectorized("SELECT count(*), sum(a.i) FROM t a JOIN t b ON a.s = b.s WHERE b.i < 40 AND b.b", Seq(Filter))
+      assert(
+        nodesOf[VectorFilterExec](df2).exists(_.condition.exists(_.isInstanceOf[BloomFilterMightContain])),
+        finalPlan(df2).treeString
+      )
     }
   }
 }

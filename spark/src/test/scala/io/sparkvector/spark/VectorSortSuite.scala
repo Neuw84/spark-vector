@@ -3,7 +3,12 @@ package io.sparkvector.spark
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.{SortExec, TakeOrderedAndProjectExec}
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorSortExec, VectorTakeOrderedAndProjectExec}
+import org.apache.spark.sql.vector.{
+  VectorFilterExec,
+  VectorHashAggregateExec,
+  VectorSortExec,
+  VectorTakeOrderedAndProjectExec
+}
 
 /**
  * VectorSortExec against Spark's SortExec. Result sets are compared as usual and, on top, the
@@ -23,13 +28,15 @@ class VectorSortSuite extends VectorQuerySuite {
   /** Per-partition sequences of the first `numKeys` columns, with doubles rounded like assertRowsEqual. */
   private def keySequences(sql: String, numKeys: Int, enabled: Boolean): Seq[Seq[Seq[Any]]] =
     withPlugin(enabled) {
-      spark.sql(sql).rdd.glom().collect().toSeq.map(_.toSeq.map(r => (0 until numKeys).map { c =>
-        r.get(c) match {
-          case d: Double if d.isNaN => "NaN"
-          case d: Double => f"$d%.6f"
-          case v => v
+      spark.sql(sql).rdd.glom().collect().toSeq.map(_.toSeq.map(r =>
+        (0 until numKeys).map { c =>
+          r.get(c) match {
+            case d: Double if d.isNaN => "NaN"
+            case d: Double => f"$d%.6f"
+            case v => v
+          }
         }
-      }))
+      ))
     }
 
   /**
@@ -74,7 +81,10 @@ class VectorSortSuite extends VectorQuerySuite {
     checkVectorized("SELECT i, l FROM t SORT BY i * 2 + 1", Seq(Sort))
     // Expression keys of other families: a string built per row, a CASE, a cast, several at once.
     checkVectorized("SELECT i, s FROM t SORT BY concat(s, '-', CAST(i % 7 AS STRING)) DESC, i", Seq(Sort))
-    checkVectorized("SELECT i, d2 FROM t SORT BY CASE WHEN d2 > 1 THEN -d2 ELSE d2 END, CAST(i AS BIGINT) * 3 DESC", Seq(Sort))
+    checkVectorized(
+      "SELECT i, d2 FROM t SORT BY CASE WHEN d2 > 1 THEN -d2 ELSE d2 END, CAST(i AS BIGINT) * 3 DESC",
+      Seq(Sort)
+    )
   }
 
   test("global sort over a Spark row shuffle stays with Spark") {
@@ -96,7 +106,9 @@ class VectorSortSuite extends VectorQuerySuite {
       // Final aggregate -> Sort: the aggregate's output is columnar, so the sort is ours.
       val df = checkVectorized(local, Seq(Sort, classOf[VectorHashAggregateExec]))
       val rows: Array[Row] = df.collect()
-      assert(rows.map(r => (r.getString(0), r.getString(1))).toSeq === rows.map(r => (r.getString(0), r.getString(1))).sorted.toSeq)
+      assert(rows.map(r => (r.getString(0), r.getString(1))).toSeq === rows.map(r =>
+        (r.getString(0), r.getString(1))
+      ).sorted.toSeq)
       assert(rows.length === 3, "the synthetic lineitem has three flag/status groups")
     }
   }
@@ -119,16 +131,26 @@ class VectorSortSuite extends VectorQuerySuite {
       val ties = withPlugin(true) {
         spark.sql("SELECT d2, i FROM tbig SORT BY d2").rdd.glom().collect().head.map(r => (r.getDouble(0), r.getInt(1)))
       }
-      ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) => if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2") }
+      ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) =>
+        if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2")
+      }
       // A limit above a merge emits the head of the merged order.
       checkVectorized("SELECT i, l FROM tbig SORT BY l DESC LIMIT 250", Seq(Sort))
       // A top-N over the runs: each run contributes at most n rows to the merge.
-      checkVectorized("SELECT i, l, s FROM tbig ORDER BY l DESC NULLS LAST, i LIMIT 50", Seq(classOf[VectorTakeOrderedAndProjectExec]))
-      checkVectorized("SELECT i, d FROM tbig ORDER BY d, i LIMIT 7", Seq(classOf[VectorTakeOrderedAndProjectExec])) // d is null for i % 11 = 0: i breaks the ties
+      checkVectorized(
+        "SELECT i, l, s FROM tbig ORDER BY l DESC NULLS LAST, i LIMIT 50",
+        Seq(classOf[VectorTakeOrderedAndProjectExec])
+      )
+      checkVectorized(
+        "SELECT i, d FROM tbig ORDER BY d, i LIMIT 7",
+        Seq(classOf[VectorTakeOrderedAndProjectExec])
+      ) // d is null for i % 11 = 0: i breaks the ties
     }
   }
 
-  test("#416: runs spilled to disk past the budget merge like resident ones -- every key type, ties, nulls, dictionary strings") {
+  test(
+    "#416: runs spilled to disk past the budget merge like resident ones -- every key type, ties, nulls, dictionary strings"
+  ) {
     // spillBytes = 1: every run sealed after the first goes to a local Arrow file in sorted order, and the
     // merge reads those back a batch at a time (runRows = 100 makes a thousand runs of the 100k rows, so
     // hundreds of spilled runs refill many times). Same statements as the resident-runs test above.
@@ -141,15 +163,25 @@ class VectorSortSuite extends VectorQuerySuite {
       checkSorted("SELECT d, i FROM tspill SORT BY d DESC NULLS LAST", 1)
       checkSorted("SELECT dt, i FROM tspill SORT BY dt", 1)
       checkSorted("SELECT b, i FROM tspill SORT BY b DESC", 1)
-      checkSorted("SELECT s, i FROM tspill SORT BY s NULLS LAST", 1) // dictionary strings decoded per run, spilled plain
+      checkSorted(
+        "SELECT s, i FROM tspill SORT BY s NULLS LAST",
+        1
+      ) // dictionary strings decoded per run, spilled plain
       checkSorted("SELECT d2, s, i FROM tspill SORT BY d2 DESC, s, i", 3)
       checkSorted("SELECT i, l FROM tspill SORT BY i + l DESC", 1) // a computed key rides in the spill file
       val ties = withPlugin(true) {
-        spark.sql("SELECT d2, i FROM tspill SORT BY d2").rdd.glom().collect().head.map(r => (r.getDouble(0), r.getInt(1)))
+        spark.sql("SELECT d2, i FROM tspill SORT BY d2").rdd.glom().collect().head.map(r =>
+          (r.getDouble(0), r.getInt(1))
+        )
       }
-      ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) => if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2") }
+      ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) =>
+        if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2")
+      }
       checkVectorized("SELECT i, l FROM tspill SORT BY l DESC LIMIT 250", Seq(Sort))
-      checkVectorized("SELECT i, l, s FROM tspill ORDER BY l DESC NULLS LAST, i LIMIT 50", Seq(classOf[VectorTakeOrderedAndProjectExec]))
+      checkVectorized(
+        "SELECT i, l, s FROM tspill ORDER BY l DESC NULLS LAST, i LIMIT 50",
+        Seq(classOf[VectorTakeOrderedAndProjectExec])
+      )
     }
     // A budget the partition fits in spills nothing and the plan reads the same.
     withConf(VectorConf.SortRunRows -> "100", VectorConf.SortSpillBytes -> "1g") {
@@ -168,7 +200,11 @@ class VectorSortSuite extends VectorQuerySuite {
   private val TopN = classOf[VectorTakeOrderedAndProjectExec]
 
   /** Rows must come back in exactly Spark's order: the keys are compared positionally. */
-  private def checkOrdered(sql: String, key: Row => Any, extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil): Array[Row] = {
+  private def checkOrdered(
+      sql: String,
+      key: Row => Any,
+      extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil
+  ): Array[Row] = {
     val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
     val df = checkVectorized(sql, TopN +: extra)
     val actual = df.collect()
@@ -182,8 +218,14 @@ class VectorSortSuite extends VectorQuerySuite {
     val top = checkOrdered("SELECT i, s FROM t ORDER BY i DESC LIMIT 10", _.getInt(0))
     assert(top.length === 10 && top.head.getInt(0) === 19999)
     checkOrdered("SELECT i FROM t ORDER BY i LIMIT 1", _.getInt(0))
-    checkOrdered("SELECT l, i FROM t ORDER BY l NULLS FIRST, i LIMIT 25", r => (if (r.isNullAt(0)) None else Some(r.getLong(0)), r.getInt(1)))
-    checkOrdered("SELECT d, i FROM t ORDER BY d DESC NULLS LAST, i LIMIT 25", r => (if (r.isNullAt(0)) "null" else r.getDouble(0).toString, r.getInt(1))) // NaN sorts greatest; compared as text since NaN != NaN
+    checkOrdered(
+      "SELECT l, i FROM t ORDER BY l NULLS FIRST, i LIMIT 25",
+      r => (if (r.isNullAt(0)) None else Some(r.getLong(0)), r.getInt(1))
+    )
+    checkOrdered(
+      "SELECT d, i FROM t ORDER BY d DESC NULLS LAST, i LIMIT 25",
+      r => (if (r.isNullAt(0)) "null" else r.getDouble(0).toString, r.getInt(1))
+    ) // NaN sorts greatest; compared as text since NaN != NaN
     checkOrdered("SELECT dt, i FROM t ORDER BY dt, i DESC LIMIT 7", r => (r.getDate(0), r.getInt(1)))
     checkOrdered("SELECT s, i FROM t ORDER BY s DESC, i LIMIT 12", r => (r.getString(0), r.getInt(1)))
     // Projection on top: computed columns and a reordered subset, key not in the output.
@@ -206,7 +248,11 @@ class VectorSortSuite extends VectorQuerySuite {
     assert(rows.length === 2)
     assert(rows(0).getDouble(2) >= rows(1).getDouble(2))
     // Q10 orders on an aggregate and limits to 20; here every group survives the limit.
-    checkOrdered("SELECT l_orderkey, sum(l_quantity) AS q FROM lineitem GROUP BY l_orderkey ORDER BY q DESC, l_orderkey LIMIT 20", _.getLong(0), Seq(classOf[VectorHashAggregateExec]))
+    checkOrdered(
+      "SELECT l_orderkey, sum(l_quantity) AS q FROM lineitem GROUP BY l_orderkey ORDER BY q DESC, l_orderkey LIMIT 20",
+      _.getLong(0),
+      Seq(classOf[VectorHashAggregateExec])
+    )
   }
 
   test("ORDER BY ... LIMIT falls back with a reason: offset, unsupported key, disabled") {

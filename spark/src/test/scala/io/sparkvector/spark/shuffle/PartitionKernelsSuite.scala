@@ -32,26 +32,53 @@ class PartitionKernelsSuite extends AnyFunSuite {
   private def intKey(arena: Arena, n: Int, dt: DataType): Key = {
     val nl = nulls(n, 0.2)
     val v = Array.fill(n)(rnd.nextInt())
-    Key(ArrowLayout.ofInts(arena, v, nl), v.indices.map(i => if (nl(i)) null else Int.box(v(i))).toArray, dt, KeyKind.INT)
+    Key(
+      ArrowLayout.ofInts(arena, v, nl),
+      v.indices.map(i => if (nl(i)) null else Int.box(v(i))).toArray,
+      dt,
+      KeyKind.INT
+    )
   }
 
   private def longKey(arena: Arena, n: Int, dt: DataType, toSpark: Long => Any, bound: Long = Long.MaxValue): Key = {
     val nl = nulls(n, 0.2)
     val v = Array.fill(n)(if (rnd.nextBoolean()) rnd.nextLong() % bound else rnd.nextInt(1000).toLong - 500)
-    Key(ArrowLayout.ofLongs(arena, v, nl), v.indices.map(i => if (nl(i)) null else toSpark(v(i))).toArray, dt, KeyKind.LONG)
+    Key(
+      ArrowLayout.ofLongs(arena, v, nl),
+      v.indices.map(i => if (nl(i)) null else toSpark(v(i))).toArray,
+      dt,
+      KeyKind.LONG
+    )
   }
 
   private def doubleKey(arena: Arena, n: Int): Key = {
     val nl = nulls(n, 0.2)
-    val specials = Array(0.0, -0.0, Double.NaN, java.lang.Double.longBitsToDouble(0x7ff8000000000123L), Double.PositiveInfinity, -1.5)
+    val specials = Array(
+      0.0,
+      -0.0,
+      Double.NaN,
+      java.lang.Double.longBitsToDouble(0x7ff8000000000123L),
+      Double.PositiveInfinity,
+      -1.5
+    )
     val v = Array.fill(n)(if (rnd.nextInt(4) == 0) specials(rnd.nextInt(specials.length)) else rnd.nextGaussian() * 1e6)
-    Key(ArrowLayout.ofDoubles(arena, v, nl), v.indices.map(i => if (nl(i)) null else Double.box(v(i))).toArray, DoubleType, KeyKind.DOUBLE)
+    Key(
+      ArrowLayout.ofDoubles(arena, v, nl),
+      v.indices.map(i => if (nl(i)) null else Double.box(v(i))).toArray,
+      DoubleType,
+      KeyKind.DOUBLE
+    )
   }
 
   private def boolKey(arena: Arena, n: Int): Key = {
     val nl = nulls(n, 0.2)
     val v = Array.fill(n)(rnd.nextBoolean())
-    Key(ArrowLayout.ofBooleans(arena, v, nl), v.indices.map(i => if (nl(i)) null else Boolean.box(v(i))).toArray, BooleanType, KeyKind.BOOL)
+    Key(
+      ArrowLayout.ofBooleans(arena, v, nl),
+      v.indices.map(i => if (nl(i)) null else Boolean.box(v(i))).toArray,
+      BooleanType,
+      KeyKind.BOOL
+    )
   }
 
   private def randomString(): String = {
@@ -71,7 +98,12 @@ class PartitionKernelsSuite extends AnyFunSuite {
 
   private def stringKey(arena: Arena, n: Int): Key = {
     val v = Array.fill[String](n)(if (rnd.nextDouble() < 0.2) null else randomString())
-    Key(ArrowLayout.ofStrings(arena, v), v.map(s => if (s == null) null else UTF8String.fromString(s)), StringType, KeyKind.UTF8)
+    Key(
+      ArrowLayout.ofStrings(arena, v),
+      v.map(s => if (s == null) null else UTF8String.fromString(s)),
+      StringType,
+      KeyKind.UTF8
+    )
   }
 
   private def dictionaryStringKey(arena: Arena, n: Int): Key = {
@@ -81,7 +113,12 @@ class PartitionKernelsSuite extends AnyFunSuite {
     val dictBuffers = ArrowLayout.ofStrings(arena, dict)
     val idBuffers = ArrowLayout.ofInts(arena, ids, nl)
     val buffers = SegmentVectorBuffers.dictionaryUtf8(n, idBuffers.validity(), idBuffers.data(), dictBuffers)
-    Key(buffers, ids.indices.map(i => if (nl(i)) null else UTF8String.fromString(dict(ids(i)))).toArray, StringType, KeyKind.UTF8)
+    Key(
+      buffers,
+      ids.indices.map(i => if (nl(i)) null else UTF8String.fromString(dict(ids(i)))).toArray,
+      StringType,
+      KeyKind.UTF8
+    )
   }
 
   private def wideDecimalKey(arena: Arena, n: Int): Key = {
@@ -92,7 +129,9 @@ class PartitionKernelsSuite extends AnyFunSuite {
       val mag = new BigInteger(bits, rnd.self)
       if (rnd.nextBoolean()) mag.negate() else mag
     }
-    val spark = v.indices.map(i => if (nl(i)) null else org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(v(i), 4), 30, 4)).toArray[Any]
+    val spark = v.indices.map(i =>
+      if (nl(i)) null else org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(v(i), 4), 30, 4)
+    ).toArray[Any]
     Key(ArrowLayout.ofDecimal128(arena, v, nl), spark, dt, KeyKind.DECIMAL128)
   }
 
@@ -100,7 +139,14 @@ class PartitionKernelsSuite extends AnyFunSuite {
     val n = keys.head.values.length
     val hashes = new Array[Int](n)
     val ids = new Array[Int](n)
-    PartitionKernels.hashPartitionIds(keys.map(_.buffers).toArray, keys.map(_.kind).toArray, n, numPartitions, hashes, ids)
+    PartitionKernels.hashPartitionIds(
+      keys.map(_.buffers).toArray,
+      keys.map(_.kind).toArray,
+      n,
+      numPartitions,
+      hashes,
+      ids
+    )
     var i = 0
     while (i < n) {
       var h = PartitionKernels.SPARK_SEED
@@ -121,12 +167,19 @@ class PartitionKernelsSuite extends AnyFunSuite {
         intKey(arena, n, DateType),
         longKey(arena, n, LongType, identity),
         longKey(arena, n, TimestampType, identity),
-        longKey(arena, n, DecimalType(18, 3), v => org.apache.spark.sql.types.Decimal(v, 18, 3), bound = 1000000000000000000L),
+        longKey(
+          arena,
+          n,
+          DecimalType(18, 3),
+          v => org.apache.spark.sql.types.Decimal(v, 18, 3),
+          bound = 1000000000000000000L
+        ),
         doubleKey(arena, n),
         boolKey(arena, n),
         stringKey(arena, n),
         dictionaryStringKey(arena, n),
-        wideDecimalKey(arena, n))
+        wideDecimalKey(arena, n)
+      )
       all.foreach(k => check(Seq(k), 8))
       check(all, 200)
       check(all.reverse, 7)

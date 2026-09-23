@@ -6,7 +6,17 @@ import io.sparkvector.kernels.{ArrowLayout, Bitmap, SegmentVectorBuffers, VecTyp
 import io.sparkvector.spark.adapter.TypeMapping
 import org.apache.spark.sql.catalyst.expressions.{EmptyRow, Expression, XXH64}
 import org.apache.spark.sql.execution.ExecSubqueryExpression
-import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, TimestampType}
+import org.apache.spark.sql.types.{
+  BooleanType,
+  DataType,
+  DateType,
+  DecimalType,
+  DoubleType,
+  IntegerType,
+  LongType,
+  StringType,
+  TimestampType
+}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.sketch.BloomFilter
 
@@ -31,6 +41,7 @@ final case class SubqueryLiteralExpr(expr: Expression) extends VectorExpr {
 }
 
 object SubqueryLiteralExpr {
+
   /** Whether `e` is a subquery result in disguise: no column references, deterministic, a subquery somewhere below. */
   def isDeferred(e: Expression): Boolean =
     e.references.isEmpty && e.deterministic && e.exists(_.isInstanceOf[ExecSubqueryExpression])
@@ -44,7 +55,12 @@ object SubqueryLiteralExpr {
     val validity = ArrowLayout.allocateBitmap(ctx.arena, n) // a fresh bitmap is all clear: every lane null
     TypeMapping.vecTypeOf(dt) match {
       case VecType.UTF8 =>
-        SegmentVectorBuffers.utf8(n, validity, ArrowLayout.allocateOffsets(ctx.arena, n), ArrowLayout.allocateBytes(ctx.arena, 0L))
+        SegmentVectorBuffers.utf8(
+          n,
+          validity,
+          ArrowLayout.allocateOffsets(ctx.arena, n),
+          ArrowLayout.allocateBytes(ctx.arena, 0L)
+        )
       case VecType.BOOL =>
         SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, validity, ArrowLayout.allocateBitmap(ctx.arena, n))
       case fixed =>
@@ -86,7 +102,8 @@ final case class XxHash64Expr(children: Seq[VectorExpr], types: Seq[DataType], s
 }
 
 object XxHash64Expr {
-  private[expr] val INT = 0; private[expr] val LONG = 1; private[expr] val DOUBLE = 2; private[expr] val BOOL = 3; private[expr] val UTF8 = 4
+  private[expr] val INT = 0; private[expr] val LONG = 1; private[expr] val DOUBLE = 2; private[expr] val BOOL = 3;
+  private[expr] val UTF8 = 4
 
   def supports(dt: DataType): Boolean = dt match {
     case IntegerType | DateType | LongType | TimestampType | DoubleType | BooleanType | StringType => true

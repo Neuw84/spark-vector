@@ -34,27 +34,42 @@ class VectorUnknownSourceSuite extends VectorQuerySuite {
     val p = checkVectorized("SELECT i + 1 AS j, d * 2 AS e, upper(s) AS us, dt, ts, dec, b FROM u", Seq(Project))
     val a = checkVectorized(
       "SELECT s, count(*) AS n, sum(l) AS sl, max(dec) AS md, min(dt) AS mdt, count(ts) AS nts, sum(d) AS sd FROM u GROUP BY s",
-      Seq(Agg))
+      Seq(Agg)
+    )
     for (df <- Seq(f, p, a)) {
       assert(nodesOf[BatchScanExec](df).nonEmpty, finalPlan(df).treeString)
-      assert(nodesOf[RowToColumnarExec](df).forall(!_.child.isInstanceOf[BatchScanExec]), "the source's batches should be consumed directly\n" + finalPlan(df).treeString)
+      assert(
+        nodesOf[RowToColumnarExec](df).forall(!_.child.isInstanceOf[BatchScanExec]),
+        "the source's batches should be consumed directly\n" + finalPlan(df).treeString
+      )
     }
     // Every column of every batch read with the plugin on went through the copy fallback; the
     // filter reads 8 columns (the scan is not pruned), the projection 8, the aggregate 8.
     val copied = ColumnVectorAdapters.copiedColumns() - copiedBefore
     assert(copied >= 3L * batches * 8, s"expected at least ${3 * batches * 8} copied columns, saw $copied")
-    assert(ColumnVectorAdapters.adaptedColumns() === adaptedBefore, "no zero-copy adapter should claim an unknown vector")
+    assert(
+      ColumnVectorAdapters.adaptedColumns() === adaptedBefore,
+      "no zero-copy adapter should claim an unknown vector"
+    )
   }
 
   test("nulls, dictionaries of one and every supported type survive the copy") {
     checkVectorized("SELECT count(*) AS n, count(l) AS nl, count(d) AS nd, count(ts) AS nts FROM u", Seq(Agg))
     checkVectorized("SELECT i, l, d, b, dt, ts, dec, s FROM u WHERE l IS NULL OR d IS NULL OR ts IS NULL", Seq(Filter))
     checkVectorized("SELECT b, count(*) AS n, sum(i) AS si FROM u GROUP BY b", Seq(Agg))
-    checkVectorized("SELECT year(dt) AS y, hour(ts) AS h, dec + 1 AS d1, length(s) AS ls FROM u WHERE i < 100", Seq(Filter, Project))
+    checkVectorized(
+      "SELECT year(dt) AS y, hour(ts) AS h, dec + 1 AS d1, length(s) AS ls FROM u WHERE i < 100",
+      Seq(Filter, Project)
+    )
   }
 
-  test("a struct column from a foreign source passes through the filter as the source's vector; its field is read from the source's child vector") {
-    checkVectorized("SELECT i, st.a AS a FROM u_struct WHERE i > 10", Seq(Filter, classOf[org.apache.spark.sql.vector.VectorProjectExec]))
+  test(
+    "a struct column from a foreign source passes through the filter as the source's vector; its field is read from the source's child vector"
+  ) {
+    checkVectorized(
+      "SELECT i, st.a AS a FROM u_struct WHERE i > 10",
+      Seq(Filter, classOf[org.apache.spark.sql.vector.VectorProjectExec])
+    )
     checkVectorized("SELECT i, st FROM u_struct WHERE i > 10", Seq(Filter))
   }
 }

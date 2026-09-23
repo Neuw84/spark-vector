@@ -37,12 +37,14 @@ object VectorAccelerationTab {
   /** Shared legend, so the list and the plan page agree on what each colour means. */
   def legend: Seq[Node] =
     <div class="sv-legend">
-      {Engine.all.map { e =>
+      {
+      Engine.all.map { e =>
         <span class="sv-legend-item">
           <span class={s"sv-legend-swatch ${e.cssClass}"}></span>
           <span class="sv-legend-label">{e.label}</span>
         </span>
-      }}
+      }
+    }
     </div>
 
   /**

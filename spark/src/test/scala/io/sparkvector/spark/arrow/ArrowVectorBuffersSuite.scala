@@ -25,7 +25,8 @@ class ArrowVectorBuffersSuite extends AnyFunSuite with BeforeAndAfterAll {
     try {
       iv.allocateNew(n); dv.allocateNew(n)
       (0 until n).foreach { i =>
-        if (nullAt(i)) { iv.setNull(i); dv.setNull(i) } else { iv.set(i, i * 7 - 100); dv.set(i, 19000 + i) }
+        if (nullAt(i)) { iv.setNull(i); dv.setNull(i) }
+        else { iv.set(i, i * 7 - 100); dv.set(i, 19000 + i) }
       }
       iv.setValueCount(n); dv.setValueCount(n)
 

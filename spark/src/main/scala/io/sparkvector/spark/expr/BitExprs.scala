@@ -10,7 +10,8 @@ import org.apache.spark.sql.types.{DataType, IntegerType}
  * literal on either side of and/or/xor and a literal on either side of a shift are handled without
  * materialising a constant column. Validity is the operands' conjunction.
  */
-final case class BitBinaryExpr(op: BitKernels.BitOp, left: VectorExpr, right: VectorExpr, dataType: DataType) extends VectorExpr {
+final case class BitBinaryExpr(op: BitKernels.BitOp, left: VectorExpr, right: VectorExpr, dataType: DataType)
+    extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(left, right)
 
   override def eval(ctx: EvalContext): VectorBuffers = {

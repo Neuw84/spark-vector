@@ -17,13 +17,15 @@ trait VectorPlan extends SparkPlan {
     "numInputBatches" -> SQLMetrics.createMetric(sparkContext, "number of input batches"),
     "numOutputBatches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"),
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels"))
+    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels")
+  )
 
   protected def vectorMetrics: VectorMetrics = new VectorMetrics(
     longMetric("numInputBatches"),
     longMetric("numOutputBatches"),
     longMetric("numOutputRows"),
-    longMetric("time"))
+    longMetric("time")
+  )
 
   /**
    * Row-based execution, for consumers that call `execute()` on a columnar child without going

@@ -42,7 +42,8 @@ object FlightShuffle extends Logging {
   val BindHostKey = "spark.vector.shuffle.flight.bindHost"
   val ThreadsKey = "spark.vector.shuffle.flight.threads"
 
-  def backend(conf: SparkConf): String = org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
+  def backend(conf: SparkConf): String =
+    org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
 
   /**
    * The ticket of one reduce task's blocks on one executor (#347, #411): 4-byte shuffleId, 4-byte
@@ -73,7 +74,10 @@ object FlightShuffle extends Logging {
     require(b.remaining() >= 16 && (b.remaining() - 16) % 8 == 0, s"malformed shuffle ticket (${b.remaining()} bytes)")
     val shuffleId = b.getInt; val start = b.getInt; val end = b.getInt; val count = b.getInt
     require(end > start, s"malformed shuffle ticket: reduce range [$start, $end)")
-    require(count >= 0 && b.remaining() == 8L * count, s"malformed shuffle ticket: $count blocks, ${b.remaining()} bytes left")
+    require(
+      count >= 0 && b.remaining() == 8L * count,
+      s"malformed shuffle ticket: $count blocks, ${b.remaining()} bytes left"
+    )
     (shuffleId, start, end, Seq.fill(count)(b.getLong))
   }
 
@@ -90,9 +94,15 @@ object FlightShuffle extends Logging {
     override def authenticate(incomingHeaders: CallHeaders): CallHeaderAuthenticator.AuthResult = {
       val header = Option(incomingHeaders.get(Auth2Constants.AUTHORIZATION_HEADER)).getOrElse("")
       val prefix = Auth2Constants.BEARER_PREFIX
-      if (!header.startsWith(prefix) || !java.security.MessageDigest.isEqual(
-          header.substring(prefix.length).getBytes("UTF-8"), expected.getBytes("UTF-8"))) {
-        throw CallStatus.UNAUTHENTICATED.withDescription("spark.authenticate is on: a valid bearer token is required").toRuntimeException
+      if (
+        !header.startsWith(prefix) || !java.security.MessageDigest.isEqual(
+          header.substring(prefix.length).getBytes("UTF-8"),
+          expected.getBytes("UTF-8")
+        )
+      ) {
+        throw CallStatus.UNAUTHENTICATED.withDescription(
+          "spark.authenticate is on: a valid bearer token is required"
+        ).toRuntimeException
       }
       () => "spark"
     }
@@ -108,17 +118,28 @@ object FlightShuffle extends Logging {
    * [[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader]] a local block goes through, and the
    * server neither decodes nor re-encodes anything.
    */
-  final class Producer(blockData: (Int, Long, Int, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator,
+  final class Producer(
+      blockData: (Int, Long, Int, Int) => org.apache.spark.network.buffer.ManagedBuffer,
+      allocator: BufferAllocator,
       /** Bytes per gRPC message; a parameter so the transport benchmark can sweep it (default [[ChunkBytes]]). */
-      chunkBytes: Int = ChunkBytes) extends NoOpFlightProducer {
+      chunkBytes: Int = ChunkBytes
+  ) extends NoOpFlightProducer {
+
     /** A producer serving single partitions: `blockData(shuffleId, mapId, reduce)`. */
     def this(single: (Int, Long, Int) => org.apache.spark.network.buffer.ManagedBuffer, allocator: BufferAllocator) =
-      this((shuffleId: Int, mapId: Long, start: Int, end: Int) => {
-        require(end == start + 1, s"a single-partition producer asked for [$start, $end)")
-        single(shuffleId, mapId, start)
-      }, allocator)
+      this(
+        (shuffleId: Int, mapId: Long, start: Int, end: Int) => {
+          require(end == start + 1, s"a single-partition producer asked for [$start, $end)")
+          single(shuffleId, mapId, start)
+        },
+        allocator
+      )
 
-    override def getStream(context: FlightProducer.CallContext, ticket: Ticket, listener: FlightProducer.ServerStreamListener): Unit = {
+    override def getStream(
+        context: FlightProducer.CallContext,
+        ticket: Ticket,
+        listener: FlightProducer.ServerStreamListener
+    ): Unit = {
       val (shuffleId, reduce, endReduce, mapIds) = parseTicket(ticket)
       val root = VectorSchemaRoot.create(BytesSchema, allocator)
       val vector = root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector]
@@ -179,7 +200,10 @@ object FlightShuffle extends Logging {
         listener.completed()
       } catch {
         case e: Exception =>
-          logWarning(s"flight shuffle: serving $shuffleId/$current/[$reduce, $endReduce) (${mapIds.size} map outputs) failed", e)
+          logWarning(
+            s"flight shuffle: serving $shuffleId/$current/[$reduce, $endReduce) (${mapIds.size} map outputs) failed",
+            e
+          )
           listener.error(CallStatus.INTERNAL.withCause(e).withDescription(e.toString).toRuntimeException)
       } finally {
         root.close()
@@ -189,31 +213,49 @@ object FlightShuffle extends Logging {
 
   /** The wire schema of a block: its IPC bytes, chunked. */
   val BytesSchema: org.apache.arrow.vector.types.pojo.Schema = new org.apache.arrow.vector.types.pojo.Schema(
-    java.util.List.of(org.apache.arrow.vector.types.pojo.Field.nullable("ipc", org.apache.arrow.vector.types.pojo.ArrowType.Binary.INSTANCE)))
+    java.util.List.of(org.apache.arrow.vector.types.pojo.Field.nullable(
+      "ipc",
+      org.apache.arrow.vector.types.pojo.ArrowType.Binary.INSTANCE
+    ))
+  )
+
   /** One Flight message per this many bytes of the block. */
   val ChunkBytes: Int = 4 << 20
+
   /** The chunk buffer's first size; it doubles up to [[ChunkBytes]] as a stream's bytes arrive. */
   val InitialChunkBytes: Int = 64 << 10
 
   /** The server of this executor; started once, stopped by the executor plugin. */
-  final class Service(conf: SparkConf, hostname: String, resolver: () => IndexShuffleBlockResolver) extends AutoCloseable {
+  final class Service(conf: SparkConf, hostname: String, resolver: () => IndexShuffleBlockResolver)
+      extends AutoCloseable {
     private val allocator = VectorAllocators.newChild("flight-shuffle-server")
     private val host = conf.get(BindHostKey, hostname)
     private val threads = conf.getInt(ThreadsKey, math.max(4, Runtime.getRuntime.availableProcessors()))
-    private val executor = Executors.newFixedThreadPool(threads, r => { val t = new Thread(r, "flight-shuffle"); t.setDaemon(true); t })
+    private val executor =
+      Executors.newFixedThreadPool(threads, r => { val t = new Thread(r, "flight-shuffle"); t.setDaemon(true); t })
     private val server: FlightServer = {
       if (conf.getBoolean("spark.ssl.rpc.enabled", false)) {
         throw new IllegalStateException(
           "spark.ssl.rpc.enabled is on but the Flight shuffle server has no TLS material yet (#288): " +
-            "use spark.vector.shuffle.backend=block or turn RPC TLS off")
+            "use spark.vector.shuffle.backend=block or turn RPC TLS off"
+        )
       }
-      val builder = FlightServer.builder(allocator, Location.forGrpcInsecure(host, 0), new Producer((s: Int, m: Long, start: Int, end: Int) =>
-        if (end == start + 1) resolver().getBlockData(ShuffleBlockId(s, m, start), None)
-        else resolver().getBlockData(org.apache.spark.storage.ShuffleBlockBatchId(s, m, start, end), None), allocator)).executor(executor)
+      val builder = FlightServer.builder(
+        allocator,
+        Location.forGrpcInsecure(host, 0),
+        new Producer(
+          (s: Int, m: Long, start: Int, end: Int) =>
+            if (end == start + 1) resolver().getBlockData(ShuffleBlockId(s, m, start), None)
+            else resolver().getBlockData(org.apache.spark.storage.ShuffleBlockBatchId(s, m, start, end), None),
+          allocator
+        )
+      ).executor(executor)
       secret(conf) match {
         case Some(s) => builder.headerAuthenticator(new SecretAuthenticator(s))
         case None if conf.getBoolean("spark.authenticate", false) =>
-          throw new IllegalStateException("spark.authenticate is on but no shuffle secret is available to the Flight shuffle server")
+          throw new IllegalStateException(
+            "spark.authenticate is on but no shuffle secret is available to the Flight shuffle server"
+          )
         case None =>
       }
       builder.build()
@@ -224,7 +266,8 @@ object FlightShuffle extends Logging {
     def location: FlightLocation = FlightLocation(host, server.getPort)
 
     override def close(): Unit = {
-      try server.close() finally {
+      try server.close()
+      finally {
         executor.shutdownNow()
         allocator.close()
       }
@@ -237,7 +280,10 @@ object FlightShuffle extends Logging {
     private val clients = new ConcurrentHashMap[FlightLocation, FlightClient]()
 
     def client(loc: FlightLocation): FlightClient =
-      clients.computeIfAbsent(loc, l => FlightClient.builder(allocator, Location.forGrpcInsecure(l.host, l.port)).build())
+      clients.computeIfAbsent(
+        loc,
+        l => FlightClient.builder(allocator, Location.forGrpcInsecure(l.host, l.port)).build()
+      )
 
     def callOptions(conf: SparkConf): Array[CallOption] = secret(conf) match {
       case Some(s) => Array(new CredentialCallOption(new BearerCredentialWriter(s)))
@@ -279,7 +325,8 @@ object FlightRegistry extends Logging {
   @volatile private var initFailure: Throwable = _
 
   def executorInit(ctx: PluginContext): Unit =
-    try executorInit0(ctx) catch {
+    try executorInit0(ctx)
+    catch {
       case t: Throwable =>
         // The executor must come up: the failure surfaces on the first fetch that needs this server.
         initFailure = t
@@ -289,7 +336,11 @@ object FlightRegistry extends Logging {
   private def executorInit0(ctx: PluginContext): Unit = {
     val conf = ctx.conf()
     pluginContext = ctx
-    if (org.apache.spark.sql.vector.shuffle.VectorShuffleManager.isConfigured(conf) && FlightShuffle.backend(conf) == "flight") {
+    if (
+      org.apache.spark.sql.vector.shuffle.VectorShuffleManager.isConfigured(conf) && FlightShuffle.backend(
+        conf
+      ) == "flight"
+    ) {
       // The plugin initialises before the executor's block manager: the host comes from the plugin
       // context and the block resolver is looked up when the first DoGet arrives.
       val resolver = () => SparkEnv.get.shuffleManager.shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver]
@@ -298,7 +349,8 @@ object FlightRegistry extends Logging {
       service = new FlightShuffle.Service(conf, org.apache.spark.util.Utils.localHostName(), resolver)
       val loc = service.location
       // In local mode the executor is the driver: register directly.
-      if (ctx.executorID() == "driver") locations.put("driver", loc) else ctx.send(RegisterFlight(ctx.executorID(), loc))
+      if (ctx.executorID() == "driver") locations.put("driver", loc)
+      else ctx.send(RegisterFlight(ctx.executorID(), loc))
       cache.put(ctx.executorID(), loc)
     }
   }
@@ -312,11 +364,14 @@ object FlightRegistry extends Logging {
     val cached = cache.get(executorId)
     if (cached != null) return cached
     val answer = Option(locations.get(executorId)).orElse {
-      Option(pluginContext).flatMap(ctx => Option(ctx.ask(LookupFlight(executorId))).map(_.asInstanceOf[FlightLocation]))
+      Option(pluginContext).flatMap(ctx =>
+        Option(ctx.ask(LookupFlight(executorId))).map(_.asInstanceOf[FlightLocation])
+      )
     }
     val loc = answer.getOrElse(throw new IllegalStateException(
       s"no Flight shuffle server registered for executor $executorId" +
-        (if (initFailure != null) s"; this executor's own server failed to start: $initFailure" else "")))
+        (if (initFailure != null) s"; this executor's own server failed to start: $initFailure" else "")
+    ))
     cache.put(executorId, loc)
     loc
   }
@@ -344,21 +399,63 @@ final class FlightBlockStream(
     compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType],
     conf: SparkConf,
     allocator: BufferAllocator,
-    metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) extends Iterator[org.apache.spark.sql.vectorized.ColumnarBatch] with AutoCloseable {
+    metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter
+) extends Iterator[org.apache.spark.sql.vectorized.ColumnarBatch] with AutoCloseable {
 
   /** One reduce partition's blocks on the executor, zstd-compressed streams (the default). */
-  def this(location: FlightLocation, shuffleId: Int, mapIds: Seq[Long], reduce: Int, schema: org.apache.spark.sql.types.StructType, conf: SparkConf,
-      allocator: BufferAllocator, metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) =
-    this(location, shuffleId, mapIds, reduce, reduce + 1, schema, Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), conf, allocator, metrics)
+  def this(
+      location: FlightLocation,
+      shuffleId: Int,
+      mapIds: Seq[Long],
+      reduce: Int,
+      schema: org.apache.spark.sql.types.StructType,
+      conf: SparkConf,
+      allocator: BufferAllocator,
+      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter
+  ) =
+    this(
+      location,
+      shuffleId,
+      mapIds,
+      reduce,
+      reduce + 1,
+      schema,
+      Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD),
+      conf,
+      allocator,
+      metrics
+    )
 
   /** A single block. */
-  def this(location: FlightLocation, shuffleId: Int, mapId: Long, reduce: Int, schema: org.apache.spark.sql.types.StructType, conf: SparkConf,
-      allocator: BufferAllocator, metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter) =
-    this(location, shuffleId, Seq(mapId), reduce, reduce + 1, schema, Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD), conf, allocator, metrics)
+  def this(
+      location: FlightLocation,
+      shuffleId: Int,
+      mapId: Long,
+      reduce: Int,
+      schema: org.apache.spark.sql.types.StructType,
+      conf: SparkConf,
+      allocator: BufferAllocator,
+      metrics: org.apache.spark.shuffle.ShuffleReadMetricsReporter
+  ) =
+    this(
+      location,
+      shuffleId,
+      Seq(mapId),
+      reduce,
+      reduce + 1,
+      schema,
+      Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD),
+      conf,
+      allocator,
+      metrics
+    )
 
   private val stream: FlightStream = {
     val start = System.nanoTime()
-    val s = FlightShuffle.Clients.client(location).getStream(FlightShuffle.ticket(shuffleId, reduce, endReduce, mapIds), FlightShuffle.Clients.callOptions(conf): _*)
+    val s = FlightShuffle.Clients.client(location).getStream(
+      FlightShuffle.ticket(shuffleId, reduce, endReduce, mapIds),
+      FlightShuffle.Clients.callOptions(conf): _*
+    )
     metrics.incFetchWaitTime((System.nanoTime() - start) / 1000000)
     s
   }
@@ -395,6 +492,7 @@ final class FlightBlockStream(
       current.limit(lim)
       n
     }
+
     /** Whether any byte is left, without consuming one. */
     def isEmpty: Boolean = !fill()
     override def isOpen: Boolean = open
@@ -402,6 +500,7 @@ final class FlightBlockStream(
   }
 
   private val channel = new ChunkChannel
+
   /**
    * The local path's decoder over the remote bytes; None for an empty block. Made on the first
    * `hasNext`, not in the constructor (#416): a reduce task opens one stream per executor back to
@@ -412,7 +511,8 @@ final class FlightBlockStream(
    */
   private var reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = _
   private def decoder: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = {
-    if (reader == null) reader = if (channel.isEmpty) None else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
+    if (reader == null) reader = if (channel.isEmpty) None
+    else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
     reader
   }
 

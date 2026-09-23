@@ -40,9 +40,16 @@ object Rows {
 
   /** Spark's ordering of two rows of the same lane: signed for integers, total for doubles, binary for strings. */
   def compare(a: VectorBuffers, i: Int, b: VectorBuffers, j: Int): Int = a.`type`() match {
-    case VecType.INT32 => Integer.compare(a.data().getAtIndex(VectorBuffers.LE_INT, i), b.data().getAtIndex(VectorBuffers.LE_INT, j))
-    case VecType.INT64 => java.lang.Long.compare(a.data().getAtIndex(VectorBuffers.LE_LONG, i), b.data().getAtIndex(VectorBuffers.LE_LONG, j))
-    case VecType.FLOAT64 => java.lang.Double.compare(a.data().getAtIndex(VectorBuffers.LE_DOUBLE, i), b.data().getAtIndex(VectorBuffers.LE_DOUBLE, j))
+    case VecType.INT32 =>
+      Integer.compare(a.data().getAtIndex(VectorBuffers.LE_INT, i), b.data().getAtIndex(VectorBuffers.LE_INT, j))
+    case VecType.INT64 => java.lang.Long.compare(
+        a.data().getAtIndex(VectorBuffers.LE_LONG, i),
+        b.data().getAtIndex(VectorBuffers.LE_LONG, j)
+      )
+    case VecType.FLOAT64 => java.lang.Double.compare(
+        a.data().getAtIndex(VectorBuffers.LE_DOUBLE, i),
+        b.data().getAtIndex(VectorBuffers.LE_DOUBLE, j)
+      )
     case VecType.BOOL => java.lang.Boolean.compare(Bitmap.isSet(a.data(), i), Bitmap.isSet(b.data(), j))
     case VecType.UTF8 => java.util.Arrays.compareUnsigned(a.getUtf8Bytes(i), b.getUtf8Bytes(j))
     case t => throw new IllegalStateException(s"ordering over $t")
@@ -50,9 +57,12 @@ object Rows {
 
   /** Compares a boxed value with row `j`: the boxed side is an earlier row of the same lane. */
   def compareBoxed(boxed: Any, b: VectorBuffers, j: Int): Int = b.`type`() match {
-    case VecType.INT32 => Integer.compare(boxed.asInstanceOf[java.lang.Integer], b.data().getAtIndex(VectorBuffers.LE_INT, j))
-    case VecType.INT64 => java.lang.Long.compare(boxed.asInstanceOf[java.lang.Long], b.data().getAtIndex(VectorBuffers.LE_LONG, j))
-    case VecType.FLOAT64 => java.lang.Double.compare(boxed.asInstanceOf[java.lang.Double], b.data().getAtIndex(VectorBuffers.LE_DOUBLE, j))
+    case VecType.INT32 =>
+      Integer.compare(boxed.asInstanceOf[java.lang.Integer], b.data().getAtIndex(VectorBuffers.LE_INT, j))
+    case VecType.INT64 =>
+      java.lang.Long.compare(boxed.asInstanceOf[java.lang.Long], b.data().getAtIndex(VectorBuffers.LE_LONG, j))
+    case VecType.FLOAT64 =>
+      java.lang.Double.compare(boxed.asInstanceOf[java.lang.Double], b.data().getAtIndex(VectorBuffers.LE_DOUBLE, j))
     case VecType.BOOL => java.lang.Boolean.compare(boxed.asInstanceOf[java.lang.Boolean], Bitmap.isSet(b.data(), j))
     case VecType.UTF8 => java.util.Arrays.compareUnsigned(boxed.asInstanceOf[UTF8String].getBytes, b.getUtf8Bytes(j))
     case t => throw new IllegalStateException(s"ordering over $t")
@@ -99,7 +109,9 @@ final case class OrderedMinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: D
       state.ensure(groups.numGroups())
       val v = input.eval(ctx)
       Rows.grouped(ctx, groups) { (g, i) =>
-        if (Rows.valid(v, i) && (!state.set(g) || better(-Rows.compareBoxed(state.values(g), v, i)))) { state.values(g) = Rows.box(v, i); state.set(g) = true }
+        if (Rows.valid(v, i) && (!state.set(g) || better(-Rows.compareBoxed(state.values(g), v, i)))) {
+          state.values(g) = Rows.box(v, i); state.set(g) = true
+        }
       }
     }
     override def bufferValue(g: Int, slot: Int): Any = state.value(g)
@@ -111,8 +123,10 @@ final case class OrderedMinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: D
  * ignored) in partition order, Spark's `(last, valueSet)` buffer. In a merge mode the buffers arrive in
  * partition order too, so the same class serves with `valueSet` as the guard.
  */
-final case class LastAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boolean, valueSet: Option[VectorExpr]) extends VectorAggFunction {
+final case class LastAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boolean, valueSet: Option[VectorExpr])
+    extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(dataType, BooleanType)
+
   /** Whether row `i` counts: a non-null value (or any row without ignoreNulls); in a merge, a set buffer. */
   private def counts(v: VectorBuffers, set: VectorBuffers, i: Int): Boolean =
     if (set != null) Rows.valid(set, i) && Bitmap.isSet(set.data(), i) else !ignoreNulls || Rows.valid(v, i)
@@ -123,7 +137,9 @@ final case class LastAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boo
     override def update(ctx: EvalContext): Unit = {
       val v = input.eval(ctx)
       val set = valueSet.map(_.eval(ctx)).orNull
-      Rows.ungrouped(ctx) { i => if (counts(v, set, i)) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; seen = true } }
+      Rows.ungrouped(ctx) { i =>
+        if (counts(v, set, i)) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; seen = true }
+      }
     }
     override def bufferValues: Array[Any] = Array(value, java.lang.Boolean.valueOf(seen))
   }
@@ -133,9 +149,14 @@ final case class LastAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boo
       state.ensure(groups.numGroups())
       val v = input.eval(ctx)
       val set = valueSet.map(_.eval(ctx)).orNull
-      Rows.grouped(ctx, groups) { (g, i) => if (counts(v, set, i)) { state.values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; state.set(g) = true } }
+      Rows.grouped(ctx, groups) { (g, i) =>
+        if (counts(v, set, i)) {
+          state.values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; state.set(g) = true
+        }
+      }
     }
-    override def bufferValue(g: Int, slot: Int): Any = if (slot == 0) state.value(g) else java.lang.Boolean.valueOf(state.isSet(g))
+    override def bufferValue(g: Int, slot: Int): Any =
+      if (slot == 0) state.value(g) else java.lang.Boolean.valueOf(state.isSet(g))
   }
 }
 
@@ -148,15 +169,19 @@ final case class BitAgg(input: VectorExpr, op: BitAgg.Op, dataType: DataType) ex
     case BitAgg.Xor => acc ^ x
   }
   private def read(v: VectorBuffers, i: Int): Long =
-    if (v.`type`() == VecType.INT32) v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong else v.data().getAtIndex(VectorBuffers.LE_LONG, i)
-  private def box(acc: Long): Any = if (input.vecType == VecType.INT32) java.lang.Integer.valueOf(acc.toInt) else java.lang.Long.valueOf(acc)
+    if (v.`type`() == VecType.INT32) v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong
+    else v.data().getAtIndex(VectorBuffers.LE_LONG, i)
+  private def box(acc: Long): Any =
+    if (input.vecType == VecType.INT32) java.lang.Integer.valueOf(acc.toInt) else java.lang.Long.valueOf(acc)
 
   override def newState(): AggState = new AggState {
     private var acc = 0L
     private var seen = false
     override def update(ctx: EvalContext): Unit = {
       val v = input.eval(ctx)
-      Rows.ungrouped(ctx) { i => if (Rows.valid(v, i)) { acc = if (seen) apply(acc, read(v, i)) else read(v, i); seen = true } }
+      Rows.ungrouped(ctx) { i =>
+        if (Rows.valid(v, i)) { acc = if (seen) apply(acc, read(v, i)) else read(v, i); seen = true }
+      }
     }
     override def bufferValues: Array[Any] = Array(if (seen) box(acc) else null)
   }
@@ -169,7 +194,9 @@ final case class BitAgg(input: VectorExpr, op: BitAgg.Op, dataType: DataType) ex
         acc = java.util.Arrays.copyOf(acc, cap); seen = java.util.Arrays.copyOf(seen, cap)
       }
       val v = input.eval(ctx)
-      Rows.grouped(ctx, groups) { (g, i) => if (Rows.valid(v, i)) { acc(g) = if (seen(g)) apply(acc(g), read(v, i)) else read(v, i); seen(g) = true } }
+      Rows.grouped(ctx, groups) { (g, i) =>
+        if (Rows.valid(v, i)) { acc(g) = if (seen(g)) apply(acc(g), read(v, i)) else read(v, i); seen(g) = true }
+      }
     }
     override def bufferValue(g: Int, slot: Int): Any = if (g < seen.length && seen(g)) box(acc(g)) else null
   }
@@ -188,8 +215,15 @@ object BitAgg {
  * later row wins, as in Spark, whose predicate keeps the old value only when it is strictly better.
  * The merge is the same operation over the two buffers.
  */
-final case class MaxMinByAgg(value: VectorExpr, ordering: VectorExpr, isMax: Boolean, valueType: DataType, orderingType: DataType) extends VectorAggFunction {
+final case class MaxMinByAgg(
+    value: VectorExpr,
+    ordering: VectorExpr,
+    isMax: Boolean,
+    valueType: DataType,
+    orderingType: DataType
+) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(valueType, orderingType)
+
   /** Whether the held ordering (compared to the new one as `c`) is strictly better and stays. */
   private def keepOld(c: Int): Boolean = if (isMax) c > 0 else c < 0
 

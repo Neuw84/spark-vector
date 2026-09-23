@@ -38,5 +38,6 @@ object CometTestConf {
     "spark.memory.offHeap.size" -> "1g",
     "spark.comet.explainFallback.enabled" -> "false",
     "spark.sql.parquet.enableVectorizedReader" -> "true",
-    "spark.sql.adaptive.enabled" -> "true")
+    "spark.sql.adaptive.enabled" -> "true"
+  )
 }

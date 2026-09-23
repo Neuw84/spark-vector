@@ -24,8 +24,8 @@ import org.apache.spark.unsafe.types.UTF8String
 final case class CaseWhenExpr(
     branches: Seq[(VectorExpr, Option[VectorExpr])],
     otherwise: Option[Option[VectorExpr]],
-    dataType: DataType)
-    extends VectorExpr {
+    dataType: DataType
+) extends VectorExpr {
 
   override def children: Seq[VectorExpr] =
     branches.flatMap { case (c, v) => c +: v.toSeq } ++ otherwise.flatten.toSeq
@@ -108,5 +108,7 @@ object CaseWhenExpr {
 
   /** Literal types a CASE branch may carry, beyond the operand literals the compiler accepts elsewhere. */
   def isBranchLiteralType(dt: DataType): Boolean =
-    dt == StringType || dt == BooleanType || TypeMapping.isSupported(dt) || TypeMapping.isWideDecimal(dt) // wide: a two-limb constant (#326)
+    dt == StringType || dt == BooleanType || TypeMapping.isSupported(dt) || TypeMapping.isWideDecimal(
+      dt
+    ) // wide: a two-limb constant (#326)
 }

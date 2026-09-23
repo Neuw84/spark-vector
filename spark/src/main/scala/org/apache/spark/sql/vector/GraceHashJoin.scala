@@ -35,10 +35,12 @@ object GraceHashJoin extends Logging {
       spec: JoinSpec,
       metrics: VectorMetrics,
       budgetBytes: Long,
-      buckets: Int): Iterator[ColumnarBatch] = {
+      buckets: Int
+  ): Iterator[ColumnarBatch] = {
     val keyTypes: Array[DataType] = spec.buildKeys.map(_.dataType)
     // A key type the bucket hash has no lane for (float, binary...): the build side stays in memory.
-    val canSpill = budgetBytes > 0 && budgetBytes < Long.MaxValue && buckets >= 2 && AggregateSpill.supportsKeys(keyTypes.toSeq)
+    val canSpill =
+      budgetBytes > 0 && budgetBytes < Long.MaxValue && buckets >= 2 && AggregateSpill.supportsKeys(keyTypes.toSeq)
 
     val arena = Arena.ofShared()
     val builders = spec.buildTypes.map(dt => new ColumnBuilder(arena, TypeMapping.vecTypeOf(dt), 4096))
@@ -61,10 +63,14 @@ object GraceHashJoin extends Logging {
       return new VectorHashJoinIterator(streamIter, table, spec, metrics)
     }
 
-    logInfo(s"hash join: build side past $budgetBytes bytes after $total rows, bucketing both sides into $buckets buckets on disk")
+    logInfo(
+      s"hash join: build side past $budgetBytes bytes after $total rows, bucketing both sides into $buckets buckets on disk"
+    )
     val allocator = VectorAllocators.newChild("VectorShuffledHashJoinExec.grace")
-    val buildAttrs = if (spec.buildIsLeft) spec.joinedAttrs.take(spec.buildTypes.length) else spec.joinedAttrs.drop(spec.streamedWidth)
-    val streamedAttrs = if (spec.buildIsLeft) spec.joinedAttrs.drop(spec.buildTypes.length) else spec.joinedAttrs.take(spec.streamedWidth)
+    val buildAttrs =
+      if (spec.buildIsLeft) spec.joinedAttrs.take(spec.buildTypes.length) else spec.joinedAttrs.drop(spec.streamedWidth)
+    val streamedAttrs =
+      if (spec.buildIsLeft) spec.joinedAttrs.drop(spec.buildTypes.length) else spec.joinedAttrs.take(spec.streamedWidth)
     val buildSpill = new AggregateSpill(buckets, buildAttrs, null, allocator, AggregateSpill.BucketSeed, keyTypes)
     val probeSpill = new AggregateSpill(buckets, streamedAttrs, null, allocator, AggregateSpill.BucketSeed, keyTypes)
     var spilledRows = 0L
@@ -95,7 +101,9 @@ object GraceHashJoin extends Logging {
         spilledRows += ctx.selectedCount
       }
     }
-    logInfo(s"hash join: $spilledRows rows bucketed, ${buildSpill.spilledBatches + probeSpill.spilledBatches} batches written; joining $buckets buckets")
+    logInfo(
+      s"hash join: $spilledRows rows bucketed, ${buildSpill.spilledBatches + probeSpill.spilledBatches} batches written; joining $buckets buckets"
+    )
 
     // Bucket by bucket: the bucket's build table, probed by the bucket's streamed rows.
     new Iterator[ColumnarBatch] with AutoCloseable {
@@ -110,7 +118,9 @@ object GraceHashJoin extends Logging {
           val b = bucket
           bucket += 1
           val buildRows = buildSpill.read(b)
-          val table = try BuildTable.fromBatches(buildRows, spec) finally buildRows.close()
+          val table =
+            try BuildTable.fromBatches(buildRows, spec)
+            finally buildRows.close()
           currentProbe = probeSpill.read(b)
           current = new VectorHashJoinIterator(currentProbe, table, spec, metrics)
           if (current.hasNext) return true

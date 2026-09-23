@@ -32,7 +32,8 @@ class VectorPlugin extends SparkPlugin {
       org.apache.spark.sql.vector.ui.VectorUi.attach(
         sc,
         enabled = VectorConf.uiEnabled(get),
-        retainedExecutions = VectorConf.uiRetainedExecutions(get))
+        retainedExecutions = VectorConf.uiRetainedExecutions(get)
+      )
       Collections.emptyMap()
     }
 
@@ -60,7 +61,8 @@ object VectorPlugin {
       throw new IllegalStateException(
         "spark-vector requires the Java Vector API: start the JVM with " +
           "--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED " +
-          "(spark.driver.extraJavaOptions / spark.executor.extraJavaOptions)")
+          "(spark.driver.extraJavaOptions / spark.executor.extraJavaOptions)"
+      )
     }
   }
 }

@@ -7,9 +7,24 @@ import java.nio.channels.{Channels, FileChannel}
 import java.nio.file.{Files, Path, StandardOpenOption}
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.kernels.{Bitmap, CompactKernels, GatherKernels, PartitionKernels, SegmentVectorBuffers, StringDictionary, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  Bitmap,
+  CompactKernels,
+  GatherKernels,
+  PartitionKernels,
+  SegmentVectorBuffers,
+  StringDictionary,
+  VecType,
+  VectorBuffers
+}
 import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorArrowColumnVector, VectorDecimalColumnVector, VectorDictionaryColumnVector}
+import io.sparkvector.spark.arrow.{
+  ArrowOutput,
+  ArrowVectorBuffers,
+  VectorArrowColumnVector,
+  VectorDecimalColumnVector,
+  VectorDictionaryColumnVector
+}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, IntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.compression.CompressionUtil
@@ -76,9 +91,11 @@ final class PartitionedIpcWriter(
      * dictionary, no per-block remap. `false` keeps a dictionary per record batch (the used entries,
      * #345), for a transport that delivers a block's bytes alone (Spark's block transfer).
      */
-    fileDictionary: Boolean = true) extends AutoCloseable {
+    fileDictionary: Boolean = true
+) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
+
   /**
    * A builder's first capacity in rows (#416): an input batch's rows spread over the partitions, so
    * at 1000 partitions a partition sees ~8 rows per 8192-row batch and a 256-row first vector per
@@ -86,8 +103,14 @@ final class PartitionedIpcWriter(
    * third of the map task's time at 1 TB / 1000 partitions was spent on those. The vectors still
    * double as rows arrive, so a partition that does fill pays only the reallocations it earns.
    */
-  private val initialRows: Int = math.max(PartitionedIpcWriter.MinInitialRows,
-    math.min(PartitionedIpcWriter.InitialRows, Integer.highestOneBit(math.max(1, 4 * batchRows / math.max(numPartitions, 1)))))
+  private val initialRows: Int = math.max(
+    PartitionedIpcWriter.MinInitialRows,
+    math.min(
+      PartitionedIpcWriter.InitialRows,
+      Integer.highestOneBit(math.max(1, 4 * batchRows / math.max(numPartitions, 1)))
+    )
+  )
+
   /** The plain-UTF8 variant of every string field, for the batches whose dictionary does not pay. */
   private val plainFields: Array[Field] = Array.tabulate(schema.fields.length) { c =>
     val f = schema.fields(c)
@@ -105,12 +128,15 @@ final class PartitionedIpcWriter(
   private final class Builder(val column: Int, val shared: Boolean = false) {
     private val field = schema.fields(column)
     private val stringField = field.dataType == StringType
+
     /** A string column holds plain strings, or staging ids (#377) when its input arrives as INT32 ids; settled by the first rows. */
     private var idsMode = false
     private def isString = stringField && !idsMode
     private val isBool = field.dataType == BooleanType
-    private def width: Int = if (isString || isBool) 0 else if (stringField) 4 else PartitionedIpcWriter.byteWidth(field.dataType)
-    private def settle(in: VectorBuffers): Unit = if (stringField && vector == null && rows == 0) idsMode = in.`type`() == VecType.INT32
+    private def width: Int =
+      if (isString || isBool) 0 else if (stringField) 4 else PartitionedIpcWriter.byteWidth(field.dataType)
+    private def settle(in: VectorBuffers): Unit =
+      if (stringField && vector == null && rows == 0) idsMode = in.`type`() == VecType.INT32
     var vector: FieldVector = _
     var buffers: ArrowVectorBuffers = _
     var rows: Int = 0
@@ -118,7 +144,8 @@ final class PartitionedIpcWriter(
 
     private def allocate(rowCapacity: Int, byteCapacity: Long): Unit = {
       buffers = if (isString) ArrowOutput.allocateUtf8(field.name, rowCapacity, math.max(byteCapacity, 1L), allocator)
-        else ArrowOutput.allocateFixed(field.name, if (stringField) IntegerType else field.dataType, rowCapacity, allocator)
+      else
+        ArrowOutput.allocateFixed(field.name, if (stringField) IntegerType else field.dataType, rowCapacity, allocator)
       vector = buffers.vector().asInstanceOf[FieldVector]
       if (isString) buffers.offsets().set(VectorBuffers.LE_INT, 0L, 0)
     }
@@ -128,7 +155,10 @@ final class PartitionedIpcWriter(
       if (retained) { retainedBytes -= capacityBytes; retained = false }
       if (vector == null) {
         val cap = math.max(initialRows, Integer.highestOneBit(math.max(count, 1) - 1) << 1)
-        allocate(math.min(math.max(cap, count), math.max(batchRows, count)), if (isString) math.max(bytes, PartitionedIpcWriter.InitialBytesPerRow.toLong * cap) else 0L)
+        allocate(
+          math.min(math.max(cap, count), math.max(batchRows, count)),
+          if (isString) math.max(bytes, PartitionedIpcWriter.InitialBytesPerRow.toLong * cap) else 0L
+        )
         return
       }
       var grown = false
@@ -148,18 +178,37 @@ final class PartitionedIpcWriter(
       val validityScratch = Bitmap.allocate(scratch, count)
       if (isString) {
         val offsets = buffers.offsets().asSlice(rows.toLong << 2)
-        CompactKernels.compactUtf8(in, mask, count, offsets, buffers.data().asSlice(dataBytes), if (in.validity() != null) validityScratch else null)
+        CompactKernels.compactUtf8(
+          in,
+          mask,
+          count,
+          offsets,
+          buffers.data().asSlice(dataBytes),
+          if (in.validity() != null) validityScratch else null
+        )
         if (dataBytes > 0) {
           // The kernel's offsets start at zero: rebase them on the bytes already there (count + 1 of them).
           var i = 0
-          while (i <= count) { offsets.set(VectorBuffers.LE_INT, i.toLong << 2, offsets.get(VectorBuffers.LE_INT, i.toLong << 2) + dataBytes.toInt); i += 1 }
+          while (i <= count) {
+            offsets.set(
+              VectorBuffers.LE_INT,
+              i.toLong << 2,
+              offsets.get(VectorBuffers.LE_INT, i.toLong << 2) + dataBytes.toInt
+            ); i += 1
+          }
         }
       } else if (isBool) {
         val bits = Bitmap.allocate(scratch, count)
         CompactKernels.compactFixed(in, mask, count, bits, if (in.validity() != null) validityScratch else null)
         Bitmap.copyBits(bits, buffers.data(), rows, count)
       } else {
-        CompactKernels.compactFixed(in, mask, count, buffers.data().asSlice(rows.toLong * width), if (in.validity() != null) validityScratch else null)
+        CompactKernels.compactFixed(
+          in,
+          mask,
+          count,
+          buffers.data().asSlice(rows.toLong * width),
+          if (in.validity() != null) validityScratch else null
+        )
       }
       if (in.validity() != null) Bitmap.copyBits(validityScratch, buffers.validity(), rows, count)
       else Bitmap.fillRange(buffers.validity(), rows, count, true)
@@ -182,7 +231,13 @@ final class PartitionedIpcWriter(
         val offsets = buffers.offsets()
         val base = dataBytes.toInt - start
         var i = 0
-        while (i <= n) { offsets.set(VectorBuffers.LE_INT, (rows + i).toLong << 2, srcOff.get(VectorBuffers.LE_INT, i.toLong << 2) + base); i += 1 }
+        while (i <= n) {
+          offsets.set(
+            VectorBuffers.LE_INT,
+            (rows + i).toLong << 2,
+            srcOff.get(VectorBuffers.LE_INT, i.toLong << 2) + base
+          ); i += 1
+        }
         if (bytes > 0) MemorySegment.copy(in.data(), start.toLong, buffers.data(), dataBytes, bytes)
       } else if (isBool) {
         Bitmap.copyBits(in.data(), buffers.data(), rows, n)
@@ -208,7 +263,13 @@ final class PartitionedIpcWriter(
         GatherKernels.gatherUtf8(in, idx, from, to, offsets, buffers.data().asSlice(dataBytes), validityScratch)
         if (dataBytes > 0) {
           var i = 0
-          while (i <= count) { offsets.set(VectorBuffers.LE_INT, i.toLong << 2, offsets.get(VectorBuffers.LE_INT, i.toLong << 2) + dataBytes.toInt); i += 1 }
+          while (i <= count) {
+            offsets.set(
+              VectorBuffers.LE_INT,
+              i.toLong << 2,
+              offsets.get(VectorBuffers.LE_INT, i.toLong << 2) + dataBytes.toInt
+            ); i += 1
+          }
         }
       } else if (isBool) {
         val bits = Bitmap.allocate(scratch, count)
@@ -245,7 +306,11 @@ final class PartitionedIpcWriter(
     }
 
     /** Bytes the vector's buffers hold, used or not. */
-    def capacityBytes: Long = if (vector == null) 0L else { var t = 0L; val bs = vector.getBuffers(false); var i = 0; while (i < bs.length) { t += bs(i).capacity(); i += 1 }; t }
+    def capacityBytes: Long = if (vector == null) 0L
+    else {
+      var t = 0L; val bs = vector.getBuffers(false); var i = 0; while (i < bs.length) { t += bs(i).capacity(); i += 1 };
+      t
+    }
 
     /**
      * After a flush: the vector kept and emptied for the next rows (a reset keeps its capacity). A
@@ -297,6 +362,7 @@ final class PartitionedIpcWriter(
   private final class Segment(val partition: Int) {
     val bytes = new ByteArrayOutputStream()
     var rows: Long = 0L
+
     /** The partition's own builders (the per-partition path, at most `StagingPartitions` partitions); null when staged. */
     val builders: Array[Builder] = if (staged) null else Array.tabulate(schema.fields.length)(new Builder(_))
     var pendingRows: Int = 0
@@ -327,6 +393,7 @@ final class PartitionedIpcWriter(
       sinkChannel
     }
     private var sinkChannel: java.nio.channels.WritableByteChannel = _
+
     /** The compressed frame of the last staged bytes, written to the data file at `finish`. */
     var tail: Array[Byte] = Array.emptyByteArray
 
@@ -353,8 +420,16 @@ final class PartitionedIpcWriter(
     }
 
     def release(): Unit = {
-      if (builders != null) builders.foreach(b => try b.close() catch { case _: Exception => })
-      if (overflow != null) { try overflow.close() catch { case _: Exception => }; try Files.deleteIfExists(overflowPath) catch { case _: Exception => } }
+      if (builders != null) builders.foreach(b =>
+        try b.close()
+        catch { case _: Exception => }
+      )
+      if (overflow != null) {
+        try overflow.close()
+        catch { case _: Exception => };
+        try Files.deleteIfExists(overflowPath)
+        catch { case _: Exception => }
+      }
     }
   }
 
@@ -368,6 +443,7 @@ final class PartitionedIpcWriter(
    */
   private val staged: Boolean = numPartitions > PartitionedIpcWriter.StagingPartitions
   private val segments = Array.tabulate(numPartitions)(new Segment(_))
+
   /**
    * The task's rows, staged once whatever their partition (#416): one builder per column plus the
    * partition id of every staged row. At the flush the staged rows are grouped by partition and
@@ -377,22 +453,33 @@ final class PartitionedIpcWriter(
    * output and gathered every input batch into a thousand slices of eight rows; at 1 TB the map
    * stage carried the whole partition-count cost. Spark's sort-based writer has this shape.
    */
-  private val staging: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
+  private val staging: Array[Builder] =
+    if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
   private var stagedIds: Array[Int] = new Array[Int](0)
   private var stagedRows: Int = 0
+
   /** The vectors a partition's rows are gathered into for one record batch, reused for every partition and flush. */
-  private val batchBuilders: Array[Builder] = if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
+  private val batchBuilders: Array[Builder] =
+    if (staged) Array.tabulate(schema.fields.length)(new Builder(_, shared = true)) else null
+
   /** Staged data before a flush. A smaller staging (12.8 MB at 200 partitions) gave more, smaller record batches and cost q67 a further 8%. */
   private val stagingBytes: Long = bufferBytes
   private var heldBytes = 0L
+
   /** Capacity held by emptied per-partition builders kept for their next batch (#417), and its cap: well under `bufferBytes`. */
   private var retainedBytes = 0L
   private val retainBudget: Long = bufferBytes / 4
+
   /** Per string column, the ids and dictionary vectors of its encoding, reused across blocks (#416). */
   private val dictScratch = new Array[(IntVector, VarCharVector)](schema.fields.length)
   private def scratchFor(c: Int): (IntVector, VarCharVector) = {
     var sc = dictScratch(c)
-    if (sc == null) { sc = (new IntVector(schema.fields(c).name, allocator), new VarCharVector(schema.fields(c).name + ".dictionary", allocator)); dictScratch(c) = sc }
+    if (sc == null) {
+      sc = (
+        new IntVector(schema.fields(c).name, allocator),
+        new VarCharVector(schema.fields(c).name + ".dictionary", allocator)
+      ); dictScratch(c) = sc
+    }
     sc
   }
   private var rawBytesWritten = 0L
@@ -406,8 +493,10 @@ final class PartitionedIpcWriter(
    */
   private final class IdColumn(c: Int) {
     val dict = new StringDictionary()
+
     /** Non-null rows mapped so far: the denominator of the task-level distinct ratio (#416). */
     var rowsSeen: Long = 0L
+
     /** Whether a record batch carrying this column's ids has been written: then the dictionary section must hold the dictionary. */
     var flushedIds: Boolean = false
     private val scratch = new StringDictionary.Scratch()
@@ -450,7 +539,10 @@ final class PartitionedIpcWriter(
       if (in.isDictionaryEncoded) {
         val d = in.dictionary()
         val m = d.length()
-        if (entryIds.length < m) { entryIds = new Array[Int](math.max(m, entryIds.length * 2)); entryGen = new Array[Int](entryIds.length); gen = 0; lastDict = null; lastLength = -1 }
+        if (entryIds.length < m) {
+          entryIds = new Array[Int](math.max(m, entryIds.length * 2)); entryGen = new Array[Int](entryIds.length);
+          gen = 0; lastDict = null; lastLength = -1
+        }
         if (!sameDictionary(d)) {
           lastDict = d; lastLength = m; lastVector = arrowVector(d)
           gen += 1
@@ -465,7 +557,8 @@ final class PartitionedIpcWriter(
           else {
             val e = idx.get(VectorBuffers.LE_INT, i.toLong << 2)
             if (entryGen(e) != g) {
-              entryIds(e) = if (dValidity != null && !Bitmap.isSet(dValidity, e)) 0 else {
+              entryIds(e) = if (dValidity != null && !Bitmap.isSet(dValidity, e)) 0
+              else {
                 val start = dOff.get(VectorBuffers.LE_INT, e.toLong << 2)
                 dict.indexOf(dData, start, dOff.get(VectorBuffers.LE_INT, (e + 1).toLong << 2) - start, true, scratch)
               }
@@ -505,12 +598,16 @@ final class PartitionedIpcWriter(
     def remap(staged: IntVector, n: Int, ids: IntVector, dictionary: VarCharVector): (IntVector, VarCharVector) = {
       if (dictionaryMaxRatio <= 0.0) return null
       val size = dict.size()
-      if (dense.length < size) { dense = new Array[Int](math.max(size, dense.length * 2)); denseGen = new Array[Int](dense.length); flushGen = 0 }
+      if (dense.length < size) {
+        dense = new Array[Int](math.max(size, dense.length * 2)); denseGen = new Array[Int](dense.length); flushGen = 0
+      }
       flushGen += 1
       if (flushGen == 0) { java.util.Arrays.fill(denseGen, 0); flushGen = 1 }
       val g = flushGen
       if (ids.getValueCapacity < n) ids.allocateNew(n) else ids.reset()
-      if (dictionary.getValueCapacity < math.max(n, 1)) dictionary.allocateNew(math.max(n.toLong * PartitionedIpcWriter.InitialBytesPerRow, 1L), math.max(n, 1)) else dictionary.reset()
+      if (dictionary.getValueCapacity < math.max(n, 1))
+        dictionary.allocateNew(math.max(n.toLong * PartitionedIpcWriter.InitialBytesPerRow, 1L), math.max(n, 1))
+      else dictionary.reset()
       val store = dict.bytes()
       var next = 0
       var i = 0
@@ -527,7 +624,9 @@ final class PartitionedIpcWriter(
           ids.set(i, dense(id))
         }
         i += 1
-        if ((i == PartitionedIpcWriter.DictionarySampleRows || i == n) && next > (i * dictionaryMaxRatio) && dictionaryMaxRatio < 1.0) {
+        if (
+          (i == PartitionedIpcWriter.DictionarySampleRows || i == n) && next > (i * dictionaryMaxRatio) && dictionaryMaxRatio < 1.0
+        ) {
           ids.reset(); dictionary.reset()
           return null
         }
@@ -542,11 +641,14 @@ final class PartitionedIpcWriter(
       var total = 0L
       var i = 0
       while (i < n) { if (!staged.isNull(i)) total += dict.length(staged.get(i)); i += 1 }
-      if (out.getValueCapacity < math.max(n, 1) || out.getByteCapacity < total) out.allocateNew(math.max(total, 1L), math.max(n, 1)) else out.reset()
+      if (out.getValueCapacity < math.max(n, 1) || out.getByteCapacity < total)
+        out.allocateNew(math.max(total, 1L), math.max(n, 1))
+      else out.reset()
       val store = dict.bytes()
       i = 0
       while (i < n) {
-        if (staged.isNull(i)) out.setNull(i) else { val id = staged.get(i); out.setSafe(i, store, dict.offset(id), dict.length(id)) }
+        if (staged.isNull(i)) out.setNull(i)
+        else { val id = staged.get(i); out.setSafe(i, store, dict.offset(id), dict.length(id)) }
         i += 1
       }
       out.setValueCount(n)
@@ -555,6 +657,7 @@ final class PartitionedIpcWriter(
 
     def reset(): Unit = { dict.clear(); gen += 1; lastDict = null; lastVector = null; lastLength = -1 }
   }
+
   /**
    * Every string column starts in ids mode (#416): its rows become staging ids over the column's
    * dictionary whatever the input's encoding -- a dictionary-encoded batch by its entries, a plain one
@@ -564,8 +667,10 @@ final class PartitionedIpcWriter(
    * pending is flushed as ids (they stay valid: the dictionary is written whole at `finish`) and the
    * column travels plain for the rest of the task.
    */
-  private val idColumns: Array[IdColumn] = Array.tabulate(schema.fields.length)(c => if (schema.fields(c).dataType == StringType) new IdColumn(c) else null)
+  private val idColumns: Array[IdColumn] =
+    Array.tabulate(schema.fields.length)(c => if (schema.fields(c).dataType == StringType) new IdColumn(c) else null)
   private val frozen = new Array[Boolean](schema.fields.length)
+
   /** Per ids-mode string column, the plain vector of a batch that goes plain (#356), reused across blocks. */
   private val plainScratch = new Array[VarCharVector](schema.fields.length)
   private def plainScratchFor(c: Int): VarCharVector = {
@@ -610,7 +715,8 @@ final class PartitionedIpcWriter(
     var col = 0
     while (col < buffers.length) {
       val b = buffers(col)
-      plain(col) = if (b.`type`() != VecType.UTF8) b else {
+      plain(col) = if (b.`type`() != VecType.UTF8) b
+      else {
         if (!frozen(col)) idColumns(col).map(b, n)
         else if (b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, scratch)
         else b
@@ -630,7 +736,8 @@ final class PartitionedIpcWriter(
       capDictionaries()
       return
     }
-    if (stagedIds.length < stagedRows + n) stagedIds = java.util.Arrays.copyOf(stagedIds, math.max(stagedRows + n, stagedIds.length * 2))
+    if (stagedIds.length < stagedRows + n)
+      stagedIds = java.util.Arrays.copyOf(stagedIds, math.max(stagedRows + n, stagedIds.length * 2))
     System.arraycopy(ids, 0, stagedIds, stagedRows, n)
     var size = 0L
     var c = 0
@@ -672,7 +779,9 @@ final class PartitionedIpcWriter(
     // that section was most of a narrow task's bytes.
     var anyFlushed = false
     c = 0
-    while (c < idColumns.length) { val ic = idColumns(c); if (ic != null && !frozen(c) && mustFreeze(ic) && ic.flushedIds) anyFlushed = true; c += 1 }
+    while (c < idColumns.length) {
+      val ic = idColumns(c); if (ic != null && !frozen(c) && mustFreeze(ic) && ic.flushedIds) anyFlushed = true; c += 1
+    }
     if (anyFlushed) {
       if (staged) flushStaging() else { var p = 0; while (p < numPartitions) { flushPartition(segments(p)); p += 1 } }
     }
@@ -700,7 +809,14 @@ final class PartitionedIpcWriter(
   private val starts = new Array[Int](numPartitions + 1)
   private var order = new Array[Int](0)
 
-  private def appendIndexed(seg: Segment, buffers: Array[VectorBuffers], idx: Array[Int], from: Int, to: Int, scratch: Arena): Unit = {
+  private def appendIndexed(
+      seg: Segment,
+      buffers: Array[VectorBuffers],
+      idx: Array[Int],
+      from: Int,
+      to: Int,
+      scratch: Arena
+  ): Unit = {
     var size = 0L
     var c = 0
     while (c < buffers.length) {
@@ -722,7 +838,8 @@ final class PartitionedIpcWriter(
         if (sg.pendingBytes > 0 && (fullest == null || sg.pendingBytes > fullest.pendingBytes)) fullest = sg
         p += 1
       }
-      if (fullest == null) { heldBytes = 0L; return } else flushPartition(fullest)
+      if (fullest == null) { heldBytes = 0L; return }
+      else flushPartition(fullest)
     }
   }
 
@@ -751,7 +868,9 @@ final class PartitionedIpcWriter(
         while (from < end) {
           val to = math.min(end, from + batchRows)
           var c = 0
-          while (c < schema.fields.length) { batchBuilders(c).appendIndexed(source(c), order, from, to, scratch); c += 1 }
+          while (c < schema.fields.length) {
+            batchBuilders(c).appendIndexed(source(c), order, from, to, scratch); c += 1
+          }
           flush(segments(p), to - from, batchBuilders)
           from = to
         }
@@ -791,7 +910,8 @@ final class PartitionedIpcWriter(
               if (fileDictionary) { encodedColumn = true; ic.flushedIds = true }
               else {
                 val (sids, sdict) = scratchFor(c)
-                val encoded = if (rows < PartitionedIpcWriter.DictionaryMinRows) null else ic.remap(staged, rows, sids, sdict)
+                val encoded =
+                  if (rows < PartitionedIpcWriter.DictionaryMinRows) null else ic.remap(staged, rows, sids, sdict)
                 if (encoded != null) {
                   val (ids, dictionary) = encoded
                   taken(c) = ids
@@ -826,7 +946,8 @@ final class PartitionedIpcWriter(
       while (shape.hasRemaining) seg.sink.write(shape)
       val root = new VectorSchemaRoot(batchSchema.getFields, java.util.Arrays.asList(taken: _*), rows)
       val batch = new org.apache.arrow.vector.VectorUnloader(root, true, codec, true).getRecordBatch
-      try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, batch, IpcOption.DEFAULT) finally batch.close()
+      try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, batch, IpcOption.DEFAULT)
+      finally batch.close()
       seg.endStream()
       seg.rows += rows
       rawBytesWritten += batchBytesOf(taken)
@@ -849,9 +970,18 @@ final class PartitionedIpcWriter(
 
   /** One dictionary as an IPC `DictionaryBatch` message with `id`, over a root that wraps the vector. */
   private def writeDictionary(out: org.apache.arrow.vector.ipc.WriteChannel, vector: VarCharVector, id: Long): Unit = {
-    val droot = new VectorSchemaRoot(java.util.List.of(vector.getField), java.util.List.of[FieldVector](vector), vector.getValueCount)
-    val dbatch = new org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch(id, new org.apache.arrow.vector.VectorUnloader(droot, true, codec, true).getRecordBatch, false)
-    try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, dbatch, IpcOption.DEFAULT) finally dbatch.close()
+    val droot = new VectorSchemaRoot(
+      java.util.List.of(vector.getField),
+      java.util.List.of[FieldVector](vector),
+      vector.getValueCount
+    )
+    val dbatch = new org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch(
+      id,
+      new org.apache.arrow.vector.VectorUnloader(droot, true, codec, true).getRecordBatch,
+      false
+    )
+    try org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(out, dbatch, IpcOption.DEFAULT)
+    finally dbatch.close()
   }
 
   /**
@@ -900,13 +1030,12 @@ final class PartitionedIpcWriter(
   private val batchDictionaries = scala.collection.mutable.ArrayBuffer.empty[(VarCharVector, Int)]
 
   /** No per-buffer body compression: the partition's stream is compressed in frames (see `Segment.sink`). */
-  private val codec: org.apache.arrow.vector.compression.CompressionCodec = org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
+  private val codec: org.apache.arrow.vector.compression.CompressionCodec =
+    org.apache.arrow.vector.compression.NoCompressionCodec.INSTANCE
 
   /** The writer's one compression context and its output scratch, reused for every frame of every partition. */
   private val frameCompressor: ShuffleCompression.FrameCompressor = ShuffleCompression.frameCompressor(compression)
   private def compressFrame(raw: Array[Byte]): Array[Byte] = frameCompressor.compress(raw)
-
-
 
   /**
    * Ends every stream and writes the data file: the streams back to back and, when `withFooter`,
@@ -914,7 +1043,8 @@ final class PartitionedIpcWriter(
    * instead and the data file must be exactly the streams, so the writer there passes `false`.
    */
   def finish(withFooter: Boolean = true): PartitionedIpcFile.Index = {
-    val out = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+    val out =
+      FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
     try {
       val offsets = new Array[Long](numPartitions)
       val lengths = new Array[Long](numPartitions)
@@ -964,8 +1094,14 @@ final class PartitionedIpcWriter(
 
   override def close(): Unit = {
     segments.foreach(_.release())
-    if (staging != null) staging.foreach(b => try b.close() catch { case _: Exception => })
-    if (batchBuilders != null) batchBuilders.foreach(b => try b.close() catch { case _: Exception => })
+    if (staging != null) staging.foreach(b =>
+      try b.close()
+      catch { case _: Exception => }
+    )
+    if (batchBuilders != null) batchBuilders.foreach(b =>
+      try b.close()
+      catch { case _: Exception => }
+    )
     dictScratch.foreach(sc => if (sc != null) { sc._1.close(); sc._2.close() })
     plainScratch.foreach(v => if (v != null) v.close())
     frameCompressor.close()
@@ -973,21 +1109,28 @@ final class PartitionedIpcWriter(
 }
 
 object PartitionedIpcWriter {
+
   /** A builder's first capacity in rows, doubled as a partition fills (#351). */
   val InitialRows: Int = 256
+
   /** The floor of a builder's first capacity, however many partitions there are. */
   val MinInitialRows: Int = 16
+
   /** Above this many partitions the writer stages rows and partitions them at the flush; at or below, a builder set per partition. */
   val StagingPartitions: Int = 256
+
   /** A string builder's first data capacity per row, in bytes. */
   val InitialBytesPerRow: Int = 16
+
   /** Above this many partitions the writer groups rows by index lists and gathers; below, it compacts by masks. */
   val IndexListPartitions: Int = 32
 
   /** The data width of a fixed-width lane as the writer lays it out (a small decimal is int64). */
   def byteWidth(dt: org.apache.spark.sql.types.DataType): Int = dt match {
-    case org.apache.spark.sql.types.IntegerType | org.apache.spark.sql.types.DateType | org.apache.spark.sql.types.ByteType | org.apache.spark.sql.types.ShortType => 4 // narrow ints ride INT32 lanes (#327)
-    case org.apache.spark.sql.types.LongType | org.apache.spark.sql.types.TimestampType | org.apache.spark.sql.types.DoubleType => 8
+    case org.apache.spark.sql.types.IntegerType | org.apache.spark.sql.types.DateType | org.apache.spark.sql.types.ByteType | org.apache.spark.sql.types.ShortType =>
+      4 // narrow ints ride INT32 lanes (#327)
+    case org.apache.spark.sql.types.LongType | org.apache.spark.sql.types.TimestampType | org.apache.spark.sql.types.DoubleType =>
+      8
     case d: org.apache.spark.sql.types.DecimalType if d.precision <= 18 => 8
     case _: org.apache.spark.sql.types.DecimalType => 16
     case other => throw new IllegalArgumentException(s"unsupported shuffle column type $other")
@@ -1000,15 +1143,18 @@ object PartitionedIpcWriter {
     override def close(): Unit = ()
   }
 
-
   /** Default share of distinct values per rows above which a batch's string column goes plain (#356). */
   val DefaultDictionaryMaxRatio: Double = 0.5
+
   /** Below this many rows a record batch's strings stay plain (#416): coalescible by the reader, and no dictionary to pay for. */
   val DictionaryMinRows: Int = 256
+
   /** Rows hashed before the first distinct-ratio check: enough to tell a name column from a state column. */
   val DictionarySampleRows: Int = 512
+
   /** Bytes of distinct values a string column's task dictionary (#377) holds before the column is frozen and goes plain (#416). */
   val DictionaryCapBytes: Long = 32L << 20
+
   /** Non-null rows a string column maps before its task-level distinct ratio is judged against `dictionaryMaxRatio` (#416). */
   val FreezeSampleRows: Long = 4096L
 
@@ -1018,8 +1164,12 @@ object PartitionedIpcWriter {
    * `maxRatio` of the rows seen, checked after [[DictionarySampleRows]] rows and at the end: the
    * caller then ships the column plain (#356).
    */
-  def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator,
-      maxRatio: Double = DefaultDictionaryMaxRatio): (IntVector, VarCharVector) = {
+  def encodeStrings(
+      in: VarCharVector,
+      name: String,
+      allocator: BufferAllocator,
+      maxRatio: Double = DefaultDictionaryMaxRatio
+  ): (IntVector, VarCharVector) = {
     if (maxRatio <= 0.0) return null
     val ids = new IntVector(name, allocator)
     val dictionary = new VarCharVector(name + ".dictionary", allocator)
@@ -1032,21 +1182,29 @@ object PartitionedIpcWriter {
    * As above into the caller's `ids` and `dictionary` (emptied, grown as needed and kept by the caller
    * across blocks, #416); on `null` they are left empty.
    */
-  def encodeStrings(in: VarCharVector, name: String, allocator: BufferAllocator, maxRatio: Double,
-      ids: IntVector, dictionary: VarCharVector): (IntVector, VarCharVector) = {
+  def encodeStrings(
+      in: VarCharVector,
+      name: String,
+      allocator: BufferAllocator,
+      maxRatio: Double,
+      ids: IntVector,
+      dictionary: VarCharVector
+  ): (IntVector, VarCharVector) = {
     val n = in.getValueCount
     if (maxRatio <= 0.0) return null
     val totalBytes = if (n == 0) 0L else in.getOffsetBuffer.getInt(n.toLong * 4).toLong
     if (ids.getValueCapacity < n) ids.allocateNew(n) else ids.reset()
     // Sized to the input once (the distinct values are at most all of it): no reallocation per growth.
-    if (dictionary.getValueCapacity < math.max(n, 1) || dictionary.getByteCapacity < totalBytes) dictionary.allocateNew(math.max(totalBytes, 1L), math.max(n, 1))
+    if (dictionary.getValueCapacity < math.max(n, 1) || dictionary.getByteCapacity < totalBytes)
+      dictionary.allocateNew(math.max(totalBytes, 1L), math.max(n, 1))
     else dictionary.reset()
     // The distinct values as an open-addressing table over the input's own bytes (#387): an entry is the
     // row where its value was first seen, hashed and compared in place through the Arrow buffers -- no
     // ByteBuffer per row, no boxing, no HashMap. A HashMap of ByteBuffers here was 11% of an executor's
     // time in q67 at 1 TB (encodeStrings 7%, ByteBuffer.hashCode 4%).
     val offsets = MemorySegment.ofBuffer(in.getOffsetBuffer.nioBuffer(0, (n + 1) * 4))
-    val data = if (totalBytes == 0) MemorySegment.NULL else MemorySegment.ofBuffer(in.getDataBuffer.nioBuffer(0, totalBytes.toInt))
+    val data = if (totalBytes == 0) MemorySegment.NULL
+    else MemorySegment.ofBuffer(in.getDataBuffer.nioBuffer(0, totalBytes.toInt))
     val dataBuf = if (totalBytes == 0) null else in.getDataBuffer.nioBuffer(0, totalBytes.toInt)
     var capacity = 16
     while (capacity < n * 2) capacity <<= 1
@@ -1069,13 +1227,15 @@ object PartitionedIpcWriter {
             table(h) = i + 1
             entryId(i) = next
             id = next
-            if (end > start) dictionary.setSafe(next, dataBuf, start, end - start) else dictionary.setSafe(next, Array.emptyByteArray)
+            if (end > start) dictionary.setSafe(next, dataBuf, start, end - start)
+            else dictionary.setSafe(next, Array.emptyByteArray)
             next += 1
           } else {
             val row = slot - 1
             val rs = offsets.get(VectorBuffers.LE_INT, row.toLong * 4)
             val re = offsets.get(VectorBuffers.LE_INT, (row.toLong + 1) * 4)
-            if (re - rs == end - start && (end == start || MemorySegment.mismatch(data, rs, re, data, start, end) < 0)) id = entryId(row)
+            if (re - rs == end - start && (end == start || MemorySegment.mismatch(data, rs, re, data, start, end) < 0))
+              id = entryId(row)
             else h = (h + 1) & mask
           }
         }

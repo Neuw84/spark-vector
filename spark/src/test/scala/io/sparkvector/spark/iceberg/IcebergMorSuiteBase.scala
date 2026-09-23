@@ -68,7 +68,8 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     leaves.foreach { leaf =>
       assert(
         leaf.getClass.getSimpleName == expected,
-        s"expected $expected under ${op.getSimpleName}, got ${leaf.getClass.getName}:\n${finalPlan(df).treeString}")
+        s"expected $expected under ${op.getSimpleName}, got ${leaf.getClass.getName}:\n${finalPlan(df).treeString}"
+      )
     }
   }
 
@@ -157,10 +158,14 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
       d.collect()
       d
     }
-    val vectorNodes = PlanUtils.allNodes(finalPlan(merge)).filter(_.isInstanceOf[org.apache.spark.sql.vector.VectorExec])
+    val vectorNodes =
+      PlanUtils.allNodes(finalPlan(merge)).filter(_.isInstanceOf[org.apache.spark.sql.vector.VectorExec])
     info(s"spark-vector operators in the MERGE plan: ${vectorNodes.map(_.nodeName).mkString(", ")}")
     info(finalPlan(merge).treeString)
-    assert(IcebergTables.deleteFileCount(spark, on) > deletesBefore, "MERGE should have added delete files, not rewritten data files")
+    assert(
+      IcebergTables.deleteFileCount(spark, on) > deletesBefore,
+      "MERGE should have added delete files, not rewritten data files"
+    )
 
     // The write must not depend on which engine evaluated the plan: compare both tables row by row.
     val readAll = "SELECT i, l, d, d2, dt, b, s FROM %s"
@@ -168,8 +173,13 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     val actual = withPlugin(enabled = false)(spark.sql(readAll.format(on)).collect())
     assertRowsEqual(expected, actual, 1e-9, "table contents after MERGE INTO")
     assert(expected.length === count(s"SELECT count(*) FROM $off"))
-    assert(count(s"SELECT count(*) FROM $on WHERE i >= ${IcebergTables.MixedRows}") === IcebergTables.MergeInsertedKeys.size)
-    assert(count(s"SELECT count(*) FROM $on WHERE d2 < 0") === flaggedAbsent, "only unmatched flagged rows keep a negative d2")
+    assert(
+      count(s"SELECT count(*) FROM $on WHERE i >= ${IcebergTables.MixedRows}") === IcebergTables.MergeInsertedKeys.size
+    )
+    assert(
+      count(s"SELECT count(*) FROM $on WHERE d2 < 0") === flaggedAbsent,
+      "only unmatched flagged rows keep a negative d2"
+    )
     assert(count(s"SELECT count(*) FROM $on WHERE d2 < 0 AND i IN ($flagged)") === flaggedAbsent)
 
     // Reads over the merged table: the merge's position deletes stack on the earlier rounds.
@@ -194,11 +204,18 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     IcebergTables.createMixedMor(spark, on, formatVersion = 2)
     IcebergTables.createMixedMor(spark, off, formatVersion = 2)
     withPlugin(enabled = false)(spark.sql(IcebergTables.mergeSql(off)).collect())
-    withConf(VectorConf.SortMergeJoinEnabled -> "true", "spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.ExplainFallbackEnabled -> "true") {
+    withConf(
+      VectorConf.SortMergeJoinEnabled -> "true",
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      VectorConf.ExplainFallbackEnabled -> "true"
+    ) {
       val merge = withPlugin(enabled = true) { val d = spark.sql(IcebergTables.mergeSql(on)); d.collect(); d }
       val nodes = PlanUtils.allNodes(finalPlan(merge))
       assert(nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorMergeRowsExec]), finalPlan(merge).treeString)
-      assert(nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]), finalPlan(merge).treeString)
+      assert(
+        nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]),
+        finalPlan(merge).treeString
+      )
     }
     val readAll = "SELECT i, l, d, d2, dt, b, s FROM %s ORDER BY i"
     val expected = withPlugin(enabled = false)(spark.sql(readAll.format(off)).collect())

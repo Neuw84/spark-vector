@@ -2,7 +2,13 @@ package io.sparkvector.spark
 
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.{LocalTableScanExec, SampleExec}
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorLocalTableScanExec, VectorProjectExec, VectorSampleExec}
+import org.apache.spark.sql.vector.{
+  VectorFilterExec,
+  VectorHashAggregateExec,
+  VectorLocalTableScanExec,
+  VectorProjectExec,
+  VectorSampleExec
+}
 
 /**
  * Sampling must return exactly Spark's rows for a seed: the operator drives Spark's own Bernoulli
@@ -36,13 +42,22 @@ class VectorSampleSuite extends VectorQuerySuite {
 
   test("a sample composes with our filter, projection and aggregate on either side") {
     // A filter beneath the sample: the sampler draws only for rows the filter kept, as Spark's does.
-    checkVectorized("SELECT i FROM (SELECT i FROM t WHERE i % 3 = 0) TABLESAMPLE (50 PERCENT) REPEATABLE (7) x", Seq(Sample, Filter))
+    checkVectorized(
+      "SELECT i FROM (SELECT i FROM t WHERE i % 3 = 0) TABLESAMPLE (50 PERCENT) REPEATABLE (7) x",
+      Seq(Sample, Filter)
+    )
     // A filter above the sample consumes the forwarded selection.
-    checkVectorized("SELECT i FROM (SELECT i FROM t TABLESAMPLE (60 PERCENT) REPEATABLE (3)) x WHERE i > 100", Seq(Sample, Filter))
+    checkVectorized(
+      "SELECT i FROM (SELECT i FROM t TABLESAMPLE (60 PERCENT) REPEATABLE (3)) x WHERE i > 100",
+      Seq(Sample, Filter)
+    )
     // Sparse samples are compacted, dense ones forwarded: both end in the same rows.
     checkVectorized("SELECT i + 1 AS j, s FROM t TABLESAMPLE (2 PERCENT) REPEATABLE (99)", Seq(Sample, Project))
     checkVectorized("SELECT i + 1 AS j, s FROM t TABLESAMPLE (98 PERCENT) REPEATABLE (99)", Seq(Sample, Project))
-    checkVectorized("SELECT s, count(*) AS n, sum(i) AS si FROM t TABLESAMPLE (25 PERCENT) REPEATABLE (2024) GROUP BY s", Seq(Sample, Agg))
+    checkVectorized(
+      "SELECT s, count(*) AS n, sum(i) AS si FROM t TABLESAMPLE (25 PERCENT) REPEATABLE (2024) GROUP BY s",
+      Seq(Sample, Agg)
+    )
     checkVectorized("SELECT count(*) AS n FROM t TABLESAMPLE (0.5 PERCENT) REPEATABLE (1)", Seq(Sample, Agg))
   }
 
@@ -50,26 +65,36 @@ class VectorSampleSuite extends VectorQuerySuite {
     spark.table("t").sample(withReplacement = true, 0.3, 42L).createOrReplaceTempView("t_poisson")
     checkFallback("SELECT i FROM t_poisson", Seq(Sample), "with replacement")
     withConf(VectorConf.SampleEnabled -> "false") {
-      val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM t TABLESAMPLE (30 PERCENT) REPEATABLE (42)"); d.collect(); d }
+      val df = withPlugin(enabled = true) {
+        val d = spark.sql("SELECT i FROM t TABLESAMPLE (30 PERCENT) REPEATABLE (42)"); d.collect(); d
+      }
       assert(nodesOf[VectorSampleExec](df).isEmpty && nodesOf[SampleExec](df).nonEmpty, finalPlan(df).treeString)
     }
   }
 
   test("a VALUES relation runs our operators when the local table scan is enabled (off by default)") {
-    val sql = "SELECT a, count(*) AS n, max(b) AS mb FROM VALUES (1, 'x'), (2, 'y'), (1, 'z'), (3, NULL) AS v(a, b) WHERE a < 3 GROUP BY a"
+    val sql =
+      "SELECT a, count(*) AS n, max(b) AS mb FROM VALUES (1, 'x'), (2, 'y'), (1, 'z'), (3, NULL) AS v(a, b) WHERE a < 3 GROUP BY a"
     // The optimizer normally evaluates filters and projections over a literal relation on the driver
     // (ConvertToLocalRelation); Spark's own operator tests exclude that rule, and so does this one.
-    val keepOperators = "spark.sql.optimizer.excludedRules" -> "org.apache.spark.sql.catalyst.optimizer.ConvertToLocalRelation"
+    val keepOperators =
+      "spark.sql.optimizer.excludedRules" -> "org.apache.spark.sql.catalyst.optimizer.ConvertToLocalRelation"
     withConf(VectorConf.LocalTableScanEnabled -> "true", keepOperators) {
       val df = checkVectorized(sql, Seq(LocalScan, Filter, Agg))
       assert(nodesOf[LocalTableScanExec](df).isEmpty, finalPlan(df).treeString)
       checkVectorized("SELECT a * 2 AS d, b FROM VALUES (1, 'x'), (2, 'y') AS v(a, b)", Seq(LocalScan, Project))
       checkVectorized("SELECT a FROM VALUES (1), (2) AS v(a) WHERE a > 5", Seq(LocalScan, Filter))
-      checkVectorized("SELECT a, b FROM (SELECT * FROM VALUES (1, 'x'), (2, NULL), (3, 'z') AS v(a, b)) TABLESAMPLE (50 PERCENT) REPEATABLE (4) w", Seq(LocalScan, Sample))
+      checkVectorized(
+        "SELECT a, b FROM (SELECT * FROM VALUES (1, 'x'), (2, NULL), (3, 'z') AS v(a, b)) TABLESAMPLE (50 PERCENT) REPEATABLE (4) w",
+        Seq(LocalScan, Sample)
+      )
     }
     withConf(keepOperators) {
       val df = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); d }
-      assert(nodesOf[VectorLocalTableScanExec](df).isEmpty && nodesOf[LocalTableScanExec](df).nonEmpty, finalPlan(df).treeString)
+      assert(
+        nodesOf[VectorLocalTableScanExec](df).isEmpty && nodesOf[LocalTableScanExec](df).nonEmpty,
+        finalPlan(df).treeString
+      )
     }
   }
 }

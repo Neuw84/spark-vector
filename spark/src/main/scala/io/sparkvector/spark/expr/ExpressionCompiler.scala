@@ -1,13 +1,210 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArithOp, BitKernels, CastKernels, CompareOp, DateKernels, MathKernels, PredicateKernels, RoundKernels, StringCaseKernels, StringLengthKernels, StringMatchKernels, VecType}
+import io.sparkvector.kernels.{
+  ArithOp,
+  BitKernels,
+  CastKernels,
+  CompareOp,
+  DateKernels,
+  MathKernels,
+  PredicateKernels,
+  RoundKernels,
+  StringCaseKernels,
+  StringLengthKernels,
+  StringMatchKernels,
+  VecType
+}
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.kernels.TranscendentalKernels
-import org.apache.spark.sql.catalyst.expressions.{Abs, Acos, Acosh, Add, AddMonths, Alias, And, Ascii, Asin, Asinh, Atan, Atan2, Atanh, Attribute, AttributeReference, BinaryArithmetic, BitLength, BitwiseAnd, BitwiseCount, BitwiseGet, BitwiseNot, BitwiseOr, BitwiseXor, BloomFilterMightContain, BoundReference, BRound, CaseWhen, Cast, Cbrt, CheckOverflow, Ceil, Chr, Coalesce, Concat, ConcatWs, Contains, Crc32, Cos, Cosh, Cot, Csc, DateAdd, DateDiff, DateFormatClass, DateFromUnixDate, DateSub, DayOfMonth, DayOfWeek, DayOfYear, Divide, ElementAt, Elt, EndsWith, EqualNullSafe, EqualTo, EvalMode, Exp, Expm1, Expression, FindInSet, Floor, FromUnixTime, GetArrayItem, GetArrayStructFields, GetMapValue, GetStructField, GreaterThan, Size, Greatest, GreaterThanOrEqual, Hour, Hypot, If, In, InitCap, InSet, IntegralDivide, IsNaN, IsNotNull, IsNull, KnownFloatingPointNormalized, LastDay, Least, Length, LessThan, Like, LessThanOrEqual, Literal, Log, Log10, Log1p, Log2, Logarithm, Lower, Md5, Murmur3Hash, MakeDate, MakeDecimal, MicrosToTimestamp, MillisToTimestamp, Minute, MonotonicallyIncreasingID, Month, MonthsBetween, Multiply, NaNvl, NextDay, Not, OctetLength, Or, Pmod, Pow, Quarter, Remainder, Rint, Round, RoundCeil, RoundFloor, Overlay, Sec, Second, SecondsToTimestamp, Sha1, Sha2, ShiftLeft, ShiftRight, ShiftRightUnsigned, Signum, Sin, Sinh, Sqrt, StartsWith, StringInstr, StringLocate, StringLPad, StringRepeat, StringReplace, StringRPad, StringSpace, StringSplitSQL, StringTranslate, StringTrim, StringTrimLeft, StringTrimRight, Substring, SubstringIndex, Subtract, Tan, Tanh, ToDegrees, ToRadians, ToUnixTimestamp, TruncDate, TruncTimestamp, UnaryMathExpression, UnaryMinus, UnaryPositive, UnixDate, UnixTimestamp, UnixMicros, UnixMillis, UnixSeconds, UnscaledValue, Upper, WeekDay, WeekOfYear, XxHash64, Year}
+import org.apache.spark.sql.catalyst.expressions.{
+  Abs,
+  Acos,
+  Acosh,
+  Add,
+  AddMonths,
+  Alias,
+  And,
+  Ascii,
+  Asin,
+  Asinh,
+  Atan,
+  Atan2,
+  Atanh,
+  Attribute,
+  AttributeReference,
+  BinaryArithmetic,
+  BitLength,
+  BitwiseAnd,
+  BitwiseCount,
+  BitwiseGet,
+  BitwiseNot,
+  BitwiseOr,
+  BitwiseXor,
+  BloomFilterMightContain,
+  BoundReference,
+  BRound,
+  CaseWhen,
+  Cast,
+  Cbrt,
+  CheckOverflow,
+  Ceil,
+  Chr,
+  Coalesce,
+  Concat,
+  ConcatWs,
+  Contains,
+  Crc32,
+  Cos,
+  Cosh,
+  Cot,
+  Csc,
+  DateAdd,
+  DateDiff,
+  DateFormatClass,
+  DateFromUnixDate,
+  DateSub,
+  DayOfMonth,
+  DayOfWeek,
+  DayOfYear,
+  Divide,
+  ElementAt,
+  Elt,
+  EndsWith,
+  EqualNullSafe,
+  EqualTo,
+  EvalMode,
+  Exp,
+  Expm1,
+  Expression,
+  FindInSet,
+  Floor,
+  FromUnixTime,
+  GetArrayItem,
+  GetArrayStructFields,
+  GetMapValue,
+  GetStructField,
+  GreaterThan,
+  Size,
+  Greatest,
+  GreaterThanOrEqual,
+  Hour,
+  Hypot,
+  If,
+  In,
+  InitCap,
+  InSet,
+  IntegralDivide,
+  IsNaN,
+  IsNotNull,
+  IsNull,
+  KnownFloatingPointNormalized,
+  LastDay,
+  Least,
+  Length,
+  LessThan,
+  Like,
+  LessThanOrEqual,
+  Literal,
+  Log,
+  Log10,
+  Log1p,
+  Log2,
+  Logarithm,
+  Lower,
+  Md5,
+  Murmur3Hash,
+  MakeDate,
+  MakeDecimal,
+  MicrosToTimestamp,
+  MillisToTimestamp,
+  Minute,
+  MonotonicallyIncreasingID,
+  Month,
+  MonthsBetween,
+  Multiply,
+  NaNvl,
+  NextDay,
+  Not,
+  OctetLength,
+  Or,
+  Pmod,
+  Pow,
+  Quarter,
+  Remainder,
+  Rint,
+  Round,
+  RoundCeil,
+  RoundFloor,
+  Overlay,
+  Sec,
+  Second,
+  SecondsToTimestamp,
+  Sha1,
+  Sha2,
+  ShiftLeft,
+  ShiftRight,
+  ShiftRightUnsigned,
+  Signum,
+  Sin,
+  Sinh,
+  Sqrt,
+  StartsWith,
+  StringInstr,
+  StringLocate,
+  StringLPad,
+  StringRepeat,
+  StringReplace,
+  StringRPad,
+  StringSpace,
+  StringSplitSQL,
+  StringTranslate,
+  StringTrim,
+  StringTrimLeft,
+  StringTrimRight,
+  Substring,
+  SubstringIndex,
+  Subtract,
+  Tan,
+  Tanh,
+  ToDegrees,
+  ToRadians,
+  ToUnixTimestamp,
+  TruncDate,
+  TruncTimestamp,
+  UnaryMathExpression,
+  UnaryMinus,
+  UnaryPositive,
+  UnixDate,
+  UnixTimestamp,
+  UnixMicros,
+  UnixMillis,
+  UnixSeconds,
+  UnscaledValue,
+  Upper,
+  WeekDay,
+  WeekOfYear,
+  XxHash64,
+  Year
+}
 import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.unsafe.types.UTF8String
-import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, ByteType, ShortType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, MapType, StringType, TimestampType}
+import org.apache.spark.sql.types.{
+  ArrayType,
+  BinaryType,
+  BooleanType,
+  ByteType,
+  ShortType,
+  DataType,
+  DateType,
+  DecimalType,
+  DoubleType,
+  IntegerType,
+  LongType,
+  MapType,
+  StringType,
+  TimestampType
+}
 
 /**
  * Translates Catalyst expressions into [[VectorExpr]] trees. Returns a human-readable reason on
@@ -17,11 +214,13 @@ object ExpressionCompiler {
 
   type Result = Either[String, VectorExpr]
 
-  private val comparableTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.FLOAT64, VecType.UTF8, VecType.DECIMAL128)
+  private val comparableTypes: Set[VecType] =
+    Set(VecType.INT32, VecType.INT64, VecType.FLOAT64, VecType.UTF8, VecType.DECIMAL128)
 
   /** Types whose literals can be used as compare / IN operands. */
   private def isLiteralType(dt: DataType): Boolean = dt match {
-    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType | ByteType | ShortType => true // byte and short literals ride the int lane (#327)
+    case IntegerType | LongType | DoubleType | DateType | TimestampType | StringType | ByteType | ShortType =>
+      true // byte and short literals ride the int lane (#327)
     case d: DecimalType => TypeMapping.isSupported(d)
     case _ => false
   }
@@ -84,16 +283,22 @@ object ExpressionCompiler {
     case g: GetStructField =>
       structPath(g, input).flatMap { case (ordinal, path) =>
         if (TypeMapping.isSupported(g.dataType)) Right(StructFieldExpr(ordinal, path, g.dataType))
-        else Left(s"struct field ${g.sql} of type ${g.dataType.simpleString} not supported as a value (#50: nested results are not planned)")
+        else Left(
+          s"struct field ${g.sql} of type ${g.dataType.simpleString} not supported as a value (#50: nested results are not planned)"
+        )
       }
     // size(arr) / size(map): the element count read from Spark's vector (Spark adds size(arr) > 0 below a non-outer explode).
     case s: Size =>
       val isMap = s.child.dataType.isInstanceOf[MapType]
-      if (!isMap && !s.child.dataType.isInstanceOf[ArrayType]) Left(s"size over ${s.child.dataType.simpleString} not supported")
-      else nestedColumnPath(s.child, input).map { case (ordinal, path) => SizeExpr(ordinal, path, isMap, s.legacySizeOfNull) }
+      if (!isMap && !s.child.dataType.isInstanceOf[ArrayType])
+        Left(s"size over ${s.child.dataType.simpleString} not supported")
+      else nestedColumnPath(s.child, input).map { case (ordinal, path) =>
+        SizeExpr(ordinal, path, isMap, s.legacySizeOfNull)
+      }
     case g: GetArrayItem => Left(s"array element access ${g.sql} not supported (#50: only struct fields are read)")
     case g: GetMapValue => Left(s"map value access ${g.sql} not supported (#50: only struct fields are read)")
-    case g: GetArrayStructFields => Left(s"array of struct fields ${g.sql} not supported (#50: only struct fields are read)")
+    case g: GetArrayStructFields =>
+      Left(s"array of struct fields ${g.sql} not supported (#50: only struct fields are read)")
 
     // A typed null is an all-invalid column; the operators that need a *value* literal (comparison
     // operands, IN lists, string arguments) match the Spark node before compiling and keep their reasons.
@@ -134,29 +339,46 @@ object ExpressionCompiler {
       }.map(vs => Murmur3HashExpr(vs, children.map(_.dataType), seed))
     case Md5(BinaryFromString(str)) => stringSubject(str, input, "md5").map(DigestExpr(DigestExpr.Md5, _))
     case Sha1(BinaryFromString(str)) => stringSubject(str, input, "sha1").map(DigestExpr(DigestExpr.Sha1, _))
-    case Sha2(BinaryFromString(str), Literal(bits: Int, IntegerType)) => stringSubject(str, input, "sha2").map(DigestExpr(DigestExpr.Sha2(bits), _))
+    case Sha2(BinaryFromString(str), Literal(bits: Int, IntegerType)) =>
+      stringSubject(str, input, "sha2").map(DigestExpr(DigestExpr.Sha2(bits), _))
     case Sha2(_, _) => Left("sha2 with a non-literal bit length not supported")
     case Crc32(BinaryFromString(str)) => stringSubject(str, input, "crc32").map(DigestExpr(DigestExpr.Crc32, _))
 
     // The search family: one byte-search primitive under every function; string children only.
     case StringInstr(str, sub) if str.dataType == StringType =>
-      for (h <- stringArg(str, input, "instr"); nd <- stringArg(sub, input, "instr")) yield LocateExpr(nd, h, LiteralExpr(1, IntegerType))
+      for (h <- stringArg(str, input, "instr"); nd <- stringArg(sub, input, "instr"))
+        yield LocateExpr(nd, h, LiteralExpr(1, IntegerType))
     case StringLocate(sub, str, start) if str.dataType == StringType =>
-      for (nd <- stringArg(sub, input, "locate"); h <- stringArg(str, input, "locate"); st <- intArg(start, input, "locate")) yield LocateExpr(nd, h, st)
+      for (
+        nd <- stringArg(sub, input, "locate"); h <- stringArg(str, input, "locate");
+        st <- intArg(start, input, "locate")
+      ) yield LocateExpr(nd, h, st)
     case StringReplace(str, search, replacement) if str.dataType == StringType =>
-      for (h <- stringSubject(str, input, "replace"); se <- stringArg(search, input, "replace"); r <- stringArg(replacement, input, "replace")) yield ReplaceExpr(h, se, r)
-    case StringTranslate(str, Literal(m: UTF8String, StringType), Literal(r: UTF8String, StringType)) if str.dataType == StringType =>
+      for (
+        h <- stringSubject(str, input, "replace"); se <- stringArg(search, input, "replace");
+        r <- stringArg(replacement, input, "replace")
+      ) yield ReplaceExpr(h, se, r)
+    case StringTranslate(str, Literal(m: UTF8String, StringType), Literal(r: UTF8String, StringType))
+        if str.dataType == StringType =>
       stringSubject(str, input, "translate").map { h =>
         val (from, to) = TranslateExpr.dictionary(m.toString, r.toString)
         TranslateExpr(h, from, to)
       }
     case StringTranslate(_, _, _) => Left("translate with a non-literal from/to string not supported")
     case SubstringIndex(str, delim, count) if str.dataType == StringType =>
-      for (h <- stringSubject(str, input, "substring_index"); d <- stringArg(delim, input, "substring_index"); c <- intArg(count, input, "substring_index")) yield SubstringIndexExpr(h, d, c)
-    case e @ ElementAt(StringSplitSQL(str, delim), part, Some(Literal(dflt: UTF8String, StringType)), _) if str.dataType == StringType && dflt.numBytes == 0 =>
-      for (h <- stringSubject(str, input, "split_part"); d <- stringArg(delim, input, "split_part"); k <- intArg(part, input, "split_part")) yield SplitPartExpr(h, d, k, e.origin.context)
+      for (
+        h <- stringSubject(str, input, "substring_index"); d <- stringArg(delim, input, "substring_index");
+        c <- intArg(count, input, "substring_index")
+      ) yield SubstringIndexExpr(h, d, c)
+    case e @ ElementAt(StringSplitSQL(str, delim), part, Some(Literal(dflt: UTF8String, StringType)), _)
+        if str.dataType == StringType && dflt.numBytes == 0 =>
+      for (
+        h <- stringSubject(str, input, "split_part"); d <- stringArg(delim, input, "split_part");
+        k <- intArg(part, input, "split_part")
+      ) yield SplitPartExpr(h, d, k, e.origin.context)
     case FindInSet(word, set) if set.dataType == StringType =>
-      for (w <- stringArg(word, input, "find_in_set"); st <- stringArg(set, input, "find_in_set")) yield FindInSetExpr(w, st)
+      for (w <- stringArg(word, input, "find_in_set"); st <- stringArg(set, input, "find_in_set"))
+        yield FindInSetExpr(w, st)
 
     // Case mapping: the ASCII rows in the kernel, the rest through Spark's own CollationSupport.
     // A collated column follows ICU rules and is not byte-mapped -- the line Comet draws too.
@@ -174,13 +396,18 @@ object ExpressionCompiler {
     case ConcatWs(children) if children.nonEmpty && children.forall(_.dataType == StringType) =>
       stringArgs(children, input, "concat_ws").map(ps => ConcatWsExpr(ps.head, ps.tail))
     case e @ Elt(children, failOnError) if children.length > 1 && children.tail.forall(_.dataType == StringType) =>
-      for (i <- intArg(children.head, input, "elt"); ps <- stringArgs(children.tail, input, "elt")) yield EltExpr(i, ps, failOnError, e.origin.context)
+      for (i <- intArg(children.head, input, "elt"); ps <- stringArgs(children.tail, input, "elt"))
+        yield EltExpr(i, ps, failOnError, e.origin.context)
 
     // The measuring family: an INT32 per string, once per dictionary entry on dictionary input.
-    case Length(child) if child.dataType == StringType => stringSubject(child, input, "length").map(StringMeasureExpr(StringLengthKernels.Measure.CHARS, _))
-    case OctetLength(child) if child.dataType == StringType => stringSubject(child, input, "octet_length").map(StringMeasureExpr(StringLengthKernels.Measure.BYTES, _))
-    case BitLength(child) if child.dataType == StringType => stringSubject(child, input, "bit_length").map(StringMeasureExpr(StringLengthKernels.Measure.BITS, _))
-    case Ascii(child) => stringSubject(child, input, "ascii").map(StringMeasureExpr(StringLengthKernels.Measure.ASCII, _))
+    case Length(child) if child.dataType == StringType =>
+      stringSubject(child, input, "length").map(StringMeasureExpr(StringLengthKernels.Measure.CHARS, _))
+    case OctetLength(child) if child.dataType == StringType =>
+      stringSubject(child, input, "octet_length").map(StringMeasureExpr(StringLengthKernels.Measure.BYTES, _))
+    case BitLength(child) if child.dataType == StringType =>
+      stringSubject(child, input, "bit_length").map(StringMeasureExpr(StringLengthKernels.Measure.BITS, _))
+    case Ascii(child) =>
+      stringSubject(child, input, "ascii").map(StringMeasureExpr(StringLengthKernels.Measure.ASCII, _))
     case Chr(child) =>
       compile(child, input).flatMap {
         case _: LiteralExpr => Left("chr of a literal")
@@ -191,13 +418,23 @@ object ExpressionCompiler {
     // The slicing family writes new UTF8 data: Spark's UTF8String semantics per lane (left/right are
     // Spark's own rewrites onto substring; binary inputs are not lanes and fall back).
     case Substring(str, pos, len) if str.dataType == StringType =>
-      for (s <- stringSubject(str, input, "substring"); p <- intArg(pos, input, "substring"); l <- intArg(len, input, "substring")) yield SubstringExpr(s, p, l)
+      for (
+        s <- stringSubject(str, input, "substring"); p <- intArg(pos, input, "substring");
+        l <- intArg(len, input, "substring")
+      ) yield SubstringExpr(s, p, l)
     case StringLPad(str, len, pad) =>
-      for (s <- stringSubject(str, input, "lpad"); l <- intArg(len, input, "lpad", StringSlices.MaxLiteralCount); pd <- stringArg(pad, input, "lpad")) yield PadExpr(s, l, pd, left = true)
+      for (
+        s <- stringSubject(str, input, "lpad"); l <- intArg(len, input, "lpad", StringSlices.MaxLiteralCount);
+        pd <- stringArg(pad, input, "lpad")
+      ) yield PadExpr(s, l, pd, left = true)
     case StringRPad(str, len, pad) =>
-      for (s <- stringSubject(str, input, "rpad"); l <- intArg(len, input, "rpad", StringSlices.MaxLiteralCount); pd <- stringArg(pad, input, "rpad")) yield PadExpr(s, l, pd, left = false)
+      for (
+        s <- stringSubject(str, input, "rpad"); l <- intArg(len, input, "rpad", StringSlices.MaxLiteralCount);
+        pd <- stringArg(pad, input, "rpad")
+      ) yield PadExpr(s, l, pd, left = false)
     case StringRepeat(str, times) =>
-      for (s <- stringSubject(str, input, "repeat"); t <- intArg(times, input, "repeat", StringSlices.MaxLiteralCount)) yield RepeatExpr(s, t)
+      for (s <- stringSubject(str, input, "repeat"); t <- intArg(times, input, "repeat", StringSlices.MaxLiteralCount))
+        yield RepeatExpr(s, t)
     case StringSpace(n) =>
       intArg(n, input, "space", StringSlices.MaxLiteralCount).flatMap {
         case _: LiteralExpr => Left("space of a literal") // folds in Spark; a constant column has no producer here
@@ -242,7 +479,11 @@ object ExpressionCompiler {
         case _: LiteralExpr => Left("negation of a literal")
         case c if !arithmeticTypes.contains(c.vecType) => Left(s"negation not supported for ${c.dataType.simpleString}")
         // Doubles and decimals of at most 18 digits cannot overflow here; integers raise in ANSI mode.
-        case c => Right(NegateExpr(c, ansi = failOnError && c.vecType != VecType.FLOAT64 && !TypeMapping.isDecimal(c.dataType), e.origin.context))
+        case c => Right(NegateExpr(
+            c,
+            ansi = failOnError && c.vecType != VecType.FLOAT64 && !TypeMapping.isDecimal(c.dataType),
+            e.origin.context
+          ))
       }
 
     // The optimizer's DecimalAggregates rewrite: sum(decimal) becomes MakeDecimal(sum(UnscaledValue(x))).
@@ -256,7 +497,8 @@ object ExpressionCompiler {
       compile(m.child, input).flatMap {
         case _: LiteralExpr => Left("make_decimal of a literal")
         case c if c.vecType != VecType.INT64 => Left(s"make_decimal of ${c.dataType.simpleString}")
-        case c if !TypeMapping.isSupported(m.dataType) => Left(s"make_decimal into ${m.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+        case c if !TypeMapping.isSupported(m.dataType) =>
+          Left(s"make_decimal into ${m.dataType.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
         case c => Right(MakeDecimalExpr(c, m.dataType.asInstanceOf[DecimalType], m.nullOnOverflow))
       }
 
@@ -267,8 +509,10 @@ object ExpressionCompiler {
     // and the decimal cast's own rescale-and-check otherwise.
     case c @ CheckOverflow(child, dt, nullOnOverflow) =>
       child.dataType match {
-        case _ if !TypeMapping.isSupported(dt) => Left(s"check_overflow into ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
-        case f: DecimalType if !TypeMapping.isSupported(f) => Left(s"check_overflow over ${f.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+        case _ if !TypeMapping.isSupported(dt) =>
+          Left(s"check_overflow into ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+        case f: DecimalType if !TypeMapping.isSupported(f) =>
+          Left(s"check_overflow over ${f.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
         case f: DecimalType =>
           compile(child, input).flatMap {
             case _: LiteralExpr => Left("check_overflow of a literal")
@@ -287,7 +531,8 @@ object ExpressionCompiler {
     // timestamp -> date is zone dependent: compiled only under a UTC or fixed-offset session zone.
     case c @ Cast(child, DateType, _, _) if child.dataType == TimestampType =>
       DateExprs.fixedOffsetMicros(c.timeZoneId) match {
-        case None => Left(s"cast timestamp -> date needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}")
+        case None =>
+          Left(s"cast timestamp -> date needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}")
         case Some(offset) =>
           compile(child, input).flatMap {
             case _: LiteralExpr => Left("cast of a literal")
@@ -306,18 +551,23 @@ object ExpressionCompiler {
         case ce =>
           (from, to) match {
             // Narrow integers (#327): into tinyint / smallint from any int lane or double; out of them the lane is already an int.
-            case (IntegerType | LongType | DoubleType | ShortType | ByteType, ByteType | ShortType) => Right(NarrowIntExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
+            case (IntegerType | LongType | DoubleType | ShortType | ByteType, ByteType | ShortType) =>
+              Right(NarrowIntExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
             case (ByteType | ShortType, IntegerType) => Right(RetypeExpr(ce, IntegerType))
-            case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) => Right(NarrowCastExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
+            case (LongType, IntegerType) | (DoubleType, IntegerType) | (DoubleType, LongType) =>
+              Right(NarrowCastExpr(ce, to, ansi, c.origin.context, nullOnOverflow = tryMode))
             case (IntegerType | LongType | DoubleType, BooleanType) => Right(ToBooleanExpr(ce))
             case (BooleanType, IntegerType | LongType | DoubleType) => Right(FromBooleanExpr(ce, to))
             case (StringType, BooleanType) => Right(StringToBooleanExpr(ce, ansi, c.origin.context))
             case (DateType, TimestampType) =>
               DateExprs.fixedOffsetMicros(c.timeZoneId) match {
-                case None => Left(s"cast date -> timestamp needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}")
+                case None => Left(
+                    s"cast date -> timestamp needs a fixed-offset session zone, not ${c.timeZoneId.getOrElse("none")}"
+                  )
                 case Some(offset) => Right(DateToTimestampExpr(ce, offset))
               }
-            case (StringType, IntegerType | LongType | DoubleType) => Right(StringToNumberExpr(ce, to, ansi, c.origin.context))
+            case (StringType, IntegerType | LongType | DoubleType) =>
+              Right(StringToNumberExpr(ce, to, ansi, c.origin.context))
             case (DateType | TimestampType, StringType) =>
               c.timeZoneId match {
                 case None => Left("cast to string without a session zone")
@@ -369,7 +619,8 @@ object ExpressionCompiler {
       dateArith(ArithOp.SUB, end, start, e.dataType, input)
 
     // Pattern functions: Spark's own formatter per row (a literal pattern), and date_trunc on timestamps.
-    case DateFormatClass(ts, Literal(fmt: UTF8String, StringType), tz) => formatInstant(ts, fmt.toString, tz, input, "date_format")
+    case DateFormatClass(ts, Literal(fmt: UTF8String, StringType), tz) =>
+      formatInstant(ts, fmt.toString, tz, input, "date_format")
     case DateFormatClass(_, _, _) => Left("date_format with a non-literal pattern not supported")
     case FromUnixTime(sec, Literal(fmt: UTF8String, StringType), Some(zone)) if sec.dataType == LongType =>
       compile(sec, input).flatMap {
@@ -385,7 +636,9 @@ object ExpressionCompiler {
         case Some(unit) =>
           DateExprs.fixedOffsetMicros(tz) match {
             case None => Left(s"date_trunc needs a fixed-offset session zone, not ${tz.getOrElse("none")}")
-            case Some(offset) => instantLane(ts, input, "date_trunc").map { case (c, isDate) => TruncTimestampExpr(unit, c, isDate, offset) }
+            case Some(offset) => instantLane(ts, input, "date_trunc").map { case (c, isDate) =>
+                TruncTimestampExpr(unit, c, isDate, offset)
+              }
           }
       }
     case TruncTimestamp(_, _, _) => Left("date_trunc with a non-literal unit not supported")
@@ -398,18 +651,24 @@ object ExpressionCompiler {
     case SecondsToTimestamp(child) if child.dataType == IntegerType || child.dataType == LongType =>
       integralLane(child, input, "timestamp_seconds").map(EpochScaleExpr(_, 1000000L, toMicros = true, TimestampType))
     case SecondsToTimestamp(child) => Left(s"timestamp_seconds over ${child.dataType.simpleString} not supported")
-    case MillisToTimestamp(child) => integralLane(child, input, "timestamp_millis").map(EpochScaleExpr(_, 1000L, toMicros = true, TimestampType))
-    case UnixSeconds(child) => timestampLane(child, input, "unix_seconds").map(EpochScaleExpr(_, 1000000L, toMicros = false, LongType))
-    case UnixMillis(child) => timestampLane(child, input, "unix_millis").map(EpochScaleExpr(_, 1000L, toMicros = false, LongType))
+    case MillisToTimestamp(child) =>
+      integralLane(child, input, "timestamp_millis").map(EpochScaleExpr(_, 1000L, toMicros = true, TimestampType))
+    case UnixSeconds(child) =>
+      timestampLane(child, input, "unix_seconds").map(EpochScaleExpr(_, 1000000L, toMicros = false, LongType))
+    case UnixMillis(child) =>
+      timestampLane(child, input, "unix_millis").map(EpochScaleExpr(_, 1000L, toMicros = false, LongType))
 
     // Month and week arithmetic on the civil-date conversion.
     case LastDay(child) => dateChild(child, input).map(DateScalarExpr(DateScalarExpr.LastDay, _, None, DateType))
-    case WeekOfYear(child) => dateChild(child, input).map(DateScalarExpr(DateScalarExpr.WeekOfYear, _, None, IntegerType))
+    case WeekOfYear(child) =>
+      dateChild(child, input).map(DateScalarExpr(DateScalarExpr.WeekOfYear, _, None, IntegerType))
     case AddMonths(start, months) =>
-      for (d <- dateChild(start, input); m <- intArg(months, input, "add_months")) yield DateScalarExpr(DateScalarExpr.AddMonths, d, Some(m), DateType)
+      for (d <- dateChild(start, input); m <- intArg(months, input, "add_months"))
+        yield DateScalarExpr(DateScalarExpr.AddMonths, d, Some(m), DateType)
     case NextDay(start, Literal(day: UTF8String, StringType), _) =>
       val code = DateKernels.dayOfWeekCode(day.toString)
-      if (code < 0) Left(s"next_day with an unknown day name '$day'") else dateChild(start, input).map(DateScalarExpr(DateScalarExpr.NextDay(code), _, None, DateType))
+      if (code < 0) Left(s"next_day with an unknown day name '$day'")
+      else dateChild(start, input).map(DateScalarExpr(DateScalarExpr.NextDay(code), _, None, DateType))
     case NextDay(_, _, _) => Left("next_day with a non-literal day name not supported")
     case e @ MonthsBetween(a, b, Literal(roundOff: Boolean, BooleanType), tz) =>
       DateExprs.fixedOffsetMicros(tz) match {
@@ -419,7 +678,9 @@ object ExpressionCompiler {
             yield MonthsBetweenExpr(ca._1, cb._1, ca._2, cb._2, roundOff, offset)
       }
     case e @ MakeDate(y, m, d, failOnError) =>
-      for (cy <- intLane(y, input, "make_date"); cm <- intLane(m, input, "make_date"); cd <- intLane(d, input, "make_date"))
+      for (
+        cy <- intLane(y, input, "make_date"); cm <- intLane(m, input, "make_date"); cd <- intLane(d, input, "make_date")
+      )
         yield MakeDateExpr(cy, cm, cd, failOnError, e.origin.context)
 
     // Per-partition prefix plus a running row number; state lives in the node, per task.
@@ -431,7 +692,9 @@ object ExpressionCompiler {
         case c => Right(WideDecimalUnaryExpr(c, abs = true, e.dataType.asInstanceOf[DecimalType]))
       }
     case e @ Abs(child, failOnError) =>
-      numericChild(child, input, "abs").map(c => AbsExpr(c, ansi = failOnError && c.vecType != VecType.FLOAT64, e.origin.context))
+      numericChild(child, input, "abs").map(c =>
+        AbsExpr(c, ansi = failOnError && c.vecType != VecType.FLOAT64, e.origin.context)
+      )
     case UnaryPositive(child) => compile(child, input)
     case Signum(child) =>
       if (child.dataType != DoubleType) Left(s"signum over ${child.dataType.simpleString}")
@@ -483,7 +746,8 @@ object ExpressionCompiler {
         for {
           le <- compile(l, input)
           re <- compile(r, input)
-          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("nanvl of two literals") else Right(())
+          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("nanvl of two literals")
+          else Right(())
         } yield NanvlExpr(le, re)
 
     case e @ Ceil(child) => ceilFloor(child, ceil = true, e.dataType, input)
@@ -492,9 +756,12 @@ object ExpressionCompiler {
       if (child.dataType != DoubleType) Left(s"rint over ${child.dataType.simpleString}")
       else numericChild(child, input, "rint").map(RintExpr(_))
     case r: Round => rounding(RoundKernels.Mode.HALF_UP, "round", r.child, r.scale, r.dataType, r.ansiEnabled, r, input)
-    case r: BRound => rounding(RoundKernels.Mode.HALF_EVEN, "bround", r.child, r.scale, r.dataType, r.ansiEnabled, r, input)
-    case r: RoundCeil => rounding(RoundKernels.Mode.CEILING, "ceil", r.child, r.scale, r.dataType, ansi = false, r, input)
-    case r: RoundFloor => rounding(RoundKernels.Mode.FLOOR, "floor", r.child, r.scale, r.dataType, ansi = false, r, input)
+    case r: BRound =>
+      rounding(RoundKernels.Mode.HALF_EVEN, "bround", r.child, r.scale, r.dataType, r.ansiEnabled, r, input)
+    case r: RoundCeil =>
+      rounding(RoundKernels.Mode.CEILING, "ceil", r.child, r.scale, r.dataType, ansi = false, r, input)
+    case r: RoundFloor =>
+      rounding(RoundKernels.Mode.FLOOR, "floor", r.child, r.scale, r.dataType, ansi = false, r, input)
 
     case e @ BitwiseAnd(l, r) => bitwise(BitKernels.BitOp.AND, "&", l, r, e.dataType, input)
     case e @ BitwiseOr(l, r) => bitwise(BitKernels.BitOp.OR, "|", l, r, e.dataType, input)
@@ -514,7 +781,8 @@ object ExpressionCompiler {
   }
 
   /** The input column and the chain of field ordinals a struct-field access reads; anything but a column or a field of one is refused. */
-  private def structPath(e: Expression, input: Seq[Attribute]): Either[String, (Int, Seq[Int])] = nestedColumnPath(e, input)
+  private def structPath(e: Expression, input: Seq[Attribute]): Either[String, (Int, Seq[Int])] =
+    nestedColumnPath(e, input)
 
   /**
    * A nested column as (input ordinal, chain of struct-field ordinals): a bare column, or a struct field
@@ -524,7 +792,9 @@ object ExpressionCompiler {
     case a: AttributeReference =>
       val ordinal = input.indexWhere(_.exprId == a.exprId)
       if (ordinal < 0) Left(s"unbound attribute ${a.name}") else Right((ordinal, Nil))
-    case GetStructField(child, ordinal, _) => nestedColumnPath(child, input).map { case (o, path) => (o, path :+ ordinal) }
+    case GetStructField(child, ordinal, _) => nestedColumnPath(child, input).map { case (o, path) =>
+        (o, path :+ ordinal)
+      }
     case other => Left(s"nested access over ${other.sql} not supported (only a column or a struct field of one)")
   }
 
@@ -532,14 +802,31 @@ object ExpressionCompiler {
   private val transcendental: Map[Class[_], TranscendentalKernels.Fn] = {
     import TranscendentalKernels.Fn._
     Map(
-      classOf[Exp] -> EXP, classOf[Expm1] -> EXPM1, classOf[Log] -> LOG, classOf[Log2] -> LOG2,
-      classOf[Log10] -> LOG10, classOf[Log1p] -> LOG1P, classOf[Cbrt] -> CBRT,
-      classOf[Sin] -> SIN, classOf[Cos] -> COS, classOf[Tan] -> TAN,
-      classOf[Asin] -> ASIN, classOf[Acos] -> ACOS, classOf[Atan] -> ATAN,
-      classOf[Sinh] -> SINH, classOf[Cosh] -> COSH, classOf[Tanh] -> TANH,
-      classOf[Asinh] -> ASINH, classOf[Acosh] -> ACOSH, classOf[Atanh] -> ATANH,
-      classOf[Cot] -> COT, classOf[Sec] -> SEC, classOf[Csc] -> CSC,
-      classOf[ToDegrees] -> DEGREES, classOf[ToRadians] -> RADIANS)
+      classOf[Exp] -> EXP,
+      classOf[Expm1] -> EXPM1,
+      classOf[Log] -> LOG,
+      classOf[Log2] -> LOG2,
+      classOf[Log10] -> LOG10,
+      classOf[Log1p] -> LOG1P,
+      classOf[Cbrt] -> CBRT,
+      classOf[Sin] -> SIN,
+      classOf[Cos] -> COS,
+      classOf[Tan] -> TAN,
+      classOf[Asin] -> ASIN,
+      classOf[Acos] -> ACOS,
+      classOf[Atan] -> ATAN,
+      classOf[Sinh] -> SINH,
+      classOf[Cosh] -> COSH,
+      classOf[Tanh] -> TANH,
+      classOf[Asinh] -> ASINH,
+      classOf[Acosh] -> ACOSH,
+      classOf[Atanh] -> ATANH,
+      classOf[Cot] -> COT,
+      classOf[Sec] -> SEC,
+      classOf[Csc] -> CSC,
+      classOf[ToDegrees] -> DEGREES,
+      classOf[ToRadians] -> RADIANS
+    )
   }
 
   private def doubleChild(e: Expression, input: Seq[Attribute], what: String): Result =
@@ -550,15 +837,24 @@ object ExpressionCompiler {
     doubleChild(child, input, what).map(UnaryMathExpr(fn, _))
 
   /** A binary math function: both sides double, a literal on at most one side (both would have folded). */
-  private def binaryMath(fn: TranscendentalKernels.Fn2, l: Expression, r: Expression, what: String, input: Seq[Attribute]): Result =
-    if (l.dataType != DoubleType || r.dataType != DoubleType) Left(s"$what over ${l.dataType.simpleString}, ${r.dataType.simpleString}")
+  private def binaryMath(
+      fn: TranscendentalKernels.Fn2,
+      l: Expression,
+      r: Expression,
+      what: String,
+      input: Seq[Attribute]
+  ): Result =
+    if (l.dataType != DoubleType || r.dataType != DoubleType)
+      Left(s"$what over ${l.dataType.simpleString}, ${r.dataType.simpleString}")
     else for (a <- compile(l, input); b <- compile(r, input)) yield {
       (a, b) match {
         case (_: LiteralExpr, _: LiteralExpr) => return Left(s"$what of two literals")
         case _ =>
       }
-      if (!a.isInstanceOf[LiteralExpr] && !arithmeticTypes.contains(a.vecType)) return Left(s"$what over ${l.dataType.simpleString} not supported")
-      if (!b.isInstanceOf[LiteralExpr] && !arithmeticTypes.contains(b.vecType)) return Left(s"$what over ${r.dataType.simpleString} not supported")
+      if (!a.isInstanceOf[LiteralExpr] && !arithmeticTypes.contains(a.vecType))
+        return Left(s"$what over ${l.dataType.simpleString} not supported")
+      if (!b.isInstanceOf[LiteralExpr] && !arithmeticTypes.contains(b.vecType))
+        return Left(s"$what over ${r.dataType.simpleString} not supported")
       BinaryMathExpr(fn, a, b)
     }
 
@@ -581,28 +877,45 @@ object ExpressionCompiler {
       resultType: DataType,
       mode: EvalMode.Value,
       e: Expression,
-      input: Seq[Attribute]): Result = {
-    val what = kind match { case DivideLikeExpr.Rem => "%"; case DivideLikeExpr.Pmod => "pmod"; case DivideLikeExpr.Div => "div" }
+      input: Seq[Attribute]
+  ): Result = {
+    val what = kind match {
+      case DivideLikeExpr.Rem => "%"; case DivideLikeExpr.Pmod => "pmod"; case DivideLikeExpr.Div => "div"
+    }
     // try_mod is Remainder in TRY mode: a zero divisor is null, exactly the legacy path.
     if (mode == EvalMode.TRY && kind != DivideLikeExpr.Rem) Left(s"try_* $what not supported")
-    else if (l.dataType != r.dataType) Left(s"$what operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
+    else if (l.dataType != r.dataType)
+      Left(s"$what operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
     else if (TypeMapping.isDecimal(l.dataType)) Left(s"$what over ${l.dataType.simpleString} not supported")
-    else if (kind == DivideLikeExpr.Div && TypeMapping.vecTypeOf(l.dataType) == VecType.FLOAT64) Left("div over double not supported")
+    else if (kind == DivideLikeExpr.Div && TypeMapping.vecTypeOf(l.dataType) == VecType.FLOAT64)
+      Left("div over double not supported")
     else
       for {
         le <- compile(l, input)
         re <- compile(r, input)
-        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
-        _ <- if (!arithmeticTypes.contains(le.vecType)) Left(s"$what over ${l.dataType.simpleString} not supported") else Right(())
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
+        else Right(())
+        _ <- if (!arithmeticTypes.contains(le.vecType)) Left(s"$what over ${l.dataType.simpleString} not supported")
+        else Right(())
       } yield DivideLikeExpr(kind, le, re, resultType, mode == EvalMode.ANSI, e.origin.context)
   }
 
   /** `greatest` / `least`: every child the same Spark type on a numeric lane, at least one non-literal. */
-  private def pick(pick: MathKernels.Pick, children: Seq[Expression], resultType: DataType, input: Seq[Attribute]): Result = {
+  private def pick(
+      pick: MathKernels.Pick,
+      children: Seq[Expression],
+      resultType: DataType,
+      input: Seq[Attribute]
+  ): Result = {
     val what = if (pick == MathKernels.Pick.GREATEST) "greatest" else "least"
     if (children.size < 2) Left(s"$what with fewer than two arguments")
-    else if (children.exists(_.dataType != resultType)) Left(s"$what operands differ: ${children.map(_.dataType.simpleString).distinct.mkString("/")}")
-    else if (TypeMapping.isDecimal(resultType) || !TypeMapping.isSupported(resultType) || !arithmeticTypes.contains(TypeMapping.vecTypeOf(resultType))) Left(s"$what over ${resultType.simpleString} not supported")
+    else if (children.exists(_.dataType != resultType))
+      Left(s"$what operands differ: ${children.map(_.dataType.simpleString).distinct.mkString("/")}")
+    else if (
+      TypeMapping.isDecimal(resultType) || !TypeMapping.isSupported(resultType) || !arithmeticTypes.contains(
+        TypeMapping.vecTypeOf(resultType)
+      )
+    ) Left(s"$what over ${resultType.simpleString} not supported")
     else {
       val compiled = children.map {
         case Literal(null, _) => Left("null literal")
@@ -612,7 +925,8 @@ object ExpressionCompiler {
         case Some(reason) => Left(reason)
         case None =>
           val exprs = compiled.collect { case Right(c) => c }
-          if (exprs.forall(_.isInstanceOf[LiteralExpr])) Left(s"$what of literals only") else Right(PickExpr(pick, exprs, resultType))
+          if (exprs.forall(_.isInstanceOf[LiteralExpr])) Left(s"$what of literals only")
+          else Right(PickExpr(pick, exprs, resultType))
       }
     }
   }
@@ -646,18 +960,23 @@ object ExpressionCompiler {
       resultType: DataType,
       ansi: Boolean,
       e: Expression,
-      input: Seq[Attribute]): Result =
+      input: Seq[Attribute]
+  ): Result =
     scale match {
       // round (half up) of a wide decimal to a non-negative scale is Spark's `toPrecision(p, k, HALF_UP)`:
       // the decimal-to-decimal cast's rescale, which never overflows since the result type keeps every
       // integer digit (#326). bround (half even) and negative scales stay refused.
-      case Literal(k: Int, IntegerType) if isWideDecimal(child.dataType) && mode == RoundKernels.Mode.HALF_UP && k >= 0 && TypeMapping.hasLane(resultType) =>
+      case Literal(k: Int, IntegerType)
+          if isWideDecimal(child.dataType) && mode == RoundKernels.Mode.HALF_UP && k >= 0 && TypeMapping.hasLane(
+            resultType
+          ) =>
         wideOperand(child, input).flatMap {
           case _: LiteralExpr => Left(s"$what of a literal")
           case c => Right(WideDecimalCastExpr(c, child.dataType, resultType, ansi = false, e.origin.context))
         }
       case Literal(k: Int, IntegerType) =>
-        if (!RoundExpr.supports(child.dataType, resultType)) Left(s"$what over ${child.dataType.simpleString} -> ${resultType.simpleString} not supported")
+        if (!RoundExpr.supports(child.dataType, resultType))
+          Left(s"$what over ${child.dataType.simpleString} -> ${resultType.simpleString} not supported")
         else
           compile(child, input).flatMap {
             case _: LiteralExpr => Left(s"$what of a literal")
@@ -671,7 +990,8 @@ object ExpressionCompiler {
 
   /** A compiled non-literal INT32 / INT64 operand (bytes, shorts and booleans have no lane here). */
   private def integralChild(e: Expression, input: Seq[Attribute], what: String): Result =
-    if (e.dataType != IntegerType && e.dataType != LongType) Left(s"$what over ${e.dataType.simpleString} not supported")
+    if (e.dataType != IntegerType && e.dataType != LongType)
+      Left(s"$what over ${e.dataType.simpleString} not supported")
     else
       compile(e, input).flatMap {
         case _: LiteralExpr => Left(s"$what of a literal")
@@ -682,7 +1002,14 @@ object ExpressionCompiler {
    * `& | ^` (same integral type on both sides after Spark's coercion) and the shifts (an INT32 amount
    * on the right); a literal may sit on either side but not both.
    */
-  private def bitwise(op: BitKernels.BitOp, what: String, l: Expression, r: Expression, resultType: DataType, input: Seq[Attribute]): Result = {
+  private def bitwise(
+      op: BitKernels.BitOp,
+      what: String,
+      l: Expression,
+      r: Expression,
+      resultType: DataType,
+      input: Seq[Attribute]
+  ): Result = {
     val leftOk = l.dataType == IntegerType || l.dataType == LongType
     val rightOk = if (op.isShift) r.dataType == IntegerType else r.dataType == l.dataType
     if (!leftOk || !rightOk) Left(s"$what over ${l.dataType.simpleString}, ${r.dataType.simpleString} not supported")
@@ -690,7 +1017,8 @@ object ExpressionCompiler {
       for {
         le <- compile(l, input)
         re <- compile(r, input)
-        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left(s"$what of two literals") else Right(())
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left(s"$what of two literals")
+        else Right(())
       } yield BitBinaryExpr(op, le, re, resultType)
   }
 
@@ -719,10 +1047,12 @@ object ExpressionCompiler {
     }
 
   private def intLane(e: Expression, input: Seq[Attribute], what: String): Result =
-    if (e.dataType != IntegerType) Left(s"$what argument ${e.dataType.simpleString} is not an int") else compile(e, input)
+    if (e.dataType != IntegerType) Left(s"$what argument ${e.dataType.simpleString} is not an int")
+    else compile(e, input)
 
   private def integralLane(e: Expression, input: Seq[Attribute], what: String): Result =
-    if (e.dataType != IntegerType && e.dataType != LongType) Left(s"$what over ${e.dataType.simpleString} not supported")
+    if (e.dataType != IntegerType && e.dataType != LongType)
+      Left(s"$what over ${e.dataType.simpleString} not supported")
     else compile(e, input).flatMap { case _: LiteralExpr => Left(s"$what of a literal"); case c => Right(c) }
 
   private def timestampLane(e: Expression, input: Seq[Attribute], what: String): Result =
@@ -730,7 +1060,13 @@ object ExpressionCompiler {
     else compile(e, input).flatMap { case _: LiteralExpr => Left(s"$what of a literal"); case c => Right(c) }
 
   /** `date_format` over a timestamp lane (any zone -- Spark's formatter does the work) or a date lane (fixed offset). */
-  private def formatInstant(e: Expression, pattern: String, tz: Option[String], input: Seq[Attribute], what: String): Result = tz match {
+  private def formatInstant(
+      e: Expression,
+      pattern: String,
+      tz: Option[String],
+      input: Seq[Attribute],
+      what: String
+  ): Result = tz match {
     case None => Left(s"$what without a session zone")
     case Some(zone) =>
       instantLane(e, input, what).flatMap {
@@ -739,7 +1075,8 @@ object ExpressionCompiler {
         case (c, true) =>
           DateExprs.fixedOffsetMicros(tz) match {
             case None => Left(s"$what over a date needs a fixed-offset session zone, not $zone")
-            case Some(offset) => Right(FormatInstantExpr(c, childIsDate = true, secondsIn = false, pattern, zone, offset))
+            case Some(offset) =>
+              Right(FormatInstantExpr(c, childIsDate = true, secondsIn = false, pattern, zone, offset))
           }
       }
   }
@@ -759,28 +1096,42 @@ object ExpressionCompiler {
       }
 
   /** A timestamp lane, or a date lane behind Spark's date -> timestamp cast (the flag says which). */
-  private def instantLane(e: Expression, input: Seq[Attribute], what: String): Either[String, (VectorExpr, Boolean)] = e match {
-    case Cast(child, TimestampType, _, _) if child.dataType == DateType => compile(child, input).map(c => (c, true))
-    case _ if e.dataType == TimestampType => compile(e, input).map(c => (c, false))
-    case _ if e.dataType == DateType => compile(e, input).map(c => (c, true))
-    case _ => Left(s"$what over ${e.dataType.simpleString} not supported")
-  }
+  private def instantLane(e: Expression, input: Seq[Attribute], what: String): Either[String, (VectorExpr, Boolean)] =
+    e match {
+      case Cast(child, TimestampType, _, _) if child.dataType == DateType => compile(child, input).map(c => (c, true))
+      case _ if e.dataType == TimestampType => compile(e, input).map(c => (c, false))
+      case _ if e.dataType == DateType => compile(e, input).map(c => (c, true))
+      case _ => Left(s"$what over ${e.dataType.simpleString} not supported")
+    }
 
   private def dateField(field: DateKernels.Field, child: Expression, input: Seq[Attribute]): Result =
     dateChild(child, input).map(DateFieldExpr(field, _))
 
   /** `date_add` / `date_sub` take a date and an int; `datediff` two dates. Both are INT32 lanes. */
-  private def dateArith(op: ArithOp, l: Expression, r: Expression, resultType: DataType, input: Seq[Attribute]): Result =
+  private def dateArith(
+      op: ArithOp,
+      l: Expression,
+      r: Expression,
+      resultType: DataType,
+      input: Seq[Attribute]
+  ): Result =
     if (l.dataType != DateType) Left(s"date arithmetic over ${l.dataType.simpleString}")
-    else if (r.dataType != IntegerType && r.dataType != DateType) Left(s"date arithmetic with ${r.dataType.simpleString} days")
+    else if (r.dataType != IntegerType && r.dataType != DateType)
+      Left(s"date arithmetic with ${r.dataType.simpleString} days")
     else
       for {
         le <- compile(l, input)
         re <- compile(r, input)
-        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
+        else Right(())
       } yield ArithExpr(op, le, re, resultType, ansiDivideByZero = false, queryContext = null)
 
-  private def timeField(field: DateKernels.TimeField, child: Expression, zoneId: Option[String], input: Seq[Attribute]): Result =
+  private def timeField(
+      field: DateKernels.TimeField,
+      child: Expression,
+      zoneId: Option[String],
+      input: Seq[Attribute]
+  ): Result =
     if (child.dataType != TimestampType) Left(s"time field over ${child.dataType.simpleString}")
     else DateExprs.fixedOffsetMicros(zoneId) match {
       case None => Left(s"time field needs a fixed-offset session zone, not ${zoneId.getOrElse("none")}")
@@ -805,8 +1156,10 @@ object ExpressionCompiler {
       r: Expression,
       mode: EvalMode.Value,
       e: Expression,
-      input: Seq[Attribute]): Result =
-    if (TypeMapping.isDecimal(l.dataType) || TypeMapping.isDecimal(r.dataType)) decimalArithmetic(op, l, r, mode, e, input)
+      input: Seq[Attribute]
+  ): Result =
+    if (TypeMapping.isDecimal(l.dataType) || TypeMapping.isDecimal(r.dataType))
+      decimalArithmetic(op, l, r, mode, e, input)
     else for {
       le <- compile(l, input)
       re <- compile(r, input)
@@ -815,9 +1168,23 @@ object ExpressionCompiler {
       // tinyint / smallint arithmetic (#327): exact on the int lane (two bytes or shorts never overflow an
       // int), then narrowed into the declared type -- Spark wraps in legacy mode, raises in ANSI, nulls in try.
       case ByteType | ShortType =>
-        NarrowIntExpr(ArithExpr(op, le, re, IntegerType, ansiDivideByZero = false, e.origin.context), e.dataType, mode == EvalMode.ANSI, e.origin.context,
-          nullOnOverflow = mode == EvalMode.TRY, arithmetic = true)
-      case _ => ArithExpr(op, le, re, e.dataType, mode == EvalMode.ANSI, e.origin.context, nullOnOverflow = mode == EvalMode.TRY)
+        NarrowIntExpr(
+          ArithExpr(op, le, re, IntegerType, ansiDivideByZero = false, e.origin.context),
+          e.dataType,
+          mode == EvalMode.ANSI,
+          e.origin.context,
+          nullOnOverflow = mode == EvalMode.TRY,
+          arithmetic = true
+        )
+      case _ => ArithExpr(
+          op,
+          le,
+          re,
+          e.dataType,
+          mode == EvalMode.ANSI,
+          e.origin.context,
+          nullOnOverflow = mode == EvalMode.TRY
+        )
     }
 
   private def checkArithmetic(
@@ -826,11 +1193,14 @@ object ExpressionCompiler {
       re: VectorExpr,
       l: Expression,
       r: Expression,
-      mode: EvalMode.Value): Either[String, Unit] = {
+      mode: EvalMode.Value
+  ): Either[String, Unit] = {
     if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
-    else if (l.dataType != r.dataType) Left(s"arithmetic operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
+    else if (l.dataType != r.dataType)
+      Left(s"arithmetic operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
     else if (!arithmeticTypes.contains(le.vecType)) Left(s"arithmetic not supported for ${l.dataType.simpleString}")
-    else if (op == ArithOp.DIV && le.vecType != VecType.FLOAT64) Left(s"division not supported for ${l.dataType.simpleString}")
+    else if (op == ArithOp.DIV && le.vecType != VecType.FLOAT64)
+      Left(s"division not supported for ${l.dataType.simpleString}")
     else Right(())
   }
 
@@ -847,12 +1217,15 @@ object ExpressionCompiler {
     // An operand is a lane (at most 18 digits) or, recursively, a speculative expression itself.
     def operand(o: Expression): Result =
       if (TypeMapping.isSupported(o.dataType)) compile(o, input)
-      else speculativeDecimalArithmetic(o, input).getOrElse(Left(s"decimal operand ${o.dataType.simpleString} of ${o.sql} is neither a lane nor a speculative product or sum"))
+      else speculativeDecimalArithmetic(o, input).getOrElse(Left(
+        s"decimal operand ${o.dataType.simpleString} of ${o.sql} is neither a lane nor a speculative product or sum"
+      ))
     def operands(l: Expression, r: Expression): Either[String, (VectorExpr, VectorExpr)] =
       for {
         le <- operand(l)
         re <- operand(r)
-        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
+        else Right(())
       } yield (le, re)
     e match {
       case m @ Multiply(l, r, _) =>
@@ -860,8 +1233,12 @@ object ExpressionCompiler {
         val mode = m.evalContext.evalMode
         (l.dataType, r.dataType, e.dataType) match {
           case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
-              if !TypeMapping.isSupported(dt) && dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
-            Some(operands(l, r).map { case (le, re) => SpeculativeDecimalMulExpr(le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context) })
+              if !TypeMapping.isSupported(
+                dt
+              ) && dt.scale == lt.scale + rt.scale && dt.precision <= DecimalType.MAX_PRECISION && mode != EvalMode.TRY =>
+            Some(operands(l, r).map { case (le, re) =>
+              SpeculativeDecimalMulExpr(le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context)
+            })
           case _ => None
         }
       case a: BinaryArithmetic if a.isInstanceOf[Add] || a.isInstanceOf[Subtract] =>
@@ -869,7 +1246,18 @@ object ExpressionCompiler {
         (a.left.dataType, a.right.dataType, e.dataType) match {
           case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
               if !TypeMapping.isSupported(dt) && dt.scale == math.max(lt.scale, rt.scale) && mode != EvalMode.TRY =>
-            Some(operands(a.left, a.right).map { case (le, re) => SpeculativeDecimalAddExpr(le, re, a.isInstanceOf[Subtract], lt, rt, dt, mode == EvalMode.ANSI, e.origin.context) })
+            Some(operands(a.left, a.right).map { case (le, re) =>
+              SpeculativeDecimalAddExpr(
+                le,
+                re,
+                a.isInstanceOf[Subtract],
+                lt,
+                rt,
+                dt,
+                mode == EvalMode.ANSI,
+                e.origin.context
+              )
+            })
           case _ => None
         }
       case _ => None
@@ -888,21 +1276,27 @@ object ExpressionCompiler {
       r: Expression,
       mode: EvalMode.Value,
       e: Expression,
-      input: Seq[Attribute]): Result = (l.dataType, r.dataType, e.dataType) match {
-    case (lt: DecimalType, rt: DecimalType, dt: DecimalType) if isWideDecimal(lt) || isWideDecimal(rt) || isWideDecimal(dt) =>
+      input: Seq[Attribute]
+  ): Result = (l.dataType, r.dataType, e.dataType) match {
+    case (lt: DecimalType, rt: DecimalType, dt: DecimalType)
+        if isWideDecimal(lt) || isWideDecimal(rt) || isWideDecimal(dt) =>
       // A wide operand or result (#258): the DECIMAL128 kernels, exact with Spark's toPrecision. The
       // operands are lanes (wide or narrow) or literals; a wide operand that is itself an expression
       // compiles recursively through this same path.
       if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
-      else if (!TypeMapping.hasLane(lt) || !TypeMapping.hasLane(rt) || !TypeMapping.hasLane(dt)) Left(s"decimal wider than ${DecimalType.MAX_PRECISION} digits in ${e.sql}")
+      else if (!TypeMapping.hasLane(lt) || !TypeMapping.hasLane(rt) || !TypeMapping.hasLane(dt))
+        Left(s"decimal wider than ${DecimalType.MAX_PRECISION} digits in ${e.sql}")
       else for {
         le <- wideArithmeticOperand(l, input)
         re <- wideArithmeticOperand(r, input)
-        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+        _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
+        else Right(())
       } yield WideDecimalArithExpr(op, le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context)
     case (lt: DecimalType, rt: DecimalType, dt: DecimalType) =>
-      if (!TypeMapping.isSupported(dt)) Left(s"decimal result ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
-      else if (!TypeMapping.isSupported(lt) || !TypeMapping.isSupported(rt)) Left(s"decimal operand wider than ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+      if (!TypeMapping.isSupported(dt))
+        Left(s"decimal result ${dt.simpleString} exceeds ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
+      else if (!TypeMapping.isSupported(lt) || !TypeMapping.isSupported(rt))
+        Left(s"decimal operand wider than ${TypeMapping.MAX_DECIMAL_PRECISION} digits")
       else if (mode == EvalMode.TRY) Left("try_* arithmetic not supported")
       else {
         val shapeOk = op match {
@@ -914,7 +1308,8 @@ object ExpressionCompiler {
         else for {
           le <- compile(l, input)
           re <- compile(r, input)
-          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals") else Right(())
+          _ <- if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("arithmetic on two literals")
+          else Right(())
         } yield DecimalArithExpr(op, le, re, lt, rt, dt, mode == EvalMode.ANSI, e.origin.context)
       }
     case _ => Left(s"mixed decimal and non-decimal arithmetic: ${e.sql}")
@@ -925,19 +1320,20 @@ object ExpressionCompiler {
     val to = c.dataType
     if (isWideDecimal(from) || isWideDecimal(to)) wideDecimalCast(c, input)
     else {
-    val supportedPair = (from, to) match {
-      case (_: DecimalType, _: DecimalType) => true
-      case (IntegerType | LongType | DoubleType, _: DecimalType) => true
-      case (_: DecimalType, DoubleType | LongType | IntegerType) => true
-      case _ => false
-    }
-    if (!TypeMapping.isSupported(from) || !TypeMapping.isSupported(to)) Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
-    else if (!supportedPair) Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
-    else if (c.evalMode == EvalMode.TRY) Left("try_cast not supported")
-    else compile(c.child, input).flatMap {
-      case _: LiteralExpr => Left("cast of a literal")
-      case child => Right(DecimalCastExpr(child, from, to, c.evalMode == EvalMode.ANSI, c.origin.context))
-    }
+      val supportedPair = (from, to) match {
+        case (_: DecimalType, _: DecimalType) => true
+        case (IntegerType | LongType | DoubleType, _: DecimalType) => true
+        case (_: DecimalType, DoubleType | LongType | IntegerType) => true
+        case _ => false
+      }
+      if (!TypeMapping.isSupported(from) || !TypeMapping.isSupported(to))
+        Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
+      else if (!supportedPair) Left(s"unsupported cast ${from.simpleString} -> ${to.simpleString}")
+      else if (c.evalMode == EvalMode.TRY) Left("try_cast not supported")
+      else compile(c.child, input).flatMap {
+        case _: LiteralExpr => Left("cast of a literal")
+        case child => Right(DecimalCastExpr(child, from, to, c.evalMode == EvalMode.ANSI, c.origin.context))
+      }
     }
   }
 
@@ -967,15 +1363,19 @@ object ExpressionCompiler {
       branches: Seq[(Expression, Expression)],
       elseValue: Option[Expression],
       e: Expression,
-      input: Seq[Attribute]): Result = {
+      input: Seq[Attribute]
+  ): Result = {
     // A wide decimal result (#326) is the DECIMAL128 lane: its branches are wide columns, wide
     // arithmetic or wide literals, blended limb by limb; anything else the wide path refuses itself.
-    if (!TypeMapping.isSupported(e.dataType) && !isWideDecimal(e.dataType)) Left(s"unsupported result type ${e.dataType.simpleString} for ${e.sql}")
+    if (!TypeMapping.isSupported(e.dataType) && !isWideDecimal(e.dataType))
+      Left(s"unsupported result type ${e.dataType.simpleString} for ${e.sql}")
     else {
       def value(v: Expression): Either[String, Option[VectorExpr]] = v match {
         case Literal(null, _) => Right(None)
-        case Literal(x, dt) if dt == e.dataType && CaseWhenExpr.isBranchLiteralType(dt) => Right(Some(LiteralExpr(x, dt)))
-        case other if other.dataType != e.dataType => Left(s"branch type ${other.dataType.simpleString} differs from ${e.dataType.simpleString}")
+        case Literal(x, dt) if dt == e.dataType && CaseWhenExpr.isBranchLiteralType(dt) =>
+          Right(Some(LiteralExpr(x, dt)))
+        case other if other.dataType != e.dataType =>
+          Left(s"branch type ${other.dataType.simpleString} differs from ${e.dataType.simpleString}")
         case other => operand(other, input).map(Some(_))
       }
       val compiled = branches.foldLeft[Either[String, Vector[(VectorExpr, Option[VectorExpr])]]](Right(Vector.empty)) {
@@ -1076,7 +1476,9 @@ object ExpressionCompiler {
     if (list.isEmpty) Left("empty IN list")
     else if (list.exists { case Literal(null, _) => true; case _ => false }) Left("NULL in IN list")
     else if (!list.forall(_.isInstanceOf[Literal])) Left("IN list is not all literals")
-    else if (list.exists(_.dataType != value.dataType)) Left(s"IN operands differ: ${value.dataType.simpleString} vs ${list.map(_.dataType.simpleString).distinct.mkString("/")}")
+    else if (list.exists(_.dataType != value.dataType)) Left(
+      s"IN operands differ: ${value.dataType.simpleString} vs ${list.map(_.dataType.simpleString).distinct.mkString("/")}"
+    )
     else operand(value, input).flatMap {
       case _: LiteralExpr => Left("IN over a literal")
       case c if !comparableTypes.contains(c.vecType) => Left(s"IN not supported for ${value.dataType.simpleString}")
@@ -1121,15 +1523,27 @@ object ExpressionCompiler {
   }
 
   private def caseMap(kind: StringCaseKernels.Kind, child: Expression, input: Seq[Attribute], what: String): Result =
-    if (child.dataType != StringType) Left(s"$what over ${child.dataType.sql.toLowerCase} not supported (a collated string follows ICU rules)")
-    else stringSubject(child, input, what).map(CaseMapExpr(kind, _, SQLConf.get.getConf(SQLConf.ICU_CASE_MAPPINGS_ENABLED)))
+    if (child.dataType != StringType)
+      Left(s"$what over ${child.dataType.sql.toLowerCase} not supported (a collated string follows ICU rules)")
+    else stringSubject(
+      child,
+      input,
+      what
+    ).map(CaseMapExpr(kind, _, SQLConf.get.getConf(SQLConf.ICU_CASE_MAPPINGS_ENABLED)))
 
   /** A trim with no trim string, or a literal one taken as a set of code points; a column trim set falls back. */
-  private def trim(side: StringCaseKernels.Side, src: Expression, trimStr: Option[Expression], input: Seq[Attribute], what: String): Result =
+  private def trim(
+      side: StringCaseKernels.Side,
+      src: Expression,
+      trimStr: Option[Expression],
+      input: Seq[Attribute],
+      what: String
+  ): Result =
     if (src.dataType != StringType) Left(s"$what over ${src.dataType.sql.toLowerCase} not supported")
     else trimStr match {
       case None => stringSubject(src, input, what).map(TrimExpr(side, _, None))
-      case Some(Literal(t: UTF8String, StringType)) => stringSubject(src, input, what).map(TrimExpr(side, _, Some(t.toString.codePoints().toArray)))
+      case Some(Literal(t: UTF8String, StringType)) =>
+        stringSubject(src, input, what).map(TrimExpr(side, _, Some(t.toString.codePoints().toArray)))
       case Some(Literal(null, _)) => Left(s"$what with a null trim string")
       case Some(_) => Left(s"$what with a non-literal trim string not supported")
     }
@@ -1153,12 +1567,13 @@ object ExpressionCompiler {
   }
 
   /** An int argument: an INT32 lane or an int literal, the literal bounded when it sizes the output. */
-  private def intArg(e: Expression, input: Seq[Attribute], what: String, maxLiteral: Int = Int.MaxValue): Result = e match {
-    case Literal(null, _) => Left(s"$what with a null argument")
-    case Literal(v: Int, IntegerType) if v > maxLiteral => Left(s"$what count $v exceeds the batch output cap")
-    case _ if e.dataType != IntegerType => Left(s"$what argument ${e.dataType.simpleString} is not an int")
-    case _ => compile(e, input)
-  }
+  private def intArg(e: Expression, input: Seq[Attribute], what: String, maxLiteral: Int = Int.MaxValue): Result =
+    e match {
+      case Literal(null, _) => Left(s"$what with a null argument")
+      case Literal(v: Int, IntegerType) if v > maxLiteral => Left(s"$what count $v exceeds the batch output cap")
+      case _ if e.dataType != IntegerType => Left(s"$what argument ${e.dataType.simpleString} is not an int")
+      case _ => compile(e, input)
+    }
 
   /**
    * `LIKE` with several `%` wildcards -- the shape `LikeSimplification` leaves alone -- as a
@@ -1179,7 +1594,8 @@ object ExpressionCompiler {
           val parts = pattern.split("%", -1)
           val prefix = parts.head.getBytes(java.nio.charset.StandardCharsets.UTF_8)
           val suffix = parts.last.getBytes(java.nio.charset.StandardCharsets.UTF_8)
-          val tokens = parts.slice(1, parts.length - 1).filter(_.nonEmpty).map(_.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+          val tokens =
+            parts.slice(1, parts.length - 1).filter(_.nonEmpty).map(_.getBytes(java.nio.charset.StandardCharsets.UTF_8))
           Right(LikeTokensExpr(c, prefix, tokens, suffix))
       }
     case _: Literal => Left(s"LIKE pattern of type ${like.right.dataType.simpleString}")
@@ -1205,13 +1621,15 @@ object ExpressionCompiler {
 
   private def check(le: VectorExpr, re: VectorExpr, l: Expression, r: Expression): Either[String, Unit] = {
     if (le.isInstanceOf[LiteralExpr] && re.isInstanceOf[LiteralExpr]) Left("comparison of two literals")
-    else if (l.dataType != r.dataType) Left(s"comparison operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
+    else if (l.dataType != r.dataType)
+      Left(s"comparison operands differ: ${l.dataType.simpleString} vs ${r.dataType.simpleString}")
     else if (!comparableTypes.contains(le.vecType)) Left(s"comparison not supported for ${l.dataType.simpleString}")
     else Right(())
   }
 
   private def binaryBoolean(l: Expression, r: Expression, input: Seq[Attribute])(
-      make: (VectorExpr, VectorExpr) => VectorExpr): Result =
+      make: (VectorExpr, VectorExpr) => VectorExpr
+  ): Result =
     for {
       le <- booleanChild(l, input)
       re <- booleanChild(r, input)

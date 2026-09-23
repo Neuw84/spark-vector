@@ -33,16 +33,19 @@ sealed trait VectorPartitioning extends Serializable {
 }
 
 object VectorPartitioning {
+
   /** Spark's `HashPartitioning`: `Pmod(Murmur3Hash(keys), n)` over key columns of the batch. */
   final case class Hash(keyOrdinals: Array[Int], kinds: Array[KeyKind], numPartitions: Int) extends VectorPartitioning
   final case class RoundRobin(numPartitions: Int) extends VectorPartitioning
   case object Single extends VectorPartitioning { val numPartitions = 1 }
+
   /**
    * Spark's `RangePartitioning`: the bounds are Spark's own `RangePartitioner` (sampled by the
    * exchange the way Spark samples), applied to a projection of the sort keys row by row -- the
    * kernel-side binary search over the sort's normalised keys is a follow-up.
    */
-  final case class Range(partitioner: Partitioner, sortKeys: Seq[Expression], output: Seq[Attribute]) extends VectorPartitioning {
+  final case class Range(partitioner: Partitioner, sortKeys: Seq[Expression], output: Seq[Attribute])
+      extends VectorPartitioning {
     def numPartitions: Int = partitioner.numPartitions
   }
 
@@ -51,7 +54,8 @@ object VectorPartitioning {
     dt match {
       case IntegerType | DateType | ByteType | ShortType => KeyKind.INT // Spark hashes a byte or short as its int value
       case LongType | TimestampType => KeyKind.LONG
-      case d: DecimalType if d.precision <= io.sparkvector.spark.adapter.TypeMapping.MAX_DECIMAL_PRECISION => KeyKind.LONG
+      case d: DecimalType if d.precision <= io.sparkvector.spark.adapter.TypeMapping.MAX_DECIMAL_PRECISION =>
+        KeyKind.LONG
       case _: DecimalType => KeyKind.DECIMAL128
       case DoubleType => KeyKind.DOUBLE
       case BooleanType => KeyKind.BOOL
@@ -69,12 +73,19 @@ final class VectorShuffleDependency(
     val partitioning: VectorPartitioning,
     writeProcessor: ShuffleWriteProcessor,
     /** The exchange's `dataSize` metric -- AQE's runtime statistic for the stage; every map task adds its uncompressed Arrow bytes. */
-    val dataSize: org.apache.spark.sql.execution.metric.SQLMetric)
-  extends ShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
-    rdd, partitioner, SparkEnv.get.serializer, None, None, false, writeProcessor)
+    val dataSize: org.apache.spark.sql.execution.metric.SQLMetric
+) extends ShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
+      rdd,
+      partitioner,
+      SparkEnv.get.serializer,
+      None,
+      None,
+      false,
+      writeProcessor
+    )
 
 final class VectorShuffleHandle(shuffleId: Int, val dependency: VectorShuffleDependency)
-  extends ShuffleHandle(shuffleId)
+    extends ShuffleHandle(shuffleId)
 
 /**
  * `spark.shuffle.manager` for the columnar shuffle (#288): our dependencies get the Arrow IPC writer
@@ -85,13 +96,15 @@ final class VectorShuffleHandle(shuffleId: Int, val dependency: VectorShuffleDep
  */
 final class VectorShuffleManager(conf: SparkConf) extends ShuffleManager {
   private val sort = new SortShuffleManager(conf)
+
   /**
    * The map task ids written for each of our shuffles, as `SortShuffleManager` keeps for its own:
    * `unregisterShuffle` removes their data and index files by these. Without it every map output
    * stayed on the executor's disk until the executor died -- the 20 GB node disks of the bench
    * cluster filled within minutes at 1 TB (#358).
    */
-  private val taskIdMapsForShuffle = new java.util.concurrent.ConcurrentHashMap[Int, org.apache.spark.util.collection.OpenHashSet[Long]]()
+  private val taskIdMapsForShuffle =
+    new java.util.concurrent.ConcurrentHashMap[Int, org.apache.spark.util.collection.OpenHashSet[Long]]()
 
   override def registerShuffle[K, V, C](shuffleId: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle =
     dependency match {
@@ -99,21 +112,49 @@ final class VectorShuffleManager(conf: SparkConf) extends ShuffleManager {
       case other => sort.registerShuffle(shuffleId, other)
     }
 
-  override def getWriter[K, V](handle: ShuffleHandle, mapId: Long, context: TaskContext, metrics: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] =
+  override def getWriter[K, V](
+      handle: ShuffleHandle,
+      mapId: Long,
+      context: TaskContext,
+      metrics: ShuffleWriteMetricsReporter
+  ): ShuffleWriter[K, V] =
     handle match {
       case v: VectorShuffleHandle =>
-        val mapTaskIds = taskIdMapsForShuffle.computeIfAbsent(v.shuffleId, _ => new org.apache.spark.util.collection.OpenHashSet[Long](16))
+        val mapTaskIds = taskIdMapsForShuffle.computeIfAbsent(
+          v.shuffleId,
+          _ => new org.apache.spark.util.collection.OpenHashSet[Long](16)
+        )
         mapTaskIds.synchronized { mapTaskIds.add(mapId) }
-        new VectorShuffleWriter(v, mapId, context, metrics, sort.shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver]).asInstanceOf[ShuffleWriter[K, V]]
+        new VectorShuffleWriter(
+          v,
+          mapId,
+          context,
+          metrics,
+          sort.shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver]
+        ).asInstanceOf[ShuffleWriter[K, V]]
       case other => sort.getWriter(other, mapId, context, metrics)
     }
 
   override def getReader[K, C](
-      handle: ShuffleHandle, startMapIndex: Int, endMapIndex: Int, startPartition: Int, endPartition: Int,
-      context: TaskContext, metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] =
+      handle: ShuffleHandle,
+      startMapIndex: Int,
+      endMapIndex: Int,
+      startPartition: Int,
+      endPartition: Int,
+      context: TaskContext,
+      metrics: ShuffleReadMetricsReporter
+  ): ShuffleReader[K, C] =
     handle match {
       case v: VectorShuffleHandle =>
-        new VectorShuffleReader(v, startMapIndex, endMapIndex, startPartition, endPartition, context, metrics).asInstanceOf[ShuffleReader[K, C]]
+        new VectorShuffleReader(
+          v,
+          startMapIndex,
+          endMapIndex,
+          startPartition,
+          endPartition,
+          context,
+          metrics
+        ).asInstanceOf[ShuffleReader[K, C]]
       case other => sort.getReader(other, startMapIndex, endMapIndex, startPartition, endPartition, context, metrics)
     }
 
@@ -145,7 +186,8 @@ final class VectorShuffleWriter(
     mapId: Long,
     context: TaskContext,
     metrics: ShuffleWriteMetricsReporter,
-    resolver: IndexShuffleBlockResolver) extends ShuffleWriter[Int, ColumnarBatch] {
+    resolver: IndexShuffleBlockResolver
+) extends ShuffleWriter[Int, ColumnarBatch] {
 
   private val dep = handle.dependency
   private val numPartitions = dep.partitioner.numPartitions
@@ -155,19 +197,29 @@ final class VectorShuffleWriter(
   // A limit as the backstop behind the writer's own flushing (#340): a runaway task fails on its own
   // instead of exhausting the executor's direct memory for every task on it.
   private val allocator: BufferAllocator = VectorAllocators.root().newChildAllocator(
-    s"shuffle-write-${handle.shuffleId}-$mapId", 0L, VectorShuffleWriter.memoryLimit(SparkEnv.get.conf))
+    s"shuffle-write-${handle.shuffleId}-$mapId",
+    0L,
+    VectorShuffleWriter.memoryLimit(SparkEnv.get.conf)
+  )
   private val writer = {
     val conf = SparkEnv.get.conf
-    new PartitionedIpcWriter(dep.schema, numPartitions, allocator, tmp.toPath,
-      VectorShuffleWriter.flushBytes(conf), VectorShuffleWriter.compression(conf),
-      conf.getInt(VectorShuffleWriter.BatchRowsKey, 8192), conf.getSizeAsBytes(VectorShuffleWriter.BatchBytesKey, "1m"),
+    new PartitionedIpcWriter(
+      dep.schema,
+      numPartitions,
+      allocator,
+      tmp.toPath,
+      VectorShuffleWriter.flushBytes(conf),
+      VectorShuffleWriter.compression(conf),
+      conf.getInt(VectorShuffleWriter.BatchRowsKey, 8192),
+      conf.getSizeAsBytes(VectorShuffleWriter.BatchBytesKey, "1m"),
       conf.getSizeAsBytes(VectorShuffleWriter.BufferBytesKey, "64m"),
       conf.getDouble(VectorShuffleWriter.DictionaryMaxRatioKey, PartitionedIpcWriter.DefaultDictionaryMaxRatio),
       PartitionedIpcWriter.DictionaryCapBytes,
       // One dictionary per map file (#416) needs the reader to see the file: the Flight producer and the
       // local reader prepend it; Spark's block transfer delivers a block's bytes alone, so it keeps the
       // per-block dictionaries.
-      fileDictionary = VectorShuffleBackend.backendName(conf).equalsIgnoreCase("flight"))
+      fileDictionary = VectorShuffleBackend.backendName(conf).equalsIgnoreCase("flight")
+    )
   }
   private var lengths: Array[Long] = _
   private var stopped = false
@@ -178,31 +230,38 @@ final class VectorShuffleWriter(
     case _ => null
   }
 
-  override def write(records: Iterator[Product2[Int, ColumnarBatch]]): Unit = try {
-    // The write time is the writer's own work per batch -- adapting, partitioning, appending -- not
-    // the upstream operators pulled through `records.next()`: timed around the whole loop it read as
-    // the entire map stage (15 s against Spark's 81 ms on the same exchange at SF1, #247).
-    var written = 0L
-    while (records.hasNext) {
-      val batch = records.next()._2
-      val n = batch.numRows()
-      if (n > 0) {
-        val start = System.nanoTime()
-        val arena = java.lang.foreign.Arena.ofConfined()
-        try {
-          val buffers = Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
-          val ids = partitionIds(batch, buffers, n)
-          // Trailing columns beyond the schema hold materialised hash keys: partitioned on, not written.
-          writer.write(if (buffers.length > dep.schema.fields.length) buffers.take(dep.schema.fields.length) else buffers, n, ids, arena)
-        } finally arena.close()
-        rows += n
-        written += System.nanoTime() - start
+  override def write(records: Iterator[Product2[Int, ColumnarBatch]]): Unit =
+    try {
+      // The write time is the writer's own work per batch -- adapting, partitioning, appending -- not
+      // the upstream operators pulled through `records.next()`: timed around the whole loop it read as
+      // the entire map stage (15 s against Spark's 81 ms on the same exchange at SF1, #247).
+      var written = 0L
+      while (records.hasNext) {
+        val batch = records.next()._2
+        val n = batch.numRows()
+        if (n > 0) {
+          val start = System.nanoTime()
+          val arena = java.lang.foreign.Arena.ofConfined()
+          try {
+            val buffers = Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
+            val ids = partitionIds(batch, buffers, n)
+            // Trailing columns beyond the schema hold materialised hash keys: partitioned on, not written.
+            writer.write(
+              if (buffers.length > dep.schema.fields.length) buffers.take(dep.schema.fields.length) else buffers,
+              n,
+              ids,
+              arena
+            )
+          } finally arena.close()
+          rows += n
+          written += System.nanoTime() - start
+        }
       }
+      metrics.incWriteTime(written)
+    } catch {
+      case e: org.apache.arrow.memory.OutOfMemoryException =>
+        throw VectorShuffleWriter.serializable("write", allocator, e)
     }
-    metrics.incWriteTime(written)
-  } catch {
-    case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("write", allocator, e)
-  }
 
   private def partitionIds(batch: ColumnarBatch, buffers: Array[VectorBuffers], n: Int): Array[Int] = {
     val ids = new Array[Int](n)
@@ -240,7 +299,9 @@ final class VectorShuffleWriter(
         writer.close()
         lengths = index.lengths
         resolver.writeMetadataFileAndCommit(handle.shuffleId, mapId, lengths, Array.emptyLongArray, tmp)
-        metrics.incWriteTime(System.nanoTime() - start) // the last record batches and the file, as Spark counts its merge
+        metrics.incWriteTime(
+          System.nanoTime() - start
+        ) // the last record batches and the file, as Spark counts its merge
         VectorShuffleBackend(SparkEnv.get.conf).mapOutputCommitted(handle.shuffleId, mapId, dataFile, lengths)
         metrics.incBytesWritten(lengths.sum)
         // Pre-compression size, as Spark's dataSize is; never below the file (IPC framing dominates tiny outputs).
@@ -258,9 +319,11 @@ final class VectorShuffleWriter(
 }
 
 object VectorShuffleWriter {
+
   /** The hard limit of one map task's writer allocator; the writer flushes long before it, this is the backstop. */
   val MemoryLimitKey = "spark.vector.shuffle.writer.memoryLimit"
   def memoryLimit(conf: SparkConf): Long = conf.getSizeAsBytes(MemoryLimitKey, "1g")
+
   /** A record batch's string column is dictionary-encoded only when distinct/rows is at most this (#356); 0 never, 1 always. */
   val DictionaryMaxRatioKey = "spark.vector.shuffle.writer.dictionaryMaxRatio"
 
@@ -269,11 +332,16 @@ object VectorShuffleWriter {
    * it cannot be reported and, on Spark 4.1 + JDK 24+, ends the executor instead (SPARK-55679, see
    * `upstream/`). The task fails with this serializable exception carrying the allocator's state.
    */
-  def serializable(side: String, allocator: BufferAllocator, e: org.apache.arrow.memory.OutOfMemoryException): SparkException =
+  def serializable(
+      side: String,
+      allocator: BufferAllocator,
+      e: org.apache.arrow.memory.OutOfMemoryException
+  ): SparkException =
     new SparkException(
       s"columnar shuffle $side ran out of Arrow memory: ${e.getMessage}; allocator ${allocator.getName} " +
         s"allocated ${allocator.getAllocatedMemory} peak ${allocator.getPeakMemoryAllocation} limit ${allocator.getLimit}" +
-        (if (e.getCause != null) s"; cause: ${e.getCause}" else ""))
+        (if (e.getCause != null) s"; cause: ${e.getCause}" else "")
+    )
 
   /** A partition's held rows / bytes before they become one record batch, and the task-wide cap on held bytes. */
   val BatchRowsKey = "spark.vector.shuffle.batchRows"
@@ -281,6 +349,7 @@ object VectorShuffleWriter {
   val BufferBytesKey = "spark.vector.shuffle.bufferBytes"
   val FlushBytesKey = "spark.vector.shuffle.flushBytes"
   def flushBytes(conf: SparkConf): Long = conf.getSizeAsBytes(FlushBytesKey, "1m")
+
   /**
    * `zstd` (default; zstd-jni, native), `lz4` (Arrow's codec is commons-compress pure Java -- an order
    * of magnitude slower, a TPC-H Q3 shuffle crawled under it), or `none`: body compression of the
@@ -294,6 +363,7 @@ object VectorShuffleWriter {
       case "none" | "" => None
       case other => throw new IllegalArgumentException(s"$CompressionKey: lz4, zstd or none, not '$other'")
     }
+
   /** Spark's round robin starts each task at a random partition: same here, seeded by the partition id. */
   def roundRobinStart(context: TaskContext, numPartitions: Int): Int =
     new java.util.Random(context.partitionId()).nextInt(numPartitions)
@@ -312,7 +382,8 @@ final class VectorShuffleReader(
     startPartition: Int,
     endPartition: Int,
     context: TaskContext,
-    metrics: ShuffleReadMetricsReporter) extends ShuffleReader[Int, ColumnarBatch] {
+    metrics: ShuffleReadMetricsReporter
+) extends ShuffleReader[Int, ColumnarBatch] {
 
   override def read(): Iterator[Product2[Int, ColumnarBatch]] = {
     val env = SparkEnv.get
@@ -322,32 +393,49 @@ final class VectorShuffleReader(
     val allocator = VectorAllocators.newChild(s"shuffle-read-${handle.shuffleId}-${context.partitionId()}")
     val open = new java.util.ArrayList[AutoCloseable]()
     context.addTaskCompletionListener[Unit] { _ =>
-      open.asScala.foreach(c => try c.close() catch { case _: Exception => })
+      open.asScala.foreach(c =>
+        try c.close()
+        catch { case _: Exception => }
+      )
       allocator.close()
       // The task-level shuffle read metrics are the reader's to merge (Spark's BlockStoreShuffleReader
       // does it in its completion iterator); the executor only merges them on heartbeats.
       context.taskMetrics().mergeShuffleReadMetrics()
     }
     val nonEmpty = blocksByAddress.map { case (address, blocks) =>
-      address -> blocks.collect { case (id: ShuffleBlockId, size, mapIndex) if size > 0 => (id, size, mapIndex) }.toIndexedSeq
+      address -> blocks.collect {
+        case (id: ShuffleBlockId, size, mapIndex) if size > 0 => (id, size, mapIndex)
+      }.toIndexedSeq
     }
-    val streams = VectorShuffleBackend(env.conf).read(nonEmpty, handle.dependency.schema, VectorShuffleWriter.compression(env.conf), allocator, metrics)
+    val streams = VectorShuffleBackend(env.conf).read(
+      nonEmpty,
+      handle.dependency.schema,
+      VectorShuffleWriter.compression(env.conf),
+      allocator,
+      metrics
+    )
     streams.flatMap { reader =>
       open.add(reader)
       new Iterator[Product2[Int, ColumnarBatch]] {
         private var live = true
         override def hasNext: Boolean = {
           if (!live) return false
-          val more = try reader.hasNext catch {
-            case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("read", allocator, e)
-          }
+          val more =
+            try reader.hasNext
+            catch {
+              case e: org.apache.arrow.memory.OutOfMemoryException =>
+                throw VectorShuffleWriter.serializable("read", allocator, e)
+            }
           if (!more) { reader.close(); open.remove(reader); live = false }
           more
         }
         override def next(): Product2[Int, ColumnarBatch] = {
-          val b = try reader.next() catch {
-            case e: org.apache.arrow.memory.OutOfMemoryException => throw VectorShuffleWriter.serializable("read", allocator, e)
-          }
+          val b =
+            try reader.next()
+            catch {
+              case e: org.apache.arrow.memory.OutOfMemoryException =>
+                throw VectorShuffleWriter.serializable("read", allocator, e)
+            }
           metrics.incRecordsRead(b.numRows())
           (0, b)
         }
@@ -357,9 +445,14 @@ final class VectorShuffleReader(
 }
 
 object VectorShuffleReader {
+
   /** A fetched or local block (one partition's IPC stream) as batches; the buffer is released with the stream. */
-  def blockStream(buf: ManagedBuffer, allocator: BufferAllocator, schema: org.apache.spark.sql.types.StructType,
-      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType]): Iterator[ColumnarBatch] with AutoCloseable =
+  def blockStream(
+      buf: ManagedBuffer,
+      allocator: BufferAllocator,
+      schema: org.apache.spark.sql.types.StructType,
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType]
+  ): Iterator[ColumnarBatch] with AutoCloseable =
     new Iterator[ColumnarBatch] with AutoCloseable {
       // A file segment is read with positional reads straight into Arrow memory; an InputStream
       // channel would copy every byte through a heap array first (the GC behind Q19/Q20's 1.15x). The
@@ -373,17 +466,28 @@ object VectorShuffleReader {
     }
 
   /** Interim remote path over Spark's block transfer: all of one executor's blocks in one request, collected as they land. */
-  def fetchRemote(address: BlockManagerId, ids: Seq[BlockId], metrics: ShuffleReadMetricsReporter): Iterator[(BlockId, ManagedBuffer)] = {
+  def fetchRemote(
+      address: BlockManagerId,
+      ids: Seq[BlockId],
+      metrics: ShuffleReadMetricsReporter
+  ): Iterator[(BlockId, ManagedBuffer)] = {
     val client = SparkEnv.get.blockManager.blockStoreClient
     val queue = new LinkedBlockingQueue[Either[Throwable, (BlockId, ManagedBuffer)]]()
     val start = System.nanoTime()
-    client.fetchBlocks(address.host, address.port, address.executorId, ids.map(_.toString).toArray, new BlockFetchingListener {
-      override def onBlockFetchSuccess(blockId: String, data: ManagedBuffer): Unit = {
-        data.retain()
-        queue.put(Right((BlockId(blockId), data)))
-      }
-      override def onBlockFetchFailure(blockId: String, exception: Throwable): Unit = queue.put(Left(exception))
-    }, null.asInstanceOf[DownloadFileManager])
+    client.fetchBlocks(
+      address.host,
+      address.port,
+      address.executorId,
+      ids.map(_.toString).toArray,
+      new BlockFetchingListener {
+        override def onBlockFetchSuccess(blockId: String, data: ManagedBuffer): Unit = {
+          data.retain()
+          queue.put(Right((BlockId(blockId), data)))
+        }
+        override def onBlockFetchFailure(blockId: String, exception: Throwable): Unit = queue.put(Left(exception))
+      },
+      null.asInstanceOf[DownloadFileManager]
+    )
     val out = new ArrayBuffer[(BlockId, ManagedBuffer)](ids.size)
     while (out.size < ids.size) {
       queue.take() match {

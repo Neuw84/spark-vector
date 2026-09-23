@@ -1,15 +1,26 @@
 package org.apache.spark.sql.vector
 
-
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.expr.VectorExpr
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, NamedExpression, NullsFirst, SortOrder, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.{
+  Ascending,
+  Attribute,
+  NamedExpression,
+  NullsFirst,
+  SortOrder,
+  UnsafeProjection
+}
 import org.apache.spark.sql.catalyst.expressions.codegen.LazilyGeneratedOrdering
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, SinglePartition}
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
-import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics, SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
+import org.apache.spark.sql.execution.metric.{
+  SQLMetric,
+  SQLMetrics,
+  SQLShuffleReadMetricsReporter,
+  SQLShuffleWriteMetricsReporter
+}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -34,8 +45,8 @@ case class VectorTakeOrderedAndProjectExec(
     limit: Int,
     sortOrder: Seq[SortOrder],
     projectList: Seq[NamedExpression],
-    child: SparkPlan)
-    extends VectorExec {
+    child: SparkPlan
+) extends VectorExec {
 
   override def output: Seq[Attribute] = projectList.map(_.toAttribute)
   override def outputOrdering: Seq[SortOrder] = sortOrder
@@ -47,7 +58,8 @@ case class VectorTakeOrderedAndProjectExec(
     "numInputBatches" -> SQLMetrics.createMetric(sparkContext, "number of input batches"),
     "numOutputBatches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"),
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels")) ++ readMetrics ++ writeMetrics
+    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels")
+  ) ++ readMetrics ++ writeMetrics
 
   @transient private lazy val compiledKeys: Array[VectorExpr] = sortOrder.map { o =>
     VectorSortPlanner.compileKey(o, child.output) match {
@@ -68,7 +80,10 @@ case class VectorTakeOrderedAndProjectExec(
     val spillBytes = io.sparkvector.spark.VectorConf.sortSpillBytes(conf, sparkContext.getConf)
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter =>
-      VectorRowStages.toUnsafeRows(new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n, runRows, spillBytes), childOutput)
+      VectorRowStages.toUnsafeRows(
+        new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n, runRows, spillBytes),
+        childOutput
+      )
     }
   }
 
@@ -118,9 +133,12 @@ object VectorTakeOrderedPlanner {
 
   /** Attempts to convert a Spark TakeOrderedAndProjectExec; Left explains the fallback. */
   def plan(t: TakeOrderedAndProjectExec): Either[String, VectorTakeOrderedAndProjectExec] = {
-    val keyFailures = t.sortOrder.flatMap(o => VectorSortPlanner.compileKey(o, t.child.output).left.toOption.map(r => s"${o.sql}: $r"))
+    val keyFailures =
+      t.sortOrder.flatMap(o => VectorSortPlanner.compileKey(o, t.child.output).left.toOption.map(r => s"${o.sql}: $r"))
     // Spark's own row projection applies `projectList`; the batch built from the rows carries any lane type (a wide decimal included, #259).
-    val outputFailures = t.projectList.filterNot(e => TypeMapping.hasLane(e.dataType)).map(e => s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
+    val outputFailures = t.projectList.filterNot(e => TypeMapping.hasLane(e.dataType)).map(e =>
+      s"unsupported output type ${e.dataType.simpleString} for ${e.name}"
+    )
     if (t.offset != 0) Left(s"offset ${t.offset} not supported")
     else if (t.sortOrder.isEmpty) Left("sort without keys")
     else if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))

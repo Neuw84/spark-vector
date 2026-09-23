@@ -60,6 +60,7 @@ final case class TimeFieldExpr(field: DateKernels.TimeField, child: VectorExpr, 
 }
 
 object DateExprs {
+
   /**
    * The fixed offset of a session zone in microseconds, or None when the zone has rules (DST or
    * historical changes), in which case timestamp functions fall back rather than guess.

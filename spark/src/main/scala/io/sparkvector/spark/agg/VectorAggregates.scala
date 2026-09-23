@@ -1,7 +1,24 @@
 package io.sparkvector.spark.agg
 
-import io.sparkvector.kernels.{AggKernels, Bitmap, CompareOp, Decimal128, GroupAssignment, GroupedAccumulators, VecType, VectorBuffers}
-import io.sparkvector.spark.expr.{CastExpr, EvalContext, ExpressionCompiler, LiteralExpr, SpeculativeDecimalExpr, SpeculativeDecimals, VectorExpr}
+import io.sparkvector.kernels.{
+  AggKernels,
+  Bitmap,
+  CompareOp,
+  Decimal128,
+  GroupAssignment,
+  GroupedAccumulators,
+  VecType,
+  VectorBuffers
+}
+import io.sparkvector.spark.expr.{
+  CastExpr,
+  EvalContext,
+  ExpressionCompiler,
+  LiteralExpr,
+  SpeculativeDecimalExpr,
+  SpeculativeDecimals,
+  VectorExpr
+}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import io.sparkvector.spark.adapter.TypeMapping
@@ -21,6 +38,7 @@ trait AggState {
 /** Running state of one aggregate function over many groups (see [[GroupAssignment]]). */
 trait GroupedAggState {
   def update(ctx: EvalContext, groups: GroupAssignment): Unit
+
   /**
    * Writes slot `slot` of groups `[from, to)` straight into `out` -- a lane of the slot's emitted
    * type, validity bits included -- and answers true; false leaves the column to the boxed path
@@ -28,6 +46,7 @@ trait GroupedAggState {
    * BigDecimal, a BigInteger and a Long per value, most of that stage's excess over Spark).
    */
   def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = false
+
   /** Buffer slot value of group `g` in Spark's internal representation, or `null`. */
   def bufferValue(g: Int, slot: Int): Any
 }
@@ -37,6 +56,7 @@ trait VectorAggFunction extends Serializable {
   def bufferTypes: Seq[DataType]
   def newState(): AggState
   def newGroupedState(): GroupedAggState
+
   /**
    * The types of the columns this function's slots are emitted as, given Spark's declared buffer
    * types. A function whose result mode emits the result ready-made in a buffer slot (the wide
@@ -65,7 +85,8 @@ final case class SumDoubleAgg(input: VectorExpr, strict: Boolean) extends Vector
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
     private val acc = new GroupedAccumulators.DoubleSum(strict)
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-    override def bufferValue(g: Int, slot: Int): Any = if (acc.count(g) == 0) null else java.lang.Double.valueOf(acc.sum(g))
+    override def bufferValue(g: Int, slot: Int): Any =
+      if (acc.count(g) == 0) null else java.lang.Double.valueOf(acc.sum(g))
   }
 }
 
@@ -73,9 +94,11 @@ final case class SumDoubleAgg(input: VectorExpr, strict: Boolean) extends Vector
  * SUM over ints or longs into a long buffer. `checked` is Spark's ANSI mode for a bigint sum: an
  * overflow raises ARITHMETIC_OVERFLOW instead of wrapping.
  */
-final case class SumLongAgg(input: VectorExpr, checked: Boolean, queryContext: org.apache.spark.QueryContext) extends VectorAggFunction {
+final case class SumLongAgg(input: VectorExpr, checked: Boolean, queryContext: org.apache.spark.QueryContext)
+    extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(LongType)
-  private def overflow(): Nothing = throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow("long overflow", "try_sum", queryContext)
+  private def overflow(): Nothing =
+    throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow("long overflow", "try_sum", queryContext)
   override def newState(): AggState = new AggState {
     private var sum = 0L
     private var count = 0L
@@ -84,7 +107,8 @@ final case class SumLongAgg(input: VectorExpr, checked: Boolean, queryContext: o
       val c = AggKernels.countValid(v)
       if (c > 0) {
         try {
-          val s = if (v.`type`() == VecType.INT32) AggKernels.sumInt(v) else if (checked) AggKernels.sumLongExact(v) else AggKernels.sumLong(v)
+          val s = if (v.`type`() == VecType.INT32) AggKernels.sumInt(v)
+          else if (checked) AggKernels.sumLongExact(v) else AggKernels.sumLong(v)
           sum = if (checked) Math.addExact(sum, s) else sum + s
         } catch { case _: ArithmeticException => overflow() }
         count += c
@@ -95,10 +119,13 @@ final case class SumLongAgg(input: VectorExpr, checked: Boolean, queryContext: o
   override def newGroupedState(): GroupedAggState = new GroupedAggState {
     private val acc = new GroupedAccumulators.LongSum(checked)
     override def update(ctx: EvalContext, groups: GroupAssignment): Unit =
-      try acc.update(input.eval(ctx), groups) catch { case _: ArithmeticException => overflow() }
+      try acc.update(input.eval(ctx), groups)
+      catch { case _: ArithmeticException => overflow() }
     override def bufferValue(g: Int, slot: Int): Any =
       if (acc.count(g) == 0) null
-      else try java.lang.Long.valueOf(acc.sum(g)) catch { case _: ArithmeticException => overflow() }
+      else
+        try java.lang.Long.valueOf(acc.sum(g))
+        catch { case _: ArithmeticException => overflow() }
   }
 }
 
@@ -129,7 +156,9 @@ private[agg] final class Escalation {
     counts(g) += 1
   }
   def count(g: Int): Long = if (g < counts.length) counts(g) else 0L
-  def total(g: Int, base: java.math.BigInteger): java.math.BigInteger = if (g < totals.length && totals(g) != null) base.add(totals(g)) else base
+  def total(g: Int, base: java.math.BigInteger): java.math.BigInteger =
+    if (g < totals.length && totals(g) != null) base.add(totals(g)) else base
+
   /** Whether any row of group `g` was escalated (its total then needs the `BigInteger` path). */
   def hasTotal(g: Int): Boolean = g < totals.length && totals(g) != null
 }
@@ -156,16 +185,25 @@ private[agg] final class WideLimbs(limit: java.math.BigInteger) extends Serializ
     if (t.abs.compareTo(limit) >= 0) nul(out, o)
     else { Bitmap.set(out.validity(), o); Decimal128.set(out.data(), o, Decimal128.hiOf(t), Decimal128.loOf(t)) }
 
-  def zero(out: ArrowVectorBuffers, o: Int): Unit = { Bitmap.set(out.validity(), o); Decimal128.set(out.data(), o, 0L, 0L) }
-  def nul(out: ArrowVectorBuffers, o: Int): Unit = { Bitmap.clear(out.validity(), o); Decimal128.set(out.data(), o, 0L, 0L) }
+  def zero(out: ArrowVectorBuffers, o: Int): Unit = {
+    Bitmap.set(out.validity(), o); Decimal128.set(out.data(), o, 0L, 0L)
+  }
+  def nul(out: ArrowVectorBuffers, o: Int): Unit = {
+    Bitmap.clear(out.validity(), o); Decimal128.set(out.data(), o, 0L, 0L)
+  }
 }
 
 private[agg] object WideLimbs {
-  def long(out: ArrowVectorBuffers, o: Int, v: Long): Unit = { Bitmap.set(out.validity(), o); out.data().setAtIndex(VectorBuffers.LE_LONG, o.toLong, v) }
-  def bool(out: ArrowVectorBuffers, o: Int, v: Boolean): Unit = { Bitmap.set(out.validity(), o); Bitmap.setTo(out.data(), o, v) }
+  def long(out: ArrowVectorBuffers, o: Int, v: Long): Unit = {
+    Bitmap.set(out.validity(), o); out.data().setAtIndex(VectorBuffers.LE_LONG, o.toLong, v)
+  }
+  def bool(out: ArrowVectorBuffers, o: Int, v: Boolean): Unit = {
+    Bitmap.set(out.validity(), o); Bitmap.setTo(out.data(), o, v)
+  }
 }
 
 private[agg] object Escalation {
+
   /**
    * The group's exact total: the 128-bit accumulator plus the escalated rows. An accumulator that
    * left 128 bits (a DECIMAL128 input, #259) is reported as 10^38, past every decimal precision, so the
@@ -176,20 +214,21 @@ private[agg] object Escalation {
     if (acc.overflowed(g)) pastAnyPrecision else extra.total(g, acc.sum(g))
 
   /** Evaluates `input` for one batch: the lane to accumulate, and the escalated rows folded into `extra`. */
-  def evalInput(input: VectorExpr, ctx: EvalContext, extra: Escalation, groupOf: Int => Int): VectorBuffers = input match {
-    case s: SpeculativeDecimalExpr =>
-      val checked = s.evalChecked(ctx)
-      var k = 0
-      var added = 0
-      while (k < checked.rows.length) {
-        val g = groupOf(checked.rows(k))
-        if (g >= 0) { extra.add(g, checked.exact(k)); added += 1 }
-        k += 1
-      }
-      if (added > 0) SpeculativeDecimals.addEscalated(added)
-      checked.lane
-    case other => other.eval(ctx)
-  }
+  def evalInput(input: VectorExpr, ctx: EvalContext, extra: Escalation, groupOf: Int => Int): VectorBuffers =
+    input match {
+      case s: SpeculativeDecimalExpr =>
+        val checked = s.evalChecked(ctx)
+        var k = 0
+        var added = 0
+        while (k < checked.rows.length) {
+          val g = groupOf(checked.rows(k))
+          if (g >= 0) { extra.add(g, checked.exact(k)); added += 1 }
+          k += 1
+        }
+        if (added > 0) SpeculativeDecimals.addEscalated(added)
+        checked.lane
+      case other => other.eval(ctx)
+    }
 }
 
 /**
@@ -211,7 +250,8 @@ final case class WideDecimalSumAgg(
     bufferType: DecimalType,
     finalResult: Boolean,
     nullOnOverflow: Boolean,
-    queryContext: org.apache.spark.QueryContext) extends VectorAggFunction {
+    queryContext: org.apache.spark.QueryContext
+) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(bufferType, BooleanType)
   private val limit = java.math.BigInteger.TEN.pow(bufferType.precision)
 
@@ -224,7 +264,11 @@ final case class WideDecimalSumAgg(
         if (t.abs.compareTo(limit) >= 0) {
           if (nullOnOverflow) null
           else throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
-            org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(t, bufferType.scale)), bufferType.precision, bufferType.scale, queryContext)
+            org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(t, bufferType.scale)),
+            bufferType.precision,
+            bufferType.scale,
+            queryContext
+          )
         } else new java.math.BigDecimal(t, bufferType.scale)
       }
     } else if (count == 0) java.math.BigDecimal.valueOf(0L, bufferType.scale)
@@ -258,6 +302,7 @@ final case class WideDecimalSumAgg(
       val count = acc.count(g) + extra.count(g)
       if (slot == 0) sumValue(count, Escalation.total(acc, extra, g)) else java.lang.Boolean.valueOf(count == 0)
     }
+
     /** The buffer as lanes (#416): the sum as limbs -- zero while empty, null past the precision -- and the empty flag. */
     override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
       if (finalResult) return false
@@ -295,7 +340,8 @@ final case class DecimalAvgResult(expression: Expression, resultType: DecimalTyp
     row.update(1, count)
     expression.eval(row) match {
       case null => null
-      case d: org.apache.spark.sql.types.Decimal => if (wide) d.toJavaBigDecimal else java.lang.Long.valueOf(d.toUnscaledLong)
+      case d: org.apache.spark.sql.types.Decimal =>
+        if (wide) d.toJavaBigDecimal else java.lang.Long.valueOf(d.toUnscaledLong)
     }
   }
 }
@@ -303,8 +349,12 @@ final case class DecimalAvgResult(expression: Expression, resultType: DecimalTyp
 object DecimalAvgResult {
   def apply(a: Average): DecimalAvgResult =
     DecimalAvgResult(
-      org.apache.spark.sql.catalyst.expressions.BindReferences.bindReference(a.evaluateExpression, a.aggBufferAttributes),
-      a.dataType.asInstanceOf[DecimalType])
+      org.apache.spark.sql.catalyst.expressions.BindReferences.bindReference(
+        a.evaluateExpression,
+        a.aggBufferAttributes
+      ),
+      a.dataType.asInstanceOf[DecimalType]
+    )
 }
 
 /**
@@ -319,7 +369,12 @@ object DecimalAvgResult {
  * In `Complete` mode the sum slot carries the result -- [[DecimalAvgResult]] over the group's own
  * sum and count -- as the merge emits it in `Final` mode.
  */
-final case class WideDecimalAvgAgg(input: VectorExpr, bufferType: DecimalType, result: DecimalAvgResult, finalResult: Boolean) extends VectorAggFunction {
+final case class WideDecimalAvgAgg(
+    input: VectorExpr,
+    bufferType: DecimalType,
+    result: DecimalAvgResult,
+    finalResult: Boolean
+) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(bufferType, LongType)
   override def emittedTypes(declared: Seq[DataType]): Seq[DataType] =
     if (finalResult) Seq(result.resultType, declared(1)) else declared
@@ -334,7 +389,8 @@ final case class WideDecimalAvgAgg(input: VectorExpr, bufferType: DecimalType, r
       if (count == 0) java.math.BigDecimal.valueOf(0L, bufferType.scale)
       else {
         val t = total
-        if (!(finalResult && ungrouped) && t.abs.compareTo(limit) >= 0) null else new java.math.BigDecimal(t, bufferType.scale)
+        if (!(finalResult && ungrouped) && t.abs.compareTo(limit) >= 0) null
+        else new java.math.BigDecimal(t, bufferType.scale)
       }
     if (finalResult) result.value(buffer, count) else buffer
   }
@@ -362,8 +418,10 @@ final case class WideDecimalAvgAgg(input: VectorExpr, bufferType: DecimalType, r
     }
     override def bufferValue(g: Int, slot: Int): Any = {
       val count = acc.count(g) + extra.count(g)
-      if (slot == 0) sumValue(count, Escalation.total(acc, extra, g), ungrouped = false) else java.lang.Long.valueOf(count)
+      if (slot == 0) sumValue(count, Escalation.total(acc, extra, g), ungrouped = false)
+      else java.lang.Long.valueOf(count)
     }
+
     /** The buffer as lanes (#416): the sum as limbs -- zero while empty, null past the precision -- and the count. */
     override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
       if (finalResult) return false
@@ -396,7 +454,8 @@ final case class WideDecimalAvgMergeAgg(
     count: VectorExpr,
     bufferType: DecimalType,
     result: DecimalAvgResult,
-    finalResult: Boolean) extends VectorAggFunction {
+    finalResult: Boolean
+) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(bufferType, LongType)
   override def emittedTypes(declared: Seq[DataType]): Seq[DataType] =
     if (finalResult) Seq(result.resultType, declared(1)) else declared
@@ -413,12 +472,14 @@ final case class WideDecimalAvgMergeAgg(
   private final class State(var groups: Int, ungrouped: Boolean) {
     var hi = new Array[Long](groups)
     var lo = new Array[Long](groups)
+
     /** Exact totals of the groups whose 128 bits overflowed (the exact ungrouped final only); null otherwise. */
     var wide: Array[java.math.BigInteger] = _
     var counts = new Array[Long](groups)
     var overflowed = new Array[Boolean](groups)
     def ensure(needed: Int): Unit = if (needed > groups) {
-      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
+      val n =
+        math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
       hi = java.util.Arrays.copyOf(hi, n); lo = java.util.Arrays.copyOf(lo, n)
       if (wide != null) wide = java.util.Arrays.copyOf(wide, n)
       counts = java.util.Arrays.copyOf(counts, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
@@ -434,7 +495,8 @@ final case class WideDecimalAvgMergeAgg(
         val g = groupOf(i)
         if (g >= 0) {
           // Spark's count buffer is never null (initial 0); a null here is a defensive skip.
-          if (counted.validity() == null || Bitmap.isSet(counted.validity(), i)) counts(g) += counted.data().getAtIndex(VectorBuffers.LE_LONG, i)
+          if (counted.validity() == null || Bitmap.isSet(counted.validity(), i))
+            counts(g) += counted.data().getAtIndex(VectorBuffers.LE_LONG, i)
           if (sums.isNull(i)) overflowed(g) = true
           else if (!overflowed(g)) add(g, Decimal128.hi(data, i), Decimal128.lo(data, i))
         }
@@ -456,6 +518,7 @@ final case class WideDecimalAvgMergeAgg(
     }
     private def total(g: Int): java.math.BigInteger =
       if (wide != null && wide(g) != null) wide(g) else Decimal128.toBigInteger(hi(g), lo(g))
+
     /**
      * The merged sum as Spark's buffer holds it: null once a partial arrived null. A total past the
      * buffer precision is null in a grouped result -- Spark's hash-map buffer rows re-check the
@@ -485,6 +548,7 @@ final case class WideDecimalAvgMergeAgg(
       state.merge(ctx, i => ids(i))
     }
     override def bufferValue(g: Int, slot: Int): Any = state.value(g, slot)
+
     /** The merged buffer as lanes (#416): the sum as limbs -- null once overflowed or past the precision -- and the count. */
     override def writeBuffer(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Boolean = {
       if (finalResult) return false
@@ -523,7 +587,8 @@ final case class WideDecimalSumMergeAgg(
     bufferType: DecimalType,
     finalResult: Boolean,
     nullOnOverflow: Boolean,
-    queryContext: org.apache.spark.QueryContext) extends VectorAggFunction {
+    queryContext: org.apache.spark.QueryContext
+) extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(bufferType, BooleanType)
   private val limit = java.math.BigInteger.TEN.pow(bufferType.precision)
 
@@ -538,10 +603,12 @@ final case class WideDecimalSumMergeAgg(
     var nonEmpty = new Array[Boolean](groups)
     var overflowed = new Array[Boolean](groups)
     def ensure(needed: Int): Unit = if (needed > groups) {
-      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
+      val n =
+        math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
       hi = java.util.Arrays.copyOf(hi, n); lo = java.util.Arrays.copyOf(lo, n)
       nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); overflowed = java.util.Arrays.copyOf(overflowed, n); groups = n
     }
+
     /** Folds the buffer rows of `ctx` in: `groupOf(i)` is the row's group, or -1 to skip it. */
     def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
       // The partial's sum buffer is a DECIMAL128 lane (ours in place, Spark's copied once): two limbs per row.
@@ -578,13 +645,18 @@ final case class WideDecimalSumMergeAgg(
         if (!nonEmpty(g)) null
         else if (overflowed(g)) {
           // A partial that overflowed left a null sum: Spark's CheckOverflowInSum raises on it in ANSI.
-          if (nullOnOverflow) null else throw org.apache.spark.sql.vector.VectorErrors.overflowInSumOfDecimal(queryContext)
+          if (nullOnOverflow) null
+          else throw org.apache.spark.sql.vector.VectorErrors.overflowInSumOfDecimal(queryContext)
         } else {
           val t = total(g)
           if (t.abs.compareTo(limit) >= 0) {
             if (nullOnOverflow) null
             else throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
-              org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(t, bufferType.scale)), bufferType.precision, bufferType.scale, queryContext)
+              org.apache.spark.sql.types.Decimal(new java.math.BigDecimal(t, bufferType.scale)),
+              bufferType.precision,
+              bufferType.scale,
+              queryContext
+            )
           } else new java.math.BigDecimal(t, bufferType.scale)
         }
       } else {
@@ -596,6 +668,7 @@ final case class WideDecimalSumMergeAgg(
           if (t.abs.compareTo(limit) >= 0) null else new java.math.BigDecimal(t, bufferType.scale)
         }
       }
+
     /** The merged buffer as lanes (#416): the sum as limbs -- zero while empty, null once overflowed or past the precision -- and the empty flag. */
     def write(slot: Int, from: Int, to: Int, out: ArrowVectorBuffers): Unit = {
       var g = from
@@ -648,8 +721,10 @@ final case class TrySumLongAgg(input: VectorExpr) extends VectorAggFunction {
     var nonEmpty = new Array[Boolean](groups)
     var poisoned = new Array[Boolean](groups)
     def ensure(needed: Int): Unit = if (needed > groups) {
-      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
-      sum = java.util.Arrays.copyOf(sum, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
+      val n =
+        math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
+      sum = java.util.Arrays.copyOf(sum, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n);
+      poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
     }
     def add(v: VectorBuffers, validity: java.lang.foreign.MemorySegment, n: Int, groupOf: Int => Int): Unit = {
       val wide = v.`type`() == VecType.INT64
@@ -659,7 +734,8 @@ final case class TrySumLongAgg(input: VectorExpr) extends VectorAggFunction {
         if (g >= 0 && (validity == null || Bitmap.isSet(validity, i))) {
           nonEmpty(g) = true
           if (!poisoned(g)) {
-            val x = if (wide) v.data().getAtIndex(VectorBuffers.LE_LONG, i) else v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong
+            val x = if (wide) v.data().getAtIndex(VectorBuffers.LE_LONG, i)
+            else v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong
             val r = sum(g) + x
             // Overflow iff both operands share a sign the result does not (Math.addExact's test).
             if (((sum(g) ^ r) & (x ^ r)) < 0) poisoned(g) = true else sum(g) = r
@@ -703,8 +779,10 @@ final case class TrySumLongMergeAgg(sum: VectorExpr, isEmpty: VectorExpr) extend
     var nonEmpty = new Array[Boolean](groups)
     var poisoned = new Array[Boolean](groups)
     def ensure(needed: Int): Unit = if (needed > groups) {
-      val n = math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
-      total = java.util.Arrays.copyOf(total, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n); poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
+      val n =
+        math.max(needed, groups * 2) // geometric: a copy per batch as groups trickle in was 8% of an executor (#388)
+      total = java.util.Arrays.copyOf(total, n); nonEmpty = java.util.Arrays.copyOf(nonEmpty, n);
+      poisoned = java.util.Arrays.copyOf(poisoned, n); groups = n
     }
     def merge(ctx: EvalContext, groupOf: Int => Int): Unit = {
       val sv = sum.eval(ctx)
@@ -713,7 +791,9 @@ final case class TrySumLongMergeAgg(sum: VectorExpr, isEmpty: VectorExpr) extend
       var i = 0
       while (i < n) {
         val g = groupOf(i)
-        if (g >= 0 && !(empty.validity() != null && !Bitmap.isSet(empty.validity(), i)) && !Bitmap.isSet(empty.data(), i)) {
+        if (
+          g >= 0 && !(empty.validity() != null && !Bitmap.isSet(empty.validity(), i)) && !Bitmap.isSet(empty.data(), i)
+        ) {
           nonEmpty(g) = true
           if (sv.validity() != null && !Bitmap.isSet(sv.validity(), i)) poisoned(g) = true
           else if (!poisoned(g)) {
@@ -826,6 +906,7 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
         case _ => Array(java.lang.Long.valueOf(bestLong))
       }
   }
+
   /** The wide decimal's scale, for the boxed value the DECIMAL128 buffer column is built from. */
   private def scale: Int = dataType.asInstanceOf[DecimalType].scale
   override def newGroupedState(): GroupedAggState = input.vecType match {
@@ -833,25 +914,29 @@ final case class MinMaxAgg(input: VectorExpr, isMin: Boolean, dataType: DataType
       new GroupedAggState {
         private val acc = new GroupedAccumulators.Decimal128MinMax(isMin)
         override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) new java.math.BigDecimal(acc.value(g), scale) else null
+        override def bufferValue(g: Int, slot: Int): Any =
+          if (acc.hasValue(g)) new java.math.BigDecimal(acc.value(g), scale) else null
       }
     case VecType.FLOAT64 =>
       new GroupedAggState {
         private val acc = new GroupedAccumulators.DoubleMinMax(isMin)
         override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) java.lang.Double.valueOf(acc.value(g)) else null
+        override def bufferValue(g: Int, slot: Int): Any =
+          if (acc.hasValue(g)) java.lang.Double.valueOf(acc.value(g)) else null
       }
     case VecType.INT32 =>
       new GroupedAggState {
         private val acc = new GroupedAccumulators.LongMinMax(isMin)
         override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) java.lang.Integer.valueOf(acc.value(g).toInt) else null
+        override def bufferValue(g: Int, slot: Int): Any =
+          if (acc.hasValue(g)) java.lang.Integer.valueOf(acc.value(g).toInt) else null
       }
     case _ =>
       new GroupedAggState {
         private val acc = new GroupedAccumulators.LongMinMax(isMin)
         override def update(ctx: EvalContext, groups: GroupAssignment): Unit = acc.update(input.eval(ctx), groups)
-        override def bufferValue(g: Int, slot: Int): Any = if (acc.hasValue(g)) java.lang.Long.valueOf(acc.value(g)) else null
+        override def bufferValue(g: Int, slot: Int): Any =
+          if (acc.hasValue(g)) java.lang.Long.valueOf(acc.value(g)) else null
       }
   }
 }
@@ -938,7 +1023,9 @@ object VectorAggregates {
     bufferOffsets(a.initialInputBufferOffset, a.aggregateExpressions)
 
   def bufferOffsets(initialOffset: Int, aggregateExpressions: Seq[AggregateExpression]): Seq[Int] =
-    aggregateExpressions.scanLeft(initialOffset)((off, agg) => off + agg.aggregateFunction.inputAggBufferAttributes.length).init
+    aggregateExpressions.scanLeft(initialOffset)((off, agg) =>
+      off + agg.aggregateFunction.inputAggBufferAttributes.length
+    ).init
 
   /**
    * Compiles an aggregate expression, or explains why it cannot be vectorized. The update modes
@@ -947,7 +1034,12 @@ object VectorAggregates {
    * emits -- buffers or results -- is the planner's decision, not the function's. `strict` is
    * `spark.vector.exec.strictFloatingPoint` (default on): double sums round exactly like Spark's.
    */
-  def compile(agg: AggregateExpression, input: Seq[Attribute], bufferOffset: Int = -1, strict: Boolean = true): Either[String, VectorAggFunction] =
+  def compile(
+      agg: AggregateExpression,
+      input: Seq[Attribute],
+      bufferOffset: Int = -1,
+      strict: Boolean = true
+  ): Either[String, VectorAggFunction] =
     agg.mode match {
       // `isDistinct` is only a marker in a physical plan: Spark's distinct rewrites have already
       // grouped by the distinct column below, so the function runs over deduplicated input as is.
@@ -959,42 +1051,63 @@ object VectorAggregates {
           }
         }
       // The FILTER clause is applied while updating; merging buffers does not see it (Spark drops it).
-      case PartialMerge | Final => compileMerge(agg.aggregateFunction, input, finalResult = agg.mode == Final, bufferOffset, strict)
+      case PartialMerge | Final =>
+        compileMerge(agg.aggregateFunction, input, finalResult = agg.mode == Final, bufferOffset, strict)
     }
 
   /** Whether `mode` advances the state by merging buffers rather than by reading the function's input. */
   def merges(mode: AggregateMode): Boolean = mode == PartialMerge || mode == Final
 
-  private def compileMerge(f: AggregateFunction, input: Seq[Attribute], finalResult: Boolean, bufferOffset: Int, strict: Boolean): Either[String, VectorAggFunction] = {
+  private def compileMerge(
+      f: AggregateFunction,
+      input: Seq[Attribute],
+      finalResult: Boolean,
+      bufferOffset: Int,
+      strict: Boolean
+  ): Either[String, VectorAggFunction] = {
     val buffers = f.inputAggBufferAttributes
+
     /** The input column holding buffer `i`: by exprId when the ids agree, by Spark's position otherwise. */
     def bufferOrdinal(i: Int): Int = {
       val byId = input.indexWhere(_.exprId == buffers(i).exprId)
       if (byId >= 0) byId
-      else if (bufferOffset >= 0 && bufferOffset + i < input.length && input(bufferOffset + i).dataType == buffers(i).dataType) bufferOffset + i
+      else if (
+        bufferOffset >= 0 && bufferOffset + i < input.length && input(bufferOffset + i).dataType == buffers(i).dataType
+      ) bufferOffset + i
       else -1
     }
     def ref(i: Int): Either[String, VectorExpr] = {
       val ordinal = bufferOrdinal(i)
-      if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}") else ExpressionCompiler.compileLaneColumn(input(ordinal), input)
+      if (ordinal < 0) Left(s"unbound attribute ${buffers(i).name}")
+      else ExpressionCompiler.compileLaneColumn(input(ordinal), input)
     }
     f match {
       case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType == LongType && buffers.length == 2 =>
         for (sum <- ref(0); empty <- ref(1)) yield TrySumLongMergeAgg(sum, empty)
-      case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType.isInstanceOf[DecimalType] => Left("try_sum over a decimal not supported")
+      case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType.isInstanceOf[DecimalType] =>
+        Left("try_sum over a decimal not supported")
       case s: Sum if s.dataType.isInstanceOf[DecimalType] && buffers.length == 2 =>
         // The wide decimal sum's (sum, isEmpty) buffer: the sum column has no lane and is read from
         // the batch by ordinal; isEmpty is an ordinary boolean.
         val sumOrdinal = bufferOrdinal(0)
         if (sumOrdinal < 0) Left(s"sum buffer ${buffers(0).name} not found in the input")
-        else ref(1).map(empty => WideDecimalSumMergeAgg(sumOrdinal, empty, s.dataType.asInstanceOf[DecimalType], finalResult,
-          nullOnOverflow = s.evalContext.evalMode != EvalMode.ANSI, s.origin.context))
+        else ref(1).map(empty =>
+          WideDecimalSumMergeAgg(
+            sumOrdinal,
+            empty,
+            s.dataType.asInstanceOf[DecimalType],
+            finalResult,
+            nullOnOverflow = s.evalContext.evalMode != EvalMode.ANSI,
+            s.origin.context
+          )
+        )
       case s: Sum if buffers.length != 1 => Left(s"sum with a ${buffers.length}-column buffer not supported")
       case s: Sum =>
         ref(0).flatMap { b =>
           (s.dataType, b.vecType) match {
             case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(b, strict))
-            case (LongType, VecType.INT64) => Right(SumLongAgg(b, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
+            case (LongType, VecType.INT64) =>
+              Right(SumLongAgg(b, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
             case (dt, _) => Left(s"merging sum buffers of ${dt.simpleString} not supported")
           }
         }
@@ -1008,22 +1121,36 @@ object VectorAggregates {
       case l: Last if buffers.length == 2 && FirstAgg.supportsWide(l.dataType) =>
         for (last <- ref(0); valueSet <- ref(1)) yield LastAgg(last, l.dataType, l.ignoreNulls, Some(valueSet))
       case l: Last => Left(s"last over ${l.dataType.simpleString} not supported")
-      case m: MaxMinBy if buffers.length == 2 && FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(TypeMapping.vecTypeOf(m.orderingExpr.dataType)) =>
-        for (value <- ref(0); ordering <- ref(1)) yield MaxMinByAgg(value, ordering, isMax = m.isInstanceOf[MaxBy], m.valueExpr.dataType, m.orderingExpr.dataType)
-      case m: MaxMinBy => Left(s"${m.prettyName} over ${m.valueExpr.dataType.simpleString} by ${m.orderingExpr.dataType.simpleString} not supported")
+      case m: MaxMinBy
+          if buffers.length == 2 && FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(
+            TypeMapping.vecTypeOf(m.orderingExpr.dataType)
+          ) =>
+        for (value <- ref(0); ordering <- ref(1)) yield MaxMinByAgg(
+          value,
+          ordering,
+          isMax = m.isInstanceOf[MaxBy],
+          m.valueExpr.dataType,
+          m.orderingExpr.dataType
+        )
+      case m: MaxMinBy => Left(
+          s"${m.prettyName} over ${m.valueExpr.dataType.simpleString} by ${m.orderingExpr.dataType.simpleString} not supported"
+        )
       case a: Average if a.child.dataType.isInstanceOf[DecimalType] && buffers.length == 2 =>
         // The wide decimal average's (sum, count) buffer: the sum column has no lane and is read
         // from the batch by ordinal; the count is an ordinary bigint.
         val bufferType = buffers(0).dataType.asInstanceOf[DecimalType]
         val sumOrdinal = bufferOrdinal(0)
-        if (bufferType.precision <= TypeMapping.MAX_DECIMAL_PRECISION) Left(s"avg buffer ${bufferType.simpleString} within 18 digits not supported")
+        if (bufferType.precision <= TypeMapping.MAX_DECIMAL_PRECISION)
+          Left(s"avg buffer ${bufferType.simpleString} within 18 digits not supported")
         else if (sumOrdinal < 0) Left(s"avg buffer ${buffers(0).name} not found in the input")
         else ref(1).flatMap { count =>
-          if (count.vecType != VecType.INT64) Left(s"avg count buffer ${buffers(1).dataType.simpleString} is not a bigint")
+          if (count.vecType != VecType.INT64)
+            Left(s"avg count buffer ${buffers(1).dataType.simpleString} is not a bigint")
           else Right(WideDecimalAvgMergeAgg(sumOrdinal, count, bufferType, DecimalAvgResult(a), finalResult))
         }
       case a: Average =>
-        if (a.dataType != DoubleType || buffers.length != 2) Left(s"avg producing ${a.dataType.simpleString} not supported")
+        if (a.dataType != DoubleType || buffers.length != 2)
+          Left(s"avg producing ${a.dataType.simpleString} not supported")
         else for (sum <- ref(0); count <- ref(1)) yield AverageMergeAgg(sum, count, strict)
       case f: First if buffers.length == 2 && FirstAgg.supportsWide(f.dataType) =>
         for (first <- ref(0); valueSet <- ref(1)) yield FirstMergeAgg(first, valueSet, f.dataType)
@@ -1055,12 +1182,14 @@ object VectorAggregates {
     }
 
   private def numericBuffer(dt: DataType)(b: VectorExpr): Either[String, VectorExpr] =
-    if (numeric.contains(b.vecType) || b.vecType == VecType.DECIMAL128) Right(b) else Left(s"min/max over ${dt.simpleString} not supported")
+    if (numeric.contains(b.vecType) || b.vecType == VecType.DECIMAL128) Right(b)
+    else Left(s"min/max over ${dt.simpleString} not supported")
 
   /** The arguments of a moment statistic as double lanes. */
   private def momentArgs(args: Seq[Expression], input: Seq[Attribute]): Either[String, Seq[VectorExpr]] =
     args.foldRight[Either[String, List[VectorExpr]]](Right(Nil)) { (a, acc) =>
-      for (rest <- acc; child <- numericChild(a, input)) yield (if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType)) :: rest
+      for (rest <- acc; child <- numericChild(a, input))
+        yield (if (child.vecType == VecType.FLOAT64) child else CastExpr(child, DoubleType)) :: rest
     }
 
   /** The buffer columns of a moment statistic, every one a double. */
@@ -1072,14 +1201,20 @@ object VectorAggregates {
       }
     }
 
-  private def compileFunction(f: AggregateFunction, input: Seq[Attribute], complete: Boolean, strict: Boolean): Either[String, VectorAggFunction] = f match {
+  private def compileFunction(
+      f: AggregateFunction,
+      input: Seq[Attribute],
+      complete: Boolean,
+      strict: Boolean
+  ): Either[String, VectorAggFunction] = f match {
     // try_sum over an integral input: Spark's (sum, isEmpty) buffer with the whole group nulled on overflow.
     case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType == LongType =>
       numericChild(s.child, input).flatMap { child =>
         if (child.vecType == VecType.INT32 || child.vecType == VecType.INT64) Right(TrySumLongAgg(child))
         else Left(s"try_sum over ${s.child.dataType.simpleString} not supported")
       }
-    case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType.isInstanceOf[DecimalType] => Left("try_sum over a decimal not supported")
+    case s: Sum if s.evalContext.evalMode == EvalMode.TRY && s.dataType.isInstanceOf[DecimalType] =>
+      Left("try_sum over a decimal not supported")
     case s: Sum if s.dataType.isInstanceOf[DecimalType] =>
       // Only reached for decimals of more than 8 digits (the optimizer rewrites smaller ones to a
       // long sum): the buffer is Spark's (sum: Decimal(p + 10, s), isEmpty) pair, the sum wider than
@@ -1087,12 +1222,19 @@ object VectorAggregates {
       // narrow operands under the sum (TPC-H's `sum(l_extendedprice * (1 - l_discount))`) is computed
       // speculatively in 64 bits, its overflowing rows added exactly (#26).
       val bufferType = s.dataType.asInstanceOf[DecimalType]
-      def agg(child: VectorExpr) = WideDecimalSumAgg(child, bufferType, complete, nullOnOverflow = s.evalContext.evalMode != EvalMode.ANSI, s.origin.context)
+      def agg(child: VectorExpr) = WideDecimalSumAgg(
+        child,
+        bufferType,
+        complete,
+        nullOnOverflow = s.evalContext.evalMode != EvalMode.ANSI,
+        s.origin.context
+      )
       ExpressionCompiler.speculativeDecimalArithmetic(s.child, input) match {
         case Some(speculative) => speculative.map(agg)
         case None =>
           numericChild(s.child, input, wide = true).flatMap { child =>
-            if (child.vecType == VecType.FLOAT64) Left(s"sum over ${s.child.dataType.simpleString} producing ${s.dataType.simpleString} not supported")
+            if (child.vecType == VecType.FLOAT64)
+              Left(s"sum over ${s.child.dataType.simpleString} producing ${s.dataType.simpleString} not supported")
             else Right(agg(child))
           }
       }
@@ -1101,7 +1243,8 @@ object VectorAggregates {
         (s.dataType, child.vecType) match {
           case (DoubleType, VecType.FLOAT64) => Right(SumDoubleAgg(child, strict))
           case (LongType, VecType.INT32) => Right(SumLongAgg(child, checked = false, s.origin.context))
-          case (LongType, VecType.INT64) => Right(SumLongAgg(child, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
+          case (LongType, VecType.INT64) =>
+            Right(SumLongAgg(child, s.evalContext.evalMode == EvalMode.ANSI, s.origin.context))
           case (dt, _) => Left(s"sum over ${s.child.dataType.simpleString} producing ${dt.simpleString} not supported")
         }
       }
@@ -1126,8 +1269,10 @@ object VectorAggregates {
           }
       }
 
-    case m: Min if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = true, m.dataType))
-    case m: Max if orderedLane(m.dataType) => orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = false, m.dataType))
+    case m: Min if orderedLane(m.dataType) =>
+      orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = true, m.dataType))
+    case m: Max if orderedLane(m.dataType) =>
+      orderedChild(m.child, input).map(child => OrderedMinMaxAgg(child, isMin = false, m.dataType))
     case m: Min => numericChild(m.child, input, wide = true).map(child => MinMaxAgg(child, isMin = true, m.dataType))
     case m: Max => numericChild(m.child, input, wide = true).map(child => MinMaxAgg(child, isMin = false, m.dataType))
     case b: BitAggregate if integralLane(b.dataType) =>
@@ -1142,13 +1287,18 @@ object VectorAggregates {
         case e => Right(LastAgg(e, l.dataType, l.ignoreNulls, None))
       }
     case l: Last => Left(s"last over ${l.dataType.simpleString} not supported")
-    case m: MaxMinBy if FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(TypeMapping.vecTypeOf(m.orderingExpr.dataType)) =>
+    case m: MaxMinBy
+        if FirstAgg.supports(m.valueExpr.dataType) && Rows.supportsOrdering(
+          TypeMapping.vecTypeOf(m.orderingExpr.dataType)
+        ) =>
       for {
         value <- ExpressionCompiler.compile(m.valueExpr, input)
         ordering <- ExpressionCompiler.compile(m.orderingExpr, input)
         _ <- if (ordering.isInstanceOf[LiteralExpr]) Left(s"${m.prettyName} by a literal") else Right(())
       } yield MaxMinByAgg(value, ordering, isMax = m.isInstanceOf[MaxBy], m.valueExpr.dataType, m.orderingExpr.dataType)
-    case m: MaxMinBy => Left(s"${m.prettyName} over ${m.valueExpr.dataType.simpleString} by ${m.orderingExpr.dataType.simpleString} not supported")
+    case m: MaxMinBy => Left(
+        s"${m.prettyName} over ${m.valueExpr.dataType.simpleString} by ${m.orderingExpr.dataType.simpleString} not supported"
+      )
 
     case a: Average if a.child.dataType.isInstanceOf[DecimalType] =>
       // Only reached for decimals of more than 11 digits (the optimizer rewrites smaller ones to a
@@ -1156,14 +1306,16 @@ object VectorAggregates {
       // pair, the sum wider than 18 digits, accumulated in 128 bits; the result is Spark's own
       // expression over the merged buffer (#26).
       val bufferType = a.aggBufferAttributes.head.dataType.asInstanceOf[DecimalType]
-      if (bufferType.precision <= TypeMapping.MAX_DECIMAL_PRECISION) Left(s"avg buffer ${bufferType.simpleString} within 18 digits not supported")
+      if (bufferType.precision <= TypeMapping.MAX_DECIMAL_PRECISION)
+        Left(s"avg buffer ${bufferType.simpleString} within 18 digits not supported")
       else {
         def agg(child: VectorExpr) = WideDecimalAvgAgg(child, bufferType, DecimalAvgResult(a), complete)
         ExpressionCompiler.speculativeDecimalArithmetic(a.child, input) match {
           case Some(speculative) => speculative.map(agg)
           case None =>
             numericChild(a.child, input, wide = true).flatMap { child =>
-              if (child.vecType == VecType.FLOAT64) Left(s"avg over ${a.child.dataType.simpleString} producing ${a.dataType.simpleString} not supported")
+              if (child.vecType == VecType.FLOAT64)
+                Left(s"avg over ${a.child.dataType.simpleString} producing ${a.dataType.simpleString} not supported")
               else Right(agg(child))
             }
         }
@@ -1177,14 +1329,19 @@ object VectorAggregates {
     // The one-pass moment statistics: Spark's Welford step per row over doubles (the analyzer has
     // cast the arguments), the buffers emitted as Spark's doubles, the result Spark's own expression.
     case m: CentralMomentAgg =>
-      momentArgs(Seq(m.child), input).map(MomentsAgg(_, MomentsAgg.Central(m.aggBufferAttributes.length - 1), merge = false))
+      momentArgs(
+        Seq(m.child),
+        input
+      ).map(MomentsAgg(_, MomentsAgg.Central(m.aggBufferAttributes.length - 1), merge = false))
     case c: Covariance =>
       momentArgs(Seq(c.left, c.right), input).map(MomentsAgg(_, MomentsAgg.Covariance, merge = false))
     case c: PearsonCorrelation =>
       momentArgs(Seq(c.left, c.right), input).map(MomentsAgg(_, MomentsAgg.Correlation, merge = false))
     // regr_slope / regr_intercept: a covariance and a variance of the independent variable (the right argument) over the same pairs.
-    case r: RegrSlope => momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
-    case r: RegrIntercept => momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
+    case r: RegrSlope =>
+      momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
+    case r: RegrIntercept =>
+      momentArgs(Seq(r.right, r.left), input).map(MomentsAgg(_, MomentsAgg.Regression, merge = false))
 
     case f: First if FirstAgg.supportsWide(f.dataType) =>
       ExpressionCompiler.compileLaneColumn(f.child, input).flatMap {
@@ -1197,10 +1354,15 @@ object VectorAggregates {
   }
 
   /** A numeric lane operand; `wide` also admits a DECIMAL128 lane (the decimal sum, average, min and max, #259). */
-  private def numericChild(child: org.apache.spark.sql.catalyst.expressions.Expression, input: Seq[Attribute], wide: Boolean = false): Either[String, VectorExpr] =
+  private def numericChild(
+      child: org.apache.spark.sql.catalyst.expressions.Expression,
+      input: Seq[Attribute],
+      wide: Boolean = false
+  ): Either[String, VectorExpr] =
     ExpressionCompiler.compileLaneColumn(child, input).flatMap {
       case _: LiteralExpr => Left("aggregate over a literal")
-      case e if !numeric.contains(e.vecType) && !(wide && e.vecType == VecType.DECIMAL128) => Left(s"aggregate over ${child.dataType.simpleString} not supported")
+      case e if !numeric.contains(e.vecType) && !(wide && e.vecType == VecType.DECIMAL128) =>
+        Left(s"aggregate over ${child.dataType.simpleString} not supported")
       case e => Right(e)
     }
 

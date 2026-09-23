@@ -55,8 +55,8 @@ final case class RoundExpr(
     mode: RoundKernels.Mode,
     scale: Int,
     ansi: Boolean,
-    queryContext: QueryContext)
-    extends VectorExpr {
+    queryContext: QueryContext
+) extends VectorExpr {
 
   override def children: Seq[VectorExpr] = Seq(child)
 
@@ -82,6 +82,7 @@ final case class RoundExpr(
 }
 
 object RoundExpr {
+
   /** Whether a child / result pair is one this node handles (the result must be a 64-bit lane). */
   def supports(from: DataType, to: DataType): Boolean = (from, to) match {
     case (f: DecimalType, t: DecimalType) => TypeMapping.isSupported(f) && TypeMapping.isSupported(t)

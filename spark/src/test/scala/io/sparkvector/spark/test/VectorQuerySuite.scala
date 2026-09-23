@@ -15,16 +15,17 @@ abstract class VectorQuerySuite extends SparkVectorFunSuite {
   override protected def extraSparkConf: Map[String, String] = Map(
     "spark.sql.extensions" -> classOf[VectorSparkSessionExtensions].getName,
     "spark.sql.parquet.enableVectorizedReader" -> "true",
-    "spark.sql.adaptive.enabled" -> "true")
+    "spark.sql.adaptive.enabled" -> "true"
+  )
 
   protected def withConf[T](pairs: (String, String)*)(f: => T): T = {
     val previous = pairs.map { case (k, _) => k -> spark.conf.getOption(k) }
     pairs.foreach { case (k, v) => spark.conf.set(k, v) }
     try f
     finally previous.foreach {
-      case (k, Some(v)) => spark.conf.set(k, v)
-      case (k, None) => spark.conf.unset(k)
-    }
+        case (k, Some(v)) => spark.conf.set(k, v)
+        case (k, None) => spark.conf.unset(k)
+      }
   }
 
   protected def withPlugin[T](enabled: Boolean)(f: => T): T =
@@ -43,7 +44,8 @@ abstract class VectorQuerySuite extends SparkVectorFunSuite {
   protected def checkVectorized(
       sql: String,
       expectedOperators: Seq[Class[_ <: SparkPlan]],
-      tolerance: Double = 1e-9): DataFrame = {
+      tolerance: Double = 1e-9
+  ): DataFrame = {
     val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
     val df = withPlugin(enabled = true) {
       val d = spark.sql(sql)
@@ -57,7 +59,8 @@ abstract class VectorQuerySuite extends SparkVectorFunSuite {
       assert(
         nodes.exists(n => cls.isInstance(n)),
         s"expected ${cls.getSimpleName} in plan for: $sql\n${finalPlan(df).treeString}\n" +
-          s"fallbacks: ${VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ")}")
+          s"fallbacks: ${VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ")}"
+      )
     }
     df
   }
@@ -66,7 +69,8 @@ abstract class VectorQuerySuite extends SparkVectorFunSuite {
   protected def checkFallback(
       sql: String,
       operators: Seq[Class[_ <: SparkPlan]],
-      reasonContains: String): DataFrame = {
+      reasonContains: String
+  ): DataFrame = {
     val df = withPlugin(enabled = true) {
       val d = spark.sql(sql)
       d.collect()
@@ -79,7 +83,8 @@ abstract class VectorQuerySuite extends SparkVectorFunSuite {
     val reasons = VectorFallback.reasons(finalPlan(df)).map(_._2)
     assert(
       reasons.exists(_.contains(reasonContains)),
-      s"expected a fallback reason containing '$reasonContains', got: ${reasons.mkString("; ")}\n${finalPlan(df).treeString}")
+      s"expected a fallback reason containing '$reasonContains', got: ${reasons.mkString("; ")}\n${finalPlan(df).treeString}"
+    )
     df
   }
 
@@ -98,7 +103,10 @@ abstract class VectorQuerySuite extends SparkVectorFunSuite {
       er.zip(ar).zipWithIndex.foreach { case ((ev, av), c) =>
         (ev, av) match {
           case (x: Double, y: Double) =>
-            val ok = (x.isNaN && y.isNaN) || x == y || math.abs(x - y) <= tolerance * math.max(1.0, math.max(math.abs(x), math.abs(y)))
+            val ok = (x.isNaN && y.isNaN) || x == y || math.abs(x - y) <= tolerance * math.max(
+              1.0,
+              math.max(math.abs(x), math.abs(y))
+            )
             assert(ok, s"double mismatch at row $i col $c: $x vs $y for: $context")
           case (x, y) => assert(x == y, s"mismatch at row $i col $c: $x vs $y for: $context")
         }

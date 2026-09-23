@@ -38,7 +38,8 @@ final case class StructFieldExpr(inputOrdinal: Int, path: Seq[Int], dataType: Da
     val leaf = ColumnVectorAdapters.adapt(cv, n, ctx.arena)
     if (parentNulls == null) leaf
     else {
-      val validity = if (leaf.validity() == null) parentNulls else { BitmapKernels.and(parentNulls, leaf.validity(), parentNulls, n); parentNulls }
+      val validity = if (leaf.validity() == null) parentNulls
+      else { BitmapKernels.and(parentNulls, leaf.validity(), parentNulls, n); parentNulls }
       StructFieldExpr.withValidity(leaf, validity)
     }
   }
@@ -51,7 +52,8 @@ final case class StructFieldExpr(inputOrdinal: Int, path: Seq[Int], dataType: Da
  * the element count per row read from Spark's vector; a null array is null (or -1 under
  * `spark.sql.legacy.sizeOfNull`, as Spark's `Size` yields).
  */
-final case class SizeExpr(inputOrdinal: Int, path: Seq[Int], isMap: Boolean, legacySizeOfNull: Boolean) extends VectorExpr {
+final case class SizeExpr(inputOrdinal: Int, path: Seq[Int], isMap: Boolean, legacySizeOfNull: Boolean)
+    extends VectorExpr {
   private val steps = path.toArray
   override def dataType: DataType = org.apache.spark.sql.types.IntegerType
 
@@ -88,7 +90,9 @@ final case class SizeExpr(inputOrdinal: Int, path: Seq[Int], isMap: Boolean, leg
  */
 final case class NestedColumnRef(inputOrdinal: Int, path: Seq[Int], dataType: DataType) extends VectorExpr {
   override def eval(ctx: EvalContext): VectorBuffers =
-    throw new IllegalStateException(s"a nested column of type ${dataType.simpleString} has no lane; it is passed through, not evaluated")
+    throw new IllegalStateException(
+      s"a nested column of type ${dataType.simpleString} has no lane; it is passed through, not evaluated"
+    )
   override def children: Seq[VectorExpr] = Nil
 }
 
@@ -118,10 +122,12 @@ final case class NestedValidityExpr(inputOrdinal: Int, path: Seq[Int]) extends V
 }
 
 object StructFieldExpr {
+
   /** The same buffers under a narrower validity bitmap, whatever the lane's shape. */
   def withValidity(v: VectorBuffers, validity: java.lang.foreign.MemorySegment): VectorBuffers = v match {
     case s: SegmentVectorBuffers => s.withValidity(validity)
-    case _ if v.dictionary() != null => SegmentVectorBuffers.dictionaryUtf8(v.length(), validity, v.data(), v.dictionary())
+    case _ if v.dictionary() != null =>
+      SegmentVectorBuffers.dictionaryUtf8(v.length(), validity, v.data(), v.dictionary())
     case _ if v.`type`() == VecType.UTF8 => SegmentVectorBuffers.utf8(v.length(), validity, v.offsets(), v.data())
     case _ => SegmentVectorBuffers.fixedWidth(v.`type`(), v.length(), validity, v.data())
   }

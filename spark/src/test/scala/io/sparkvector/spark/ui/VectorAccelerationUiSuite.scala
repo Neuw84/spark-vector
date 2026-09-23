@@ -22,7 +22,8 @@ class VectorAccelerationUiSuite extends SparkVectorFunSuite with Eventually {
   override protected def extraSparkConf: Map[String, String] = Map(
     "spark.plugins" -> classOf[VectorPlugin].getName,
     "spark.ui.enabled" -> "true",
-    "spark.ui.port" -> "0")
+    "spark.ui.port" -> "0"
+  )
 
   private def uiUrl: String =
     spark.sparkContext.uiWebUrl.getOrElse(fail("the Spark UI is not running"))
@@ -83,7 +84,8 @@ class VectorAccelerationUiSuite extends SparkVectorFunSuite with Eventually {
     // Scan (columnar source) -> VectorFilter -> ColumnarToRow (transition). The scan and the
     // transition are plumbing, so the only operator is ours.
     val plan = PlanAcceleration.fromPlan(
-      spark.sql("SELECT i FROM t WHERE i > 10").queryExecution.executedPlan)
+      spark.sql("SELECT i FROM t WHERE i > 10").queryExecution.executedPlan
+    )
     assert(plan.countBy(Engine.Vector) >= 1)
     assert(plan.countBy(Engine.ColumnarSource) === 1, "the vectorized scan is a columnar source")
     assert(plan.countBy(Engine.Spark) === 0)
@@ -95,7 +97,8 @@ class VectorAccelerationUiSuite extends SparkVectorFunSuite with Eventually {
     // The shuffle behind the group-by is a Spark exchange: we have no columnar shuffle of our own
     // without Comet, so the plan must not claim to be fully accelerated.
     val plan = PlanAcceleration.fromPlan(
-      spark.sql("SELECT s, count(*) FROM t GROUP BY s").queryExecution.executedPlan)
+      spark.sql("SELECT s, count(*) FROM t GROUP BY s").queryExecution.executedPlan
+    )
     assert(plan.countBy(Engine.Spark) >= 1)
     assert(!plan.fullyAccelerated)
   }
@@ -105,7 +108,8 @@ class VectorAccelerationUiSuite extends SparkVectorFunSuite with Eventually {
     // A LIKE with inner wildcards does not compile to the kernels, so the filter stays with Spark and the
     // rule records why. That is a genuine miss, unlike a scan or an exchange.
     val fellBack = PlanAcceleration.fromPlan(
-      spark.sql("SELECT i FROM t WHERE soundex(s) = 'S000'").queryExecution.executedPlan)
+      spark.sql("SELECT i FROM t WHERE soundex(s) = 'S000'").queryExecution.executedPlan
+    )
     assert(fellBack.countBy(Engine.Spark) >= 1)
     assert(!fellBack.fullyAccelerated)
     assert(fellBack.fallbacks.nonEmpty, "the fallback reason should be recorded on the node")

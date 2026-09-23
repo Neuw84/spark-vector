@@ -2,7 +2,19 @@ package io.sparkvector.spark.expr
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, CompareKernels, CompareOp, MathKernels, OverflowKernels, PredicateKernels, SegmentVectorBuffers, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  ArrowLayout,
+  Bitmap,
+  BitmapKernels,
+  CompareKernels,
+  CompareOp,
+  MathKernels,
+  OverflowKernels,
+  PredicateKernels,
+  SegmentVectorBuffers,
+  VecType,
+  VectorBuffers
+}
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, DoubleType, LongType}
 import org.apache.spark.sql.vector.VectorErrors
@@ -77,8 +89,8 @@ final case class DivideLikeExpr(
     right: VectorExpr,
     dataType: DataType,
     ansi: Boolean,
-    queryContext: QueryContext)
-    extends VectorExpr {
+    queryContext: QueryContext
+) extends VectorExpr {
   import DivideLikeExpr._
 
   override def children: Seq[VectorExpr] = Seq(left, right)
@@ -98,7 +110,9 @@ final case class DivideLikeExpr(
           case Pmod => MathKernels.remainderScalar(MathKernels.RemOp.PMOD, a, lit.number, false, data)
           case Div =>
             MathKernels.integralDivideScalar(a, lit.number, false, data)
-            if (ansi) { overflow = ctx.bitmap(); MathKernels.integralDivideOverflowScalar(a, lit.number, false, overflow) }
+            if (ansi) {
+              overflow = ctx.bitmap(); MathKernels.integralDivideOverflowScalar(a, lit.number, false, overflow)
+            }
         }
         if (lit.number.doubleValue() == 0.0) { divisorZero = ctx.bitmap(); Bitmap.fill(divisorZero, n, true) }
       case (lit: LiteralExpr, r) =>
@@ -109,7 +123,9 @@ final case class DivideLikeExpr(
           case Pmod => MathKernels.remainderScalar(MathKernels.RemOp.PMOD, b, lit.number, true, data)
           case Div =>
             MathKernels.integralDivideScalar(b, lit.number, true, data)
-            if (ansi) { overflow = ctx.bitmap(); MathKernels.integralDivideOverflowScalar(b, lit.number, true, overflow) }
+            if (ansi) {
+              overflow = ctx.bitmap(); MathKernels.integralDivideOverflowScalar(b, lit.number, true, overflow)
+            }
         }
         divisorZero = zeroMask(b, ctx)
       case (l, r) =>
@@ -138,7 +154,8 @@ final case class DivideLikeExpr(
       else BitmapKernels.and(divisorZero, validity, affected, n)
       if (ctx.active != null) BitmapKernels.and(affected, ctx.active, affected, n)
       if (Bitmap.popcount(affected, n) > 0) {
-        if (ansi) throw (if (kind == Div) VectorErrors.divideByZero(queryContext) else VectorErrors.remainderByZero(queryContext))
+        if (ansi) throw (if (kind == Div) VectorErrors.divideByZero(queryContext)
+                         else VectorErrors.remainderByZero(queryContext))
         val newValidity = ctx.bitmap()
         if (validity == null) BitmapKernels.not(divisorZero, newValidity, n)
         else BitmapKernels.andNot(validity, divisorZero, newValidity, n)

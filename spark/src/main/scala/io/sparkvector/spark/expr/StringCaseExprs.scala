@@ -18,11 +18,13 @@ final case class CaseMapExpr(kind: Kind, child: VectorExpr, useICU: Boolean) ext
     val s = child.eval(ctx)
     val flags = ctx.bitmap()
     val slow = StringCaseKernels.slowRows(s, kind, useICU, s.validity(), flags)
-    val overrides = if (slow == 0) null else {
+    val overrides = if (slow == 0) null
+    else {
       val o = new Array[Array[Byte]](ctx.numRows)
       var i = 0
       while (i < ctx.numRows) {
-        if (Bitmap.isSet(flags, i)) o(i) = CaseMapExpr.spark(kind, UTF8String.fromBytes(s.getUtf8Bytes(i)), useICU).getBytes
+        if (Bitmap.isSet(flags, i))
+          o(i) = CaseMapExpr.spark(kind, UTF8String.fromBytes(s.getUtf8Bytes(i)), useICU).getBytes
         i += 1
       }
       o

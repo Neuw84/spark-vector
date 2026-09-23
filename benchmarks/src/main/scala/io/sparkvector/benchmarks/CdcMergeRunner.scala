@@ -58,7 +58,8 @@ object CdcMergeRunner {
       extraConf: Map[String, String] = Map.empty,
       report: Option[String] = None,
       /** Skip the read phases (merge only). */
-      mergeOnly: Boolean = false)
+      mergeOnly: Boolean = false
+  )
 
   def main(argv: Array[String]): Unit = {
     def parse(rest: List[String], a: Args): Args = rest match {
@@ -121,13 +122,18 @@ object CdcMergeRunner {
     "filter-agg" ->
       """SELECT sum(l_extendedprice * l_discount) FROM %s
         |WHERE l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01'
-        |  AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24""".stripMargin)
+        |  AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24""".stripMargin
+  )
 
   // ------------------------------------------------------------------ run
 
   private def run(args: Args): Unit = {
-    val conf = TpchRunner.Configs.getOrElse(args.config,
-      throw new IllegalArgumentException(s"unknown config ${args.config}; known: ${TpchRunner.ConfigOrder.mkString(", ")}"))
+    val conf = TpchRunner.Configs.getOrElse(
+      args.config,
+      throw new IllegalArgumentException(
+        s"unknown config ${args.config}; known: ${TpchRunner.ConfigOrder.mkString(", ")}"
+      )
+    )
     val warehouse = new File(args.warehouse).getAbsolutePath
     val builder = SparkSession.builder()
       .master(s"local[${args.threads}]")
@@ -136,7 +142,9 @@ object CdcMergeRunner {
       .config("spark.sql.shuffle.partitions", args.shufflePartitions.toString)
       .config("spark.sql.adaptive.enabled", "true")
       .config("spark.driver.host", "localhost")
-    (conf ++ IcebergMorGenerator.catalogConf(warehouse) ++ args.extraConf).foreach { case (k, v) => builder.config(k, v) }
+    (conf ++ IcebergMorGenerator.catalogConf(warehouse) ++ args.extraConf).foreach { case (k, v) =>
+      builder.config(k, v)
+    }
     val spark = builder.getOrCreate()
     try {
       val table = s"${IcebergMorGenerator.Catalog}.${args.table}"
@@ -161,12 +169,20 @@ object CdcMergeRunner {
         def branch(op: String, tweaks: Map[String, String]) =
           s"SELECT '$op' AS op, ${columns.map(c => tweaks.getOrElse(c, c) + s" AS $c").mkString(", ")} FROM cdc_base"
         spark.sql(
-          branch("U", Map(
-            "l_quantity" -> "l_quantity + 1",
-            "l_extendedprice" -> "round(l_extendedprice * 1.01, 2)",
-            "l_comment" -> "concat(l_comment, ' u')")) + s" WHERE ${buckets(UpdateBuckets)}" +
+          branch(
+            "U",
+            Map(
+              "l_quantity" -> "l_quantity + 1",
+              "l_extendedprice" -> "round(l_extendedprice * 1.01, 2)",
+              "l_comment" -> "concat(l_comment, ' u')"
+            )
+          ) + s" WHERE ${buckets(UpdateBuckets)}" +
             " UNION ALL " + branch("D", Map.empty) + s" WHERE ${buckets(DeleteBuckets)}" +
-            " UNION ALL " + branch("I", Map("l_orderkey" -> s"l_orderkey + ${maxKey}L")) + s" WHERE ${buckets(InsertBuckets)}")
+            " UNION ALL " + branch(
+              "I",
+              Map("l_orderkey" -> s"l_orderkey + ${maxKey}L")
+            ) + s" WHERE ${buckets(InsertBuckets)}"
+        )
           .repartition(args.threads)
           .write.mode("overwrite").parquet(changesDir)
       }
@@ -179,27 +195,36 @@ object CdcMergeRunner {
 
       Files.createDirectories(Paths.get(args.out))
       val outFile = Paths.get(args.out, s"cdc-${args.config}.jsonl")
-      val writer = new PrintWriter(Files.newBufferedWriter(outFile, StandardCharsets.UTF_8,
-        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND))
+      val writer = new PrintWriter(Files.newBufferedWriter(
+        outFile,
+        StandardCharsets.UTF_8,
+        java.nio.file.StandardOpenOption.CREATE,
+        java.nio.file.StandardOpenOption.APPEND
+      ))
       def emit(m: Measurement): Unit = {
         writer.println(m.toJson(args.config, args.table, live, changeCounts, changeBytes)); writer.flush()
-        println(f"[cdc] ${args.config} ${m.phase}/${m.name} median=${m.medianMs}%.1fms p90=${m.p90Ms}%.1fms rows=${m.rows} " +
-          s"accelerated=${m.acceleratedOps}/${m.operatorCount}" +
-          (if (m.morPhysicalRows > 0) f" mor live/physical=${m.morLiveRows}/${m.morPhysicalRows}" else ""))
+        println(
+          f"[cdc] ${args.config} ${m.phase}/${m.name} median=${m.medianMs}%.1fms p90=${m.p90Ms}%.1fms rows=${m.rows} " +
+            s"accelerated=${m.acceleratedOps}/${m.operatorCount}" +
+            (if (m.morPhysicalRows > 0) f" mor live/physical=${m.morLiveRows}/${m.morPhysicalRows}" else "")
+        )
         m.fallbacks.foreach(f => println(s"[cdc]   fallback: $f"))
       }
       // Whatever happens mid-phase (an exception, Ctrl-C reaching the shutdown hook), put the table
       // back; only a hard kill can leave a merge applied, and the printed baseline is the id to
       // rollback_to_snapshot by hand then.
-      def restore(): Unit = try {
-        val current = spark.sql(s"SELECT snapshot_id FROM $table.refs WHERE name = 'main'").collect()(0).getLong(0)
-        if (current != baseline) {
-          spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.rollback_to_snapshot('${args.table}', ${baseline}L)")
-          println(s"[cdc] restored $table to snapshot $baseline")
+      def restore(): Unit =
+        try {
+          val current = spark.sql(s"SELECT snapshot_id FROM $table.refs WHERE name = 'main'").collect()(0).getLong(0)
+          if (current != baseline) {
+            spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.rollback_to_snapshot('${args.table}', ${baseline}L)")
+            println(s"[cdc] restored $table to snapshot $baseline")
+          }
+          spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.expire_snapshots(table => '${args.table}', " +
+            s"older_than => TIMESTAMP '${java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(60))}', retain_last => 1)").collect()
+        } catch {
+          case e: Exception => println(s"[cdc] WARNING: could not restore $table to $baseline: ${e.getMessage}")
         }
-        spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.expire_snapshots(table => '${args.table}', " +
-          s"older_than => TIMESTAMP '${java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(60))}', retain_last => 1)").collect()
-      } catch { case e: Exception => println(s"[cdc] WARNING: could not restore $table to $baseline: ${e.getMessage}") }
       try {
         // A rolled-back merge leaves its data and delete files orphaned; at this scale that is
         // gigabytes per run, and together with the merge's shuffle spill it can fill the disk.
@@ -209,7 +234,7 @@ object CdcMergeRunner {
         val freeAtStart = new File("/").getUsableSpace
         def expireOrphans(): Unit = {
           try spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.expire_snapshots(table => '${args.table}', " +
-            s"older_than => TIMESTAMP '${java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(60))}', retain_last => 1)").collect()
+              s"older_than => TIMESTAMP '${java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(60))}', retain_last => 1)").collect()
           catch { case e: Exception => println(s"[cdc] WARNING: expire_snapshots failed: ${e.getMessage}") }
           // Shuffle files live until the ContextCleaner sees their dependencies collected, which is
           // asynchronous: wait for the disk to actually recover (a merge writes 15+ GiB of scratch,
@@ -246,8 +271,11 @@ object CdcMergeRunner {
           }
           val a = PlanAcceleration.fromPlan(plan)
           mergeAccel = Some(MergeAccel(
-            a.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated), a.operatorCount,
-            a.fallbacks.map { case (n, r) => s"$n: $r" }.distinct, plan.treeString.take(4000)))
+            a.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated),
+            a.operatorCount,
+            a.fallbacks.map { case (n, r) => s"$n: $r" }.distinct,
+            plan.treeString.take(4000)
+          ))
           ms
         }
 
@@ -269,9 +297,18 @@ object CdcMergeRunner {
         val mergedRows = times.head._2
         require(times.map(_._2).distinct.size == 1, s"merge row counts diverged: ${times.map(_._2)}")
         val accel = mergeAccel.getOrElse(MergeAccel(0, 0, Seq("merge plan not captured"), ""))
-        emit(Measurement("merge", "merge", times.map(_._1), mergedRows.toInt, checksumOf(spark, table), plan = accel.plan,
-          acceleratedOps = accel.acceleratedOps, operatorCount = accel.operatorCount, fallbacks = accel.fallbacks,
-          mergeSnapshotSummary = times.last._3))
+        emit(Measurement(
+          "merge",
+          "merge",
+          times.map(_._1),
+          mergedRows.toInt,
+          checksumOf(spark, table),
+          plan = accel.plan,
+          acceleratedOps = accel.acceleratedOps,
+          operatorCount = accel.operatorCount,
+          fallbacks = accel.fallbacks,
+          mergeSnapshotSummary = times.last._3
+        ))
 
         // 3. Reads over the merged state (the last timed merge's), then leave the table as we found it.
         if (!args.mergeOnly) ReadQueries.foreach { case (name, sql) =>
@@ -284,7 +321,9 @@ object CdcMergeRunner {
   /** `content, records, bytes` of the table's current files, split data vs deletes. */
   private final case class TableStats(dataFiles: Long, dataBytes: Long, deleteFiles: Long, deleteRows: Long)
   private def tableStats(spark: SparkSession, table: String): TableStats = {
-    val rows = spark.sql(s"SELECT content, count(*), sum(record_count), sum(file_size_in_bytes) FROM $table.files GROUP BY content").collect()
+    val rows = spark.sql(
+      s"SELECT content, count(*), sum(record_count), sum(file_size_in_bytes) FROM $table.files GROUP BY content"
+    ).collect()
     def of(pred: Int => Boolean, col: Int) = rows.filter(r => pred(r.getInt(0))).map(_.getLong(col)).sum
     TableStats(of(_ == 0, 1), of(_ == 0, 3), of(_ > 0, 1), of(_ > 0, 2))
   }
@@ -296,13 +335,22 @@ object CdcMergeRunner {
 
   /** A cheap whole-table checksum: global aggregates to 10 significant digits, like TpchRunner's row checksums. */
   private def checksumOf(spark: SparkSession, table: String): String = {
-    val r = spark.sql(s"SELECT count(*), sum(l_quantity), sum(l_extendedprice), sum(l_orderkey % 1000003) FROM $table").collect()(0)
+    val r = spark.sql(
+      s"SELECT count(*), sum(l_quantity), sum(l_extendedprice), sum(l_orderkey % 1000003) FROM $table"
+    ).collect()(0)
     (0 until r.length).map { i =>
       r.get(i) match { case d: java.lang.Double => f"${d.doubleValue()}%.10g"; case v => String.valueOf(v) }
     }.mkString("|").hashCode.toHexString
   }
 
-  private def measureRead(spark: SparkSession, phase: String, name: String, sql: String, warmup: Int, iterations: Int): Measurement = {
+  private def measureRead(
+      spark: SparkSession,
+      phase: String,
+      name: String,
+      sql: String,
+      warmup: Int,
+      iterations: Int
+  ): Measurement = {
     def once(): (Double, Array[org.apache.spark.sql.Row], SparkPlan) = {
       val df = spark.sql(sql)
       val start = System.nanoTime()
@@ -311,7 +359,8 @@ object CdcMergeRunner {
     }
     (1 to warmup).foreach(_ => once())
     val runs = (1 until iterations).map(_ => once())
-    val (physicalBefore, liveBefore) = (IcebergVectorAdapter.normalizedPhysicalRows(), IcebergVectorAdapter.normalizedLiveRows())
+    val (physicalBefore, liveBefore) =
+      (IcebergVectorAdapter.normalizedPhysicalRows(), IcebergVectorAdapter.normalizedLiveRows())
     val last = once()
     val morPhysical = IcebergVectorAdapter.normalizedPhysicalRows() - physicalBefore
     val morLive = IcebergVectorAdapter.normalizedLiveRows() - liveBefore
@@ -321,16 +370,35 @@ object CdcMergeRunner {
       case v => String.valueOf(v)
     }.mkString("|")).sorted.mkString("\n").hashCode.toHexString
     val accel = PlanAcceleration.fromPlan(plan)
-    Measurement(phase, name, (runs :+ last).map(_._1), rows.length, checksum, plan.treeString.take(4000),
-      accel.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated), accel.operatorCount,
-      accel.fallbacks.map { case (n, r) => s"$n: $r" }.distinct, morPhysical, morLive)
+    Measurement(
+      phase,
+      name,
+      (runs :+ last).map(_._1),
+      rows.length,
+      checksum,
+      plan.treeString.take(4000),
+      accel.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated),
+      accel.operatorCount,
+      accel.fallbacks.map { case (n, r) => s"$n: $r" }.distinct,
+      morPhysical,
+      morLive
+    )
   }
 
   final case class Measurement(
-      phase: String, name: String, timesMs: Seq[Double], rows: Int, checksum: String, plan: String,
-      acceleratedOps: Int, operatorCount: Int, fallbacks: Seq[String],
-      morPhysicalRows: Long = 0, morLiveRows: Long = 0,
-      mergeSnapshotSummary: Map[String, String] = Map.empty) {
+      phase: String,
+      name: String,
+      timesMs: Seq[Double],
+      rows: Int,
+      checksum: String,
+      plan: String,
+      acceleratedOps: Int,
+      operatorCount: Int,
+      fallbacks: Seq[String],
+      morPhysicalRows: Long = 0,
+      morLiveRows: Long = 0,
+      mergeSnapshotSummary: Map[String, String] = Map.empty
+  ) {
     private val sorted = timesMs.sorted
     def medianMs: Double = percentile(50)
     def p90Ms: Double = percentile(90)
@@ -342,8 +410,13 @@ object CdcMergeRunner {
       def esc(s: String) = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
       val summary = mergeSnapshotSummary.map { case (k, v) => s""""${esc(k)}":"${esc(v)}"""" }.mkString("{", ",", "}")
       s"""{"timestamp":"${Instant.now()}","config":"$config","table":"$table","phase":"$phase","name":"$name",""" +
-        s""""liveRows":$liveRows,"changeU":${changes.getOrElse("U", 0L)},"changeD":${changes.getOrElse("D", 0L)},"changeI":${changes.getOrElse("I", 0L)},"changeBytes":$changeBytes,""" +
-        s""""medianMs":$medianMs,"p90Ms":$p90Ms,"timesMs":[${timesMs.map(t => math.round(t * 10) / 10.0).mkString(",")}],""" +
+        s""""liveRows":$liveRows,"changeU":${changes.getOrElse("U", 0L)},"changeD":${changes.getOrElse(
+            "D",
+            0L
+          )},"changeI":${changes.getOrElse("I", 0L)},"changeBytes":$changeBytes,""" +
+        s""""medianMs":$medianMs,"p90Ms":$p90Ms,"timesMs":[${timesMs.map(t => math.round(t * 10) / 10.0).mkString(
+            ","
+          )}],""" +
         s""""rows":$rows,"checksum":"$checksum","acceleratedOps":$acceleratedOps,"operatorCount":$operatorCount,""" +
         s""""morPhysicalRows":$morPhysicalRows,"morLiveRows":$morLiveRows,"mergeSummary":$summary,""" +
         s""""fallbacks":"${esc(fallbacks.mkString("; "))}","plan":"${esc(plan)}"}"""
@@ -353,10 +426,27 @@ object CdcMergeRunner {
   // ------------------------------------------------------------------ report
 
   private final case class Record(
-      config: String, table: String, phase: String, name: String, medianMs: Double, p90Ms: Double,
-      timesMs: Seq[Double], rows: Long, checksum: String, acceleratedOps: Int, operatorCount: Int,
-      liveRows: Long, changeU: Long, changeD: Long, changeI: Long, changeBytes: Long,
-      morPhysicalRows: Long, morLiveRows: Long, mergeSummary: Map[String, String], fallbacks: String)
+      config: String,
+      table: String,
+      phase: String,
+      name: String,
+      medianMs: Double,
+      p90Ms: Double,
+      timesMs: Seq[Double],
+      rows: Long,
+      checksum: String,
+      acceleratedOps: Int,
+      operatorCount: Int,
+      liveRows: Long,
+      changeU: Long,
+      changeD: Long,
+      changeI: Long,
+      changeBytes: Long,
+      morPhysicalRows: Long,
+      morLiveRows: Long,
+      mergeSummary: Map[String, String],
+      fallbacks: String
+  )
 
   private def parseRecord(line: String): Record = {
     def str(k: String) = s""""$k":"(.*?)(?<!\\\\)"""".r.findFirstMatchIn(line).map(_.group(1)).getOrElse("")
@@ -365,14 +455,34 @@ object CdcMergeRunner {
       .split(",").filter(_.nonEmpty).map(_.toDouble).toSeq
     val summary = s""""mergeSummary":\\{(.*?)\\}""".r.findFirstMatchIn(line).map(_.group(1)).getOrElse("")
     val summaryMap = """"([^"]+)":"([^"]*)"""".r.findAllMatchIn(summary).map(m => m.group(1) -> m.group(2)).toMap
-    Record(str("config"), str("table"), str("phase"), str("name"), num("medianMs"), num("p90Ms"), times,
-      num("rows").toLong, str("checksum"), num("acceleratedOps").toInt, num("operatorCount").toInt,
-      num("liveRows").toLong, num("changeU").toLong, num("changeD").toLong, num("changeI").toLong, num("changeBytes").toLong,
-      num("morPhysicalRows").toLong, num("morLiveRows").toLong, summaryMap, str("fallbacks"))
+    Record(
+      str("config"),
+      str("table"),
+      str("phase"),
+      str("name"),
+      num("medianMs"),
+      num("p90Ms"),
+      times,
+      num("rows").toLong,
+      str("checksum"),
+      num("acceleratedOps").toInt,
+      num("operatorCount").toInt,
+      num("liveRows").toLong,
+      num("changeU").toLong,
+      num("changeD").toLong,
+      num("changeI").toLong,
+      num("changeBytes").toLong,
+      num("morPhysicalRows").toLong,
+      num("morLiveRows").toLong,
+      summaryMap,
+      str("fallbacks")
+    )
   }
 
   private def report(dir: java.nio.file.Path): Unit = {
-    val files = Files.list(dir).iterator().asScala.filter(_.getFileName.toString.matches("cdc-.*\\.jsonl")).toSeq.sortBy(_.toString)
+    val files = Files.list(
+      dir
+    ).iterator().asScala.filter(_.getFileName.toString.matches("cdc-.*\\.jsonl")).toSeq.sortBy(_.toString)
     require(files.nonEmpty, s"no cdc-*.jsonl under $dir")
     val records = files.flatMap(f => Files.readAllLines(f).asScala.filter(_.nonEmpty).map(parseRecord))
     // Latest record per (table, config, phase, name).
@@ -381,10 +491,18 @@ object CdcMergeRunner {
     val tables = latest.keys.map(_._1).toSeq.distinct.sorted
     val md = new StringBuilder
     val html = new StringBuilder
-    html.append("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<title>Iceberg CDC merge benchmark</title>\n<style>\n")
-    html.append(" body{font:15px/1.5 -apple-system,'Segoe UI',sans-serif;color:#1c2733;max-width:1100px;margin:2rem auto;padding:0 1rem}\n")
-    html.append(" table{border-collapse:collapse;margin:1rem 0;font-variant-numeric:tabular-nums} th,td{padding:.35rem .7rem;border-bottom:1px solid #e6eaf0;text-align:right} th:first-child,td:first-child{text-align:left}\n")
-    html.append(" th{background:#f4f6f9} code{background:#f4f6f9;padding:.1rem .3rem;border-radius:4px} .muted{color:#6b7684} .good{color:#0a7f42;font-weight:600} .bad{color:#b3261e}\n")
+    html.append(
+      "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<title>Iceberg CDC merge benchmark</title>\n<style>\n"
+    )
+    html.append(
+      " body{font:15px/1.5 -apple-system,'Segoe UI',sans-serif;color:#1c2733;max-width:1100px;margin:2rem auto;padding:0 1rem}\n"
+    )
+    html.append(
+      " table{border-collapse:collapse;margin:1rem 0;font-variant-numeric:tabular-nums} th,td{padding:.35rem .7rem;border-bottom:1px solid #e6eaf0;text-align:right} th:first-child,td:first-child{text-align:left}\n"
+    )
+    html.append(
+      " th{background:#f4f6f9} code{background:#f4f6f9;padding:.1rem .3rem;border-radius:4px} .muted{color:#6b7684} .good{color:#0a7f42;font-weight:600} .bad{color:#b3261e}\n"
+    )
     html.append("</style></head><body>\n<h1>Iceberg v2 merge-on-read: the CDC shape</h1>\n")
     md.append("# Iceberg v2 merge-on-read: the CDC shape\n")
     tables.foreach { table =>
@@ -402,20 +520,31 @@ object CdcMergeRunner {
         html.append(s"<h3>${esc(title)}</h3>\n<table><thead><tr><th>query</th>")
         configs.foreach(c => html.append(s"<th>${esc(c)} (ms)</th>"))
         html.append("<th>speedup</th><th>accelerated</th><th>checksums</th></tr></thead><tbody>\n")
-        md.append(s"\n### $title\n\n| query | ${configs.mkString(" | ")} | speedup | accelerated | checksums |\n|---|${configs.map(_ => "---:").mkString("|")}|---:|---:|---|\n")
+        md.append(s"\n### $title\n\n| query | ${configs.mkString(
+            " | "
+          )} | speedup | accelerated | checksums |\n|---|${configs.map(_ => "---:").mkString("|")}|---:|---:|---|\n")
         names.foreach { n =>
           val rs = configs.map(c => ofTable.get((table, c, phase, n)))
           val spark = ofTable.get((table, "spark", phase, n)).map(_.medianMs)
           val best = rs.flatten.filter(_.config != "spark").map(_.medianMs).minOption
           val speedup = for (s <- spark; b <- best) yield s / b
           val checksums = rs.flatten.map(_.checksum).distinct
-          val check = if (checksums.size <= 1) "identical" else "DIFFER: " + rs.flatten.map(r => s"${r.config}=${r.checksum}").mkString(", ")
-          val accel = rs.flatten.filterNot(_.config == "spark").map(r => s"${r.acceleratedOps}/${r.operatorCount}").distinct.mkString(" ")
+          val check = if (checksums.size <= 1) "identical"
+          else "DIFFER: " + rs.flatten.map(r => s"${r.config}=${r.checksum}").mkString(", ")
+          val accel = rs.flatten.filterNot(_.config == "spark").map(r =>
+            s"${r.acceleratedOps}/${r.operatorCount}"
+          ).distinct.mkString(" ")
           html.append(s"<tr><td>${esc(n)}</td>")
           rs.foreach(r => html.append(s"<td>${r.map(x => f"${x.medianMs}%.0f").getOrElse("-")}</td>"))
-          html.append(f"<td>${speedup.map(s => f"<span class=\"${if (s >= 1) "good" else "bad"}\">$s%.2fx</span>").getOrElse("-")}</td>")
-          html.append(s"<td>$accel</td><td>${if (checksums.size <= 1) "identical" else s"<span class=\"bad\">${esc(check)}</span>"}</td></tr>\n")
-          md.append(s"| $n | ${rs.map(r => r.map(x => f"${x.medianMs}%.0f").getOrElse("-")).mkString(" | ")} | ${speedup.map(s => f"$s%.2fx").getOrElse("-")} | $accel | $check |\n")
+          html.append(
+            f"<td>${speedup.map(s => f"<span class=\"${if (s >= 1) "good" else "bad"}\">$s%.2fx</span>").getOrElse("-")}</td>"
+          )
+          html.append(
+            s"<td>$accel</td><td>${if (checksums.size <= 1) "identical" else s"<span class=\"bad\">${esc(check)}</span>"}</td></tr>\n"
+          )
+          md.append(s"| $n | ${rs.map(r =>
+              r.map(x => f"${x.medianMs}%.0f").getOrElse("-")
+            ).mkString(" | ")} | ${speedup.map(s => f"$s%.2fx").getOrElse("-")} | $accel | $check |\n")
         }
         html.append("</tbody></table>\n")
       }
@@ -424,15 +553,20 @@ object CdcMergeRunner {
       if (merged.nonEmpty) {
         section("The CDC merge (median of the timed runs, table rolled back in between)", "merge", Seq("merge"))
         val s = merged.head.mergeSummary
-        val detail = Seq("added-data-files", "added-delete-files", "added-position-deletes", "added-records", "deleted-records")
-          .flatMap(k => s.get(k).map(v => s"$k=$v")).mkString(", ")
-        if (detail.nonEmpty) { html.append(s"<p class=\"muted\">Last merge snapshot: $detail.</p>\n"); md.append(s"\nLast merge snapshot: $detail.\n") }
+        val detail =
+          Seq("added-data-files", "added-delete-files", "added-position-deletes", "added-records", "deleted-records")
+            .flatMap(k => s.get(k).map(v => s"$k=$v")).mkString(", ")
+        if (detail.nonEmpty) {
+          html.append(s"<p class=\"muted\">Last merge snapshot: $detail.</p>\n");
+          md.append(s"\nLast merge snapshot: $detail.\n")
+        }
         merged.foreach { m =>
           val line = f"${m.config}: runs ${m.timesMs.map(t => f"$t%.0f").mkString(" ")} ms, p90 ${m.p90Ms}%.0f ms"
           html.append(s"<p class=\"muted\">${esc(line)}</p>\n"); md.append(s"$line\n")
         }
       }
-      if (ofTable.keys.exists(_._3 == "read-after-merge")) section("Reads over the merged state (one more delete layer)", "read-after-merge", readNames)
+      if (ofTable.keys.exists(_._3 == "read-after-merge"))
+        section("Reads over the merged state (one more delete layer)", "read-after-merge", readNames)
       val fallbacks = ofTable.values.filter(r => r.config != "spark" && r.fallbacks.nonEmpty)
         .flatMap(r => r.fallbacks.split("; ").map(f => s"${r.phase}/${r.name}: $f")).toSeq.distinct.sorted
       if (fallbacks.nonEmpty) {

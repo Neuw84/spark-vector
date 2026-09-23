@@ -41,11 +41,13 @@ case class VectorUnionExec(children: Seq[SparkPlan]) extends VectorPassThrough {
     val rdds = children.map(_.executeColumnar())
     partitioning match {
       case _: UnknownPartitioning => sparkContext.union(rdds)
-      case known => new SQLPartitioningAwareUnionRDD(sparkContext, rdds.filter(_.partitions.nonEmpty), known.numPartitions)
+      case known =>
+        new SQLPartitioningAwareUnionRDD(sparkContext, rdds.filter(_.partitions.nonEmpty), known.numPartitions)
     }
   }
 
-  override protected def withNewChildrenInternal(newChildren: IndexedSeq[SparkPlan]): SparkPlan = copy(children = newChildren)
+  override protected def withNewChildrenInternal(newChildren: IndexedSeq[SparkPlan]): SparkPlan =
+    copy(children = newChildren)
 
   override def simpleString(maxFields: Int): String = s"VectorUnion(children=${children.length})"
 }
@@ -100,5 +102,6 @@ object VectorStructuralPlanner {
   }
 
   def planCoalesce(c: CoalesceExec): Either[String, VectorCoalesceExec] =
-    if (c.numPartitions < 1) Left(s"coalesce to ${c.numPartitions} partitions") else Right(VectorCoalesceExec(c.numPartitions, c.child))
+    if (c.numPartitions < 1) Left(s"coalesce to ${c.numPartitions} partitions")
+    else Right(VectorCoalesceExec(c.numPartitions, c.child))
 }

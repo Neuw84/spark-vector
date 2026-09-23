@@ -7,7 +7,14 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.catalog.{SupportsRead, Table, TableCapability, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
-import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReader, PartitionReaderFactory, Scan, ScanBuilder}
+import org.apache.spark.sql.connector.read.{
+  Batch,
+  InputPartition,
+  PartitionReader,
+  PartitionReaderFactory,
+  Scan,
+  ScanBuilder
+}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.vectorized.{ColumnarArray, ColumnarBatch, ColumnarMap, ColumnVector}
@@ -28,7 +35,11 @@ class UnknownColumnarSource extends TableProvider {
   override def inferSchema(options: CaseInsensitiveStringMap): StructType =
     UnknownColumnarSource.schema(options.getBoolean("struct", false))
 
-  override def getTable(schema: StructType, partitioning: Array[Transform], properties: util.Map[String, String]): Table =
+  override def getTable(
+      schema: StructType,
+      partitioning: Array[Transform],
+      properties: util.Map[String, String]
+  ): Table =
     new UnknownColumnarSource.UnknownTable(schema)
 
   override def supportsExternalMetadata(): Boolean = true
@@ -48,8 +59,11 @@ object UnknownColumnarSource {
       StructField("dt", DateType, nullable = false),
       StructField("ts", TimestampType),
       StructField("dec", DecimalType(12, 2), nullable = false),
-      StructField("s", StringType, nullable = false)))
-    if (withStruct) base.add(StructField("st", StructType(Seq(StructField("a", IntegerType, nullable = false))), nullable = false)) else base
+      StructField("s", StringType, nullable = false)
+    ))
+    if (withStruct)
+      base.add(StructField("st", StructType(Seq(StructField("a", IntegerType, nullable = false))), nullable = false))
+    else base
   }
 
   /** The value of column `name` for global row `r`, boxed; `null` for SQL null. */
@@ -119,7 +133,11 @@ final class UnknownColumnVector(dt: DataType, n: Int, value: Int => Any) extends
   private lazy val children: Array[UnknownColumnVector] = dt match {
     case st: StructType =>
       st.fields.zipWithIndex.map { case (f, j) =>
-        new UnknownColumnVector(f.dataType, n, i => if (values(i) == null) null else values(i).asInstanceOf[Array[Any]](j))
+        new UnknownColumnVector(
+          f.dataType,
+          n,
+          i => if (values(i) == null) null else values(i).asInstanceOf[Array[Any]](j)
+        )
       }
     case _ => Array.empty
   }

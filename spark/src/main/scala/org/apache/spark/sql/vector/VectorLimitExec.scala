@@ -7,10 +7,21 @@ import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.arrow.ArrowOutput
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
-import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, Distribution, Partitioning, SinglePartition, UnspecifiedDistribution}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  AllTuples,
+  Distribution,
+  Partitioning,
+  SinglePartition,
+  UnspecifiedDistribution
+}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.execution.{CollectLimitExec, GlobalLimitExec, LocalLimitExec, SparkPlan}
-import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics, SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
+import org.apache.spark.sql.execution.metric.{
+  SQLMetric,
+  SQLMetrics,
+  SQLShuffleReadMetricsReporter,
+  SQLShuffleWriteMetricsReporter
+}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -25,8 +36,8 @@ private[vector] class VectorLimitIterator(
     input: Iterator[ColumnarBatch],
     limit: Int,
     outputAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorLimitExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorLimitExec") {
 
   private var remaining: Int = limit
 
@@ -65,8 +76,14 @@ private[vector] class VectorLimitIterator(
 }
 
 private[vector] object VectorLimitIterator {
+
   /** A selection with only the first `keep` live rows of `selection` (every row when it is null). */
-  def head(selection: MemorySegment, numRows: Int, keep: Int, ctx: io.sparkvector.spark.expr.EvalContext): MemorySegment = {
+  def head(
+      selection: MemorySegment,
+      numRows: Int,
+      keep: Int,
+      ctx: io.sparkvector.spark.expr.EvalContext
+  ): MemorySegment = {
     val out = ctx.bitmap()
     Bitmap.fill(out, numRows, false)
     var kept = 0
@@ -135,7 +152,8 @@ case class VectorCollectLimitExec(limit: Int, child: SparkPlan) extends VectorEx
     "numInputBatches" -> SQLMetrics.createMetric(sparkContext, "number of input batches"),
     "numOutputBatches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"),
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels")) ++ readMetrics ++ writeMetrics
+    "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels")
+  ) ++ readMetrics ++ writeMetrics
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val n = limit
@@ -174,7 +192,9 @@ object VectorLimitPlanner {
     else Right(VectorGlobalLimitExec(g.limit, g.child))
 
   def planCollect(c: CollectLimitExec): Either[String, VectorCollectLimitExec] = {
-    val outputFailures = c.child.output.filterNot(a => TypeMapping.hasLane(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
+    val outputFailures = c.child.output.filterNot(a => TypeMapping.hasLane(a.dataType)).map(a =>
+      s"unsupported output type ${a.dataType.simpleString} for ${a.name}"
+    )
     if (c.offset != 0) Left(s"offset ${c.offset} not supported")
     else if (c.limit < 0) Left(s"negative limit ${c.limit}")
     else if (outputFailures.nonEmpty) Left(outputFailures.mkString("; "))
