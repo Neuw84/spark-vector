@@ -402,6 +402,42 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
   }
 
+  test("#416: a string column that is null in every row reads back from the per-file dictionary (TPC-DS c_login)") {
+    // The column stays in ids mode with an empty dictionary; the section must still carry that dictionary,
+    // or a reader meeting the column's (all-null) id batches refuses the stream.
+    val dir = Files.createTempDirectory("svipc")
+    val path = dir.resolve("map.ipc")
+    val nullSchema = StructType(Seq(StructField("i", IntegerType), StructField("s", StringType)))
+    val parts = 4
+    val writer = new PartitionedIpcWriter(nullSchema, parts, allocator, path, 1L << 20, batchRows = 400)
+    val arena = Arena.ofConfined()
+    try {
+      (0 until 3).foreach { _ =>
+        val n = 1000
+        val ints = Array.tabulate(n)(identity)
+        val strings = Array.fill[String](n)(null)
+        val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
+        io.sparkvector.kernels.Bitmap.fill(all, n, true)
+        val columns: Array[ColumnVector] = Array(
+          ArrowOutput.compact("i", IntegerType, ArrowLayout.ofInts(arena, ints, Array.fill(n)(false)), all, n, allocator),
+          ArrowOutput.compact("s", StringType, ArrowLayout.ofStrings(arena, strings), all, n, allocator))
+        val b = new ColumnarBatch(columns, n)
+        try writer.write(b, Array.tabulate(n)(_ % parts)) finally b.close()
+      }
+      writer.finish()
+      var rows = 0
+      (0 until parts).foreach { p =>
+        val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator, nullSchema)
+        try while (reader.hasNext) {
+          val got = reader.next()
+          (0 until got.numRows()).foreach { r => assert(got.column(1).isNullAt(r), s"row $r of partition $p should be null") }
+          rows += got.numRows()
+        } finally reader.close()
+      }
+      assert(rows === 3000)
+    } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+  }
+
   test("#356: a record batch's string column is dictionary-encoded only when the dictionary pays; the reader takes either per batch") {
     import org.apache.arrow.vector.{IntVector, VarCharVector}
     // The encoder itself: all-distinct gives up at the sample (nothing allocated stays behind), repeats encode.

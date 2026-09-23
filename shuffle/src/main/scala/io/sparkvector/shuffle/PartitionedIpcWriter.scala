@@ -867,11 +867,14 @@ final class PartitionedIpcWriter(
       var c = 0
       while (c < idColumns.length) {
         val ic = idColumns(c)
-        if (ic != null && ic.dict.size() > 0 && ic.flushedIds) {
+        // Every column whose ids reached the file gets its dictionary, an empty one included: a string
+        // column that is null in every row (TPC-DS's c_login) stays in ids mode with an empty dictionary,
+        // and a reader meeting its batches without one refuses the stream (#416).
+        if (ic != null && ic.flushedIds) {
           val vector = new VarCharVector(schema.fields(c).name + ".dictionary", allocator)
           try {
             val n = ic.dict.size()
-            vector.allocateNew(math.max(ic.dict.valueBytes(), 1L), n)
+            vector.allocateNew(math.max(ic.dict.valueBytes(), 1L), math.max(n, 1))
             val store = ic.dict.bytes()
             var i = 0
             while (i < n) { vector.setSafe(i, store, ic.dict.offset(i), ic.dict.length(i)); i += 1 }
