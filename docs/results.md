@@ -1076,6 +1076,92 @@ class linking being shared by every query and the query-specific profiles adding
 cache is therefore worth baking into the image at build time from a synthetic training workload
 over every operator; it is the cheap half of the cold-start cost, the branchless kernels the other.
 
+**The AOT cache, productized: trained on the cluster, not at build (#416).** The build-time cache was
+built, accepted by the executors, and did nothing at 1 TB (q18 16.0/15.9 s against 15.3/15.2 without
+it): a local training run in the Dockerfile links the driver's and local-mode paths, while an
+executor's cold minutes go to the S3A/Parquet client, the Flight transport over the network and the
+executor backend, none of which a local run can reach. The cache now comes from the cluster.
+`benchmarks/k8s/aot/train-cluster.sh` runs the vector-shuffle configuration over a training set
+(q18, q67, q22, q4 by default) with the executors in `-XX:AOTMode=record`, each writing its
+configuration to a per-node directory under the image tag; a DaemonSet then assembles the cache on
+every node holding a recording (`assemble.sh`, the executor's exact option set from `aot-env.sh`,
+which the executor's JVM checks against its own) and uploads it under the image tag; `render-run.sh`
+fetches that object in an init container at every executor start and points the JVM at it, and an
+image without a trained cache simply runs without one. Seven minutes of cluster time per image; the
+cache is 188 MB with 19,277 AOT-linked classes. Measured cold at 1000 partitions, alternating legs
+in one window: q18 **11.2 / 10.9 s** with the fetched cache against 15.9 / 15.1 without (-29% / -27%),
+q67 unchanged (112.2 / 107.2 against 109.6 / 109.7; not warm-up bound). The build-time run stays in
+the Dockerfile as the smoke test of the runtime -- the build fails when no class links -- and its
+cache is discarded. One lesson that cost a run: the kubelet creates the hostPath directory root-owned
+and the executor runs as the image's user; a JVM in record mode that cannot open its configuration
+file dies at start, and every executor did until a root init container opened the directory first.
+
+**The per-block cost of the shuffle at 1000 partitions, taken apart (#416, items 1-6).** With a
+thousand reduce partitions a map task's output to one reducer is a few hundred rows, so everything
+that is paid once per block -- a dictionary per string column per block, a 64 KB chunk buffer, a
+record batch's header, a kernel's set-up on the reduce side -- is paid a thousand times per map. The
+series: one dictionary per string column per map file with a 12-byte unit header per IPC message
+(#439; the map's dictionary section is prepended to every partition fetch by the Flight producer), a
+producer chunk buffer that starts at the chunk size (#441), a column frozen before its first flush
+decoding its pending ids in place instead of carrying a dictionary it will not use (#442), the
+reader's decode of a small encoded block through heap arrays instead of per-element `MemorySegment`
+accesses (#443), and an encoded block of 128 rows or more handed to the operators as ids rather than
+decoded into a coalesced plain batch (#444). The transport benchmark
+(`FlightShuffleBenchmark`, two loopback Flight servers over real map files) is the ruler for each
+step: the reduce task at 1000 partitions over mixed strings went 8.39 -> 2.00 ms across the series,
+eight concurrent reducers 17.98 -> 3.59 ms. On the cluster the rollup stage of q67 writes 16% fewer
+bytes and 25% less shuffle-write time (1968 -> 1445-1748 s at 300 partitions). The wall clock was a
+longer road: the first image with the series (v13) was 12-32% *slower* on q67 at 1000 partitions
+because #438's coalescing decoded every small encoded block into plain strings and the aggregate
+then hashed UTF8 bytes where it had consumed ids -- a JFR of the final stage put a quarter of the
+samples there -- and two attempts were needed to take it back (#443 removed the decode's segment
+checks, #444 restored the id path for blocks above a floor). Where it ended, in one window each:
+1000 partitions q67 v15 111.2 / 110.7 s against 106.1 s before the series (about 5% behind, and the
+16% smaller shuffle makes AQE coalesce the final stage into 125 tasks instead of 143 -- a worse tail
+on 104 cores, a consequence of the smaller shuffle rather than a cost in it); 300 partitions q67
+95.8 s against 108.1 / 102.8 (ahead), q18 within the window's drift at both. Two findings for the
+record: coalescing encoded blocks *as ids* is not available at 1000 partitions because consecutive
+blocks come from different maps with different dictionaries, and the transport benchmark's short
+strings did not show the decode cost that the 1 TB profile did, so the benchmark is the ruler for
+the transport and the profile for the operators.
+
+**The dictionary-id design, closed (#377).** After the three-step design (#436: string group keys by
+id through the group table, the aggregate's output and the shuffle writer) the final aggregate at
+1 TB read slower on ids at 1000 partitions, and #437 put the result modes on contiguous byte records;
+then a 300-partition reading in another window pointed the other way, and #445 put every mode back
+on ids. The decision was taken in one quiet window (the untouched rollup stage within 2-3% across
+four legs), q67 at 300 partitions, records / ids / records / ids: the final stage on ids uses 6.5% and
+11.5% more executor CPU than on records (3777 / 3932 s against 3546 / 3525) and *less* run time and
+wall (4026 / 4183 against 4195 / 4232; 51.1 / 49.0 s against 53.6 / 50.3), because the record layout's
+GC is twice the id layout's (32-37 s against 19-22) and GC pauses are run time that is not CPU. Ids
+stay everywhere; the record layout is kept in the kernel behind a flag. The two earlier readings
+that disagreed were both two-window comparisons; the rule that came out of it is the one this
+document already uses for engines: a design decision at 1 TB needs both sides in one window with a
+control stage that the change does not touch.
+
+**q64 at 1 TB: a Comet native-execution issue, filed (#248).** The one result that differed from
+Spark's in the full runs -- q64 returning 0 rows in the two configurations with Comet's scan, 12,185
+in ours and Spark's -- was taken apart to the last discriminator: a new `comet-scan` configuration
+(Comet's scan alone, Spark's operators and shuffle) returns 12,185, with the event log confirming it
+is the same `CometNativeScan` (48 instances in the plan) that feeds the two failing configurations.
+So the scan's values are right when read through Spark's `ColumnarToRow`, and the rows are lost only
+when the batches are consumed by a native operator pipeline -- Comet's own or ours -- through the
+Arrow C data export; the loss sits in the second `cs_ui` instance's join against the broadcast of
+`store_sales(2000) ⋈ store_returns`, and SF10 never reproduces it. Reported upstream as
+apache/datafusion-comet#6133; q64 stays marked as a Comet issue in the tables and our own row is right.
+
+**Comet's scan against ours, per query (v10, 300 partitions, one window).** Over 101 queries our
+scan totals 2752 s and Comet's native scan over the same operators and shuffle 2730 s -- a wash that
+is two large effects cancelling: 22 queries are more than 10% faster with Comet's scan (the wide
+`store_sales` aggregates: q28 134 -> 96 s, q67 116 -> 93, q9 105 -> 86, q44 -24%, q59 -16%), 21 are
+more than 10% slower (join-heavy plans over the smaller fact tables: q10 6.7 -> 16.2 s, q36 +70%,
+q94 +48%, q90 +26%, q95 +23%). The best of both per query would be 2581 s, 6% under either. The wins
+say Comet's reader decodes wide Parquet scans about 20% faster than ours; the losses say the boundary
+gives it back -- Comet's vectors cross into our operators through the Arrow C export and lose our
+reader's dictionary encoding of strings and our batch sizing, so joins and aggregates on string keys
+run on plain strings, the input-side twin of the #416 finding above. The converter is the cheaper
+lever; the reader the larger project.
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
