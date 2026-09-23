@@ -19,6 +19,7 @@ object VectorConf {
   val AggDictionaryKeys = "spark.vector.agg.dictionaryKeys"
   val SortEnabled = "spark.vector.exec.sort.enabled"
   val SortRunRows = "spark.vector.sort.runRows"
+  val SortSpillBytes = "spark.vector.sort.spillBytes"
   val TakeOrderedEnabled = "spark.vector.exec.takeOrdered.enabled"
   val LimitEnabled = "spark.vector.exec.limit.enabled"
   val UnionEnabled = "spark.vector.exec.union.enabled"
@@ -66,6 +67,17 @@ object VectorConf {
    * merges the runs on output (one run is one sort over the whole partition, #285). Bounds the
    * sort's JVM scratch to the run rather than the partition.
    */
+  /**
+   * The sort's memory budget per task (bytes, size strings accepted; #416): past it, sealed runs are
+   * written to local disk in sorted order and merged from there, so a partition of any size sorts in
+   * bounded memory. Default: the join build budget ([[joinMaxBuildSize]], a per-core share of the
+   * off-heap size when configured, else 1 GiB). `0` or negative turns spilling off.
+   */
+  def sortSpillBytes(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
+    val explicit = conf.getConfString(SortSpillBytes, "").trim
+    val v = if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit) else joinMaxBuildSize(conf, sparkConf)
+    if (v <= 0) Long.MaxValue else v
+  }
   def sortRunRows(conf: SQLConf): Int =
     scala.util.Try(conf.getConfString(SortRunRows, "").trim.toInt).toOption.filter(_ > 0).getOrElse(1 << 20)
   /** Convert TakeOrderedAndProjectExec (ORDER BY ... LIMIT) over a columnar child. */
