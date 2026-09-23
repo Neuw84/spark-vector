@@ -171,14 +171,14 @@ object AggregateSpill {
     case _ => false
   }
 
-  private def vectorOf(col: ColumnVector): FieldVector = col match {
+  private[vector] def vectorOf(col: ColumnVector): FieldVector = col match {
     case v: VectorArrowColumnVector => v.getValueVector.asInstanceOf[FieldVector]
     case d: VectorDecimalColumnVector => d.vector()
     case other => throw new IllegalStateException(s"a spilled column must be a plain vector, not ${other.getClass.getSimpleName}")
   }
 
   /** A file in the task's local directory (Spark's disk block manager), or a plain temp file outside Spark. */
-  private def newFile(): File = Option(SparkEnv.get) match {
+  private[vector] def newFile(): File = Option(SparkEnv.get) match {
     case Some(env) => env.blockManager.diskBlockManager.createTempLocalBlock()._2
     case None => Files.createTempFile("vector-agg-spill", ".arrow").toFile
   }

@@ -474,11 +474,9 @@ that pin it.
   `off`, `true` as `auto`; the default is `auto` since #311 (it was `off` until the issue's three
   conditions were measured: the golden files under `auto` 642/0, TPC-DS SF1 with every checksum equal
   to Spark's, and TPC-H SF10 under `auto` not slower than `off` under our shuffle -- see results.md,
-  "auto by default"). Two size rules guard `auto` (both #311): a merge-join choice is kept only when
-  *both* inputs have statistics and each fits `spark.vector.exec.sortMergeJoin.maxInputSize` (default
-  = `spark.vector.join.maxBuildSize`, 1 GiB) -- otherwise the join is *left to Spark* (`Left("left to
-  Spark: inputs too large ...")`, reason on the tag; q21's lineitem joins at SF10, where our merge over
-  Spark's row sort was 2.3x slower than Spark's own); and the hash rewrite declines a build side larger
+  "auto by default"). One size rule guards `auto` since #416 (the second, #311's input-size gate that
+  left large merge joins to Spark, went when the sort learned to spill -- `spark.vector.sort.spillBytes`
+  bounds a task's sort memory, runs past it are merged from local disk): the hash rewrite declines a build side larger
   than the streamed side by statistics (`VectorJoinPlanner.sortMergeBuildSide`: a semi or anti join may
   only build its right side; q4 hashed lineitem and ran 14% slower than Spark's merge -- with the rule
   `auto` takes our merge join there and is at parity, fully accelerated). Both rules read
@@ -533,11 +531,10 @@ that pin it.
   from 244 s to 92 s of task time); q97 was already at parity with the hash rewrite on `main` (529 vs
   511 ms -- the row buffer had fixed the unique-key shape). What remains on q21 is not the join: the
   profile puts its own machinery under a tenth of the samples, the rest is Spark's spilling row sort
-  (7.7 GB of spill) feeding it through `RowToColumnarExec`. Hence the size gate of #311: under `auto` a
-  merge-join choice is taken only where both inputs are within
-  `spark.vector.exec.sortMergeJoin.maxInputSize` by statistics (default: the join budget); over it, or
-  without statistics, the join is left to Spark's own with a printed reason (`left to Spark: ...;
-  would have been as merge join: ...`), so `auto` is never slower than `off` beyond noise. Readings in docs/results.md. A right outer join runs the iterator with the sides
+  (7.7 GB of spill) feeding it through `RowToColumnarExec`. Hence the size gate of #311, which left a
+  merge join over large or unmeasured inputs to Spark's own; it was removed in #416 once our shuffle
+  and our spilling sort feed the join (at 1 TB the gate had sent 70 of 101 TPC-DS queries to Spark's
+  operator). Readings in docs/results.md. A right outer join runs the iterator with the sides
   swapped (Spark streams the preserved side, so its output is in right order) and the gather lays the
   columns back in left ++ right order. Null keys never match. Tested positionally against Spark
   (`VectorSortMergeJoinSuite`): the hash join suites compare row sets, this one row order.

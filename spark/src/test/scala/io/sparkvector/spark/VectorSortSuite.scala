@@ -128,6 +128,35 @@ class VectorSortSuite extends VectorQuerySuite {
     }
   }
 
+  test("#416: runs spilled to disk past the budget merge like resident ones -- every key type, ties, nulls, dictionary strings") {
+    // spillBytes = 1: every run sealed after the first goes to a local Arrow file in sorted order, and the
+    // merge reads those back a batch at a time (runRows = 100 makes a thousand runs of the 100k rows, so
+    // hundreds of spilled runs refill many times). Same statements as the resident-runs test above.
+    val path = newTempPath("sort/tspill")
+    TestTables.mixedDataFrame(spark, 100000).coalesce(1).write.mode("overwrite").parquet(path)
+    spark.read.parquet(path).createOrReplaceTempView("tspill")
+    withConf(VectorConf.SortRunRows -> "100", VectorConf.SortSpillBytes -> "1") {
+      checkSorted("SELECT i, l FROM tspill SORT BY i DESC", 1)
+      checkSorted("SELECT l, i FROM tspill SORT BY l NULLS FIRST", 1)
+      checkSorted("SELECT d, i FROM tspill SORT BY d DESC NULLS LAST", 1)
+      checkSorted("SELECT dt, i FROM tspill SORT BY dt", 1)
+      checkSorted("SELECT b, i FROM tspill SORT BY b DESC", 1)
+      checkSorted("SELECT s, i FROM tspill SORT BY s NULLS LAST", 1) // dictionary strings decoded per run, spilled plain
+      checkSorted("SELECT d2, s, i FROM tspill SORT BY d2 DESC, s, i", 3)
+      checkSorted("SELECT i, l FROM tspill SORT BY i + l DESC", 1) // a computed key rides in the spill file
+      val ties = withPlugin(true) {
+        spark.sql("SELECT d2, i FROM tspill SORT BY d2").rdd.glom().collect().head.map(r => (r.getDouble(0), r.getInt(1)))
+      }
+      ties.sliding(2).foreach { case Array((k1, i1), (k2, i2)) => if (k1 == k2) assert(i1 < i2, s"ties out of input order at i=$i1,$i2") }
+      checkVectorized("SELECT i, l FROM tspill SORT BY l DESC LIMIT 250", Seq(Sort))
+      checkVectorized("SELECT i, l, s FROM tspill ORDER BY l DESC NULLS LAST, i LIMIT 50", Seq(classOf[VectorTakeOrderedAndProjectExec]))
+    }
+    // A budget the partition fits in spills nothing and the plan reads the same.
+    withConf(VectorConf.SortRunRows -> "100", VectorConf.SortSpillBytes -> "1g") {
+      checkSorted("SELECT d2, s, i FROM tspill SORT BY d2 DESC, s, i", 3)
+    }
+  }
+
   test("sort can be disabled") {
     withConf(VectorConf.SortEnabled -> "false") {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM t SORT BY i"); d.collect(); d }

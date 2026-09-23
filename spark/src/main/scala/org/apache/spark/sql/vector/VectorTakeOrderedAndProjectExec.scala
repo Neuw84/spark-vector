@@ -65,9 +65,10 @@ case class VectorTakeOrderedAndProjectExec(
     val childOutput = child.output
     val n = limit
     val runRows = io.sparkvector.spark.VectorConf.sortRunRows(conf)
+    val spillBytes = io.sparkvector.spark.VectorConf.sortSpillBytes(conf, sparkContext.getConf)
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter =>
-      VectorRowStages.toUnsafeRows(new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n, runRows), childOutput)
+      VectorRowStages.toUnsafeRows(new VectorSortIterator(iter, keys, ascending, nullsFirst, childAttrs, m, n, runRows, spillBytes), childOutput)
     }
   }
 

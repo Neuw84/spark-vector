@@ -596,33 +596,6 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     a.length == b.length && a.zip(b).forall { case (x, y) => x.child.semanticEquals(y.child) && x.direction == y.direction && x.nullOrdering == y.nullOrdering }
 
   /** The merge join's inputs without the sorts Spark placed for the merge (exactly the required ones, local). */
-  /**
-   * The bytes the merge join's size gate measures an input by (#402). The build-side estimator takes
-   * the smaller of the logical estimate and the runtime bytes of a materialised stage reached through
-   * unary operators; an input that is itself a join has no stage of its own (same partitioning, no
-   * exchange), so only the logical estimate was left -- the product of the joins below it, which read
-   * 11.7 GB for a self-join of a few thousand windowed rows and 10^16 at scale (#329), and left the join
-   * to Spark as "too large". A join's output is bounded here by the sum of its inputs' bytes when both
-   * are known (an equi-join on the key of a windowed row set, q47/q57's shape, returns about one row per
-   * input row); this is a gate for a streaming merge join, which holds no build side, not a memory
-   * budget, so the bound is the right order of magnitude, not an upper bound on every join.
-   */
-  private def mergeInputSize(plan: SparkPlan): Option[Long] = {
-    def throughUnary(p: SparkPlan): SparkPlan = p match {
-      case u if u.children.size == 1 && !u.isInstanceOf[org.apache.spark.sql.execution.adaptive.QueryStageExec] => throughUnary(u.children.head)
-      case other => other
-    }
-    val node = throughUnary(plan)
-    val isJoin = node.children.size == 2 && (node.isInstanceOf[org.apache.spark.sql.execution.joins.BaseJoinExec] ||
-      node.isInstanceOf[VectorBroadcastHashJoinExec] || node.isInstanceOf[VectorShuffledHashJoinExec] || node.isInstanceOf[VectorSortMergeJoinExec])
-    if (isJoin) {
-      (mergeInputSize(node.children.head), mergeInputSize(node.children(1))) match {
-        case (Some(l), Some(r)) => Some(l + r)
-        case _ => VectorJoinPlanner.estimatedBuildSize(plan)
-      }
-    } else VectorJoinPlanner.estimatedBuildSize(plan)
-  }
-
   private def sortMergeInputs(j: SortMergeJoinExec): (SparkPlan, SparkPlan) = {
     def strip(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan = child match {
       case VectorSortExec(order, false, c) if sameOrder(order, required) => c
@@ -775,21 +748,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
               case Right(side) => Right((side, s"as hash join: ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"} side fits ${VectorConf.JoinMaxBuildSize} by statistics"))
               case Left(reason) => Left(s"as merge join: $reason")
             }
-          // The size gate (#311): our merge join is taken only where both inputs are small by statistics.
-          // On large inputs it still loses to Spark's own (SF10 q21: 21 s vs 17 s after #310 -- the row
-          // sort and conversion feeding it), so `auto` stays no slower than `off`: a merge-join choice
-          // over inputs that are large or unknown is left to Spark, and the reason says so.
-          val gated = choice match {
-            case Left(why) if why.startsWith("as merge join") =>
-              val (left, right) = sortMergeInputs(j)
-              val budget = VectorConf.sortMergeJoinMaxInputSize(session.sessionState.conf, maxBuildSize)
-              (mergeInputSize(left), mergeInputSize(right)) match {
-                case (Some(l), Some(r)) if l <= budget && r <= budget => choice
-                case (Some(l), Some(r)) => Left(s"left to Spark: inputs too large for the merge join (${math.max(l, r)} bytes over ${VectorConf.SortMergeJoinMaxInputSize} = $budget); would have been $why")
-                case _ => Left(s"left to Spark: no size statistics for the merge join's inputs; would have been $why")
-              }
-            case other => other
-          }
+          // No size gate any more (#416): the sort below the merge join spills past its memory budget,
+          // so our merge join takes inputs of any size; #311's gate existed because it could not.
+          val gated = choice
           j.setTagValue(VectorExecRule.SortMergeChoice, gated)
           gated.isRight
         } else decision.isRight

@@ -35,7 +35,6 @@ class VectorMergeJoinGateSuite extends VectorQuerySuite {
       val reasons = VectorFallback.reasons(finalPlan(df)).map(_._2)
       assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](df).isEmpty, finalPlan(df).treeString)
       assert(nodesOf[org.apache.spark.sql.vector.VectorSortMergeJoinExec](df).length === 2, finalPlan(df).treeString)
-      assert(!reasons.exists(_.contains("inputs too large")), reasons.mkString("; "))
     }
   }
 }
