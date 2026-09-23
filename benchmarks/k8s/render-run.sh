@@ -18,8 +18,14 @@
 #   EXEC_JAVA_OPTS (extra executor JVM options, e.g. a JFR recording: -XX:StartFlightRecording=duration=300s,filename=/tmp/exec.jfr,settings=profile)
 #   KEEP_EXECUTORS (unset; set to 1 to keep dead executor pods for their logs)
 #   DIRECT_MEM (EXEC_OVERHEAD minus 2g; the executors' -XX:MaxDirectMemorySize)
-#   AOT_CACHE (1; the executors start from the image's AOT cache, /opt/spark/aot/executor.aot -- #416.
-#             0 leaves it out, for an A/B or an image built without one)
+#   AOT_CACHE (1; the executors start from the image's AOT cache, trained on the cluster (#416): an
+#             init container fetches s3://<bucket>/aot/<image tag>/executor.aot (AOT_BUCKET, default
+#             the results bucket) to /aot and the JVM gets -XX:AOTCache=/aot/executor.aot. No object
+#             yet -- the image's training run has not happened -- means no file and a JVM warning, the
+#             run proceeds without a cache. 0 leaves all of it out, for an A/B.)
+#   AOT_RECORD (unset; 1 = the training run: the executors record their configuration with
+#             -XX:AOTMode=record to a per-node hostPath directory, /mnt/spark-vector-aot/<image tag>,
+#             which benchmarks/k8s/aot/train-cluster.sh then assembles into the cache and uploads)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CONFIG="${1:?config}"; TABLES="${2:?tables}"; DATASET="${3:?dataset}"; OUT="${4:?out}"; IMAGE="${5:?image}"; shift 5
@@ -109,10 +115,21 @@ done
 # the first in the YAML map (it did: the direct-memory bound never reached the executors before this).
 EXEC_OPTS="${SEEN[spark.executor.extraJavaOptions]:-}"
 EXEC_OPTS="${EXEC_OPTS:+$EXEC_OPTS }-XX:MaxDirectMemorySize=$DIRECT_MEM${EXEC_JAVA_OPTS:+ $EXEC_JAVA_OPTS}"
-# The image's AOT cache (#416): classes linked and profiled by the build-time training run. A JVM
-# whose class path or module options differ from the training run's, or an image without the file,
-# logs a warning and runs without it -- AOTMode stays auto, so nothing fails.
-if [ "${AOT_CACHE:-1}" = "1" ]; then EXEC_OPTS="$EXEC_OPTS -XX:AOTCache=/opt/spark/aot/executor.aot"; fi
+# The executor's AOT cache (#416), trained on the cluster by real executors. A training run
+# (AOT_RECORD=1) records each executor's configuration to the node; a normal run fetches the assembled
+# cache for this image tag from S3 in an init container and points the JVM at it. A missing object,
+# or a cache whose class path or module options differ from the JVM's, is a warning and a run without
+# a cache -- AOTMode stays auto, so nothing fails.
+IMAGE_TAG="${IMAGE##*:}"
+AOT_BUCKET="${AOT_BUCKET:-${OUT#s3a://}}"; AOT_BUCKET="${AOT_BUCKET%%/*}"
+AOT_MODE=""
+if [ "${AOT_RECORD:-0}" = "1" ]; then
+  AOT_MODE=record
+  EXEC_OPTS="$EXEC_OPTS -XX:AOTMode=record -XX:AOTConfiguration=/aot/executor.aotconf -Xlog:aot=info:file=/aot/record.log"
+elif [ "${AOT_CACHE:-1}" = "1" ]; then
+  AOT_MODE=fetch
+  EXEC_OPTS="$EXEC_OPTS -XX:AOTCache=/aot/executor.aot"
+fi
 if [ -z "${SEEN[spark.executor.extraJavaOptions]+x}" ]; then ORDER+=("spark.executor.extraJavaOptions"); fi
 SEEN[spark.executor.extraJavaOptions]="$EXEC_OPTS"
 for k in "${ORDER[@]}"; do
@@ -146,6 +163,22 @@ cat <<EOF
       - name: tmp
         mountPath: /tmp
 EOF
+if [ -n "$AOT_MODE" ]; then
+  echo "      - name: aot"; echo "        mountPath: /aot"
+fi
+if [ "$AOT_MODE" = fetch ]; then
+  # The cache for this image tag, if the cluster has trained one; the executor's service account
+  # (IRSA) is the init container's too. Nothing to fetch is not a failure: the JVM runs without it.
+  cat <<EOF
+    initContainers:
+      - name: aot-fetch
+        image: public.ecr.aws/aws-cli/aws-cli:latest
+        command: ["sh", "-c", "aws s3 cp s3://$AOT_BUCKET/aot/$IMAGE_TAG/executor.aot /aot/executor.aot || echo 'no AOT cache for $IMAGE_TAG'"]
+        volumeMounts:
+          - name: aot
+            mountPath: /aot
+EOF
+fi
 if [ -n "$NODE_SELECTOR" ]; then
   echo "    nodeSelector:"; echo "      ${NODE_SELECTOR%%=*}: \"${NODE_SELECTOR#*=}\""
 fi
@@ -154,3 +187,7 @@ cat <<EOF
     - name: tmp
       emptyDir: {}
 EOF
+case "$AOT_MODE" in
+  fetch)  printf '    - name: aot\n      emptyDir: {}\n' ;;
+  record) printf '    - name: aot\n      hostPath:\n        path: /mnt/spark-vector-aot/%s\n        type: DirectoryOrCreate\n' "$IMAGE_TAG" ;;
+esac

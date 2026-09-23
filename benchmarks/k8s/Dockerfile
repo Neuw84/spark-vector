@@ -131,17 +131,20 @@ ENV SPARK_HOME=/opt/spark
 WORKDIR /opt/spark/work-dir
 RUN chmod g+w /opt/spark/work-dir && chown -R spark:spark /opt/spark/work-dir /opt/tpcds-kit \
     && chmod a+rx /opt/tpcds-kit/tools/dsdgen
-# The executor's AOT cache (#416): a training run of every operator on our engine, under the JVM
-# options and class path the executor starts with, so executors begin with our kernels linked and
-# profiled instead of spending a query's first stages in the interpreter. render-run.sh points the
-# executors at it (-XX:AOTCache); the build fails when the cache holds no linked class.
+# The JDK AOT cache (#416). The cache the executors run with is trained on the cluster by real
+# executors (benchmarks/k8s/aot/train-cluster.sh: a recording run, assemble.sh on a node, the cache
+# in S3 under the image tag, fetched by an init container at executor start -- render-run.sh): a
+# local training run at build time cannot exercise the S3A/parquet client, the Flight transport over
+# the network or the executor backend, and measured flat at 1 TB. The build still runs the local
+# training once as the smoke test of the runtime -- it fails when no class AOT-links, the incubator
+# module trap the jre stage exists to avoid -- and discards the cache it made.
 # The class path is an explicit, sorted list of the jars rather than the directory wildcard: the JVM
 # expands a wildcard in directory order, which differs between the build's filesystem and the
 # container's overlay, and the cache is refused when the order at run time is not the training run's.
-COPY benchmarks/k8s/aot/train.sh /opt/spark/aot/train.sh
+COPY benchmarks/k8s/aot/aot-env.sh benchmarks/k8s/aot/train.sh benchmarks/k8s/aot/assemble.sh /opt/spark/aot/
 RUN ls /opt/spark/jars/*.jar | LC_ALL=C sort | paste -sd: > /opt/spark/aot/classpath \
-    && chmod a+rx /opt/spark/aot/train.sh && /opt/spark/aot/train.sh /opt/spark/aot/executor.aot --rounds 3 \
-    && chmod a+r /opt/spark/aot/executor.aot /opt/spark/aot/classpath
+    && chmod a+rx /opt/spark/aot/*.sh && /opt/spark/aot/train.sh aot-smoke/executor.aot --rounds 1 \
+    && rm -r aot-smoke && chmod a+r /opt/spark/aot/classpath
 # The executor's class path from entrypoint.sh carries its conf directory (on Kubernetes a mounted
 # ConfigMap with spark.properties), its working directory (where the executor fetches the job's jars)
 # and empty entries (the working directory again), and the JDK's AOT cache / CDS refuses a non-empty
