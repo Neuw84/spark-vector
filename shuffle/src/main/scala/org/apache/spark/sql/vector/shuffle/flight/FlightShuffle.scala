@@ -125,7 +125,11 @@ object FlightShuffle extends Logging {
       var current = -1L
       try {
         listener.start(root)
-        val chunk = new Array[Byte](chunkBytes)
+        // The chunk buffer grows with the bytes -- 64 KB, doubling up to `chunkBytes` -- instead of being
+        // allocated whole per DoGet (#416, item 4): a 1000-partition reduce task's range is a few hundred
+        // KB, and zeroing a 4 MB array for it, seven executors per task, was an eighth of the task in the
+        // transport benchmark. A wide range still reaches full-size messages after a few doublings.
+        var chunk = new Array[Byte](math.min(chunkBytes, InitialChunkBytes))
         var filled = 0
         // The blocks back to back: each is a sequence of IPC streams and the client's reader decodes
         // concatenated streams, so where one block ends and the next begins needs no marker -- and a
@@ -148,7 +152,9 @@ object FlightShuffle extends Logging {
               if (r < 0) more = false
               else {
                 filled += r
-                if (filled == chunk.length) {
+                if (filled == chunk.length && chunk.length < chunkBytes) {
+                  chunk = java.util.Arrays.copyOf(chunk, math.min(chunkBytes, chunk.length * 2))
+                } else if (filled == chunk.length) {
                   vector.reset()
                   vector.setSafe(0, chunk, 0, filled)
                   vector.setValueCount(1)
@@ -186,6 +192,8 @@ object FlightShuffle extends Logging {
     java.util.List.of(org.apache.arrow.vector.types.pojo.Field.nullable("ipc", org.apache.arrow.vector.types.pojo.ArrowType.Binary.INSTANCE)))
   /** One Flight message per this many bytes of the block. */
   val ChunkBytes: Int = 4 << 20
+  /** The chunk buffer's first size; it doubles up to [[ChunkBytes]] as a stream's bytes arrive. */
+  val InitialChunkBytes: Int = 64 << 10
 
   /** The server of this executor; started once, stopped by the executor plugin. */
   final class Service(conf: SparkConf, hostname: String, resolver: () => IndexShuffleBlockResolver) extends AutoCloseable {
