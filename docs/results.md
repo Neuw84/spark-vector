@@ -1096,6 +1096,25 @@ cache is discarded. One lesson that cost a run: the kubelet creates the hostPath
 and the executor runs as the image's user; a JVM in record mode that cannot open its configuration
 file dies at start, and every executor did until a root init container opened the directory first.
 
+**The AOT cache, measured on the heavy queries and switched off for the runs (#248, #416).** The
+q18 gain above is a cold-start gain, and the heavy queries pay for it. Once every full run had the
+trained cache and every diagnostic window ran without it, the two disagreed on the same image and the
+same plans by 10--30 % on q9, q28, q23a, q24a and q67, always in the cache's disfavour. Measured
+directly, alone on the cluster, back to back at 300 partitions (v23, main at #462): cache on / off --
+q9 **122.4 / 110.7 s** (+11 %), q28 **152.4 / 133.5** (+14 %), q23a **149.4 / 121.7** (+23 %), q14a
+**146.2 / 92.6** (+58 %), q4 **85.4 / 78.2** (+9 %); 655.8 against 536.7 s over the five, **+22 %
+with the cache**. The cache's profiles come from a four-query training run and drive the JIT's early
+decisions for the operators' hot loops; on a query that runs for minutes those decisions are worse
+than the ones the JIT makes on its own from the query's own profile, and the start-up seconds saved
+are a rounding error against it. The decision rule, fixed before the leg ran: the cache stays on for
+the benchmark runs only if the five queries' total with it is within 5 % of without; it was not, so
+every benchmark run from here (and every number in the tables that follow) is measured **without the
+AOT cache**; the pipeline stays in the tree for what it is good at -- a short-query, cold-start
+deployment -- and `AOT_CACHE=0` is the run scripts' default. The `ours` full runs earlier in this
+section that carried the cache (v18, v19, v23 at 300 partitions) read 3--10 % over what the same image
+reads without it on the heavy half of the suite, and are not to be compared with cache-off numbers
+query by query.
+
 **The per-block cost of the shuffle at 1000 partitions, taken apart (#416, items 1-6).** With a
 thousand reduce partitions a map task's output to one reducer is a few hundred rows, so everything
 that is paid once per block -- a dictionary per string column per block, a 64 KB chunk buffer, a

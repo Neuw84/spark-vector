@@ -18,11 +18,12 @@
 #   EXEC_JAVA_OPTS (extra executor JVM options, e.g. a JFR recording: -XX:StartFlightRecording=duration=300s,filename=/tmp/exec.jfr,settings=profile)
 #   KEEP_EXECUTORS (unset; set to 1 to keep dead executor pods for their logs)
 #   DIRECT_MEM (EXEC_OVERHEAD minus 2g; the executors' -XX:MaxDirectMemorySize)
-#   AOT_CACHE (1; the executors start from the image's AOT cache, trained on the cluster (#416): an
-#             init container fetches s3://<bucket>/aot/<image tag>/executor.aot (AOT_BUCKET, default
+#   AOT_CACHE (0; 1 = the executors start from the image's AOT cache, trained on the cluster (#416):
+#             an init container fetches s3://<bucket>/aot/<image tag>/executor.aot (AOT_BUCKET, default
 #             the results bucket) to /aot and the JVM gets -XX:AOTCache=/aot/executor.aot. No object
 #             yet -- the image's training run has not happened -- means no file and a JVM warning, the
-#             run proceeds without a cache. 0 leaves all of it out, for an A/B.)
+#             run proceeds without a cache. Off by default since the cache measured +22 % on the heavy
+#             queries at 1 TB (q14a +58 %) for a cold-start gain on the short ones -- docs/results.md.)
 #   AOT_RECORD (unset; 1 = the training run: the executors record their configuration with
 #             -XX:AOTMode=record to a per-node hostPath directory, /mnt/spark-vector-aot/<image tag>,
 #             which benchmarks/k8s/aot/train-cluster.sh then assembles into the cache and uploads)
@@ -126,7 +127,7 @@ AOT_MODE=""
 if [ "${AOT_RECORD:-0}" = "1" ]; then
   AOT_MODE=record
   EXEC_OPTS="$EXEC_OPTS -XX:AOTMode=record -XX:AOTConfiguration=/aot/executor.aotconf -Xlog:aot=info:file=/aot/record.log"
-elif [ "${AOT_CACHE:-1}" = "1" ]; then
+elif [ "${AOT_CACHE:-0}" = "1" ]; then
   AOT_MODE=fetch
   EXEC_OPTS="$EXEC_OPTS -XX:AOTCache=/aot/executor.aot"
 fi
