@@ -298,11 +298,12 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkFallback("SELECT t2.i, dim.name FROM (SELECT * FROM tk WHERE i < 100) t2 FULL JOIN dim ON t2.i50 < dim.di", Seq(BNLJ), "full outer nested loop join")
   }
 
-  test("a build side estimated above spark.vector.join.maxBuildSize stays with Spark; unknown sizes convert") {
+  test("a broadcast build side estimated above spark.vector.join.maxBuildSize stays with Spark; unknown sizes convert; the shuffled join splits instead (#416)") {
     withConf(VectorConf.JoinMaxBuildSize -> "1") {
       checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(BHJ), "exceeds spark.vector.join.maxBuildSize=1")
       checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 < dim.di WHERE tk.i < 500", Seq(BNLJ), "exceeds spark.vector.join.maxBuildSize=1")
-      checkFallback("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "exceeds spark.vector.join.maxBuildSize=1")
+      // The shuffled hash join is not gated by size: its build side past the budget splits into buckets on disk.
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
     }
     // Size strings are accepted, and a generous threshold converts as before.
     withConf(VectorConf.JoinMaxBuildSize -> "512m") {
@@ -370,7 +371,7 @@ class VectorJoinSuite extends VectorQuerySuite {
     }
   }
 
-  test("a sort-merge join stays Spark's when its ordering is relied on, its statistics are missing or too large, or when switched off") {
+  test("a sort-merge join stays Spark's when its ordering is relied on or when switched off; size and statistics no longer decide (#416)") {
     // `auto` by default since #311; the boolean flag set to false still leaves Spark's join alone.
     withConf((SortMerge.take(2) :+ (VectorConf.SortMergeJoinEnabled -> "false")): _*) {
       val df = withPlugin(enabled = true) { val d = spark.sql("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di"); d.collect(); d }
@@ -402,12 +403,13 @@ class VectorJoinSuite extends VectorQuerySuite {
       val resort = nodesOf[org.apache.spark.sql.vector.VectorSortExec](healed).filter(sort => !sort.global && sort.child.collectFirst { case j: org.apache.spark.sql.vector.VectorShuffledHashJoinExec => j }.isDefined)
       assert(resort.nonEmpty, finalPlan(healed).treeString)
     }
+    // Size no longer gates the rewrite (#416): over the budget the shuffled join splits into buckets on
+    // disk, and without statistics it builds from the right side.
     withConf((SortMerge :+ ("spark.vector.join.maxBuildSize" -> "1")): _*) {
-      checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "exceeds spark.vector.join.maxBuildSize=1")
+      checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
     }
     withConf((SortMerge :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
-      // Without adaptive execution the shuffles Spark inserts carry no statistics: no assumption is made.
-      checkFallback("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ), "no size statistics")
+      checkVectorized("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
     }
   }
 

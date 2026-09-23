@@ -248,7 +248,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => j.right
           }
           val shjStreamed = if (shjBuild eq j.left) j.right else j.left
-          streamedInputReason(shjStreamed).orElse(laneExchangeInputReason(shjBuild)).orElse(VectorJoinPlanner.buildSizeReason(shjBuild, maxBuildSize)) match {
+          // No size gate on the build side (#416): past the budget the join splits both sides into buckets on disk.
+          streamedInputReason(shjStreamed).orElse(laneExchangeInputReason(shjBuild)) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -745,7 +746,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             if (orderingNeeded) Left("as merge join: ordering relied on by the parent")
             else if (visibleHere) Left("as merge join: the row order reaches a limit or a sort")
             else eligibility match {
-              case Right(side) => Right((side, s"as hash join: ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"} side fits ${VectorConf.JoinMaxBuildSize} by statistics"))
+              case Right(side) => Right((side, s"as hash join: built from the ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"} side (split into buckets on disk past ${VectorConf.JoinSpillBytes})"))
               case Left(reason) => Left(s"as merge join: $reason")
             }
           // No size gate any more (#416): the sort below the merge join spills past its memory budget,

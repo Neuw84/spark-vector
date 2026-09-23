@@ -1155,10 +1155,11 @@ object VectorJoinPlanner {
   private def known(size: BigInt): Option[Long] = if (size >= 0 && size < BigInt(Long.MaxValue)) Some(size.toLong) else None
 
   /**
-   * The joins hold the build side in memory per task with no limit but the JVM's (#86): a build side
-   * estimated above `spark.vector.join.maxBuildSize` stays with Spark. An unknown estimate converts --
+   * The broadcast joins hold the relation in memory per task with no limit but the JVM's (#86): a build
+   * side estimated above `spark.vector.join.maxBuildSize` stays with Spark. An unknown estimate converts --
    * Spark planned this join after its own size checks, so "unknown" means the statistic is absent,
-   * not that the side is large.
+   * not that the side is large. The shuffled join is not gated: past the budget it splits into buckets
+   * on disk (#416).
    */
   def buildSizeReason(buildPlan: SparkPlan, maxBuildSize: Long): Option[String] =
     estimatedBuildSize(buildPlan).filter(_ > maxBuildSize).map { size =>
@@ -1275,20 +1276,20 @@ object VectorJoinPlanner {
       }
       if (sides.isEmpty) Left(s"join type $joinType not supported")
       else {
+        // The build side: the smaller by statistics, the right one without them. Size is no longer a gate
+        // (#416): past its budget the shuffled join splits both sides into buckets on disk, so the join
+        // is ours whatever the inputs weigh -- what the planner still decides is which side builds.
         val sized = sides.flatMap { s =>
           estimatedBuildSize(if (s == BuildLeft) left else right).map(size => (s, size))
         }
-        if (sized.isEmpty) Left("no size statistics for a build side (a sort-merge join is re-expressed only when statistics say the build side fits)")
-        else {
-          val (buildSide, size) = sized.minBy(_._2)
-          val streamed = estimatedBuildSize(if (buildSide == BuildLeft) right else left)
-          if (size > maxBuildSize) Left(s"smallest side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize")
-          // A semi or anti join may only build its right side; when that is the larger one (TPC-H q4:
-          // orders semi-joined with lineitem), hashing it costs more than Spark's merge over the
-          // sorted inputs -- measured 14% slower at SF10 -- so the rewrite declines (#311).
-          else if (streamed.exists(_ < size)) Left(s"build side estimated at $size bytes is larger than the streamed side (${streamed.get} bytes)")
-          else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right, preservedBuild = true).map(_ => buildSide)
-        }
+        val buildSide = if (sized.nonEmpty) sized.minBy(_._2)._1 else sides.head
+        val size = sized.collectFirst { case (s, sz) if s == buildSide => sz }
+        val streamed = estimatedBuildSize(if (buildSide == BuildLeft) right else left)
+        // A semi or anti join may only build its right side; when that is the larger one (TPC-H q4:
+        // orders semi-joined with lineitem), hashing it costs more than the merge over the sorted
+        // inputs -- measured 14% slower at SF10 -- so the rewrite declines and the merge join takes it (#311).
+        if (size.exists(sz => streamed.exists(_ < sz))) Left(s"build side estimated at ${size.get} bytes is larger than the streamed side (${streamed.get} bytes)")
+        else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right, preservedBuild = true).map(_ => buildSide)
       }
     }
   }

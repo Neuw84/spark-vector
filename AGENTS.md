@@ -492,9 +492,10 @@ that pin it.
   it -- because the hash rewrite's tie order shows there (the three golden files); otherwise the hash
   rewrite when `sortMergeEligibility` finds a side whose statistics fit the budget, the merge join when
   it does not (no statistics, both sides large, a skew join). The choice is the `SortMergeChoice` tag,
-  its reason the `SortMergeWhy` tag both operators print (`Sort-merge join as hash join: right side fits
-  spark.vector.join.maxBuildSize by statistics` / `as merge join: the row order reaches a limit or a
-  sort` / `ordering relied on by the parent` / `no size statistics ...`). A hash join below a merge join
+  its reason the `SortMergeWhy` tag both operators print (`Sort-merge join as hash join: built from the
+  right side (split into buckets on disk past spark.vector.join.spillBytes)` / `as merge join: the row
+  order reaches a limit or a sort` / `ordering relied on by the parent`; since #416 neither size nor
+  statistics decide -- the shuffled hash join splits past its budget, `GraceHashJoin`). A hash join below a merge join
   (its sorts stripped) gets a `VectorSortExec` back (`resortedMerge`). Measured at TPC-H SF10 (#279):
   q21's chain of two merge joins over lineitem (four-row runs) ran 44.9 s against Spark's own
   sort-merge join at 16.8 s and three of our hash joins (under Comet's shuffle) at 6.5 s, so `auto` is
@@ -554,7 +555,8 @@ that pin it.
   above a chain that did). Tie order
   under `ORDER BY` and unordered `LIMIT` picks differ from Spark's order-preserving merge (three
   `subquery/in-subquery` golden files); `SQL_TESTS_JVM_ARGS` runs the golden suite under the flag.
-- All three hash-style joins refuse a build side whose estimate exceeds `spark.vector.join.maxBuildSize`
+- The two broadcast joins refuse a build side whose estimate exceeds `spark.vector.join.maxBuildSize`;
+  the shuffled hash join is not gated since #416 (past the budget it splits into buckets on disk)
   (`VectorJoinPlanner.buildSizeReason`; the estimate is the AQE stage's `computeStats` for a
   materialised stage, else the logical link's `stats.sizeInBytes`; `Long.MaxValue` or no link =
   unknown = convert). The runtime half of #86 (fail with a message when the build actually exceeds
