@@ -112,4 +112,64 @@ public interface VectorBuffers {
     default String getString(int i) {
         return new String(getUtf8Bytes(i), StandardCharsets.UTF_8);
     }
+
+    /**
+     * Rows {@code [from, to)} as a column over the same memory, nothing copied:
+     * the fixed-width data and the bitmaps are sliced, a plain UTF8 column keeps
+     * its data buffer whole and slices the offsets (they stay absolute into it,
+     * which every kernel reads them as), a dictionary-encoded one slices its
+     * indices. {@code from} must be a multiple of 64 so the bitmaps slice on a
+     * byte, and the slice is valid as long as this column is.
+     */
+    default VectorBuffers slice(int from, int to) {
+        if (from < 0 || to < from || to > length()) {
+            throw new IllegalArgumentException("slice ["
+                    + from
+                    + ", "
+                    + to
+                    + ") of "
+                    + length()
+                    + " rows");
+        }
+        if ((from & 63) != 0) {
+            throw new IllegalArgumentException("a slice starts on a 64-row boundary, not at " + from);
+        }
+        int n = to - from;
+        MemorySegment validity = validity() == null ? null : sliceBitmap(validity(), from, n);
+        switch (type()) {
+            case UTF8 -> {
+                if (isDictionaryEncoded()) {
+                    return SegmentVectorBuffers.dictionaryUtf8(
+                            n,
+                            validity,
+                            data().asSlice((long) from << 2, (long) n << 2),
+                            dictionary());
+                }
+                return SegmentVectorBuffers.utf8(
+                        n,
+                        validity,
+                        offsets().asSlice((long) from << 2, ((long) n + 1) << 2),
+                        data());
+            }
+            case BOOL -> {
+                return SegmentVectorBuffers.fixedWidth(VecType.BOOL, n, validity, sliceBitmap(data(), from, n));
+            }
+            default -> {
+                int width = type().byteWidth();
+                return SegmentVectorBuffers.fixedWidth(type(), n, validity,
+                        data().asSlice((long) from * width, (long) n * width));
+            }
+        }
+    }
+
+    /**
+     * Bits {@code [from, from + n)} of a bitmap, {@code from} a multiple of 64;
+     * whole words where the bitmap has them, so word-wise readers see what they
+     * would in the original.
+     */
+    private static MemorySegment sliceBitmap(MemorySegment bitmap, int from, int n) {
+        long offset = (long) from >>> 3;
+        long bytes = Math.min(bitmap.byteSize() - offset, (long) Bitmap.wordsFor(n) << 3);
+        return bitmap.asSlice(offset, bytes);
+    }
 }

@@ -281,7 +281,9 @@ final class BuildTable(
     val columns: Array[VectorBuffers],
     val numRows: Int,
     spec: JoinSpec,
-    val shared: Boolean = false
+    val shared: Boolean = false,
+    /** The owning builders `columns` are the views of, when they are (closed with the table; #416). */
+    builders: Array[ColumnBuilder] = null
 ) extends AutoCloseable {
 
   /**
@@ -350,22 +352,28 @@ final class BuildTable(
         else next(i) = -1
         i -= 1
       }
-      // The same rows clustered by key (a counting sort by group id keeps build order within a key).
-      rangeStart = new Array[Int](groups + 1)
-      i = 0
-      while (i < numRows) { val g = ids(i); if (g >= 0) rangeStart(g + 1) += 1; i += 1 }
-      var g = 0
-      while (g < groups) { rangeStart(g + 1) += rangeStart(g); g += 1 }
-      val fill = java.util.Arrays.copyOf(rangeStart, groups)
-      rangeRows = new Array[Int](rangeStart(groups))
-      i = 0
-      while (i < numRows) { val g = ids(i); if (g >= 0) { rangeRows(fill(g)) = i; fill(g) += 1 }; i += 1 }
+      // The same rows clustered by key (a counting sort by group id keeps build order within a key) --
+      // for the ranged residual alone, so a join without a condition does not pay 4 bytes a row for it.
+      if (spec.condition.isDefined) {
+        rangeStart = new Array[Int](groups + 1)
+        i = 0
+        while (i < numRows) { val g = ids(i); if (g >= 0) rangeStart(g + 1) += 1; i += 1 }
+        var g = 0
+        while (g < groups) { rangeStart(g + 1) += rangeStart(g); g += 1 }
+        val fill = java.util.Arrays.copyOf(rangeStart, groups)
+        rangeRows = new Array[Int](rangeStart(groups))
+        i = 0
+        while (i < numRows) { val g = ids(i); if (g >= 0) { rangeRows(fill(g)) = i; fill(g) += 1 }; i += 1 }
+      }
     }
     this
   }
 
   /** A shared table (a broadcast relation's, used by every task of the executor) outlives its tasks. */
-  override def close(): Unit = if (!shared) arena.close()
+  override def close(): Unit = if (!shared) {
+    arena.close()
+    if (builders != null) builders.foreach(_.close())
+  }
 }
 
 object BuildTable {
@@ -387,7 +395,8 @@ object BuildTable {
   /** The build side from columnar batches (shuffled hash join). */
   def fromBatches(batches: Iterator[ColumnarBatch], spec: JoinSpec): BuildTable = {
     val arena = Arena.ofShared()
-    val builders = spec.buildTypes.map(dt => new ColumnBuilder(arena, TypeMapping.vecTypeOf(dt), 4096))
+    // Owning builders: a grown-out buffer is released at once, not with the arena (#416).
+    val builders = spec.buildTypes.map(dt => ColumnBuilder.owning(TypeMapping.vecTypeOf(dt), 4096))
     var total = 0
     while (batches.hasNext) {
       val batch = batches.next()
@@ -399,7 +408,7 @@ object BuildTable {
         }
       }
     }
-    new BuildTable(arena, builders.map(_.view()), total, spec).build()
+    new BuildTable(arena, builders.map(_.view()), total, spec, builders = builders).build()
   }
 
   /**

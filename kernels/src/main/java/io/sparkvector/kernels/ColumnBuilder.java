@@ -11,13 +11,24 @@ import java.lang.foreign.ValueLayout;
  * selection bitmap; dictionary-encoded strings are decoded on the way in, since
  * the dictionaries of different batches are unrelated.
  *
- * <p>Buffers grow by doubling inside the given {@link Arena}; a shared arena is
- * expected, so the abandoned smaller buffers are released with everything else
- * when the operator closes.
+ * <p>Buffers grow by doubling. In the given {@link Arena} (the constructor) the
+ * abandoned smaller buffers stay allocated until the arena closes -- a shared
+ * arena is expected there, sized by the caller -- so a column that grew to
+ * {@code C} bytes holds {@code 2C}. An {@link #owning owning} builder keeps
+ * each buffer in an arena of its own and releases a grown-out buffer at once,
+ * so it holds its capacity and no more; the caller closes it (#416: the build
+ * side of a hash join held four times its budget through the doubling's
+ * leftovers).
  */
-public final class ColumnBuilder {
+public final class ColumnBuilder implements AutoCloseable {
 
-    private final Arena arena;
+    private static final int DATA = 0;
+    private static final int OFFSETS = 1;
+    private static final int VALIDITY = 2;
+    private static final int SCRATCH = 3;
+
+    private final Arena arena; // the caller's, or null for an owning builder
+    private final Arena[] owned; // per buffer, an owning builder's arenas; null otherwise
     private final VecType type;
     private int length;
     private MemorySegment data;
@@ -26,17 +37,153 @@ public final class ColumnBuilder {
     private long bytesUsed; // UTF8 data bytes
 
     public ColumnBuilder(Arena arena, VecType type, int expectedRows) {
+        this(arena, false, type, expectedRows);
+    }
+
+    /**
+     * A builder that owns its memory: a buffer it outgrows is released when the
+     * grown one is in place, and {@link #close()} releases the rest. Its
+     * {@link #view()} is valid until the next append or {@code close()}.
+     */
+    public static ColumnBuilder owning(VecType type, int expectedRows) {
+        return new ColumnBuilder(null, true, type, expectedRows);
+    }
+
+    private ColumnBuilder(Arena arena, boolean owning, VecType type,
+                          int expectedRows) {
         this.arena = arena;
+        this.owned = owning ? new Arena[4] : null;
         this.type = type;
         int cap = Math.max(expectedRows, 1024);
         if (type == VecType.UTF8) {
-            offsets = ArrowLayout.allocateOffsets(arena, cap);
-            data = ArrowLayout.allocateBytes(arena, (long) cap * 8);
+            Arena o = freshArena();
+            offsets = ArrowLayout.allocateOffsets(o, cap);
+            install(OFFSETS, o);
+            Arena d = freshArena();
+            data = ArrowLayout.allocateBytes(d, (long) cap * 8);
+            install(DATA, d);
         } else if (type == VecType.BOOL) {
-            data = ArrowLayout.allocateBitmap(arena, cap);
+            Arena d = freshArena();
+            data = ArrowLayout.allocateBitmap(d, cap);
+            install(DATA, d);
         } else {
-            data = ArrowLayout.allocateData(arena, type, cap);
+            Arena d = freshArena();
+            data = ArrowLayout.allocateData(d, type, cap);
+            install(DATA, d);
         }
+    }
+
+    /**
+     * The arena a new (or grown) buffer goes into: the caller's, or a fresh one
+     * of this builder's.
+     */
+    private Arena freshArena() {
+        return owned == null ? arena : Arena.ofShared();
+    }
+
+    /**
+     * Makes {@code fresh} the arena of buffer {@code slot}, releasing the one it
+     * grew out of (its bytes were copied over before this call).
+     */
+    private void install(int slot, Arena fresh) {
+        if (owned == null) {
+            return;
+        }
+        Arena old = owned[slot];
+        owned[slot] = fresh;
+        if (old != null) {
+            old.close();
+        }
+    }
+
+    /**
+     * Releases an owning builder's memory (the view included); a no-op for a
+     * builder over a caller's arena.
+     */
+    @Override
+    public void close() {
+        if (owned == null) {
+            return;
+        }
+        for (int slot = 0; slot < owned.length; slot++) {
+            if (owned[slot] != null) {
+                owned[slot].close();
+                owned[slot] = null;
+            }
+        }
+        data = null;
+        offsets = null;
+        validity = null;
+        scratch = null;
+    }
+
+    /**
+     * The bytes this builder's buffers occupy now: their capacity, not the rows
+     * in them.
+     */
+    public long allocatedBytes() {
+        long bytes = data.byteSize();
+        if (offsets != null) {
+            bytes += offsets.byteSize();
+        }
+        if (validity != null) {
+            bytes += validity.byteSize();
+        }
+        return bytes;
+    }
+
+    /**
+     * The bytes this builder's buffers would occupy after appending the
+     * {@code count} rows of {@code in} set in {@code selection} ({@code null}
+     * for all rows): {@link #allocatedBytes()} as it would read then, the
+     * growth rule and the lazily allocated validity bitmap included. A caller
+     * with a memory budget asks before appending, so a batch that would double
+     * the capacity past the budget is never appended.
+     */
+    public long bytesAfterAppend(VectorBuffers in, MemorySegment selection, int count) {
+        if (count == 0) {
+            return allocatedBytes();
+        }
+        int rows = length + count;
+        int cap = capacityRows();
+        int newCap = rows <= cap ? cap : Math.max(rows, cap * 2);
+        long bytes;
+        switch (type) {
+            case UTF8 -> {
+                bytes = ArrowLayout.padded(((long) newCap + 1) << 2);
+                long dataBytes = bytesUsed + utf8Bytes(in, selection);
+                bytes += dataBytes <= data.byteSize() ? data.byteSize() : ArrowLayout.padded(Math.max(dataBytes, data.byteSize() * 2));
+            }
+            case BOOL -> bytes = ArrowLayout.padded(Bitmap.bytesFor(newCap));
+            default -> bytes = ArrowLayout.padded((long) newCap * type.byteWidth());
+        }
+        if (validity != null || in.hasNulls()) {
+            bytes += ArrowLayout.padded(Bitmap.bytesFor(newCap));
+        }
+        return bytes;
+    }
+
+    /**
+     * The UTF8 bytes an append of the selected rows of {@code in} adds to the
+     * data buffer.
+     */
+    private static long utf8Bytes(VectorBuffers in, MemorySegment selection) {
+        if (in.isDictionaryEncoded()) {
+            long bytes = 0;
+            VectorBuffers dict = in.dictionary();
+            int n = in.length();
+            for (int i = 0; i < n; i++) {
+                if ((selection == null || Bitmap.isSet(selection, i)) && !in.isNull(i)) {
+                    bytes += utf8Length(dict, in.getInt(i));
+                }
+            }
+            return bytes;
+        }
+        if (selection == null) {
+            MemorySegment off = in.offsets();
+            return (long) off.get(VectorBuffers.LE_INT, (long) in.length() << 2) - off.get(VectorBuffers.LE_INT, 0L);
+        }
+        return CompactKernels.selectedUtf8Bytes(in, selection);
     }
 
     public VecType type() {
@@ -67,7 +214,9 @@ public final class ColumnBuilder {
         ensureRows(start + count);
         boolean needValidity = in.hasNulls();
         if (needValidity && validity == null) {
-            validity = ArrowLayout.allocateBitmap(arena, capacityRows());
+            Arena v = freshArena();
+            validity = ArrowLayout.allocateBitmap(v, capacityRows());
+            install(VALIDITY, v);
             Bitmap.fill(validity, start, true);
         }
         switch (type) {
@@ -230,7 +379,9 @@ public final class ColumnBuilder {
 
     private MemorySegment scratchBitmap(int bits) {
         if (scratch == null || scratch.byteSize() < Bitmap.bytesFor(bits)) {
-            scratch = ArrowLayout.allocateBitmap(arena, Math.max(bits, 8192));
+            Arena s = freshArena();
+            scratch = ArrowLayout.allocateBitmap(s, Math.max(bits, 8192));
+            install(SCRATCH, s);
         }
         return scratch;
     }
@@ -251,25 +402,33 @@ public final class ColumnBuilder {
         int newCap = Math.max(rows, cap * 2);
         switch (type) {
             case UTF8 -> {
-                MemorySegment grown = ArrowLayout.allocateOffsets(arena, newCap);
+                Arena o = freshArena();
+                MemorySegment grown = ArrowLayout.allocateOffsets(o, newCap);
                 MemorySegment.copy(offsets, 0, grown, 0, ((long) length + 1) << 2);
                 offsets = grown;
+                install(OFFSETS, o);
             }
             case BOOL -> {
-                MemorySegment grown = ArrowLayout.allocateBitmap(arena, newCap);
+                Arena d = freshArena();
+                MemorySegment grown = ArrowLayout.allocateBitmap(d, newCap);
                 MemorySegment.copy(data, 0, grown, 0, Bitmap.bytesFor(length));
                 data = grown;
+                install(DATA, d);
             }
             default -> {
-                MemorySegment grown = ArrowLayout.allocateData(arena, type, newCap);
+                Arena d = freshArena();
+                MemorySegment grown = ArrowLayout.allocateData(d, type, newCap);
                 MemorySegment.copy(data, 0, grown, 0, (long) length * type.byteWidth());
                 data = grown;
+                install(DATA, d);
             }
         }
         if (validity != null) {
-            MemorySegment grown = ArrowLayout.allocateBitmap(arena, newCap);
+            Arena v = freshArena();
+            MemorySegment grown = ArrowLayout.allocateBitmap(v, newCap);
             MemorySegment.copy(validity, 0, grown, 0, Bitmap.bytesFor(length));
             validity = grown;
+            install(VALIDITY, v);
         }
     }
 
@@ -277,8 +436,10 @@ public final class ColumnBuilder {
         if (bytes <= data.byteSize()) {
             return;
         }
-        MemorySegment grown = ArrowLayout.allocateBytes(arena, Math.max(bytes, data.byteSize() * 2));
+        Arena d = freshArena();
+        MemorySegment grown = ArrowLayout.allocateBytes(d, Math.max(bytes, data.byteSize() * 2));
         MemorySegment.copy(data, 0, grown, 0, bytesUsed);
         data = grown;
+        install(DATA, d);
     }
 }

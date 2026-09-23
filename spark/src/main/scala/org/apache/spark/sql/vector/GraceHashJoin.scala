@@ -26,8 +26,22 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * one would fill `buckets / gcd(partitions, buckets)` buckets). Null keys hash to one bucket on both
  * sides and never match there, as in memory. A key with more rows than the budget still builds as one
  * bucket, with a warning: the same memory the in-memory join took for it.
+ *
+ * What the task holds is bounded by the budget, not proportional to it (#416, the second round; TPC-DS
+ * q95 at 1 TB with 13 tasks an executor): the builders are owning [[ColumnBuilder]]s, whose grown-out
+ * buffers are released at once, and a batch is appended only when the capacity it grows the builders
+ * to stays within the budget -- so the held rows occupy at most the budget, not four times it through
+ * the doubling's leftovers; and the held rows are bucketed in [[SpillChunkRows]]-row slices, so the
+ * bucketing's scratch (two `int` arrays per row on the heap, one mask per bucket in the arena, the
+ * compacted Arrow buffers) is that of a slice, not of 67 M rows at once.
  */
 object GraceHashJoin extends Logging {
+
+  /**
+   * Rows of the held build side bucketed per call: at 32 buckets a record batch of ~8192 rows per
+   * bucket, the join's own batch size. A multiple of 64, so a slice starts on a bitmap byte.
+   */
+  val SpillChunkRows: Int = 262144
 
   def iterator(
       buildIter: Iterator[ColumnarBatch],
@@ -42,29 +56,32 @@ object GraceHashJoin extends Logging {
     val canSpill =
       budgetBytes > 0 && budgetBytes < Long.MaxValue && buckets >= 2 && AggregateSpill.supportsKeys(keyTypes.toSeq)
 
-    val arena = Arena.ofShared()
-    val builders = spec.buildTypes.map(dt => new ColumnBuilder(arena, TypeMapping.vecTypeOf(dt), 4096))
+    val arena = Arena.ofShared() // the table's scratch; the columns live in the builders
+    val builders = spec.buildTypes.map(dt => ColumnBuilder.owning(TypeMapping.vecTypeOf(dt), 4096))
     var total = 0
-    var overflow = false
-    while (buildIter.hasNext && !overflow) {
+    // The batch that would have grown the builders past the budget: not appended, bucketed first below.
+    var overflowBatch: ColumnarBatch = null
+    while (buildIter.hasNext && overflowBatch == null) {
       val batch = buildIter.next()
       if (batch.numRows() > 0) {
         EvalContexts.withBatch(batch) { ctx =>
-          var c = 0
-          while (c < builders.length) { builders(c).append(ctx.input(c), ctx.selection, ctx.selectedCount); c += 1 }
-          total += ctx.selectedCount
+          if (canSpill && bytesAfter(builders, ctx) > budgetBytes) overflowBatch = batch
+          else {
+            var c = 0
+            while (c < builders.length) { builders(c).append(ctx.input(c), ctx.selection, ctx.selectedCount); c += 1 }
+            total += ctx.selectedCount
+          }
         }
-        if (canSpill && heldBytes(builders) > budgetBytes) overflow = true
       }
     }
-    if (!overflow) {
+    if (overflowBatch == null) {
       // As before #416: the whole build side in one table.
-      val table = new BuildTable(arena, builders.map(_.view()), total, spec).build()
+      val table = new BuildTable(arena, builders.map(_.view()), total, spec, builders = builders).build()
       return new VectorHashJoinIterator(streamIter, table, spec, metrics)
     }
 
     logInfo(
-      s"hash join: build side past $budgetBytes bytes after $total rows, bucketing both sides into $buckets buckets on disk"
+      s"hash join: build side past $budgetBytes bytes after $total rows (${heldBytes(builders)} bytes held), bucketing both sides into $buckets buckets on disk"
     )
     val allocator = VectorAllocators.newChild("VectorShuffledHashJoinExec.grace")
     val buildAttrs =
@@ -75,23 +92,30 @@ object GraceHashJoin extends Logging {
     val probeSpill = new AggregateSpill(buckets, streamedAttrs, null, allocator, AggregateSpill.BucketSeed, keyTypes)
     var spilledRows = 0L
 
-    // The rows held so far, then the rest of the build side, into the build buckets.
-    val scratch = Arena.ofConfined()
-    try {
-      val views = builders.map(_.view())
-      val ctx = new EvalContext(scratch, total, c => views(c))
-      buildSpill.writeBuffers(views.map(plain(_, scratch)), spec.buildKeys.map(_.eval(ctx)), total, scratch)
-      spilledRows += total
-    } finally scratch.close()
-    arena.close()
-    while (buildIter.hasNext) {
-      val batch = buildIter.next()
-      if (batch.numRows() > 0) EvalContexts.withBatch(batch) { ctx =>
-        val cols = Array.tabulate(spec.buildTypes.length)(c => plain(ctx.input(c), ctx.arena))
-        buildSpill.writeBuffers(cols, spec.buildKeys.map(_.eval(ctx)), ctx.numRows, ctx.arena, ctx.selection)
-        spilledRows += ctx.selectedCount
-      }
+    // The rows held so far, a slice at a time (the class note), then the batch that overflowed and the
+    // rest of the build side, into the build buckets.
+    val views = builders.map(_.view())
+    var from = 0
+    while (from < total) {
+      val to = math.min(total, from + SpillChunkRows)
+      val scratch = Arena.ofConfined()
+      try {
+        val slice = views.map(v => plain(v.slice(from, to), scratch))
+        val ctx = new EvalContext(scratch, to - from, c => slice(c))
+        buildSpill.writeBuffers(slice, spec.buildKeys.map(_.eval(ctx)), to - from, scratch)
+      } finally scratch.close()
+      from = to
     }
+    spilledRows += total
+    builders.foreach(_.close())
+    arena.close()
+    def spillBuild(batch: ColumnarBatch): Unit = if (batch.numRows() > 0) EvalContexts.withBatch(batch) { ctx =>
+      val cols = Array.tabulate(spec.buildTypes.length)(c => plain(ctx.input(c), ctx.arena))
+      buildSpill.writeBuffers(cols, spec.buildKeys.map(_.eval(ctx)), ctx.numRows, ctx.arena, ctx.selection)
+      spilledRows += ctx.selectedCount
+    }
+    spillBuild(overflowBatch)
+    while (buildIter.hasNext) spillBuild(buildIter.next())
     // Every streamed row into the probe buckets.
     while (streamIter.hasNext) {
       val batch = streamIter.next()
@@ -160,15 +184,20 @@ object GraceHashJoin extends Logging {
     }
   }
 
-  /** The bytes the builders hold (data, offsets, validity), for the budget. */
+  /** The bytes the builders hold (capacity: data, offsets, validity), for the log line. */
   private def heldBytes(builders: Array[ColumnBuilder]): Long = {
     var bytes = 0L
     var c = 0
+    while (c < builders.length) { bytes += builders(c).allocatedBytes(); c += 1 }
+    bytes
+  }
+
+  /** The bytes the builders would hold after appending the batch of `ctx` -- the budget is checked before, not after. */
+  private def bytesAfter(builders: Array[ColumnBuilder], ctx: EvalContext): Long = {
+    var bytes = 0L
+    var c = 0
     while (c < builders.length) {
-      val v = builders(c).view()
-      if (v.data() != null) bytes += v.data().byteSize()
-      if (v.offsets() != null) bytes += v.offsets().byteSize()
-      if (v.validity() != null) bytes += v.validity().byteSize()
+      bytes += builders(c).bytesAfterAppend(ctx.input(c), ctx.selection, ctx.selectedCount)
       c += 1
     }
     bytes
