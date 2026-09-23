@@ -137,9 +137,12 @@ final class AggregateSpill(
   }
 
   private def endWriting(b: Int): Unit = if (writers(b) != null) {
-    writers(b).end(); writers(b).close(); writers(b) = null
+    writers(b).end()
+    val written = channels(b).size() // before the writer's close, which closes the channel
+    writers(b).close(); writers(b) = null
     roots(b).close(); roots(b) = null
     channels(b).close(); channels(b) = null
+    AggregateSpill.reportSpill(written, written)
   }
 
   /** Bucket `b`'s batches, as the operator's column vectors; empty when nothing was spilled into it. */
@@ -200,6 +203,21 @@ final class AggregateSpill(
 }
 
 object AggregateSpill {
+
+  /**
+   * Reports bytes our operators wrote to local disk into the task's Spark metrics, so a spilling
+   * sort or a bucketed join shows in the UI's and the event log's `diskBytesSpilled` like Spark's own
+   * spills do (#416: q67's sort spilled one run per task past its budget and every metric read 0).
+   * `memoryBytes` is what the rows occupied before they were written, for `memoryBytesSpilled`.
+   */
+  def reportSpill(diskBytes: Long, memoryBytes: Long): Unit =
+    Option(org.apache.spark.TaskContext.get()).foreach { tc =>
+      val m = tc.taskMetrics()
+      if (m != null) {
+        if (diskBytes > 0) m.incDiskBytesSpilled(diskBytes)
+        if (memoryBytes > 0) m.incMemoryBytesSpilled(memoryBytes)
+      }
+    }
 
   /** The bucket hash's seed: any value but the shuffle's `PartitionKernels.SPARK_SEED` (42) -- see the class note. */
   val BucketSeed: Int = 0x5bd1e995

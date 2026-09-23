@@ -187,6 +187,28 @@ class VectorSortSuite extends VectorQuerySuite {
     withConf(VectorConf.SortRunRows -> "100", VectorConf.SortSpillBytes -> "1g") {
       checkSorted("SELECT d2, s, i FROM tspill SORT BY d2 DESC, s, i", 3)
     }
+    // The spilled bytes reach Spark's task metrics (the UI's and the event log's diskBytesSpilled), and a
+    // budget the partition fits in reports none.
+    def diskSpilled(spillBytes: String): Long = {
+      val spilled = new java.util.concurrent.atomic.AtomicLong
+      val listener = new org.apache.spark.scheduler.SparkListener {
+        override def onTaskEnd(e: org.apache.spark.scheduler.SparkListenerTaskEnd): Unit =
+          if (e.taskMetrics != null) spilled.addAndGet(e.taskMetrics.diskBytesSpilled)
+      }
+      spark.sparkContext.addSparkListener(listener)
+      try {
+        withConf(VectorConf.SortRunRows -> "100", VectorConf.SortSpillBytes -> spillBytes) {
+          withPlugin(true) { spark.sql("SELECT s, i FROM tspill SORT BY s NULLS LAST").rdd.count() }
+        }
+        // The listener bus delivers asynchronously; give the task-end events a moment to land.
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (spilled.get() == 0L && System.nanoTime() < deadline) Thread.sleep(50)
+        Thread.sleep(200)
+      } finally spark.sparkContext.removeSparkListener(listener)
+      spilled.get()
+    }
+    assert(diskSpilled("1") > 0L, "spilled runs must be reported as diskBytesSpilled")
+    assert(diskSpilled("1g") === 0L, "a resident sort reports no spill")
   }
 
   test("sort can be disabled") {
