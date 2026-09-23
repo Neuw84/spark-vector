@@ -101,6 +101,7 @@ abstract class VectorBatchIterator(input: Iterator[ColumnarBatch], name: String)
 }
 
 object EvalContexts {
+
   /**
    * Runs `f` with an evaluation context over `batch`; the scratch arena is closed afterwards. A
    * row-id-mapped batch from a foreign reader is normalized first (see [[InputBatches]]), so
@@ -114,9 +115,23 @@ object EvalContexts {
       val n = batch.numRows()
       val ctx = batch match {
         case s: io.sparkvector.spark.arrow.SelectedColumnarBatch =>
-          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena), s.selection(), s.selectedCount(), c => batch.column(c))
+          new EvalContext(
+            arena,
+            n,
+            c => ColumnVectorAdapters.adapt(batch.column(c), n, arena),
+            s.selection(),
+            s.selectedCount(),
+            c => batch.column(c)
+          )
         case _ =>
-          new EvalContext(arena, n, c => ColumnVectorAdapters.adapt(batch.column(c), n, arena), null, n, c => batch.column(c))
+          new EvalContext(
+            arena,
+            n,
+            c => ColumnVectorAdapters.adapt(batch.column(c), n, arena),
+            null,
+            n,
+            c => batch.column(c)
+          )
       }
       f(ctx)
     } finally {
@@ -143,8 +158,8 @@ final class VectorMetrics(
     val numInputBatches: SQLMetric,
     val numOutputBatches: SQLMetric,
     val numOutputRows: SQLMetric,
-    val time: SQLMetric)
-    extends Serializable {
+    val time: SQLMetric
+) extends Serializable {
 
   def timed[T](f: => T): T = {
     val start = System.nanoTime()

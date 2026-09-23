@@ -4,7 +4,17 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.Future
 import scala.jdk.CollectionConverters._
 
-import org.apache.spark.{Dependency, FutureAction, MapOutputStatistics, Partition, Partitioner, RangePartitioner, ShuffleDependency, SparkEnv, TaskContext}
+import org.apache.spark.{
+  Dependency,
+  FutureAction,
+  MapOutputStatistics,
+  Partition,
+  Partitioner,
+  RangePartitioner,
+  ShuffleDependency,
+  SparkEnv,
+  TaskContext
+}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, BoundReference, UnsafeProjection, UnsafeRow}
@@ -13,7 +23,12 @@ import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec, ShuffleExchangeLike, ShuffleOrigin}
-import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics, SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
+import org.apache.spark.sql.execution.metric.{
+  SQLMetric,
+  SQLMetrics,
+  SQLShuffleReadMetricsReporter,
+  SQLShuffleWriteMetricsReporter
+}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vector.shuffle.{VectorPartitioning, VectorShuffleDependency}
@@ -42,12 +57,14 @@ case class VectorShuffleExchangeExec(
      * materialises `rn + 1` and the like in a projection under the exchange): they partition the rows
      * and are not written, so the exchange's output is the child's without them.
      */
-    materializedKeys: Int = 0) extends Exchange with ShuffleExchangeLike with VectorPlan {
+    materializedKeys: Int = 0
+) extends Exchange with ShuffleExchangeLike with VectorPlan {
 
   override def output: Seq[Attribute] = child.output.dropRight(materializedKeys)
 
   override def nodeName: String = "VectorShuffleExchange"
   override def supportsColumnar: Boolean = true
+
   /**
    * Both outputs: AQE creates the stage from Spark's row exchange and applies the columnar rules with
    * `outputsColumnar = false`, so a shuffle that were columnar-only would be wrapped in a
@@ -60,7 +77,8 @@ case class VectorShuffleExchangeExec(
   private[sql] lazy val readMetrics = SQLShuffleReadMetricsReporter.createShuffleReadMetrics(sparkContext)
   override lazy val metrics: Map[String, SQLMetric] = Map(
     "dataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size"),
-    "numPartitions" -> SQLMetrics.createMetric(sparkContext, "partitions")) ++ readMetrics ++ writeMetrics
+    "numPartitions" -> SQLMetrics.createMetric(sparkContext, "partitions")
+  ) ++ readMetrics ++ writeMetrics
 
   @transient private lazy val inputRDD: RDD[ColumnarBatch] = child.executeColumnar()
 
@@ -82,7 +100,14 @@ case class VectorShuffleExchangeExec(
   }
 
   @transient lazy val shuffleDependency: VectorShuffleDependency = {
-    val dep = VectorShuffleExchangeExec.prepareShuffleDependency(inputRDD, child.output, output, VectorShuffleExchangeExec.keysAsColumns(outputPartitioning, child), writeMetrics, metrics("dataSize"))
+    val dep = VectorShuffleExchangeExec.prepareShuffleDependency(
+      inputRDD,
+      child.output,
+      output,
+      VectorShuffleExchangeExec.keysAsColumns(outputPartitioning, child),
+      writeMetrics,
+      metrics("dataSize")
+    )
     metrics("numPartitions").set(dep.partitioner.numPartitions)
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics("numPartitions") :: Nil)
@@ -125,13 +150,15 @@ object VectorShuffleExchangeExec {
   def keysAsColumns(partitioning: Partitioning, child: SparkPlan): Partitioning = partitioning match {
     case h: HashPartitioning if h.expressions.exists(!_.isInstanceOf[Attribute]) =>
       val aliases = child match {
-        case p: VectorProjectExec => p.projectList.collect { case a: org.apache.spark.sql.catalyst.expressions.Alias => a }
+        case p: VectorProjectExec => p.projectList.collect { case a: org.apache.spark.sql.catalyst.expressions.Alias =>
+            a
+          }
         case _ => Nil
       }
       h.copy(expressions = h.expressions.map {
         case a: Attribute => a
         case e => aliases.find(_.child.semanticEquals(e)).map(_.toAttribute)
-          .getOrElse(throw new IllegalStateException(s"hash key $e is not a column of the exchange's input"))
+            .getOrElse(throw new IllegalStateException(s"hash key $e is not a column of the exchange's input"))
       })
     case other => other
   }
@@ -142,7 +169,8 @@ object VectorShuffleExchangeExec {
       written: Seq[Attribute],
       partitioning: Partitioning,
       writeMetrics: Map[String, SQLMetric],
-      dataSize: SQLMetric): VectorShuffleDependency = {
+      dataSize: SQLMetric
+  ): VectorShuffleDependency = {
     // `output` is the child's (keys are resolved against it); `written` is what the shuffle carries --
     // the same, less the trailing materialised key columns.
     val schema = org.apache.spark.sql.catalyst.types.DataTypeUtils.fromAttributes(written)
@@ -155,7 +183,9 @@ object VectorShuffleExchangeExec {
       case SinglePartition => VectorPartitioning.Single
       case RangePartitioning(sortingExpressions, numPartitions) =>
         // Spark's sampling (ShuffleExchangeExec.prepareShuffleDependency), over the batches' rows.
-        val bound = sortingExpressions.map(_.child).map(e => org.apache.spark.sql.catalyst.expressions.BindReferences.bindReference(e, output))
+        val bound = sortingExpressions.map(_.child).map(e =>
+          org.apache.spark.sql.catalyst.expressions.BindReferences.bindReference(e, output)
+        )
         val rddForSampling = rdd.mapPartitionsInternal { batches =>
           val projection = UnsafeProjection.create(bound)
           val mutablePair = new MutablePair[InternalRow, Null]()
@@ -165,8 +195,12 @@ object VectorShuffleExchangeExec {
           ord.copy(child = BoundReference(i, ord.dataType, ord.nullable))
         }
         implicit val ordering: Ordering[InternalRow] = new LazilyGeneratedOrdering(orderingAttributes)
-        val partitioner = new RangePartitioner(numPartitions, rddForSampling, ascending = true,
-          samplePointsPerPartitionHint = SQLConf.get.rangeExchangeSampleSizePerPartition)
+        val partitioner = new RangePartitioner(
+          numPartitions,
+          rddForSampling,
+          ascending = true,
+          samplePointsPerPartitionHint = SQLConf.get.rangeExchangeSampleSizePerPartition
+        )
         VectorPartitioning.Range(partitioner, sortingExpressions.map(_.child), output)
       case other => throw new IllegalArgumentException(s"columnar shuffle over $other")
     }
@@ -175,7 +209,14 @@ object VectorShuffleExchangeExec {
       override def getPartition(key: Any): Int = 0 // the writer assigns rows, not Spark
     }
     val keyed: RDD[Product2[Int, ColumnarBatch]] = rdd.mapPartitionsInternal(_.map(b => (0, b)))
-    new VectorShuffleDependency(keyed, partitioner, schema, spec, ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics), dataSize)
+    new VectorShuffleDependency(
+      keyed,
+      partitioner,
+      schema,
+      spec,
+      ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics),
+      dataSize
+    )
   }
 }
 
@@ -189,17 +230,23 @@ final class ShuffledColumnarRDDPartition(val index: Int, val spec: ShufflePartit
 final class ShuffledColumnarRDD(
     dependency: ShuffleDependency[Int, ColumnarBatch, ColumnarBatch],
     metrics: Map[String, SQLMetric],
-    partitionSpecs: Array[ShufflePartitionSpec]) extends RDD[ColumnarBatch](dependency.rdd.context, Nil) {
+    partitionSpecs: Array[ShufflePartitionSpec]
+) extends RDD[ColumnarBatch](dependency.rdd.context, Nil) {
 
   def this(dependency: ShuffleDependency[Int, ColumnarBatch, ColumnarBatch], metrics: Map[String, SQLMetric]) =
-    this(dependency, metrics, Array.tabulate(dependency.partitioner.numPartitions)(i => CoalescedPartitionSpec(i, i + 1)))
+    this(
+      dependency,
+      metrics,
+      Array.tabulate(dependency.partitioner.numPartitions)(i => CoalescedPartitionSpec(i, i + 1))
+    )
 
   override def getDependencies: Seq[Dependency[_]] = List(dependency)
 
   override val partitioner: Option[Partitioner] =
     if (partitionSpecs.forall(_.isInstanceOf[CoalescedPartitionSpec])) {
       val indices = partitionSpecs.map(_.asInstanceOf[CoalescedPartitionSpec].startReducerIndex)
-      if (indices.toSet.size == partitionSpecs.length) Some(new CoalescedPartitioner(dependency.partitioner, indices)) else None
+      if (indices.toSet.size == partitionSpecs.length) Some(new CoalescedPartitioner(dependency.partitioner, indices))
+      else None
     } else None
 
   override def getPartitions: Array[Partition] =
@@ -227,11 +274,35 @@ final class ShuffledColumnarRDD(
       case CoalescedPartitionSpec(startReducerIndex, endReducerIndex, _) =>
         manager.getReader(dependency.shuffleHandle, startReducerIndex, endReducerIndex, context, sqlMetricsReporter)
       case PartialReducerPartitionSpec(reducerIndex, startMapIndex, endMapIndex, _) =>
-        manager.getReader(dependency.shuffleHandle, startMapIndex, endMapIndex, reducerIndex, reducerIndex + 1, context, sqlMetricsReporter)
+        manager.getReader(
+          dependency.shuffleHandle,
+          startMapIndex,
+          endMapIndex,
+          reducerIndex,
+          reducerIndex + 1,
+          context,
+          sqlMetricsReporter
+        )
       case PartialMapperPartitionSpec(mapIndex, startReducerIndex, endReducerIndex) =>
-        manager.getReader(dependency.shuffleHandle, mapIndex, mapIndex + 1, startReducerIndex, endReducerIndex, context, sqlMetricsReporter)
+        manager.getReader(
+          dependency.shuffleHandle,
+          mapIndex,
+          mapIndex + 1,
+          startReducerIndex,
+          endReducerIndex,
+          context,
+          sqlMetricsReporter
+        )
       case CoalescedMapperPartitionSpec(startMapIndex, endMapIndex, numReducers) =>
-        manager.getReader(dependency.shuffleHandle, startMapIndex, endMapIndex, 0, numReducers, context, sqlMetricsReporter)
+        manager.getReader(
+          dependency.shuffleHandle,
+          startMapIndex,
+          endMapIndex,
+          0,
+          numReducers,
+          context,
+          sqlMetricsReporter
+        )
     }
     reader.read().asInstanceOf[Iterator[Product2[Int, ColumnarBatch]]].map(_._2)
   }

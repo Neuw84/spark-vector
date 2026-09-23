@@ -18,7 +18,8 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
   private val merge = Seq(
     "spark.sql.autoBroadcastJoinThreshold" -> "-1",
     "spark.sql.join.preferSortMergeJoin" -> "true",
-    VectorConf.SortMergeJoinMode -> "merge")
+    VectorConf.SortMergeJoinMode -> "merge"
+  )
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
@@ -34,7 +35,8 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
         "date_add(date '2021-01-01', cast(id % 300 as int)) as kdt",
         "cast(id % 300 as decimal(27,2)) * 100000000000 as kw",
         "cast(id as int) as v",
-        "concat('left', id) as name")
+        "concat('left', id) as name"
+      )
       .write
       .mode("overwrite")
       .parquet(a)
@@ -51,7 +53,8 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
         "date_add(date '2021-01-01', cast(id % 400 as int)) as kdt",
         "cast(id % 400 as decimal(27,2)) * 100000000000 as kw",
         "cast(id as int) as w",
-        "concat('right', id) as tag")
+        "concat('right', id) as tag"
+      )
       .write
       .mode("overwrite")
       .parquet(b)
@@ -118,7 +121,9 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       checkOrdered("SELECT * FROM (SELECT * FROM a WHERE v < -1) a2 RIGHT OUTER JOIN b ON a2.ki = b.ki")
     }
     // One key on both sides: the cross product 2000 x 800 in chunks, Spark's order.
-    checkOrdered("SELECT a.v, b.w FROM (SELECT pmod(v, 1) AS k, v FROM a WHERE v < 2000) a JOIN (SELECT pmod(w, 1) AS k, w FROM b WHERE w < 800) b ON a.k = b.k")
+    checkOrdered(
+      "SELECT a.v, b.w FROM (SELECT pmod(v, 1) AS k, v FROM a WHERE v < 2000) a JOIN (SELECT pmod(w, 1) AS k, w FROM b WHERE w < 800) b ON a.k = b.k"
+    )
   }
 
   test("a parent relying on the join's ordering converts: a window on the key, a same-key chain") {
@@ -126,22 +131,38 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       // The window's partition is the join key: it needs the join's ordering and gets it, no sort between.
       val w = checkVectorized(
         "SELECT a.ki, a.v, b.w, row_number() OVER (PARTITION BY a.ki ORDER BY a.ki) AS rn FROM a JOIN b ON a.ki = b.ki",
-        Seq(SMJ, classOf[org.apache.spark.sql.vector.VectorWindowExec]))
-      assert(nodesOf[org.apache.spark.sql.execution.SortExec](w).forall(s => !s.child.isInstanceOf[VectorSortMergeJoinExec]), "a sort was placed over the merge join")
-      assert(nodesOf[org.apache.spark.sql.vector.VectorSortExec](w).forall(s => !s.child.isInstanceOf[VectorSortMergeJoinExec]), "our sort was placed over the merge join")
+        Seq(SMJ, classOf[org.apache.spark.sql.vector.VectorWindowExec])
+      )
+      assert(
+        nodesOf[org.apache.spark.sql.execution.SortExec](w).forall(s => !s.child.isInstanceOf[VectorSortMergeJoinExec]),
+        "a sort was placed over the merge join"
+      )
+      assert(
+        nodesOf[org.apache.spark.sql.vector.VectorSortExec](w).forall(s =>
+          !s.child.isInstanceOf[VectorSortMergeJoinExec]
+        ),
+        "our sort was placed over the merge join"
+      )
       // A chain on the same key: the second join reads the first's ordering.
       val c = checkVectorized(
         "SELECT a.v, b.w, c.w AS w2 FROM a JOIN b ON a.ki = b.ki JOIN (SELECT ki, w FROM b WHERE w % 2 = 0) c ON a.ki = c.ki",
-        Seq(SMJ))
+        Seq(SMJ)
+      )
       assert(nodesOf[VectorSortMergeJoinExec](c).length === 2, "both joins of the chain")
       assert(nodesOf[SortMergeJoinExec](c).isEmpty)
     }
   }
 
   test("auto: the hash join unless the order can show, statistics or not (#416); the merge join where it does") {
-    val auto = Seq("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "true", VectorConf.SortMergeJoinMode -> "auto")
+    val auto = Seq(
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      "spark.sql.join.preferSortMergeJoin" -> "true",
+      VectorConf.SortMergeJoinMode -> "auto"
+    )
     def why(df: org.apache.spark.sql.DataFrame): String =
-      (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](df)).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
+      (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](
+        df
+      )).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
     withConf(auto: _*) {
       // A small side with AQE statistics: the hash rewrite, the reason names the side and the budget.
       val h = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
@@ -153,10 +174,19 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       val o = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki ORDER BY a.ki", Seq(SMJ))
       assert(why(o).contains("reaches a limit or a sort"), why(o))
       // A parent relying on the ordering: the merge join.
-      val w = checkVectorized("SELECT a.ki, a.v, row_number() OVER (PARTITION BY a.ki ORDER BY a.ki) AS rn FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
-      assert(why(w).contains("as merge join"), why(w)) // relied on by the parent, or through the sort Spark placed for the window
+      val w = checkVectorized(
+        "SELECT a.ki, a.v, row_number() OVER (PARTITION BY a.ki ORDER BY a.ki) AS rn FROM a JOIN b ON a.ki = b.ki",
+        Seq(SMJ)
+      )
+      assert(
+        why(w).contains("as merge join"),
+        why(w)
+      ) // relied on by the parent, or through the sort Spark placed for the window
       // An aggregate above ends the visibility: the join's order cannot show through a GROUP BY.
-      checkVectorized("SELECT a.ki, count(*) AS n FROM a JOIN b ON a.ki = b.ki GROUP BY a.ki ORDER BY a.ki", Seq(classOf[VectorShuffledHashJoinExec]))
+      checkVectorized(
+        "SELECT a.ki, count(*) AS n FROM a JOIN b ON a.ki = b.ki GROUP BY a.ki ORDER BY a.ki",
+        Seq(classOf[VectorShuffledHashJoinExec])
+      )
     }
     // No statistics (adaptive execution off): still the hash join, built from the right side -- past its
     // budget it splits into buckets on disk (#416), so neither size nor statistics decide; the merge join
@@ -185,7 +215,11 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       """WITH t AS (SELECT ki, sum(v) AS total FROM a GROUP BY ki)
         |SELECT t1.ki, t1.total FROM t t1, (SELECT ki, avg(total) * 1.2 AS lim FROM t GROUP BY ki) t2
         |WHERE t1.ki = t2.ki AND t1.total > t2.lim ORDER BY t1.ki LIMIT 50""".stripMargin
-    val auto = Seq("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "true", VectorConf.SortMergeJoinMode -> "auto")
+    val auto = Seq(
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      "spark.sql.join.preferSortMergeJoin" -> "true",
+      VectorConf.SortMergeJoinMode -> "auto"
+    )
     withConf(auto: _*) {
       val df = spark.sql(ctr)
       df.collect()
@@ -203,7 +237,10 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
         }
       }
       // And the join is ours.
-      assert(nodesOf[VectorSortMergeJoinExec](df).nonEmpty || nodesOf[VectorShuffledHashJoinExec](df).nonEmpty, plan.treeString)
+      assert(
+        nodesOf[VectorSortMergeJoinExec](df).nonEmpty || nodesOf[VectorShuffledHashJoinExec](df).nonEmpty,
+        plan.treeString
+      )
     }
   }
 
@@ -216,7 +253,11 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
     }
     withConf(merge: _*) {
-      checkFallback("SELECT a.v, s.st FROM a JOIN (SELECT ki, struct(w, tag) AS st FROM b) s ON a.ki = s.ki", Seq(SMJ), "unsupported column type struct")
+      checkFallback(
+        "SELECT a.v, s.st FROM a JOIN (SELECT ki, struct(w, tag) AS st FROM b) s ON a.ki = s.ki",
+        Seq(SMJ),
+        "unsupported column type struct"
+      )
     }
   }
 }

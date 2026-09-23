@@ -49,15 +49,28 @@ object IcebergMorGenerator {
     s"spark.sql.catalog.$Catalog.type" -> "hadoop",
     s"spark.sql.catalog.$Catalog.warehouse" -> warehouse,
     // Equality deletes are committed outside Spark: never serve a stale Table.
-    s"spark.sql.catalog.$Catalog.cache-enabled" -> "false")
+    s"spark.sql.catalog.$Catalog.cache-enabled" -> "false"
+  )
 
   val DefaultVariants: Seq[String] = Seq(
     "plain",
-    "pos_2", "pos_10", "pos_30", "pos_10_clustered", "pos_30_clustered",
-    "pos_upd_1", "pos_upd_5",
-    "eq_2", "eq_10",
-    "dv_2", "dv_10", "dv_30", "dv_10_clustered", "dv_30_clustered",
-    "dv_upd_1", "dv_upd_5")
+    "pos_2",
+    "pos_10",
+    "pos_30",
+    "pos_10_clustered",
+    "pos_30_clustered",
+    "pos_upd_1",
+    "pos_upd_5",
+    "eq_2",
+    "eq_10",
+    "dv_2",
+    "dv_10",
+    "dv_30",
+    "dv_10_clustered",
+    "dv_30_clustered",
+    "dv_upd_1",
+    "dv_upd_5"
+  )
 
   final case class Args(
       data: String = "benchmarks/data/sf1",
@@ -66,7 +79,8 @@ object IcebergMorGenerator {
       variants: Seq[String] = DefaultVariants,
       threads: Int = Runtime.getRuntime.availableProcessors(),
       /** Data files the base table is written as; deletes then span all of them. */
-      files: Int = 16)
+      files: Int = 16
+  )
 
   private val Pattern = """^(plain|(pos|dv)_(\d+)(_clustered)?|(pos|dv)_upd_(\d+)|eq_(\d+))$""".r
 
@@ -104,8 +118,10 @@ object IcebergMorGenerator {
       val summaries = args.variants.map { v =>
         val start = System.nanoTime()
         val s = build(spark, source, s"$ns.$v", v, args.files)
-        println(f"[mor] $v: live=${s.liveRows} data files=${s.dataFiles} delete files=${s.deleteFiles} (${s.deleteFormats}) " +
-          f"delete rows=${s.deleteRows} (${s.deleteRowsPerDataFile}%.0f per data file) snapshot=${s.snapshotId} in ${(System.nanoTime() - start) / 1e9}%.0fs")
+        println(
+          f"[mor] $v: live=${s.liveRows} data files=${s.dataFiles} delete files=${s.deleteFiles} (${s.deleteFormats}) " +
+            f"delete rows=${s.deleteRows} (${s.deleteRowsPerDataFile}%.0f per data file) snapshot=${s.snapshotId} in ${(System.nanoTime() - start) / 1e9}%.0fs"
+        )
         s
       }
       val readme = Paths.get(args.warehouse, s"README-${args.namespace}.md")
@@ -115,13 +131,22 @@ object IcebergMorGenerator {
   }
 
   final case class Summary(
-      variant: String, formatVersion: Int, liveRows: Long, dataFiles: Long, deleteFiles: Long, deleteFormats: String,
-      deleteRows: Long, snapshotId: Long, statements: Seq[String]) {
+      variant: String,
+      formatVersion: Int,
+      liveRows: Long,
+      dataFiles: Long,
+      deleteFiles: Long,
+      deleteFormats: String,
+      deleteRows: Long,
+      snapshotId: Long,
+      statements: Seq[String]
+  ) {
     def deleteRowsPerDataFile: Double = if (dataFiles == 0) 0 else deleteRows.toDouble / dataFiles
   }
 
   /** The 2 %, 10 %, 30 % of rows the scattered deletes remove: a stable hash of the order key, so the rows are spread over every file and block. */
-  private def scattered(pct: Int, offset: Int = 0): String = s"pmod(xxhash64(l_orderkey), 1000) >= ${offset * 10} AND pmod(xxhash64(l_orderkey), 1000) < ${(offset + pct) * 10}"
+  private def scattered(pct: Int, offset: Int = 0): String =
+    s"pmod(xxhash64(l_orderkey), 1000) >= ${offset * 10} AND pmod(xxhash64(l_orderkey), 1000) < ${(offset + pct) * 10}"
 
   /** Whole `l_shipdate` ranges from the start of the seven years the data spans: entire blocks go. */
   private def clustered(pct: Int): String = s"l_shipdate < date_add(DATE '1992-01-01', ${2557 * pct / 100})"
@@ -137,10 +162,13 @@ object IcebergMorGenerator {
       "write.delete.mode" -> "merge-on-read",
       "write.update.mode" -> "merge-on-read",
       "write.merge.mode" -> "merge-on-read",
-      "write.target-file-size-bytes" -> (512L * 1024 * 1024).toString)
+      "write.target-file-size-bytes" -> (512L * 1024 * 1024).toString
+    )
     val writer = source.repartition(files).writeTo(name).using("iceberg")
     props.foldLeft(writer) { case (w, (k, v)) => w.tableProperty(k, v) }.createOrReplace()
-    statements += s"CREATE OR REPLACE TABLE $name USING iceberg TBLPROPERTIES (${props.map { case (k, v) => s"'$k'='$v'" }.mkString(", ")}) AS SELECT * FROM lineitem  -- repartition($files)"
+    statements += s"CREATE OR REPLACE TABLE $name USING iceberg TBLPROPERTIES (${props.map { case (k, v) =>
+        s"'$k'='$v'"
+      }.mkString(", ")}) AS SELECT * FROM lineitem  -- repartition($files)"
     variant match {
       case "plain" =>
       case _ if kind != null =>
@@ -149,7 +177,9 @@ object IcebergMorGenerator {
       case _ if updKind != null =>
         // pos_10 / dv_10, then the update of a further pct % of the live rows, then the merge.
         sql(s"DELETE FROM $name WHERE ${scattered(10)}")
-        sql(s"UPDATE $name SET l_quantity = l_quantity + 1, l_comment = concat(l_comment, ' u') WHERE ${scattered(updPct.toInt, offset = 10)}")
+        sql(
+          s"UPDATE $name SET l_quantity = l_quantity + 1, l_comment = concat(l_comment, ' u') WHERE ${scattered(updPct.toInt, offset = 10)}"
+        )
         // The merge source: 1 % of the live rows come back as updates (the first line of each order
         // as a delete), and another 1 % as brand-new rows keyed above every existing order.
         val maxKey = spark.table(name).selectExpr("max(l_orderkey)").collect()(0).getAs[Number](0).longValue()
@@ -200,32 +230,67 @@ object IcebergMorGenerator {
     delta.commit()
   }
 
-  private def summarize(spark: SparkSession, name: String, variant: String, formatVersion: Int, statements: Seq[String]): Summary = {
+  private def summarize(
+      spark: SparkSession,
+      name: String,
+      variant: String,
+      formatVersion: Int,
+      statements: Seq[String]
+  ): Summary = {
     val live = spark.table(name).count()
-    val files = spark.sql(s"SELECT content, file_format, count(*) AS n, sum(record_count) AS rows FROM $name.files GROUP BY content, file_format").collect()
+    val files = spark.sql(
+      s"SELECT content, file_format, count(*) AS n, sum(record_count) AS rows FROM $name.files GROUP BY content, file_format"
+    ).collect()
     val dataFiles = files.filter(_.getInt(0) == 0).map(_.getLong(2)).sum
     val deletes = files.filter(_.getInt(0) > 0)
     val deleteFiles = deletes.map(_.getLong(2)).sum
     val deleteRows = deletes.map(_.getLong(3)).sum
-    val formats = deletes.map(r => s"${if (r.getInt(0) == 1) "position" else "equality"}/${r.getString(1).toLowerCase}").distinct.sorted.mkString(", ")
-    val snapshot = spark.sql(s"SELECT snapshot_id FROM $name.snapshots ORDER BY committed_at DESC LIMIT 1").collect()(0).getLong(0)
-    Summary(variant, formatVersion, live, dataFiles, deleteFiles, if (formats.isEmpty) "none" else formats, deleteRows, snapshot, statements)
+    val formats = deletes.map(r =>
+      s"${if (r.getInt(0) == 1) "position" else "equality"}/${r.getString(1).toLowerCase}"
+    ).distinct.sorted.mkString(", ")
+    val snapshot =
+      spark.sql(s"SELECT snapshot_id FROM $name.snapshots ORDER BY committed_at DESC LIMIT 1").collect()(0).getLong(0)
+    Summary(
+      variant,
+      formatVersion,
+      live,
+      dataFiles,
+      deleteFiles,
+      if (formats.isEmpty) "none" else formats,
+      deleteRows,
+      snapshot,
+      statements
+    )
   }
 
   private def readmeOf(args: Args, sourceRows: Long, summaries: Seq[Summary]): String = {
     val sb = new StringBuilder
     sb.append(s"# Iceberg merge-on-read variants of `lineitem` (`${args.namespace}`)\n\n")
-    sb.append(s"Source: `${args.data}/lineitem` ($sourceRows rows), written as ${args.files} data files per table into the Hadoop catalog\n")
-    sb.append(s"`${Catalog}` at `${args.warehouse}` (tables `$Catalog.${args.namespace}.<variant>`). Live rows are `count(*)` through Spark's row\n")
-    sb.append("path with no plugin loaded -- the oracle every configuration of the harness is compared to. Delete rows are\n")
-    sb.append("the `record_count` of the delete files (an equality delete row removes every line of its order; a positional\n")
-    sb.append("delete or deletion-vector row removes one). The harness reads the current snapshot; the id is the one to pin\n")
+    sb.append(
+      s"Source: `${args.data}/lineitem` ($sourceRows rows), written as ${args.files} data files per table into the Hadoop catalog\n"
+    )
+    sb.append(
+      s"`${Catalog}` at `${args.warehouse}` (tables `$Catalog.${args.namespace}.<variant>`). Live rows are `count(*)` through Spark's row\n"
+    )
+    sb.append(
+      "path with no plugin loaded -- the oracle every configuration of the harness is compared to. Delete rows are\n"
+    )
+    sb.append(
+      "the `record_count` of the delete files (an equality delete row removes every line of its order; a positional\n"
+    )
+    sb.append(
+      "delete or deletion-vector row removes one). The harness reads the current snapshot; the id is the one to pin\n"
+    )
     sb.append("with `VERSION AS OF` if the table is mutated again.\n\n")
-    sb.append("| variant | format | live rows | rows gone vs source (%) | data files | delete files | delete rows | per data file | snapshot |\n")
+    sb.append(
+      "| variant | format | live rows | rows gone vs source (%) | data files | delete files | delete rows | per data file | snapshot |\n"
+    )
     sb.append("|---|---:|---:|---:|---:|---:|---:|---:|---|\n")
     summaries.foreach { s =>
       val deletedPct = 100.0 * (sourceRows - s.liveRows) / sourceRows
-      sb.append(f"| `${s.variant}` | v${s.formatVersion} | ${s.liveRows} | $deletedPct%.1f | ${s.dataFiles} | ${s.deleteFiles} (${s.deleteFormats}) | ${s.deleteRows} | ${s.deleteRowsPerDataFile}%.0f | ${s.snapshotId} |\n")
+      sb.append(
+        f"| `${s.variant}` | v${s.formatVersion} | ${s.liveRows} | $deletedPct%.1f | ${s.dataFiles} | ${s.deleteFiles} (${s.deleteFormats}) | ${s.deleteRows} | ${s.deleteRowsPerDataFile}%.0f | ${s.snapshotId} |\n"
+      )
     }
     sb.append("\n## How each variant was produced\n")
     summaries.foreach { s =>

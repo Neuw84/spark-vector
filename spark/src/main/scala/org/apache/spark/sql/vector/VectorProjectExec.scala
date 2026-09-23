@@ -1,10 +1,25 @@
 package org.apache.spark.sql.vector
 
 import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, NestedFieldColumnVector, RemappedColumnVector, SelectedColumnarBatch}
+import io.sparkvector.spark.arrow.{
+  ArrowOutput,
+  BorrowedColumnVector,
+  NestedFieldColumnVector,
+  RemappedColumnVector,
+  SelectedColumnarBatch
+}
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, NestedColumnRef, VectorExpr}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, Expression, GetStructField, Literal, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias,
+  Attribute,
+  AttributeReference,
+  Expression,
+  GetStructField,
+  Literal,
+  NamedExpression,
+  SortOrder
+}
 import org.apache.spark.sql.execution.{OrderPreservingUnaryExecNode, PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -52,7 +67,9 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
 
   private def isIdentity: Boolean =
     projectList.length == child.output.length &&
-      projectList.zip(child.output).forall { case (e, a) => e.toAttribute.exprId == a.exprId && e.isInstanceOf[Attribute] }
+      projectList.zip(child.output).forall { case (e, a) =>
+        e.toAttribute.exprId == a.exprId && e.isInstanceOf[Attribute]
+      }
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val exprs = compiled
@@ -69,6 +86,7 @@ case class VectorProjectExec(projectList: Seq[NamedExpression], child: SparkPlan
 }
 
 object VectorProjectExec {
+
   /**
    * A projection that forwards a child column as is (possibly renamed), whatever its type, or a struct
    * field of one whose type has no lane (Spark's `NestedColumnAliasing` projects `st.inner` for a
@@ -112,8 +130,8 @@ private[vector] class VectorProjectIterator(
     identity: Boolean,
     outputAttrs: Array[(String, DataType)],
     emitSelection: Boolean,
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorProjectExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorProjectExec") {
 
   override protected def process(batch: ColumnarBatch): ColumnarBatch = metrics.timed {
     metrics.numInputBatches += 1
@@ -129,7 +147,9 @@ private[vector] class VectorProjectIterator(
       withEvalContext(batch) { ctx =>
         // With a selection we either keep it (parent is ours, and enough rows survive to make
         // computing on the whole batch cheaper than compacting) or apply it now.
-        val compactTo = if (selected && (!emitSelection || !SelectionPolicy.keep(ctx.selectedCount, ctx.numRows))) ctx.selection else null
+        val compactTo = if (selected && (!emitSelection || !SelectionPolicy.keep(ctx.selectedCount, ctx.numRows)))
+          ctx.selection
+        else null
         val outRows = if (compactTo != null) ctx.selectedCount else ctx.numRows
         val columns = new Array[ColumnVector](exprs.length)
         var foreignRows: Array[Int] = null // the selection as row ids, built once for the columns with no lane

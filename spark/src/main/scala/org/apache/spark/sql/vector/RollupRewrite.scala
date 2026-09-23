@@ -1,6 +1,13 @@
 package org.apache.spark.sql.vector
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSet, Expression, ExprId, Literal}
+import org.apache.spark.sql.catalyst.expressions.{
+  Attribute,
+  AttributeReference,
+  AttributeSet,
+  Expression,
+  ExprId,
+  Literal
+}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Partial, PartialMerge}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
@@ -60,12 +67,15 @@ object RollupRewrite {
     val childAttrs = AttributeSet(expand.child.output)
     keySlots.foreach { slot =>
       val refs = expand.projections.map(_(slot)).collect { case a: Attribute => a }
-      val ok = expand.projections.forall(p => p(slot) match { case _: Attribute | _: Literal => true; case _ => false }) &&
-        refs.map(_.exprId).distinct.size <= 1 && refs.forall(childAttrs.contains)
+      val ok =
+        expand.projections.forall(p => p(slot) match { case _: Attribute | _: Literal => true; case _ => false }) &&
+          refs.map(_.exprId).distinct.size <= 1 && refs.forall(childAttrs.contains)
       if (!ok) return None
     }
     // The grouping set of each projection, as child columns; nested means each is a subset of the one before.
-    val setOf: Seq[Set[ExprId]] = expand.projections.map(p => groupingSlots.flatMap(slot => p(slot) match { case a: Attribute => Some(a.exprId); case _ => None }).toSet)
+    val setOf: Seq[Set[ExprId]] = expand.projections.map(p =>
+      groupingSlots.flatMap(slot => p(slot) match { case a: Attribute => Some(a.exprId); case _ => None }).toSet
+    )
     val order: Seq[Int] = setOf.indices.sortBy(j => -setOf(j).size)
     val nested = order.sliding(2).forall { case Seq(a, b) => setOf(b).subsetOf(setOf(a)); case _ => true }
     if (!nested || setOf(order.head).isEmpty) return None
@@ -74,10 +84,14 @@ object RollupRewrite {
 
     // Level 0: the partial aggregate on the finest set over the Expand's child, its functions reading
     // the child columns directly (the Expand passed them through under their own attributes).
-    val inputRewrite: Map[ExprId, Attribute] = passThrough.map { case (slot, childAttr) => output(slot).exprId -> childAttr }
+    val inputRewrite: Map[ExprId, Attribute] = passThrough.map { case (slot, childAttr) =>
+      output(slot).exprId -> childAttr
+    }
     if (!inputRewrite.values.forall(childAttrs.contains)) return None
     val partialAggs = agg.aggregateExpressions.map { ae =>
-      ae.transform { case a: AttributeReference => inputRewrite.getOrElse(a.exprId, a) }.asInstanceOf[AggregateExpression]
+      ae.transform { case a: AttributeReference => inputRewrite.getOrElse(a.exprId, a) }.asInstanceOf[
+        AggregateExpression
+      ]
     }
     // The levels' functions may be new objects (their inputs were rewritten), with buffer attributes of
     // their own; the projections map those onto the ORIGINAL buffer attributes, which the final
@@ -100,7 +114,8 @@ object RollupRewrite {
         aggregateAttributes = agg.aggregateAttributes,
         initialInputBufferOffset = if (k == 0) 0 else keys.length,
         resultExpressions = keys ++ levelBuffers,
-        child = below)
+        child = below
+      )
       val planned = VectorAggregatePlanner.plan(spark, finalEnabled = true, strict).toOption.getOrElse(return None)
       levels += planned
       below = planned
@@ -108,7 +123,9 @@ object RollupRewrite {
     // Each level's projection: the original Expand's key slots (over that level's keys) and the buffers.
     val projections: Seq[Seq[Expression]] = order.map { j =>
       val p = expand.projections(j)
-      groupingSlots.map(slot => p(slot) match { case a: Attribute => keyByExprId(a.exprId); case e => e }) ++ levelBuffers
+      groupingSlots.map(slot =>
+        p(slot) match { case a: Attribute => keyByExprId(a.exprId); case e => e }
+      ) ++ levelBuffers
     }
     val out = groupingAttrs ++ buffers
     if (out.map(_.exprId) != agg.output.map(_.exprId)) return None

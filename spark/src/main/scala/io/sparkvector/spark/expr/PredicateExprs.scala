@@ -2,7 +2,15 @@ package io.sparkvector.spark.expr
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.{Bitmap, BitmapKernels, CompareOp, PredicateKernels, SegmentVectorBuffers, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  Bitmap,
+  BitmapKernels,
+  CompareOp,
+  PredicateKernels,
+  SegmentVectorBuffers,
+  VecType,
+  VectorBuffers
+}
 import org.apache.spark.sql.types.{BooleanType, DataType}
 
 /**
@@ -20,7 +28,8 @@ final case class NullSafeEqExpr(left: VectorExpr, right: VectorExpr) extends Vec
     val a = left match { case _: LiteralExpr => null; case c => c.eval(ctx) }
     val b = right match { case _: LiteralExpr => null; case c => c.eval(ctx) }
     val eq =
-      if (left.vecType == VecType.BOOL) BoolCompareExpr(CompareOp.EQ, NullSafeEqExpr.wrap(left, a), NullSafeEqExpr.wrap(right, b)).eval(ctx)
+      if (left.vecType == VecType.BOOL)
+        BoolCompareExpr(CompareOp.EQ, NullSafeEqExpr.wrap(left, a), NullSafeEqExpr.wrap(right, b)).eval(ctx)
       else CompareExpr(CompareOp.EQ, NullSafeEqExpr.wrap(left, a), NullSafeEqExpr.wrap(right, b)).eval(ctx)
     if (eq.validity() == null) {
       // Neither side can be null: plain equality.
@@ -41,6 +50,7 @@ final case class NullSafeEqExpr(left: VectorExpr, right: VectorExpr) extends Vec
 }
 
 object NullSafeEqExpr {
+
   /** An already-evaluated column, so a node can be re-used on buffers without re-evaluating its child. */
   private[expr] final case class Evaluated(buffers: VectorBuffers, dataType: DataType) extends VectorExpr {
     override def children: Seq[VectorExpr] = Nil

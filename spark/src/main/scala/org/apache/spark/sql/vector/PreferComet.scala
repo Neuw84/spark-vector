@@ -4,7 +4,12 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.execution.joins.{
+  BroadcastHashJoinExec,
+  BroadcastNestedLoopJoinExec,
+  ShuffledHashJoinExec,
+  SortMergeJoinExec
+}
 import org.apache.spark.sql.execution.window.{WindowExec, WindowGroupLimitExec}
 import org.apache.spark.sql.types.{DecimalType, StringType}
 
@@ -38,8 +43,18 @@ object PreferComet extends Logging {
 
   val Reason = "delegated to Comet (spark.vector.comet.preferComet)"
 
-  val Kinds: Set[String] = Set("filter", "project", "sort", "sortMergeJoin", "hashJoin", "broadcastHashJoin",
-    "window", "expand", "union", "limit")
+  val Kinds: Set[String] = Set(
+    "filter",
+    "project",
+    "sort",
+    "sortMergeJoin",
+    "hashJoin",
+    "broadcastHashJoin",
+    "window",
+    "expand",
+    "union",
+    "limit"
+  )
 
   sealed trait Predicate { def holds(plan: SparkPlan): Boolean }
 
@@ -87,10 +102,14 @@ object PreferComet extends Logging {
         case i => (raw.substring(0, i).trim, Some(raw.substring(i + 1).trim))
       }
       if (kind == "aggregate") {
-        logWarning(s"spark.vector.comet.preferComet: '$raw' ignored -- an aggregate pair cannot be split across the engines (#280)")
+        logWarning(
+          s"spark.vector.comet.preferComet: '$raw' ignored -- an aggregate pair cannot be split across the engines (#280)"
+        )
         None
       } else if (kind != "all" && !Kinds.contains(kind)) {
-        logWarning(s"spark.vector.comet.preferComet: unknown operator kind '$kind' in '$raw' ignored; known: ${Kinds.toSeq.sorted.mkString(", ")}, all")
+        logWarning(
+          s"spark.vector.comet.preferComet: unknown operator kind '$kind' in '$raw' ignored; known: ${Kinds.toSeq.sorted.mkString(", ")}, all"
+        )
         None
       } else pred match {
         case None => Some(Entry(kind, None))
@@ -98,7 +117,9 @@ object PreferComet extends Logging {
         case Some("strings") => Some(Entry(kind, Some(Strings)))
         case Some(EstimatedRowsPattern(n)) => Some(Entry(kind, Some(EstimatedRows(n.toLong))))
         case Some(other) =>
-          logWarning(s"spark.vector.comet.preferComet: unknown predicate '$other' in '$raw' ignored; known: wideDecimal, strings, estimatedRows>N")
+          logWarning(
+            s"spark.vector.comet.preferComet: unknown predicate '$other' in '$raw' ignored; known: wideDecimal, strings, estimatedRows>N"
+          )
           None
       }
     })

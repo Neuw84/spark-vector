@@ -11,131 +11,132 @@ import org.apache.spark.sql.vectorized.ColumnarMap;
 import org.apache.spark.unsafe.types.UTF8String;
 
 /**
- * A TINYINT or SMALLINT column over an INT32 lane (#327): the kernels compute on 32-bit lanes and
- * every value is within the declared type's range (the compiler narrows casts and arithmetic), so
- * Spark reads the declared type back through {@link #getByte} / {@link #getShort} while the
- * operators see an ordinary {@link IntVector}. The counterpart of {@link VectorDecimalColumnVector}
- * for small integers.
+ * A TINYINT or SMALLINT column over an INT32 lane (#327): the kernels compute
+ * on 32-bit lanes and every value is within the declared type's range (the
+ * compiler narrows casts and arithmetic), so Spark reads the declared type back
+ * through {@link #getByte} / {@link #getShort} while the operators see an
+ * ordinary {@link IntVector}. The counterpart of {@link
+ * VectorDecimalColumnVector} for small integers.
  */
 public final class VectorNarrowIntColumnVector extends ColumnVector {
 
-  private final IntVector vector;
-  private final boolean owns;
+    private final IntVector vector;
+    private final boolean owns;
 
-  public VectorNarrowIntColumnVector(IntVector vector, DataType type) {
-    this(vector, type, true);
-  }
-
-  private VectorNarrowIntColumnVector(IntVector vector, DataType type, boolean owns) {
-    super(type);
-    if (!isNarrow(type)) {
-      throw new IllegalArgumentException("not a narrow integer type: " + type);
+    public VectorNarrowIntColumnVector(IntVector vector, DataType type) {
+        this(vector, type, true);
     }
-    this.vector = vector;
-    this.owns = owns;
-  }
 
-  public static boolean isNarrow(DataType type) {
-    return type instanceof ByteType || type instanceof ShortType;
-  }
-
-  public IntVector vector() {
-    return vector;
-  }
-
-  public boolean ownsMemory() {
-    return owns;
-  }
-
-  /** Same vector, not owned. */
-  public VectorNarrowIntColumnVector borrow() {
-    return new VectorNarrowIntColumnVector(vector, dataType(), false);
-  }
-
-  @Override
-  public void close() {
-    if (owns) {
-      vector.close();
+    private VectorNarrowIntColumnVector(IntVector vector, DataType type, boolean owns) {
+        super(type);
+        if (!isNarrow(type)) {
+            throw new IllegalArgumentException("not a narrow integer type: " + type);
+        }
+        this.vector = vector;
+        this.owns = owns;
     }
-  }
 
-  @Override
-  public boolean hasNull() {
-    return vector.getNullCount() > 0;
-  }
+    public static boolean isNarrow(DataType type) {
+        return type instanceof ByteType || type instanceof ShortType;
+    }
 
-  @Override
-  public int numNulls() {
-    return vector.getNullCount();
-  }
+    public IntVector vector() {
+        return vector;
+    }
 
-  @Override
-  public boolean isNullAt(int rowId) {
-    return vector.isNull(rowId);
-  }
+    public boolean ownsMemory() {
+        return owns;
+    }
 
-  @Override
-  public byte getByte(int rowId) {
-    return (byte) vector.get(rowId);
-  }
+    /** Same vector, not owned. */
+    public VectorNarrowIntColumnVector borrow() {
+        return new VectorNarrowIntColumnVector(vector, dataType(), false);
+    }
 
-  @Override
-  public short getShort(int rowId) {
-    return (short) vector.get(rowId);
-  }
+    @Override
+    public void close() {
+        if (owns) {
+            vector.close();
+        }
+    }
 
-  @Override
-  public int getInt(int rowId) {
-    return vector.get(rowId);
-  }
+    @Override
+    public boolean hasNull() {
+        return vector.getNullCount() > 0;
+    }
 
-  @Override
-  public long getLong(int rowId) {
-    return vector.get(rowId);
-  }
+    @Override
+    public int numNulls() {
+        return vector.getNullCount();
+    }
 
-  @Override
-  public boolean getBoolean(int rowId) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public boolean isNullAt(int rowId) {
+        return vector.isNull(rowId);
+    }
 
-  @Override
-  public float getFloat(int rowId) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public byte getByte(int rowId) {
+        return (byte) vector.get(rowId);
+    }
 
-  @Override
-  public double getDouble(int rowId) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public short getShort(int rowId) {
+        return (short) vector.get(rowId);
+    }
 
-  @Override
-  public ColumnarArray getArray(int rowId) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public int getInt(int rowId) {
+        return vector.get(rowId);
+    }
 
-  @Override
-  public ColumnarMap getMap(int ordinal) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public long getLong(int rowId) {
+        return vector.get(rowId);
+    }
 
-  @Override
-  public Decimal getDecimal(int rowId, int precision, int scale) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public boolean getBoolean(int rowId) {
+        throw new UnsupportedOperationException();
+    }
 
-  @Override
-  public UTF8String getUTF8String(int rowId) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public float getFloat(int rowId) {
+        throw new UnsupportedOperationException();
+    }
 
-  @Override
-  public byte[] getBinary(int rowId) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public double getDouble(int rowId) {
+        throw new UnsupportedOperationException();
+    }
 
-  @Override
-  public ColumnVector getChild(int ordinal) {
-    throw new UnsupportedOperationException();
-  }
+    @Override
+    public ColumnarArray getArray(int rowId) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ColumnarMap getMap(int ordinal) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Decimal getDecimal(int rowId, int precision, int scale) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public UTF8String getUTF8String(int rowId) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public byte[] getBinary(int rowId) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ColumnVector getChild(int ordinal) {
+        throw new UnsupportedOperationException();
+    }
 }

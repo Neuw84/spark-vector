@@ -33,8 +33,8 @@ private[vector] class VectorSortIterator(
     metrics: VectorMetrics,
     limit: Int = Int.MaxValue,
     runRows: Int = 1 << 20,
-    spillBytes: Long = Long.MaxValue)
-    extends Iterator[ColumnarBatch]
+    spillBytes: Long = Long.MaxValue
+) extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
   /** A run the merge reads: its key columns and output columns as they currently stand. */
@@ -52,8 +52,13 @@ private[vector] class VectorSortIterator(
    * first `limit` rows of the order can ever be emitted, so that is all the merge walks (`kept`): a
    * top-N over a large partition costs the merge n rows per run, not the partition.
    */
-  private final class MemoryRun(val columns: Array[VectorBuffers], val keys: Array[VectorBuffers], val rows: Int,
-      val bytes: Long, val arena: Arena) extends Run {
+  private final class MemoryRun(
+      val columns: Array[VectorBuffers],
+      val keys: Array[VectorBuffers],
+      val rows: Int,
+      val bytes: Long,
+      val arena: Arena
+  ) extends Run {
     val permutation: Array[Int] = SortKernels.sortIndices(keys, ascending, nullsFirst, rows)
     val kept: Int = math.min(rows, limit)
     def close(): Unit = arena.close()
@@ -105,6 +110,7 @@ private[vector] class VectorSortIterator(
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorSortExec")
 
   private val numColumns = outputAttrs.length
+
   /** Key c is output column `keyColumn(c)`, or -1 when it is a computed expression with its own chunks. */
   private val keyColumn: Array[Int] = keyExprs.map {
     case ColumnRef(ordinal, _) => ordinal
@@ -114,11 +120,14 @@ private[vector] class VectorSortIterator(
 
   private var sorted = false
   private val runs = ArrayBuffer.empty[Run]
+
   /** Bytes of the runs held in memory (sealed and being built), the quantity `spillBytes` bounds. */
   private var residentBytes = 0L
+
   /** Runs written to disk and their bytes, for the operator's description and the tests. */
   var spilledRuns = 0
   var spilledBytes = 0L
+
   /** One run: its columns and permutation. Several: the merge, and every output column's run columns. */
   private var columns: Array[VectorBuffers] = _
   private var permutation: Array[Int] = _
@@ -139,7 +148,8 @@ private[vector] class VectorSortIterator(
     val perRow: Long = in.`type`() match {
       case VecType.UTF8 =>
         val off = in.offsets()
-        val data = if (off == null) 0L else off.get(VectorBuffers.LE_INT, n.toLong << 2).toLong - off.get(VectorBuffers.LE_INT, 0L)
+        val data = if (off == null) 0L
+        else off.get(VectorBuffers.LE_INT, n.toLong << 2).toLong - off.get(VectorBuffers.LE_INT, 0L)
         4L + math.max(0L, data) / n
       case VecType.BOOL => 1L
       case t => math.max(1, t.byteWidth)
@@ -152,7 +162,12 @@ private[vector] class VectorSortIterator(
     val file = AggregateSpill.newFile()
     val types: Array[(String, DataType)] = outputAttrs ++ computedKeys.map(k => (s"key$k", keyExprs(k).dataType))
     Option(file.getParentFile).foreach(_.mkdirs())
-    val channel = java.nio.channels.FileChannel.open(file.toPath, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)
+    val channel = java.nio.channels.FileChannel.open(
+      file.toPath,
+      java.nio.file.StandardOpenOption.CREATE,
+      java.nio.file.StandardOpenOption.WRITE,
+      java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
+    )
     var writer: org.apache.arrow.vector.ipc.ArrowStreamWriter = null
     var root: org.apache.arrow.vector.VectorSchemaRoot = null
     try {
@@ -164,7 +179,8 @@ private[vector] class VectorSortIterator(
         while (c < types.length) {
           val (name, dt) = types(c)
           val source = if (c < numColumns) run.columns(c) else run.keys(computedKeys(c - numColumns))
-          vectors(c) = AggregateSpill.vectorOf(ArrowOutput.gather(name, dt, source, run.permutation, from, to, allocator))
+          vectors(c) =
+            AggregateSpill.vectorOf(ArrowOutput.gather(name, dt, source, run.permutation, from, to, allocator))
           c += 1
         }
         if (writer == null) {
@@ -174,7 +190,9 @@ private[vector] class VectorSortIterator(
         } else {
           // The root keeps its first vectors: later batches move theirs in.
           c = 0
-          while (c < types.length) { vectors(c).makeTransferPair(root.getVector(c)).transfer(); vectors(c).close(); c += 1 }
+          while (c < types.length) {
+            vectors(c).makeTransferPair(root.getVector(c)).transfer(); vectors(c).close(); c += 1
+          }
         }
         root.setRowCount(to - from)
         writer.writeBatch()
@@ -247,8 +265,11 @@ private[vector] class VectorSortIterator(
               if (columnBuilders == null) {
                 val expected = math.max(math.min(runRows, count), 1)
                 runArena = Arena.ofShared()
-                columnBuilders = Array.tabulate(numColumns)(c => new ColumnBuilder(runArena, ctx.input(c).`type`(), expected))
-                keyBuilders = Array.tabulate(computedKeys.length)(k => new ColumnBuilder(runArena, keyExprs(computedKeys(k)).vecType, expected))
+                columnBuilders =
+                  Array.tabulate(numColumns)(c => new ColumnBuilder(runArena, ctx.input(c).`type`(), expected))
+                keyBuilders = Array.tabulate(computedKeys.length)(k =>
+                  new ColumnBuilder(runArena, keyExprs(computedKeys(k)).vecType, expected)
+                )
               }
               var c = 0
               while (c < numColumns) {
@@ -285,9 +306,14 @@ private[vector] class VectorSortIterator(
         columns = runs.head.columns
         permutation = runs.head.permutation
       } else if (runs.nonEmpty) {
-        merge = new RunMerge(runs.map(_.keys).toArray, runs.map(_.permutation).toArray,
+        merge = new RunMerge(
+          runs.map(_.keys).toArray,
+          runs.map(_.permutation).toArray,
           runs.map { case r: MemoryRun => r.kept; case r: SpilledRun => r.rows }.toArray,
-          ascending, nullsFirst, runs.map(_.isInstanceOf[SpilledRun]).toArray)
+          ascending,
+          nullsFirst,
+          runs.map(_.isInstanceOf[SpilledRun]).toArray
+        )
         runColumns = Array.tabulate(numColumns)(c => runs.map(_.columns(c)).toArray)
         runOf = new Array[Int](OutputBatchSize)
         rowOf = new Array[Int](OutputBatchSize)

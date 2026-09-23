@@ -80,7 +80,12 @@ final case class DigestExpr(kind: DigestExpr.Kind, child: VectorExpr) extends Ve
         SegmentVectorBuffers.fixedWidth(VecType.INT64, n, v.validity(), out)
       case DigestExpr.Sha2(bits) if !DigestExpr.sha2Algorithm(bits).isDefined =>
         // Spark returns null for a bit length it does not know.
-        SegmentVectorBuffers.utf8(n, ArrowLayout.allocateBitmap(ctx.arena, n), ArrowLayout.allocateOffsets(ctx.arena, n), ArrowLayout.allocateBytes(ctx.arena, 0))
+        SegmentVectorBuffers.utf8(
+          n,
+          ArrowLayout.allocateBitmap(ctx.arena, n),
+          ArrowLayout.allocateOffsets(ctx.arena, n),
+          ArrowLayout.allocateBytes(ctx.arena, 0)
+        )
       case _ =>
         val md = MessageDigest.getInstance(kind match {
           case DigestExpr.Md5 => "MD5"
@@ -125,8 +130,8 @@ object DigestExpr {
     val out = new Array[Byte](bytes.length * 2)
     var i = 0
     while (i < bytes.length) {
-      out(2 * i) = Digits((bytes(i) >> 4) & 0xF)
-      out(2 * i + 1) = Digits(bytes(i) & 0xF)
+      out(2 * i) = Digits((bytes(i) >> 4) & 0xf)
+      out(2 * i + 1) = Digits(bytes(i) & 0xf)
       i += 1
     }
     out

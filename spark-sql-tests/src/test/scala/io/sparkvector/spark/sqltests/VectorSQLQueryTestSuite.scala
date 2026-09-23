@@ -60,19 +60,25 @@ class VectorSQLQueryTestSuite extends SQLQueryTestSuite {
     VectorCoverageListener.beginCase(testCase.name)
     try super.runSqlTestCase(testCase, listTestCases)
     finally {
-      try ListenerSync.drain(spark) catch { case _: Throwable => }
+      try ListenerSync.drain(spark)
+      catch { case _: Throwable => }
       VectorCoverageListener.endCase()
     }
   }
 
   override def afterAll(): Unit = {
     try super.afterAll()
-    finally VectorSQLQueryTestSuite.report(isFullRun = System.getProperty("spark.vector.sqlTests.filter", ".*") == ".*" &&
-      Option(System.getProperty("spark.vector.sqlTests.exclude")).filter(_.nonEmpty).forall(_ == VectorSQLQueryTestSuite.defaultExclude))
+    finally VectorSQLQueryTestSuite.report(isFullRun =
+        System.getProperty("spark.vector.sqlTests.filter", ".*") == ".*" &&
+          Option(
+            System.getProperty("spark.vector.sqlTests.exclude")
+          ).filter(_.nonEmpty).forall(_ == VectorSQLQueryTestSuite.defaultExclude)
+      )
   }
 }
 
 object VectorSQLQueryTestSuite {
+
   /**
    * Excluded by default (`-DsqlTests.exclude=<regex>` overrides, `-DsqlTests.exclude=^$` runs all):
    *  - `explain*.sql`: the golden files spell out Spark's physical plan, which is exactly what the
@@ -96,17 +102,20 @@ object VectorSQLQueryTestSuite {
   def readBaseline(): Map[String, Coverage] = {
     val in = getClass.getClassLoader.getResourceAsStream(BaselineResource)
     if (in == null) Map.empty
-    else try {
-      scala.io.Source.fromInputStream(in, "UTF-8").getLines().filter(l => l.nonEmpty && !l.startsWith("#")).map { line =>
-        val f = line.split('\t')
-        f(0) -> Coverage(f(1).toLong, f(2).toLong, if (f.length > 3) f(3).toLong else 0L)
-      }.toMap
-    } finally in.close()
+    else
+      try {
+        scala.io.Source.fromInputStream(in, "UTF-8").getLines().filter(l => l.nonEmpty && !l.startsWith("#")).map {
+          line =>
+            val f = line.split('\t')
+            f(0) -> Coverage(f(1).toLong, f(2).toLong, if (f.length > 3) f(3).toLong else 0L)
+        }.toMap
+      } finally in.close()
   }
 
   private def write(path: Path, rows: Map[String, Coverage]): Unit = {
-    val lines = Seq("# test case\texecutions\taccelerated executions\tspark-vector operators (VectorSQLQueryTestSuite, #17)") ++
-      rows.toSeq.sortBy(_._1).map { case (name, c) => s"$name\t${c.executions}\t${c.accelerated}\t${c.operators}" }
+    val lines =
+      Seq("# test case\texecutions\taccelerated executions\tspark-vector operators (VectorSQLQueryTestSuite, #17)") ++
+        rows.toSeq.sortBy(_._1).map { case (name, c) => s"$name\t${c.executions}\t${c.accelerated}\t${c.operators}" }
     Files.createDirectories(path.getParent)
     Files.write(path, lines.mkString("", "\n", "\n").getBytes(StandardCharsets.UTF_8))
   }
@@ -116,13 +125,18 @@ object VectorSQLQueryTestSuite {
     val rows = VectorCoverageListener.perCase
     val total = VectorCoverageListener.executions.get()
     val accelerated = VectorCoverageListener.withVectorOperators.get()
-    println(s"[spark-vector] SQL test coverage: $accelerated of $total executions ran at least one spark-vector operator; " +
-      s"${VectorCoverageListener.vectorOperators.get()} spark-vector operators in total")
+    println(
+      s"[spark-vector] SQL test coverage: $accelerated of $total executions ran at least one spark-vector operator; " +
+        s"${VectorCoverageListener.vectorOperators.get()} spark-vector operators in total"
+    )
     val (some, none) = rows.toSeq.sortBy(_._1).partition(_._2.accelerated > 0)
-    println(s"[spark-vector] ${some.size} test cases ran a spark-vector operator, ${none.size} never did (no supported operator in any query, or analysis-only cases):")
+    println(
+      s"[spark-vector] ${some.size} test cases ran a spark-vector operator, ${none.size} never did (no supported operator in any query, or analysis-only cases):"
+    )
     some.foreach { case (name, c) => println(f"[spark-vector]   ${c.accelerated}%5d / ${c.executions}%-5d  $name") }
     if (none.nonEmpty) println("[spark-vector] never accelerated: " + none.map(_._1).mkString(", "))
-    try write(runOutput, rows) catch { case e: Exception => println(s"[spark-vector] could not write $runOutput: $e") }
+    try write(runOutput, rows)
+    catch { case e: Exception => println(s"[spark-vector] could not write $runOutput: $e") }
 
     if (isFullRun && rows.nonEmpty) {
       if (java.lang.Boolean.getBoolean("spark.vector.sqlTests.updateBaseline")) {
@@ -132,19 +146,31 @@ object VectorSQLQueryTestSuite {
         val baseline = readBaseline()
         val regressions = baseline.toSeq.sortBy(_._1).flatMap { case (name, was) =>
           rows.get(name) match {
-            case Some(now) if now.accelerated < was.accelerated => Some(s"$name: ${was.accelerated} -> ${now.accelerated} accelerated executions")
+            case Some(now) if now.accelerated < was.accelerated =>
+              Some(s"$name: ${was.accelerated} -> ${now.accelerated} accelerated executions")
             case None if was.accelerated > 0 => Some(s"$name: ${was.accelerated} -> (case missing from the run)")
             case _ => None
           }
         }
-        val improvements = rows.toSeq.sortBy(_._1).filter { case (name, now) => now.accelerated > baseline.get(name).map(_.accelerated).getOrElse(0L) }
-        if (improvements.nonEmpty) println(s"[spark-vector] ${improvements.size} cases above the baseline (rerun with -DsqlTests.updateBaseline=true to record them): " +
-          improvements.map { case (n, c) => s"$n ${baseline.get(n).map(_.accelerated).getOrElse(0L)} -> ${c.accelerated}" }.mkString(", "))
-        if (regressions.nonEmpty) {
-          throw new AssertionError(s"[spark-vector] ${regressions.size} test cases run fewer spark-vector operators than the baseline $BaselineResource -- " +
-            "a fallback introduced by a planner change, or a golden file that changed:\n  " + regressions.mkString("\n  "))
+        val improvements = rows.toSeq.sortBy(_._1).filter { case (name, now) =>
+          now.accelerated > baseline.get(name).map(_.accelerated).getOrElse(0L)
         }
-        if (baseline.isEmpty) println(s"[spark-vector] no baseline $BaselineResource on the classpath; run with -DsqlTests.updateBaseline=true to create it")
+        if (improvements.nonEmpty)
+          println(s"[spark-vector] ${improvements.size} cases above the baseline (rerun with -DsqlTests.updateBaseline=true to record them): " +
+            improvements.map { case (n, c) =>
+              s"$n ${baseline.get(n).map(_.accelerated).getOrElse(0L)} -> ${c.accelerated}"
+            }.mkString(", "))
+        if (regressions.nonEmpty) {
+          throw new AssertionError(
+            s"[spark-vector] ${regressions.size} test cases run fewer spark-vector operators than the baseline $BaselineResource -- " +
+              "a fallback introduced by a planner change, or a golden file that changed:\n  " + regressions.mkString(
+                "\n  "
+              )
+          )
+        }
+        if (baseline.isEmpty) println(
+          s"[spark-vector] no baseline $BaselineResource on the classpath; run with -DsqlTests.updateBaseline=true to create it"
+        )
       }
     }
   }
@@ -190,7 +216,9 @@ object VectorCoverageListener {
   }
 
   def perCase: Map[String, VectorSQLQueryTestSuite.Coverage] =
-    cases.asScala.filter(_._1 != "(setup)").map { case (name, s) => name -> VectorSQLQueryTestSuite.Coverage(s(0).get(), s(1).get(), s(2).get()) }.toMap
+    cases.asScala.filter(_._1 != "(setup)").map { case (name, s) =>
+      name -> VectorSQLQueryTestSuite.Coverage(s(0).get(), s(1).get(), s(2).get())
+    }.toMap
 
   private[sqltests] def lower(s: String): String = s.toLowerCase(Locale.ROOT)
 }

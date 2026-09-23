@@ -25,7 +25,8 @@ class PlanAccelerationSuite extends AnyFunSuite {
 
   test("a Comet exchange over a Comet scan is fully accelerated") {
     val plan = PlanAcceleration.fromPlan(
-      FakeCometShuffleExchangeExec(FakeCometScanExec(attrs)))
+      FakeCometShuffleExchangeExec(FakeCometScanExec(attrs))
+    )
     assert(plan.countBy(Engine.Comet) === 2)
     assert(plan.countBy(Engine.Spark) === 0)
     assert(plan.fullyAccelerated)
@@ -44,18 +45,19 @@ class PlanAccelerationSuite extends AnyFunSuite {
       new SparkPlanInfo(name, name, children.toSeq, Map.empty, Nil)
 
     val plan = PlanAcceleration.fromInfo(
-      info("CometShuffleExchange",
-        info("VectorToComet",
-          info("VectorHashAggregate",
-            info("VectorFilter",
-              info("Scan parquet"))))))
+      info(
+        "CometShuffleExchange",
+        info("VectorToComet", info("VectorHashAggregate", info("VectorFilter", info("Scan parquet"))))
+      )
+    )
 
     assert(plan.nodes.map(n => (n.name, n.engine)) === Seq(
       ("CometShuffleExchange", Engine.Comet),
       ("VectorToComet", Engine.Bridge),
       ("VectorHashAggregate", Engine.Vector),
       ("VectorFilter", Engine.Vector),
-      ("Scan parquet", Engine.ColumnarSource)))
+      ("Scan parquet", Engine.ColumnarSource)
+    ))
     assert(plan.fullyAccelerated)
   }
 
@@ -64,11 +66,11 @@ class PlanAccelerationSuite extends AnyFunSuite {
       new SparkPlanInfo(name, name, children.toSeq, Map.empty, Nil)
 
     val plan = PlanAcceleration.fromInfo(
-      info("AdaptiveSparkPlan",
-        info("WholeStageCodegen (1)",
-          info("Filter",
-            info("InputAdapter",
-              info("Scan parquet"))))))
+      info(
+        "AdaptiveSparkPlan",
+        info("WholeStageCodegen (1)", info("Filter", info("InputAdapter", info("Scan parquet"))))
+      )
+    )
 
     assert(plan.nodes.map(_.name) === Seq("Filter", "Scan parquet"))
     assert(!plan.fullyAccelerated, "a Spark filter is a missed operator")
@@ -76,7 +78,8 @@ class PlanAccelerationSuite extends AnyFunSuite {
 
   test("edges point from child to parent") {
     val plan = PlanAcceleration.fromPlan(
-      FakeCometShuffleExchangeExec(FakeCometScanExec(attrs)))
+      FakeCometShuffleExchangeExec(FakeCometScanExec(attrs))
+    )
     // Root is id 0, its child id 1, and the edge runs child -> parent.
     assert(plan.edges === Seq(org.apache.spark.sql.vector.ui.PlanEdge(1, 0)))
     assert(plan.toDotFile.contains("1->0"))
@@ -86,17 +89,15 @@ class PlanAccelerationSuite extends AnyFunSuite {
     def info(name: String, children: SparkPlanInfo*): SparkPlanInfo =
       new SparkPlanInfo(name, name, children.toSeq, Map.empty, Nil)
     val plan = PlanAcceleration.fromInfo(
-      info("ColumnarToRow",
-        info("VectorSort",
-          info("AQEShuffleRead",
-            info("CometExchange",
-              info("ReusedExchange"))))))
+      info("ColumnarToRow", info("VectorSort", info("AQEShuffleRead", info("CometExchange", info("ReusedExchange")))))
+    )
     assert(plan.nodes.map(n => (n.name, n.engine)) === Seq(
       ("ColumnarToRow", Engine.Transition),
       ("VectorSort", Engine.Vector),
       ("AQEShuffleRead", Engine.ShuffleRead),
       ("CometExchange", Engine.Comet),
-      ("ReusedExchange", Engine.ShuffleRead)))
+      ("ReusedExchange", Engine.ShuffleRead)
+    ))
     // The reader does not count against the plan, and only the ColumnarToRow is a transition.
     assert(plan.countBy(Engine.Transition) === 1)
     assert(plan.operatorCount === 2, "VectorSort and CometExchange")

@@ -48,13 +48,15 @@ final case class TranslateExpr(hay: VectorExpr, from: Array[Int], to: Array[Arra
 }
 
 object TranslateExpr {
+
   /** Spark's `StringTranslate.buildDict`: first mapping per matching code point wins; a missing replacement deletes. */
   def dictionary(matching: String, replace: String): (Array[Int], Array[Array[Byte]]) = {
     val m = matching.codePoints().toArray
     val r = replace.codePoints().toArray
     val seen = scala.collection.mutable.LinkedHashMap.empty[Int, Array[Byte]]
     m.zipWithIndex.foreach { case (cp, k) =>
-      if (!seen.contains(cp)) seen(cp) = if (k < r.length) new String(Character.toChars(r(k))).getBytes("UTF-8") else null
+      if (!seen.contains(cp))
+        seen(cp) = if (k < r.length) new String(Character.toChars(r(k))).getBytes("UTF-8") else null
     }
     (seen.keys.toArray, seen.values.toArray)
   }
@@ -72,7 +74,8 @@ final case class SubstringIndexExpr(hay: VectorExpr, delim: VectorExpr, count: V
 }
 
 /** `split_part(hay, delim, part)`: a zero part raises Spark's INVALID_INDEX_OF_ZERO on an active row. */
-final case class SplitPartExpr(hay: VectorExpr, delim: VectorExpr, part: VectorExpr, queryContext: QueryContext) extends VectorExpr {
+final case class SplitPartExpr(hay: VectorExpr, delim: VectorExpr, part: VectorExpr, queryContext: QueryContext)
+    extends VectorExpr {
   override def dataType: DataType = StringType
   override def children: Seq[VectorExpr] = Seq(hay, delim, part)
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -80,7 +83,8 @@ final case class SplitPartExpr(hay: VectorExpr, delim: VectorExpr, part: VectorE
     val (dp, d) = StringSearches.part(delim, ctx)
     val (pc, p) = StringSlices.intArg(part, ctx)
     val validity = StringSlices.validity(ctx, h, d, pc)
-    if (StringSearchKernels.firstZeroPart(pc, p, validity, ctx.active, ctx.numRows) >= 0) throw VectorErrors.invalidIndexOfZero(queryContext)
+    if (StringSearchKernels.firstZeroPart(pc, p, validity, ctx.active, ctx.numRows) >= 0)
+      throw VectorErrors.invalidIndexOfZero(queryContext)
     StringSearchKernels.splitPart(hp, dp, pc, p, ctx.numRows, validity, ctx.arena)
   }
 }

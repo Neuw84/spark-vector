@@ -1,13 +1,16 @@
 package org.apache.spark.sql.vector
 
-
-
 import io.sparkvector.spark.VectorConf
 import io.sparkvector.spark.adapter.TypeMapping
 import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, NullsFirst, SortOrder}
-import org.apache.spark.sql.catalyst.plans.physical.{Distribution, OrderedDistribution, Partitioning, UnspecifiedDistribution}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  Distribution,
+  OrderedDistribution,
+  Partitioning,
+  UnspecifiedDistribution
+}
 import org.apache.spark.sql.execution.{SortExec, SparkPlan}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -60,7 +63,16 @@ case class VectorSortExec(sortOrder: Seq[SortOrder], global: Boolean, child: Spa
     val runRows = VectorConf.sortRunRows(conf)
     val spillBytes = VectorConf.sortSpillBytes(conf, sparkContext.getConf)
     child.executeColumnar().mapPartitionsInternal { iter =>
-      new VectorSortIterator(iter, keys, ascending, nullsFirst, outputAttrs, m, runRows = runRows, spillBytes = spillBytes)
+      new VectorSortIterator(
+        iter,
+        keys,
+        ascending,
+        nullsFirst,
+        outputAttrs,
+        m,
+        runRows = runRows,
+        spillBytes = spillBytes
+      )
     }
   }
 
@@ -85,7 +97,8 @@ object VectorSortPlanner {
   def compileKey(order: SortOrder, input: Seq[Attribute]): Either[String, VectorExpr] =
     ExpressionCompiler.compileLaneColumn(order.child, input).flatMap {
       case _: LiteralExpr => Left("literal sort key")
-      case k if !TypeMapping.hasLane(order.child.dataType) => Left(s"sort key type ${order.child.dataType.simpleString} not supported")
+      case k if !TypeMapping.hasLane(order.child.dataType) =>
+        Left(s"sort key type ${order.child.dataType.simpleString} not supported")
       case k => Right(k)
     }
 

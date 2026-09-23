@@ -10,17 +10,39 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import io.sparkvector.spark.comet.{CometBatchBridge, CometMixedBridge}
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
-import org.apache.spark.sql.execution.{CoalesceExec, CollectLimitExec, ColumnarRule, ExpandExec, FilterExec, GenerateExec, GlobalLimitExec, LocalLimitExec, LocalTableScanExec, ProjectExec, SampleExec, SortExec, SparkPlan, TakeOrderedAndProjectExec, UnionExec}
+import org.apache.spark.sql.execution.{
+  CoalesceExec,
+  CollectLimitExec,
+  ColumnarRule,
+  ExpandExec,
+  FilterExec,
+  GenerateExec,
+  GlobalLimitExec,
+  LocalLimitExec,
+  LocalTableScanExec,
+  ProjectExec,
+  SampleExec,
+  SortExec,
+  SparkPlan,
+  TakeOrderedAndProjectExec,
+  UnionExec
+}
 import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.adaptive.{AQEShuffleReadExec, QueryStageExec}
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.execution.joins.{
+  BroadcastHashJoinExec,
+  BroadcastNestedLoopJoinExec,
+  ShuffledHashJoinExec,
+  SortMergeJoinExec
+}
 import org.apache.spark.sql.execution.window.{WindowExec, WindowGroupLimitExec}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Final // still used below
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.internal.SQLConf
 
 object VectorExecRule {
+
   /**
    * Set on every SortMergeJoinExec by the pre-pass: the build side of the shuffled hash join it becomes,
    * or the reason it stays Spark's. The transform builds from this decision and never re-derives it.
@@ -74,7 +96,14 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     } else {
       val sortMergeMode = VectorConf.sortMergeJoinMode(conf)
       if (sortMergeMode == "hash" || sortMergeMode == "auto") {
-        markSortMergeJoins(plan, orderingNeeded = false, orderVisible = false, sortMergeMode == "auto", maxBuildSize, new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]])
+        markSortMergeJoins(
+          plan,
+          orderingNeeded = false,
+          orderVisible = false,
+          sortMergeMode == "auto",
+          maxBuildSize,
+          new java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]]
+        )
       }
       val bridge = if (VectorConf.cometMixedEnabled(conf)) CometMixedBridge.tryCreate() else null
       val prefer = if (bridge != null) PreferComet.parse(VectorConf.cometPreferComet(conf)) else PreferComet.Empty
@@ -106,8 +135,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           forwardingInputReason(m.child).orElse(VectorMergeRowsPlanner.reason(m)) match {
             case Some(reason) => fallback(m, reason)
             case None =>
-              VectorMergeRowsExec(m.isSourceRowPresent, m.isTargetRowPresent, m.matchedInstructions, m.notMatchedInstructions,
-                m.notMatchedBySourceInstructions, m.checkCardinality, m.output, m.child)
+              VectorMergeRowsExec(
+                m.isSourceRowPresent,
+                m.isTargetRowPresent,
+                m.matchedInstructions,
+                m.notMatchedInstructions,
+                m.notMatchedBySourceInstructions,
+                m.checkCardinality,
+                m.output,
+                m.child
+              )
           }
 
         case e: ExpandExec if VectorConf.expandEnabled(conf) =>
@@ -217,7 +254,10 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          streamedInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          streamedInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(
+            buildPlan,
+            maxBuildSize
+          )) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -231,7 +271,10 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             case org.apache.spark.sql.catalyst.optimizer.BuildLeft => (j.left, j.right)
             case org.apache.spark.sql.catalyst.optimizer.BuildRight => (j.right, j.left)
           }
-          streamedInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(buildPlan, maxBuildSize)) match {
+          streamedInputReason(streamedPlan).orElse(laneTypeReason(buildPlan)).orElse(VectorJoinPlanner.buildSizeReason(
+            buildPlan,
+            maxBuildSize
+          )) match {
             case Some(reason) => fallback(j, reason)
             case None =>
               VectorJoinPlanner.plan(j) match {
@@ -276,10 +319,12 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           j.getTagValue(VectorExecRule.SortMergeChoice) match {
             case Some(Right((buildSide, why))) =>
               val (left, right) = sortMergeInputs(j)
-              val (buildPlan, streamedPlan) = if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
+              val (buildPlan, streamedPlan) =
+                if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
               streamedInputReason(streamedPlan).orElse(laneExchangeInputReason(buildPlan)) match {
                 case None =>
-                  val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
+                  val v =
+                    VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
                   v.setTagValue(VectorExecRule.SortMergeWhy, why)
                   v
                 case Some(reason) =>
@@ -320,9 +365,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           j.getTagValue(VectorExecRule.SortMergeDecision) match {
             case Some(Right(buildSide)) =>
               val (left, right) = sortMergeInputs(j)
-              val (buildPlan, streamedPlan) = if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
+              val (buildPlan, streamedPlan) =
+                if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
               streamedInputReason(streamedPlan).orElse(laneExchangeInputReason(buildPlan)) match {
-                case None => VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
+                case None =>
+                  VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, buildSide, j.condition, left, right)
                 case Some(reason) => fallback(resorted(j), reason)
               }
             case Some(Left(reason)) => fallback(resorted(j), reason)
@@ -340,13 +387,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           // output ordering (the keys ascending) through our sort, since parents were planned on it.
           val child = s.child match {
             case VectorSortExec(order, false, c) if sameOrder(order, s.requiredChildOrdering.head) => c
-            case org.apache.spark.sql.execution.SortExec(order, false, c, _) if sameOrder(order, s.requiredChildOrdering.head) => c
+            case org.apache.spark.sql.execution.SortExec(order, false, c, _)
+                if sameOrder(order, s.requiredChildOrdering.head) => c
             case c => c
           }
           planAggregate(s, s, conf) match {
             case v: VectorHashAggregateExec =>
               val unsorted = if (child eq s.child) v else v.copy(child = child)
-              if (v.emitsResults && s.outputOrdering.nonEmpty) VectorSortExec(s.outputOrdering, global = false, unsorted) else unsorted
+              if (v.emitsResults && s.outputOrdering.nonEmpty)
+                VectorSortExec(s.outputOrdering, global = false, unsorted)
+              else unsorted
             case other => other
           }
       }
@@ -354,7 +404,12 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
       val withMixed = if (bridge != null) mixedChains(withSelections, bridge, prefer, conversions) else withSelections
       val withShuffles =
-        if (VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(conf, session.sparkContext.getConf.get("spark.shuffle.manager", "sort")))
+        if (
+          VectorConf.cometShuffleEnabled(conf) && CometShuffle.isEnabled(
+            conf,
+            session.sparkContext.getConf.get("spark.shuffle.manager", "sort")
+          )
+        )
           useCometShuffle(withMixed, conf)
         else withMixed
       // Our own columnar exchange (#288) where Comet's did not take the shuffle: the module is
@@ -366,9 +421,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             // the keys are materialised by a projection under the exchange, which declares the
             // original partitioning, and dropped by a projection above it. Otherwise the shuffle
             // stays Spark's row exchange and drags a row Sort and a RowToColumnar with it.
-            case s: ShuffleExchangeExec if s.child.supportsColumnar && VectorConf.projectEnabled(conf) && computedHashKeys(s, conf).isDefined =>
+            case s: ShuffleExchangeExec
+                if s.child.supportsColumnar && VectorConf.projectEnabled(conf) && computedHashKeys(s, conf).isDefined =>
               computedHashKeys(s, conf).get
-            case s: ShuffleExchangeExec if s.child.supportsColumnar && VectorShuffle.supports(s.outputPartitioning, s.child.output) =>
+            case s: ShuffleExchangeExec
+                if s.child.supportsColumnar && VectorShuffle.supports(s.outputPartitioning, s.child.output) =>
               VectorShuffle.exchange(s)
           }
         else withShuffles
@@ -401,12 +458,20 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    */
   private def offerable(p: SparkPlan, bridge: CometMixedBridge): Boolean =
     !ours(p) && !bridge.isComet(p) && !p.isInstanceOf[org.apache.spark.sql.execution.exchange.Exchange] &&
-      p.children.nonEmpty && p.children.forall(c => ours(c) || bridge.isNative(c) || (c match {
-        case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec => ours(b.child) || bridge.isNative(b.child)
-        case _ => false
-      }))
+      p.children.nonEmpty && p.children.forall(c =>
+        ours(c) || bridge.isNative(c) || (c match {
+          case b: org.apache.spark.sql.execution.exchange.BroadcastExchangeExec =>
+            ours(b.child) || bridge.isNative(b.child)
+          case _ => false
+        })
+      )
 
-  private def mixedChains(plan: SparkPlan, bridge: CometMixedBridge, prefer: PreferComet, conversions: PartialFunction[SparkPlan, SparkPlan]): SparkPlan = {
+  private def mixedChains(
+      plan: SparkPlan,
+      bridge: CometMixedBridge,
+      prefer: PreferComet,
+      conversions: PartialFunction[SparkPlan, SparkPlan]
+  ): SparkPlan = {
     {
       // Comet declined an operator the allowlist asked for: ours takes it after all (#281).
       def declined(p: SparkPlan, reason: String): SparkPlan =
@@ -443,11 +508,16 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
                 // unwrapped the placeholders a JVM sink does not need.
                 if (bridge.isComet(converted)) {
                   // The swap the allowlist asked for, shown where the operator now runs (#281).
-                  if (p.getTagValue(VectorFallback.Delegated).isDefined) converted.setTagValue(VectorFallback.Tag, PreferComet.Reason)
+                  if (p.getTagValue(VectorFallback.Delegated).isDefined)
+                    converted.setTagValue(VectorFallback.Tag, PreferComet.Reason)
                   converted
                 } else {
                   val reasons = bridge.declineReasons(converted)
-                  declined(p, if (reasons.isEmpty) "mixed: Comet declined the operator" else s"mixed: Comet declined -- ${reasons.mkString("; ")}")
+                  declined(
+                    p,
+                    if (reasons.isEmpty) "mixed: Comet declined the operator"
+                    else s"mixed: Comet declined -- ${reasons.mkString("; ")}"
+                  )
                 }
               }
           }
@@ -477,15 +547,20 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * it samples the child, which a native shuffle over a non-native child does twice.
    */
   private def useCometShuffle(plan: SparkPlan, conf: SQLConf): SparkPlan = plan.transformUp {
-    case s: ShuffleExchangeExec if s.child.isInstanceOf[VectorPlan] && bridgeable(s.child, s.outputPartitioning, conf) =>
+    case s: ShuffleExchangeExec
+        if s.child.isInstanceOf[VectorPlan] && bridgeable(s.child, s.outputPartitioning, conf) =>
       CometShuffle.native(s, VectorToCometExec(s.child))
-    case c if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) &&
-        c.children.head.isInstanceOf[VectorPlan] && bridgeable(c.children.head, c.outputPartitioning, conf) =>
+    case c
+        if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) &&
+          c.children.head.isInstanceOf[VectorPlan] && bridgeable(c.children.head, c.outputPartitioning, conf) =>
       CometShuffle.toNative(c, VectorToCometExec(c.children.head))
     // Comet's JVM shuffle over a block the mixed pass gave to Comet after Comet's own rule had run: its
     // native shuffle reads a native child directly (#280).
-    case c if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) && VectorConf.cometMixedEnabled(conf) &&
-        c.children.head.getClass.getName.startsWith("org.apache.spark.sql.comet.") && c.children.head.supportsColumnar =>
+    case c
+        if CometShuffle.isCometExchange(c) && !CometShuffle.isNative(c) && VectorConf.cometMixedEnabled(conf) &&
+          c.children.head.getClass.getName.startsWith(
+            "org.apache.spark.sql.comet."
+          ) && c.children.head.supportsColumnar =>
       CometShuffle.toNative(c, c.children.head)
   }
 
@@ -499,7 +574,7 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     val partitioningOk = partitioning match {
       case r: RangePartitioning =>
         VectorConf.cometRangeShuffleEnabled(conf) && CometShuffle.rangePartitioningEnabled(conf) &&
-          r.ordering.forall(o => CometBatchBridge.isSupported(o.dataType))
+        r.ordering.forall(o => CometBatchBridge.isSupported(o.dataType))
       case _ => true
     }
     partitioningOk && child.output.forall(a => CometBatchBridge.isSupported(a.dataType))
@@ -573,7 +648,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   }
 
   /** Converts an aggregate (`a`, possibly a SortAggregate re-expressed as a hash one); `original` takes the fallback. */
-  private def planAggregate(a: org.apache.spark.sql.execution.aggregate.BaseAggregateExec, original: SparkPlan, conf: SQLConf): SparkPlan = {
+  private def planAggregate(
+      a: org.apache.spark.sql.execution.aggregate.BaseAggregateExec,
+      original: SparkPlan,
+      conf: SQLConf
+  ): SparkPlan = {
     // A merging aggregate (Final, PartialMerge) reads an exchange; Spark inserts RowToColumnarExec below us when the
     // shuffle is row based (Comet's shuffle is columnar already), so only the types matter.
     val isFinal = VectorAggregatePlanner.readsExchange(a)
@@ -583,26 +662,37 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     inputReason match {
       case Some(reason) => fallback(original, reason)
       case None =>
-        VectorAggregatePlanner.plan(a, VectorConf.finalAggregateEnabled(conf), VectorConf.strictFloatingPoint(conf)) match {
+        VectorAggregatePlanner.plan(
+          a,
+          VectorConf.finalAggregateEnabled(conf),
+          VectorConf.strictFloatingPoint(conf)
+        ) match {
           // A partial aggregate over our Expand (ROLLUP, CUBE, GROUPING SETS): aggregate the finest grouping
           // once and roll the partials up, instead of hashing every input row once per grouping set (#383).
-          case Right(v) if VectorConf.rollupRewriteEnabled(conf) => RollupRewrite(v, VectorConf.strictFloatingPoint(conf))
+          case Right(v) if VectorConf.rollupRewriteEnabled(conf) =>
+            RollupRewrite(v, VectorConf.strictFloatingPoint(conf))
           case Right(v) => v
           case Left(reason) => fallback(original, reason)
         }
     }
   }
 
-  private def sameOrder(a: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder], b: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): Boolean =
-    a.length == b.length && a.zip(b).forall { case (x, y) => x.child.semanticEquals(y.child) && x.direction == y.direction && x.nullOrdering == y.nullOrdering }
+  private def sameOrder(
+      a: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder],
+      b: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]
+  ): Boolean =
+    a.length == b.length && a.zip(b).forall { case (x, y) =>
+      x.child.semanticEquals(y.child) && x.direction == y.direction && x.nullOrdering == y.nullOrdering
+    }
 
   /** The merge join's inputs without the sorts Spark placed for the merge (exactly the required ones, local). */
   private def sortMergeInputs(j: SortMergeJoinExec): (SparkPlan, SparkPlan) = {
-    def strip(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan = child match {
-      case VectorSortExec(order, false, c) if sameOrder(order, required) => c
-      case SortExec(order, false, c, _) if sameOrder(order, required) => c
-      case c => c
-    }
+    def strip(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan =
+      child match {
+        case VectorSortExec(order, false, c) if sameOrder(order, required) => c
+        case SortExec(order, false, c, _) if sameOrder(order, required) => c
+        case c => c
+      }
     (strip(j.left, j.requiredChildOrdering.head), strip(j.right, j.requiredChildOrdering(1)))
   }
 
@@ -620,7 +710,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * side runs on. None when the keys are plain columns (the plain case applies) or one does not compile.
    */
   private def computedHashKeys(s: ShuffleExchangeExec, conf: SQLConf): Option[SparkPlan] = s.outputPartitioning match {
-    case h: org.apache.spark.sql.catalyst.plans.physical.HashPartitioning if h.expressions.exists(!_.isInstanceOf[Attribute]) =>
+    case h: org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
+        if h.expressions.exists(!_.isInstanceOf[Attribute]) =>
       val input = s.child.output
       val compiles = h.expressions.forall {
         case _: Attribute => true
@@ -628,7 +719,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
       }
       if (!compiles) None
       else {
-        val keys = h.expressions.zipWithIndex.collect { case (e, i) if !e.isInstanceOf[Attribute] => Alias(e, s"_shuffle_key_$i")() }
+        val keys = h.expressions.zipWithIndex.collect {
+          case (e, i) if !e.isInstanceOf[Attribute] => Alias(e, s"_shuffle_key_$i")()
+        }
         val projected = VectorProjectExec(input ++ keys, s.child)
         val asColumns = h.copy(expressions = h.expressions.map {
           case a: Attribute => a
@@ -642,11 +735,17 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
 
   /** Why a projection would not compile over its child's output (an expression, an output type), input aside. */
   private def projectReason(p: ProjectExec): Option[String] = {
-    val failures = p.projectList.filterNot(e => VectorProjectExec.isPassThrough(e) || VectorProjectExec.constantSlot(e).isDefined).flatMap { e =>
+    val failures = p.projectList.filterNot(e =>
+      VectorProjectExec.isPassThrough(e) || VectorProjectExec.constantSlot(e).isDefined
+    ).flatMap { e =>
       val compiled = ExpressionCompiler.compile(e, p.child.output)
       // A decimal output wider than 18 digits is a DECIMAL128 lane when its expression compiled (#258).
       val typeCheck =
-        if (TypeMapping.isSupported(e.dataType) || (e.dataType.isInstanceOf[org.apache.spark.sql.types.DecimalType] && TypeMapping.hasLane(e.dataType))) Right(())
+        if (
+          TypeMapping.isSupported(
+            e.dataType
+          ) || (e.dataType.isInstanceOf[org.apache.spark.sql.types.DecimalType] && TypeMapping.hasLane(e.dataType))
+        ) Right(())
         else Left(s"unsupported output type ${e.dataType.simpleString} for ${e.name}")
       compiled.flatMap(_ => typeCheck).left.toOption.map(r => s"${e.sql}: $r")
     }
@@ -661,14 +760,20 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    */
   private def resorted(j: SortMergeJoinExec): SortMergeJoinExec = {
     def fix(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan =
-      if (org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, required) || !child.supportsColumnar) child
+      if (
+        org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(
+          child.outputOrdering,
+          required
+        ) || !child.supportsColumnar
+      ) child
       else VectorSortExec(required, global = false, child)
     val left = fix(j.left, j.requiredChildOrdering.head)
     val right = fix(j.right, j.requiredChildOrdering(1))
     if ((left eq j.left) && (right eq j.right)) j else j.copy(left = left, right = right)
   }
 
-  private type SortMergeMemo = java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]]
+  private type SortMergeMemo =
+    java.util.IdentityHashMap[SparkPlan, Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]]
 
   /**
    * Whether a sort-merge join could become our hash join, ordering aside: its inputs (sorts stripped)
@@ -677,7 +782,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * columnar once the lower converts (TPC-DS q10, q35, q69, q95 chain semi and existence joins on the
    * customer key). Bottom-up, memoised over the original nodes; the ordering question is the pre-pass's.
    */
-  private def sortMergeEligibility(j: SortMergeJoinExec, maxBuildSize: Long, memo: SortMergeMemo): Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide] = {
+  private def sortMergeEligibility(
+      j: SortMergeJoinExec,
+      maxBuildSize: Long,
+      memo: SortMergeMemo
+  ): Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide] = {
     val known = memo.get(j)
     if (known != null) known
     else {
@@ -696,18 +805,32 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
         def types(plan: SparkPlan): Option[String] = if (streamed) None else laneTypeReason(plan)
         p match {
           case inner: SortMergeJoinExec =>
-            sortMergeEligibility(inner, maxBuildSize, memo).left.toOption.map(r => s"child SortMergeJoin stays with Spark: $r").orElse(types(inner))
-          case proj: ProjectExec if VectorConf.projectEnabled(conf) => projectReason(proj).orElse(inputReason(proj.child, streamed))
-          case filt: FilterExec if VectorConf.filterEnabled(conf) => filterReason(filt).orElse(inputReason(filt.child, streamed))
+            sortMergeEligibility(inner, maxBuildSize, memo).left.toOption.map(r =>
+              s"child SortMergeJoin stays with Spark: $r"
+            ).orElse(types(inner))
+          case proj: ProjectExec if VectorConf.projectEnabled(conf) =>
+            projectReason(proj).orElse(inputReason(proj.child, streamed))
+          case filt: FilterExec if VectorConf.filterEnabled(conf) =>
+            filterReason(filt).orElse(inputReason(filt.child, streamed))
           case _: ShuffleExchangeLike | _: QueryStageExec | _: AQEShuffleReadExec => types(p)
           case _: UnionExec | _: ExpandExec | _: CoalesceExec | _: SampleExec | _: SortExec | _: LocalLimitExec | _: GlobalLimitExec |
-               _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec | _: ShuffledHashJoinExec | _: HashAggregateExec | _: SortAggregateExec =>
+              _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec | _: ShuffledHashJoinExec | _: HashAggregateExec | _: SortAggregateExec =>
             types(p)
           case other => if (streamed) forwardingInputReason(other) else laneInputReason(other)
         }
       }
-      val decision = VectorJoinPlanner.sortMergeBuildSide(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.isSkewJoin, left, right, maxBuildSize).flatMap { buildSide =>
-        val (buildPlan, streamedPlan) = if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
+      val decision = VectorJoinPlanner.sortMergeBuildSide(
+        j.leftKeys,
+        j.rightKeys,
+        j.joinType,
+        j.condition,
+        j.isSkewJoin,
+        left,
+        right,
+        maxBuildSize
+      ).flatMap { buildSide =>
+        val (buildPlan, streamedPlan) =
+          if (buildSide == org.apache.spark.sql.catalyst.optimizer.BuildLeft) (left, right) else (right, left)
         inputReason(streamedPlan, streamed = true).orElse(inputReason(buildPlan, streamed = false)) match {
           case Some(reason) => Left(reason)
           case None => Right(buildSide)
@@ -727,13 +850,22 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
    * on the same key is free to convert too; one that stays requires its children sorted, and a merge
    * join among them then stays as well. The decisions ride along the copies transformUp makes.
    */
-  private def markSortMergeJoins(plan: SparkPlan, orderingNeeded: Boolean, orderVisible: Boolean, auto: Boolean, maxBuildSize: Long, memo: SortMergeMemo): Unit = {
+  private def markSortMergeJoins(
+      plan: SparkPlan,
+      orderingNeeded: Boolean,
+      orderVisible: Boolean,
+      auto: Boolean,
+      maxBuildSize: Long,
+      memo: SortMergeMemo
+  ): Unit = {
     // Order visibility (#287): below a limit, a take-ordered, a sort, or a range-partitioned exchange (a
     // global sort's), a join's row order can show -- ties under ORDER BY, the rows a LIMIT picks -- and
     // the hash rewrite's order differs from Spark's. An aggregate or any other exchange ends it.
     val visibleHere = orderVisible || (plan match {
-      case _: LocalLimitExec | _: GlobalLimitExec | _: CollectLimitExec | _: TakeOrderedAndProjectExec | _: SortExec => true
-      case e: ShuffleExchangeExec => e.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
+      case _: LocalLimitExec | _: GlobalLimitExec | _: CollectLimitExec | _: TakeOrderedAndProjectExec | _: SortExec =>
+        true
+      case e: ShuffleExchangeExec =>
+        e.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
       case _ => false
     })
     val converts = plan match {
@@ -746,7 +878,11 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
             if (orderingNeeded) Left("as merge join: ordering relied on by the parent")
             else if (visibleHere) Left("as merge join: the row order reaches a limit or a sort")
             else eligibility match {
-              case Right(side) => Right((side, s"as hash join: built from the ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left" else "right"} side (split into buckets on disk past ${VectorConf.JoinSpillBytes})"))
+              case Right(side) => Right((
+                  side,
+                  s"as hash join: built from the ${if (side == org.apache.spark.sql.catalyst.optimizer.BuildLeft) "left"
+                    else "right"} side (split into buckets on disk past ${VectorConf.JoinSpillBytes})"
+                ))
               case Left(reason) => Left(s"as merge join: $reason")
             }
           // No size gate any more (#416): the sort below the merge join spills past its memory budget,
@@ -759,7 +895,8 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
     }
     val childVisible = visibleHere && (plan match {
       case _: HashAggregateExec | _: SortAggregateExec | _: ObjectHashAggregateExec => false
-      case e: ShuffleExchangeExec => e.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
+      case e: ShuffleExchangeExec =>
+        e.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
       case _: BroadcastExchangeExec => false
       case _ => true
     })
@@ -774,7 +911,12 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   /** A merge join of ours whose child lost its ordering (a hash join below, sorts stripped) gets the sort back. */
   private def resortedMerge(v: VectorSortMergeJoinExec): VectorSortMergeJoinExec = {
     def fix(child: SparkPlan, required: Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]): SparkPlan =
-      if (org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(child.outputOrdering, required) || !child.supportsColumnar) child
+      if (
+        org.apache.spark.sql.catalyst.expressions.SortOrder.orderingSatisfies(
+          child.outputOrdering,
+          required
+        ) || !child.supportsColumnar
+      ) child
       else VectorSortExec(required, global = false, child)
     val left = fix(v.left, v.requiredChildOrdering.head)
     val right = fix(v.right, v.requiredChildOrdering(1))
@@ -784,13 +926,20 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   /** Like [[columnarInputReason]] for an operator that only moves columns: any lane type will do. */
   private def laneInputReason(plan: SparkPlan): Option[String] =
     if (!columnarChild(plan)) Some(s"child ${plan.nodeName} is not columnar")
-    else plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
+    else plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a =>
+      s"unsupported column type ${a.dataType.simpleString} for ${a.name}"
+    )
 
   /** Like [[typeReason]] for an operator that reads any lane type (the aggregate over the DECIMAL128 lane, #259). */
   private def laneTypeReason(plan: SparkPlan): Option[String] =
-    plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a => s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
+    plan.output.find(a => !TypeMapping.hasLane(a.dataType)).map(a =>
+      s"unsupported column type ${a.dataType.simpleString} for ${a.name}"
+    )
 
-  private def typeReason(plan: SparkPlan, allowed: Set[org.apache.spark.sql.catalyst.expressions.ExprId] = Set.empty): Option[String] =
+  private def typeReason(
+      plan: SparkPlan,
+      allowed: Set[org.apache.spark.sql.catalyst.expressions.ExprId] = Set.empty
+  ): Option[String] =
     plan.output.find(a => !TypeMapping.isSupported(a.dataType) && !allowed.contains(a.exprId)).map { a =>
       s"unsupported column type ${a.dataType.simpleString} for ${a.name}"
     }

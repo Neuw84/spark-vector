@@ -56,7 +56,8 @@ case class VectorExpandExec(projections: Seq[Seq[Expression]], output: Seq[Attri
 
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
 
-  override def simpleString(maxFields: Int): String = s"VectorExpand(projections=${projections.length}, output=${output.map(_.name).mkString(", ")})"
+  override def simpleString(maxFields: Int): String =
+    s"VectorExpand(projections=${projections.length}, output=${output.map(_.name).mkString(", ")})"
 }
 
 /** One input batch in, `projections.length` output batches out, then the next input. */
@@ -64,8 +65,8 @@ private[vector] class VectorExpandIterator(
     input: Iterator[ColumnarBatch],
     projections: Array[Array[VectorExpr]],
     outputAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch]
+    metrics: VectorMetrics
+) extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorExpandExec")
@@ -113,7 +114,8 @@ private[vector] class VectorExpandIterator(
             while (c < columns.length) {
               val (name, dt) = outputAttrs(c)
               columns(c) = slots(c) match {
-                case ColumnRef(ordinal, _) => ArrowOutput.compact(name, dt, ctx.input(ordinal), ctx.selection, n, allocator)
+                case ColumnRef(ordinal, _) =>
+                  ArrowOutput.compact(name, dt, ctx.input(ordinal), ctx.selection, n, allocator)
                 case lit: LiteralExpr if lit.value == null => ArrowOutput.nulls(name, dt, n, allocator)
                 case lit: LiteralExpr => ArrowOutput.constant(name, dt, lit.value, n, allocator)
                 case e => ArrowOutput.compact(name, dt, e.eval(ctx), ctx.selection, n, allocator)
@@ -192,10 +194,13 @@ object VectorExpandPlanner {
 
   /** Every slot a literal (incl. `NULL`) of a supported type, or an expression that compiles. */
   def plan(e: ExpandExec): Either[String, VectorExpandExec] = {
-    val outputFailures = e.output.filterNot(a => TypeMapping.hasLane(a.dataType)).map(a => s"unsupported output type ${a.dataType.simpleString} for ${a.name}")
+    val outputFailures = e.output.filterNot(a => TypeMapping.hasLane(a.dataType)).map(a =>
+      s"unsupported output type ${a.dataType.simpleString} for ${a.name}"
+    )
     val slotFailures = e.projections.zipWithIndex.flatMap { case (p, i) =>
       p.flatMap {
-        case Literal(_, dt) if !TypeMapping.hasLane(dt) => Some(s"projection $i: literal of unsupported type ${dt.simpleString}")
+        case Literal(_, dt) if !TypeMapping.hasLane(dt) =>
+          Some(s"projection $i: literal of unsupported type ${dt.simpleString}")
         case _: Literal => None
         case expr =>
           ExpressionCompiler.compileLaneColumn(expr, e.child.output) match {

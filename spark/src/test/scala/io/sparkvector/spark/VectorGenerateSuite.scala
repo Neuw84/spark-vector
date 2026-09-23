@@ -29,7 +29,8 @@ class VectorGenerateSuite extends VectorQuerySuite {
         "array(cast(id AS decimal(10, 2)) / 7, cast(null AS decimal(10, 2))) AS decarr",
         "array(id % 2 = 0, null, true) AS barr",
         "if(id % 23 = 5, null, named_struct('a', cast(id AS int), 'inner', if(id % 29 = 1, null, array(id * 10, id * 11)))) AS st",
-        "map(concat('k', id % 3), id) AS mp")
+        "map(concat('k', id % 3), id) AS mp"
+      )
       .repartition(2)
       .write
       .mode("overwrite")
@@ -42,14 +43,19 @@ class VectorGenerateSuite extends VectorQuerySuite {
 
   test("explode and posexplode over arrays of every lane type, with nulls, empty and null arrays and a long array") {
     noRowConversion(checkVectorized("SELECT i, s, e FROM arrs LATERAL VIEW explode(arr) t AS e", Seq(Generate)))
-    noRowConversion(checkVectorized("SELECT i, pos, e FROM arrs LATERAL VIEW posexplode(arr) t AS pos, e", Seq(Generate)))
+    noRowConversion(checkVectorized(
+      "SELECT i, pos, e FROM arrs LATERAL VIEW posexplode(arr) t AS pos, e",
+      Seq(Generate)
+    ))
     checkVectorized("SELECT i, explode(sarr) AS e FROM arrs", Seq(Generate))
     checkVectorized("SELECT i, posexplode(darr) AS (p, e) FROM arrs", Seq(Generate))
     checkVectorized("SELECT i, explode(dtarr) AS d FROM arrs", Seq(Generate))
     checkVectorized("SELECT i, explode(decarr) AS d FROM arrs", Seq(Generate))
     checkVectorized("SELECT i, explode(barr) AS b FROM arrs", Seq(Generate))
     // The long array alone expands one input row past the batch size; the count of its rows is exact.
-    val long = withPlugin(enabled = true) { spark.sql("SELECT count(*) AS n, sum(e) AS se FROM arrs LATERAL VIEW explode(arr) t AS e WHERE i = 7").collect() }
+    val long = withPlugin(enabled = true) {
+      spark.sql("SELECT count(*) AS n, sum(e) AS se FROM arrs LATERAL VIEW explode(arr) t AS e WHERE i = 7").collect()
+    }
     assert(long.head.getLong(0) == 10000L && long.head.getLong(1) == 49995000L, long.mkString)
   }
 
@@ -60,28 +66,57 @@ class VectorGenerateSuite extends VectorQuerySuite {
     checkVectorized("SELECT i, posexplode_outer(darr) AS (p, e) FROM arrs WHERE i % 19 = 2", Seq(Generate))
   }
 
-  test("arrays inside a struct, columns without a lane beside the exploded one, selections below and aggregates above") {
+  test(
+    "arrays inside a struct, columns without a lane beside the exploded one, selections below and aggregates above"
+  ) {
     // A struct field's array: a null struct or a null inner array behaves as a null array.
     checkVectorized("SELECT i, e FROM arrs LATERAL VIEW OUTER explode(st.inner) t AS e", Seq(Generate))
     checkVectorized("SELECT st.a AS a, e FROM arrs LATERAL VIEW explode(st.inner) t AS e", Seq(Generate, Project))
     // The struct, the map and the source array ride beside the elements, gathered through the same repeat index.
-    noRowConversion(checkVectorized("SELECT i, st, mp, arr, e FROM arrs LATERAL VIEW explode(arr) t AS e WHERE i <> 7", Seq(Generate)))
+    noRowConversion(checkVectorized(
+      "SELECT i, st, mp, arr, e FROM arrs LATERAL VIEW explode(arr) t AS e WHERE i <> 7",
+      Seq(Generate)
+    ))
     // A filter below hands the generate a selection; a sparse one is compacted first.
-    noRowConversion(checkVectorized("SELECT i, e FROM arrs LATERAL VIEW explode(arr) t AS e WHERE i % 3 = 0 AND s IS NOT NULL", Seq(Filter, Generate)))
-    checkVectorized("SELECT i, pos, e FROM arrs LATERAL VIEW posexplode(sarr) t AS pos, e WHERE i % 250 = 1", Seq(Filter, Generate))
+    noRowConversion(checkVectorized(
+      "SELECT i, e FROM arrs LATERAL VIEW explode(arr) t AS e WHERE i % 3 = 0 AND s IS NOT NULL",
+      Seq(Filter, Generate)
+    ))
+    checkVectorized(
+      "SELECT i, pos, e FROM arrs LATERAL VIEW posexplode(sarr) t AS pos, e WHERE i % 250 = 1",
+      Seq(Filter, Generate)
+    )
     // Computed over the elements, filtered on them, aggregated over them.
-    checkVectorized("SELECT i, e * 2 AS e2, upper(f) AS uf FROM arrs LATERAL VIEW explode(arr) t AS e LATERAL VIEW explode(sarr) u AS f WHERE e % 2 = 0", Seq(Generate, Filter, Project))
-    checkVectorized("SELECT e % 5 AS k, count(*) AS n, sum(i) AS si FROM arrs LATERAL VIEW explode(arr) t AS e GROUP BY e % 5", Seq(Generate, Agg))
+    checkVectorized(
+      "SELECT i, e * 2 AS e2, upper(f) AS uf FROM arrs LATERAL VIEW explode(arr) t AS e LATERAL VIEW explode(sarr) u AS f WHERE e % 2 = 0",
+      Seq(Generate, Filter, Project)
+    )
+    checkVectorized(
+      "SELECT e % 5 AS k, count(*) AS n, sum(i) AS si FROM arrs LATERAL VIEW explode(arr) t AS e GROUP BY e % 5",
+      Seq(Generate, Agg)
+    )
   }
 
-  test("other generators, maps, computed arrays and nested element types fall back with a reason; the operator can be disabled") {
-    checkFallback("SELECT i, k, v FROM arrs LATERAL VIEW explode(mp) t AS k, v", Seq(Generate), "over a map not supported")
-    checkFallback("SELECT i, e FROM arrs LATERAL VIEW explode(array(i, i + 1)) t AS e", Seq(Generate), "nested access over")
+  test(
+    "other generators, maps, computed arrays and nested element types fall back with a reason; the operator can be disabled"
+  ) {
+    checkFallback(
+      "SELECT i, k, v FROM arrs LATERAL VIEW explode(mp) t AS k, v",
+      Seq(Generate),
+      "over a map not supported"
+    )
+    checkFallback(
+      "SELECT i, e FROM arrs LATERAL VIEW explode(array(i, i + 1)) t AS e",
+      Seq(Generate),
+      "nested access over"
+    )
     checkFallback("SELECT i, e FROM arrs LATERAL VIEW explode(array(st)) t AS e", Seq(Generate), "not supported")
     checkFallback("SELECT inline(array(st)) FROM arrs", Seq(Generate), "generator inline not supported")
     checkFallback("SELECT i, stack(2, i, i + 1) FROM arrs", Seq(Generate), "generator stack not supported")
     withConf("spark.vector.exec.generate.enabled" -> "false") {
-      val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i, e FROM arrs LATERAL VIEW explode(arr) t AS e"); d.collect(); d }
+      val df = withPlugin(enabled = true) {
+        val d = spark.sql("SELECT i, e FROM arrs LATERAL VIEW explode(arr) t AS e"); d.collect(); d
+      }
       assert(nodesOf[GenerateExec](df).nonEmpty && nodesOf[VectorGenerateExec](df).isEmpty, finalPlan(df).treeString)
     }
   }

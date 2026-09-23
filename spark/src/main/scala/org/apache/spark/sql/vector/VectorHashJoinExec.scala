@@ -16,7 +16,14 @@ import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, HashedRelationBroadcastMode, HashJoin, ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.execution.joins.{
+  BroadcastHashJoinExec,
+  BroadcastNestedLoopJoinExec,
+  HashedRelationBroadcastMode,
+  HashJoin,
+  ShuffledHashJoinExec,
+  SortMergeJoinExec
+}
 import org.apache.spark.sql.execution.vector.HashedRelationAccess
 import org.apache.spark.sql.types.{DataType, DecimalType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -61,10 +68,17 @@ trait VectorHashJoinLike extends VectorBinaryExec {
   /** The joined row a condition sees: both sides, whatever the join type outputs. */
   private def joinedOutput: Seq[Attribute] = left.output ++ right.output
 
-  @transient protected lazy val compiledBuildKeys: Array[VectorExpr] = VectorJoinPlanner.compileKeys(buildKeys, buildPlan.output)
-  @transient protected lazy val compiledStreamedKeys: Array[VectorExpr] = VectorJoinPlanner.compileKeys(streamedKeys, streamedPlan.output)
+  @transient protected lazy val compiledBuildKeys: Array[VectorExpr] =
+    VectorJoinPlanner.compileKeys(buildKeys, buildPlan.output)
+  @transient protected lazy val compiledStreamedKeys: Array[VectorExpr] =
+    VectorJoinPlanner.compileKeys(streamedKeys, streamedPlan.output)
   @transient protected lazy val compiledCondition: Option[VectorExpr] =
-    condition.map(c => VectorJoinPlanner.compileCondition(c, joinedOutput).fold(r => throw new IllegalStateException(s"cannot vectorize join condition: $r"), identity))
+    condition.map(c =>
+      VectorJoinPlanner.compileCondition(
+        c,
+        joinedOutput
+      ).fold(r => throw new IllegalStateException(s"cannot vectorize join condition: $r"), identity)
+    )
 
   /** Spark's plan for `NOT IN (subquery)` over nullable keys; only the broadcast join carries it. */
   def isNullAwareAntiJoin: Boolean = false
@@ -79,7 +93,8 @@ trait VectorHashJoinLike extends VectorBinaryExec {
     joinedOutput.map(a => (a.name, a.dataType)).toArray,
     buildPlan.output.map(_.dataType).toArray,
     streamedPlan.output.length,
-    dropNullStreamedKeys = isNullAwareAntiJoin)
+    dropNullStreamedKeys = isNullAwareAntiJoin
+  )
 
   override def verboseStringWithOperatorId(): String = {
     s"""$formattedNodeName
@@ -111,7 +126,8 @@ final case class JoinSpec(
      * null is dropped like a matched one (`x NOT IN (...)` is unknown, never true, for a null `x`).
      * The two other regimes of the null-aware join never reach the probe (see the broadcast exec).
      */
-    dropNullStreamedKeys: Boolean = false)
+    dropNullStreamedKeys: Boolean = false
+)
 
 /**
  * Columnar replacement for BroadcastHashJoinExec. The build side is Spark's own broadcast
@@ -126,8 +142,8 @@ case class VectorBroadcastHashJoinExec(
     condition: Option[Expression],
     left: SparkPlan,
     right: SparkPlan,
-    override val isNullAwareAntiJoin: Boolean = false)
-    extends VectorHashJoinLike {
+    override val isNullAwareAntiJoin: Boolean = false
+) extends VectorHashJoinLike {
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val boundKeys = BindReferences.bindReferences(HashJoin.rewriteKeyExpr(buildKeys), buildPlan.output)
@@ -185,8 +201,8 @@ case class VectorBroadcastNestedLoopJoinExec(
     buildSide: BuildSide,
     condition: Option[Expression],
     left: SparkPlan,
-    right: SparkPlan)
-    extends VectorHashJoinLike {
+    right: SparkPlan
+) extends VectorHashJoinLike {
 
   override def leftKeys: Seq[Expression] = Nil
   override def rightKeys: Seq[Expression] = Nil
@@ -228,8 +244,8 @@ case class VectorShuffledHashJoinExec(
     buildSide: BuildSide,
     condition: Option[Expression],
     left: SparkPlan,
-    right: SparkPlan)
-    extends VectorHashJoinLike {
+    right: SparkPlan
+) extends VectorHashJoinLike {
 
   override def requiredChildDistribution: Seq[Distribution] =
     ClusteredDistribution(leftKeys) :: ClusteredDistribution(rightKeys) :: Nil
@@ -260,7 +276,14 @@ case class VectorShuffledHashJoinExec(
  * The build side of one task: its columns, a key table over the non-null-key rows and, per key
  * (group id), the chain of build rows holding it.
  */
-final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val numRows: Int, spec: JoinSpec, val shared: Boolean = false) extends AutoCloseable {
+final class BuildTable(
+    val arena: Arena,
+    val columns: Array[VectorBuffers],
+    val numRows: Int,
+    spec: JoinSpec,
+    val shared: Boolean = false
+) extends AutoCloseable {
+
   /**
    * The key table of an equi-join; a nested loop join (no keys) never builds one. String keys by
    * dictionary id (#377): a probe maps its rows read-only (an unseen value gets id -1, which no group
@@ -268,10 +291,13 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
    * concurrent probing of a shared table safe.
    */
   lazy val table = new GroupKeyTable(spec.buildKeys.map(_.vecType), true)
+
   /** First build row of each key, -1 for none. */
   var head: Array[Int] = new Array[Int](0)
+
   /** Next build row with the same key, -1 at the end. */
   val next: Array[Int] = new Array[Int](numRows)
+
   /**
    * The build rows clustered by key: the rows of key `g`, in build order, are
    * `rangeRows(rangeStart(g) until rangeStart(g + 1))`. The residual of an inner join is tested over
@@ -279,8 +305,10 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
    */
   var rangeStart: Array[Int] = new Array[Int](0)
   var rangeRows: Array[Int] = new Array[Int](0)
+
   /** Heap mirrors of the fixed-width columns a join condition reads, made on first use (#332). */
   private val mirrors = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
+
   /** The same lanes in key-clustered order (`rangeRows`), for the range scan; made on first use. */
   private val clustered = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
 
@@ -318,7 +346,8 @@ final class BuildTable(val arena: Arena, val columns: Array[VectorBuffers], val 
       var i = numRows - 1
       while (i >= 0) {
         val g = ids(i)
-        if (g >= 0) { next(i) = head(g); head(g) = i } else next(i) = -1
+        if (g >= 0) { next(i) = head(g); head(g) = i }
+        else next(i) = -1
         i -= 1
       }
       // The same rows clustered by key (a counting sort by group id keeps build order within a key).
@@ -347,7 +376,8 @@ object BuildTable {
     keys.foreach { k =>
       if (k.validity() != null) {
         val m = ctx.bitmap()
-        if (mask == null) BitmapKernels.copy(k.validity(), m, ctx.numRows) else BitmapKernels.and(mask, k.validity(), m, ctx.numRows)
+        if (mask == null) BitmapKernels.copy(k.validity(), m, ctx.numRows)
+        else BitmapKernels.and(mask, k.validity(), m, ctx.numRows)
         mask = m
       }
     }
@@ -446,9 +476,9 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
     else vecType match {
       case VecType.INT32 => ints(n) = row.getInt(ordinal)
       case VecType.INT64 => longs(n) = dt match {
-        case d: DecimalType => row.getDecimal(ordinal, d.precision, d.scale).toUnscaledLong
-        case _ => row.getLong(ordinal)
-      }
+          case d: DecimalType => row.getDecimal(ordinal, d.precision, d.scale).toUnscaledLong
+          case _ => row.getLong(ordinal)
+        }
       case VecType.FLOAT64 => doubles(n) = row.getDouble(ordinal)
       case VecType.DECIMAL128 =>
         // A wide decimal from the broadcast rows: the unscaled value, laid out as two limbs below (#259).
@@ -505,11 +535,12 @@ private[vector] class VectorHashJoinIterator(
     input: Iterator[ColumnarBatch],
     build: BuildTable,
     spec: JoinSpec,
-    metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch]
+    metrics: VectorMetrics
+) extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
   private val OutputBatchSize = 8192
+
   /** A nested loop join pairs every streamed row with every build row: this bounds the pairs in flight. */
   private val PairBudget = OutputBatchSize * 4
 
@@ -517,13 +548,16 @@ private[vector] class VectorHashJoinIterator(
   private val pending = new ArrayDeque[ColumnarBatch]()
   private var emitted: ColumnarBatch = _
   private var closed = false
+
   /** The candidate pairs of the current batch: streamed row and build row (-1 pads an outer join). */
   private var probeIdx = new Array[Int](OutputBatchSize)
   private var buildIdx = new Array[Int](OutputBatchSize)
+
   /** The pairs of one chunk that passed an inner join's condition (#332). */
   private var survProbeIdx = new Array[Int](0)
   private var survBuildIdx = new Array[Int](0)
   private val gatherScratch = new io.sparkvector.kernels.HeapMirror.GatherScratch
+
   /** Heap mirrors of the streamed columns the condition reads, for the current batch (#332). */
   private val streamedMirrors = new Array[io.sparkvector.kernels.HeapMirror](spec.streamedWidth)
   private val streamedMirrorTried = new Array[Boolean](spec.streamedWidth)
@@ -532,7 +566,8 @@ private[vector] class VectorHashJoinIterator(
     if (!streamedMirrorTried(ordinal)) {
       streamedMirrorTried(ordinal) = true
       val in = ctx.input(ordinal)
-      if (io.sparkvector.kernels.HeapMirror.mirrors(in)) streamedMirrors(ordinal) = io.sparkvector.kernels.HeapMirror.of(in)
+      if (io.sparkvector.kernels.HeapMirror.mirrors(in))
+        streamedMirrors(ordinal) = io.sparkvector.kernels.HeapMirror.of(in)
     }
     streamedMirrors(ordinal)
   }
@@ -547,38 +582,51 @@ private[vector] class VectorHashJoinIterator(
     walk(cond)
     refs
   }.orNull
+
   /** The pairs an outer join with a condition emits, rewritten from the candidates. */
   private var outProbeIdx = new Array[Int](0)
   private var outBuildIdx = new Array[Int](0)
+
   /** Per candidate pair, whether the condition held. */
   private var passed = new Array[Boolean](0)
+
   /** Per streamed row, whether any of its candidates passed the condition. */
   private var rowMatched = new Array[Boolean](0)
   private var idScratch = new Array[Int](0)
   private var hashScratch = new Array[Int](0)
+
   /** The streamed rows of the current batch whose keys are all non-null (null when every key is). */
   private var nonNullKeys: MemorySegment = _
 
   private val numBuildCols = spec.buildTypes.length
   private val streamedWidth = spec.streamedWidth
+
   /** No keys: a nested loop join, every build row is a candidate of every streamed row. */
   private val nestedLoop = spec.streamedKeys.isEmpty
   private val isSemiOrAnti = spec.joinType == LeftSemi || spec.joinType == LeftAnti
+
   /**
    * The null-aware anti join's middle regime: the build side has rows and none has a null key (a
    * null key there is a singleton relation that never reaches this iterator), so a streamed row with
    * a null key is dropped like a matched one. Over an empty build side every streamed row is kept.
    */
   private val dropNullKeys = spec.dropNullStreamedKeys && build.numRows > 0
+
   /** `ExistenceJoin`: the semi join's probe, emitting every streamed row plus a match boolean. */
   private val isExistence = spec.joinType.isInstanceOf[ExistenceJoin]
   private val isFullOuter = spec.joinType == FullOuter
+
   /** Whether unmatched streamed rows come out null-padded: the outer join preserves the streamed side. */
-  private val preservesStreamed = isFullOuter || (spec.joinType == LeftOuter && !spec.buildIsLeft) || (spec.joinType == RightOuter && spec.buildIsLeft)
+  private val preservesStreamed =
+    isFullOuter || (spec.joinType == LeftOuter && !spec.buildIsLeft) || (spec.joinType == RightOuter && spec.buildIsLeft)
+
   /** Whether unmatched build rows come out at the end: the outer join preserves the build side (#273). */
-  private val preservesBuild = isFullOuter || (spec.joinType == LeftOuter && spec.buildIsLeft) || (spec.joinType == RightOuter && !spec.buildIsLeft)
+  private val preservesBuild =
+    isFullOuter || (spec.joinType == LeftOuter && spec.buildIsLeft) || (spec.joinType == RightOuter && !spec.buildIsLeft)
+
   /** An outer join of either kind runs the conditional outer path (pairs per streamed row, then the padding rules). */
   private val keepUnmatched = preservesStreamed || preservesBuild
+
   /** Build rows paired with a streamed row so far; a join preserving the build side needs to know. */
   private val buildMatched: Array[Boolean] = if (preservesBuild) new Array[Boolean](build.numRows) else null
   private var buildDrained = !preservesBuild
@@ -625,9 +673,12 @@ private[vector] class VectorHashJoinIterator(
       val rowsPerChunk = if (nestedLoop) math.max(1, PairBudget / math.max(1, build.numRows)) else n
       spec.condition match {
         case Some(cond) if isSemiOrAnti || keepUnmatched || isExistence =>
-          if (rowMatched.length < n) rowMatched = new Array[Boolean](n) else java.util.Arrays.fill(rowMatched, 0, n, false)
+          if (rowMatched.length < n) rowMatched = new Array[Boolean](n)
+          else java.util.Arrays.fill(rowMatched, 0, n, false)
           var from = 0
-          while (from < n) { val until = math.min(n, from + rowsPerChunk); emitConditional(ctx, cond, from, until); from = until }
+          while (from < n) {
+            val until = math.min(n, from + rowsPerChunk); emitConditional(ctx, cond, from, until); from = until
+          }
           if (isExistence) emitExistence(ctx, i => rowMatched(i))
           else if (isSemiOrAnti) emitSemiAnti(ctx, i => rowMatched(i))
         case _ if isExistence => emitExistence(ctx, i => firstCandidate(i) >= 0)
@@ -768,7 +819,9 @@ private[vector] class VectorHashJoinIterator(
     case Some(io.sparkvector.spark.expr.CompareExpr(op, LaneWithOffset(a, ao), LaneWithOffset(b, bo)))
         if isSemiOrAnti == false && !keepUnmatched && !isExistence =>
       val ma = mirrorOf(ctx, a); val mb = mirrorOf(ctx, b)
-      if (ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)) null
+      if (
+        ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)
+      ) null
       else new PairPredicate(op, ma, isBuildColumn(a), a, ao, mb, isBuildColumn(b), b, bo)
     case _ => null
   }
@@ -780,13 +833,18 @@ private[vector] class VectorHashJoinIterator(
       case ColumnRef(c, _) => Some((c, 0L))
       // Only the plain wrapping form: an ANSI / try_add arithmetic checks overflow, which the fused
       // test does not reproduce, so it keeps the gather-then-compact path.
-      case ArithExpr(op, ColumnRef(c, _), LiteralExpr(v, _), _, false, _, false) if v != null && integral(v) && (op == io.sparkvector.kernels.ArithOp.ADD || op == io.sparkvector.kernels.ArithOp.SUB) =>
+      case ArithExpr(op, ColumnRef(c, _), LiteralExpr(v, _), _, false, _, false)
+          if v != null && integral(
+            v
+          ) && (op == io.sparkvector.kernels.ArithOp.ADD || op == io.sparkvector.kernels.ArithOp.SUB) =>
         Some((c, if (op == io.sparkvector.kernels.ArithOp.ADD) toLong(v) else -toLong(v)))
-      case ArithExpr(io.sparkvector.kernels.ArithOp.ADD, LiteralExpr(v, _), ColumnRef(c, _), _, false, _, false) if v != null && integral(v) =>
+      case ArithExpr(io.sparkvector.kernels.ArithOp.ADD, LiteralExpr(v, _), ColumnRef(c, _), _, false, _, false)
+          if v != null && integral(v) =>
         Some((c, toLong(v)))
       case _ => None
     }
-    private def integral(v: Any): Boolean = v.isInstanceOf[Int] || v.isInstanceOf[Long] || v.isInstanceOf[Short] || v.isInstanceOf[Byte]
+    private def integral(v: Any): Boolean =
+      v.isInstanceOf[Int] || v.isInstanceOf[Long] || v.isInstanceOf[Short] || v.isInstanceOf[Byte]
     private def toLong(v: Any): Long = v.asInstanceOf[Number].longValue()
   }
 
@@ -798,8 +856,16 @@ private[vector] class VectorHashJoinIterator(
 
   /** `left [+ lo] OP right [+ ro]` per pair; each side reads the build row or the streamed row of the pair. */
   private final class PairPredicate(
-      op: io.sparkvector.kernels.CompareOp, left: io.sparkvector.kernels.HeapMirror, leftIsBuild: Boolean, leftOrdinal: Int, leftOffset: Long,
-      right: io.sparkvector.kernels.HeapMirror, rightIsBuild: Boolean, rightOrdinal: Int, rightOffset: Long) {
+      op: io.sparkvector.kernels.CompareOp,
+      left: io.sparkvector.kernels.HeapMirror,
+      leftIsBuild: Boolean,
+      leftOrdinal: Int,
+      leftOffset: Long,
+      right: io.sparkvector.kernels.HeapMirror,
+      rightIsBuild: Boolean,
+      rightOrdinal: Int,
+      rightOffset: Long
+  ) {
     private val ints = left.`type` == io.sparkvector.kernels.VecType.INT32
     def test(streamed: Int, buildRow: Int): Boolean = {
       val li = if (leftIsBuild) buildRow else streamed
@@ -823,13 +889,16 @@ private[vector] class VectorHashJoinIterator(
 
     /** One build lane against one streamed value: the shape the range scan handles. */
     val rangeable: Boolean = leftIsBuild != rightIsBuild
+
     /** The streamed operand's mirror and offset, and the build lane's ordinal and offset. */
     private val streamedMirror = if (leftIsBuild) right else left
     private val streamedOffset = if (leftIsBuild) rightOffset else leftOffset
     private val buildColumn = buildOrdinal(if (leftIsBuild) leftOrdinal else rightOrdinal)
     private val laneOffset = if (leftIsBuild) leftOffset else rightOffset
+
     /** `build OP streamed` when the build lane is the left operand; the mirrored operator otherwise. */
-    private val mask = io.sparkvector.kernels.RangeResidual.mask(if (leftIsBuild) op else op match {
+    private val mask = io.sparkvector.kernels.RangeResidual.mask(if (leftIsBuild) op
+    else op match {
       case io.sparkvector.kernels.CompareOp.LT => io.sparkvector.kernels.CompareOp.GT
       case io.sparkvector.kernels.CompareOp.LE => io.sparkvector.kernels.CompareOp.GE
       case io.sparkvector.kernels.CompareOp.GT => io.sparkvector.kernels.CompareOp.LT
@@ -844,9 +913,29 @@ private[vector] class VectorHashJoinIterator(
     def scan(streamed: Int, s: Int, e: Int, hits: Array[Int]): Int = {
       if (lane == null) lane = build.clusteredMirror(buildColumn)
       if (ints)
-        io.sparkvector.kernels.RangeResidual.scanInts(lane.ints, lane.validity, s, e, laneOffset.toInt, streamedMirror.ints(streamed) + streamedOffset.toInt, mask, hits, 0)
+        io.sparkvector.kernels.RangeResidual.scanInts(
+          lane.ints,
+          lane.validity,
+          s,
+          e,
+          laneOffset.toInt,
+          streamedMirror.ints(streamed) + streamedOffset.toInt,
+          mask,
+          hits,
+          0
+        )
       else
-        io.sparkvector.kernels.RangeResidual.scanLongs(lane.longs, lane.validity, s, e, laneOffset, streamedMirror.longs(streamed) + streamedOffset, mask, hits, 0)
+        io.sparkvector.kernels.RangeResidual.scanLongs(
+          lane.longs,
+          lane.validity,
+          s,
+          e,
+          laneOffset,
+          streamedMirror.longs(streamed) + streamedOffset,
+          mask,
+          hits,
+          0
+        )
     }
   }
 
@@ -974,7 +1063,8 @@ private[vector] class VectorHashJoinIterator(
       while (c < columns.length) {
         val (name, dt) = spec.outputAttrs(c)
         columns(c) =
-          if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), buildIdx, from, to, allocator)
+          if (isBuildColumn(c))
+            ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), buildIdx, from, to, allocator)
           else if (TypeMapping.hasLane(dt)) ArrowOutput.nulls(name, dt, to - from, allocator)
           else nullsWithoutLane(dt, to - from)
         c += 1
@@ -995,7 +1085,14 @@ private[vector] class VectorHashJoinIterator(
   }
 
   /** Compacts an output column by `sel`, or passes a column without a lane through as a remapped view (#273). */
-  private def compactOrPass(ctx: EvalContext, c: Int, name: String, dt: DataType, sel: MemorySegment, count: Int): ColumnVector =
+  private def compactOrPass(
+      ctx: EvalContext,
+      c: Int,
+      name: String,
+      dt: DataType,
+      sel: MemorySegment,
+      count: Int
+  ): ColumnVector =
     if (TypeMapping.hasLane(dt)) ArrowOutput.compact(name, dt, ctx.input(c), sel, count, allocator)
     else RemappedColumnVector.of(ctx.column(c), RemappedColumnVector.rowsOf(sel, ctx.numRows, count))
 
@@ -1015,9 +1112,18 @@ private[vector] class VectorHashJoinIterator(
    * Gathers the pairs `[from, to)` into a batch laid out as `attrs` (left ++ right). With `only`,
    * the columns it does not mark are [[PlaceholderColumn]]: the batch is for the condition alone.
    */
-  private def gather(ctx: EvalContext, attrs: Array[(String, DataType)], probe: Array[Int], bld: Array[Int], from: Int, to: Int, only: Array[Boolean] = null): ColumnarBatch = {
+  private def gather(
+      ctx: EvalContext,
+      attrs: Array[(String, DataType)],
+      probe: Array[Int],
+      bld: Array[Int],
+      from: Int,
+      to: Int,
+      only: Array[Boolean] = null
+  ): ColumnarBatch = {
     val columns = new Array[ColumnVector](attrs.length)
-    var probeRows: Array[Int] = null // the probe ids of this batch, for streamed columns with no lane (passed through, #273)
+    var probeRows: Array[Int] =
+      null // the probe ids of this batch, for streamed columns with no lane (passed through, #273)
     var c = 0
     while (c < columns.length) {
       val (name, dt) = attrs(c)
@@ -1026,9 +1132,20 @@ private[vector] class VectorHashJoinIterator(
         else if (isBuildColumn(c) && build.mirror(buildOrdinal(c)) != null)
           ArrowOutput.gatherHeap(name, dt, build.mirror(buildOrdinal(c)), bld, from, to, allocator, gatherScratch)
         else if (!isBuildColumn(c) && TypeMapping.hasLane(dt) && streamedMirror(ctx, streamedOrdinal(c)) != null)
-          ArrowOutput.gatherHeap(name, dt, streamedMirror(ctx, streamedOrdinal(c)), probe, from, to, allocator, gatherScratch)
-        else if (isBuildColumn(c)) ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
-        else if (TypeMapping.hasLane(dt)) ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
+          ArrowOutput.gatherHeap(
+            name,
+            dt,
+            streamedMirror(ctx, streamedOrdinal(c)),
+            probe,
+            from,
+            to,
+            allocator,
+            gatherScratch
+          )
+        else if (isBuildColumn(c))
+          ArrowOutput.gather(name, dt, build.columns(buildOrdinal(c)), bld, from, to, allocator)
+        else if (TypeMapping.hasLane(dt))
+          ArrowOutput.gather(name, dt, ctx.input(streamedOrdinal(c)), probe, from, to, allocator)
         else {
           if (probeRows == null) probeRows = java.util.Arrays.copyOfRange(probe, from, to)
           RemappedColumnVector.of(ctx.column(streamedOrdinal(c)), probeRows)
@@ -1058,7 +1175,14 @@ private[vector] class VectorHashJoinIterator(
   }
 
   /** The pairs of `[from, to)` that pass the condition, compacted into `survProbeIdx` / `survBuildIdx`; their count. */
-  private def survivors(ctx: EvalContext, cond: VectorExpr, probe: Array[Int], bld: Array[Int], from: Int, to: Int): Int = {
+  private def survivors(
+      ctx: EvalContext,
+      cond: VectorExpr,
+      probe: Array[Int],
+      bld: Array[Int],
+      from: Int,
+      to: Int
+  ): Int = {
     val n = to - from
     if (survProbeIdx.length < n) { survProbeIdx = new Array[Int](n); survBuildIdx = new Array[Int](n) }
     val narrow = gather(ctx, spec.joinedAttrs, probe, bld, from, to, conditionRefs)
@@ -1107,10 +1231,16 @@ object VectorJoinPlanner {
    * with Spark's equality.
    */
   /** Key lanes the table hashes and compares; a wide decimal key is two limbs (#259). */
-  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64, VecType.DECIMAL128)
+  private val keyTypes: Set[VecType] =
+    Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64, VecType.DECIMAL128)
 
   def compileKeys(keys: Seq[Expression], input: Seq[Attribute]): Array[VectorExpr] =
-    keys.map(k => compileKey(k, input).fold(r => throw new IllegalStateException(s"cannot vectorize join key ${k.sql}: $r"), identity)).toArray
+    keys.map(k =>
+      compileKey(
+        k,
+        input
+      ).fold(r => throw new IllegalStateException(s"cannot vectorize join key ${k.sql}: $r"), identity)
+    ).toArray
 
   def compileKey(key: Expression, input: Seq[Attribute]): Either[String, VectorExpr] =
     ExpressionCompiler.compileLaneColumn(key, input).flatMap {
@@ -1152,7 +1282,8 @@ object VectorJoinPlanner {
     case _ => None
   }
 
-  private def known(size: BigInt): Option[Long] = if (size >= 0 && size < BigInt(Long.MaxValue)) Some(size.toLong) else None
+  private def known(size: BigInt): Option[Long] =
+    if (size >= 0 && size < BigInt(Long.MaxValue)) Some(size.toLong) else None
 
   /**
    * The broadcast joins hold the relation in memory per task with no limit but the JVM's (#86): a build
@@ -1172,20 +1303,30 @@ object VectorJoinPlanner {
    * unmatched build rows once, as the full outer join does (#273) -- but not over a broadcast, whose
    * relation is shared by every task.
    */
-  private def supportedType(joinType: JoinType, buildSide: BuildSide, preservedBuild: Boolean): Either[String, Unit] = joinType match {
-    case _: InnerLike | FullOuter => Right(())
-    case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if buildSide == BuildRight => Right(())
-    case LeftOuter | RightOuter if preservedBuild => Right(())
-    case RightOuter if buildSide == BuildLeft => Right(())
-    case other => Left(s"join type $other with build side $buildSide not supported")
-  }
+  private def supportedType(joinType: JoinType, buildSide: BuildSide, preservedBuild: Boolean): Either[String, Unit] =
+    joinType match {
+      case _: InnerLike | FullOuter => Right(())
+      case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if buildSide == BuildRight => Right(())
+      case LeftOuter | RightOuter if preservedBuild => Right(())
+      case RightOuter if buildSide == BuildLeft => Right(())
+      case other => Left(s"join type $other with build side $buildSide not supported")
+    }
 
   private def check(
-      leftKeys: Seq[Expression], rightKeys: Seq[Expression], joinType: JoinType, buildSide: BuildSide,
-      condition: Option[Expression], left: SparkPlan, right: SparkPlan, preservedBuild: Boolean): Either[String, Unit] = {
+      leftKeys: Seq[Expression],
+      rightKeys: Seq[Expression],
+      joinType: JoinType,
+      buildSide: BuildSide,
+      condition: Option[Expression],
+      left: SparkPlan,
+      right: SparkPlan,
+      preservedBuild: Boolean
+  ): Either[String, Unit] = {
     if (leftKeys.isEmpty) Left("join without equi-join keys")
     else supportedType(joinType, buildSide, preservedBuild).flatMap { _ =>
-      val keyFailures = leftKeys.flatMap(k => compileKey(k, left.output).left.toOption) ++ rightKeys.flatMap(k => compileKey(k, right.output).left.toOption)
+      val keyFailures = leftKeys.flatMap(k => compileKey(k, left.output).left.toOption) ++ rightKeys.flatMap(k =>
+        compileKey(k, right.output).left.toOption
+      )
       if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))
       // The condition sees both sides, whatever the join type outputs.
       else condition.map(c => compileCondition(c, left.output ++ right.output).map(_ => ())).getOrElse(Right(()))
@@ -1196,15 +1337,29 @@ object VectorJoinPlanner {
     // Spark plans the null-aware anti join (`NOT IN (subquery)` over nullable keys) as a single-key
     // left anti join with the right side broadcast and no condition (ExtractSingleColumnNullAwareAntiJoin);
     // anything else under the flag is not a shape whose semantics we know.
-    if (j.isNullAwareAntiJoin && (j.joinType != LeftAnti || j.buildSide != BuildRight || j.leftKeys.length != 1 || j.condition.isDefined))
+    if (
+      j.isNullAwareAntiJoin && (j.joinType != LeftAnti || j.buildSide != BuildRight || j.leftKeys.length != 1 || j.condition.isDefined)
+    )
       Left("null-aware anti join that is not a single-key, condition-free left anti join with the right side broadcast")
     // Spark never broadcasts a full outer join (JoinSelection.canBuildBroadcastLeft / Right exclude
     // it): the build side is shared by every task, so the trailing pass over unmatched build rows
     // would emit them once per task. Refused with a reason rather than assumed away.
-    else if (j.joinType == FullOuter) Left("full outer join over a broadcast not supported (Spark plans it as a shuffled join)")
+    else if (j.joinType == FullOuter)
+      Left("full outer join over a broadcast not supported (Spark plans it as a shuffled join)")
     else {
-      val v = VectorBroadcastHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, j.isNullAwareAntiJoin)
-      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = false).map(_ => v)
+      val v = VectorBroadcastHashJoinExec(
+        j.leftKeys,
+        j.rightKeys,
+        j.joinType,
+        j.buildSide,
+        j.condition,
+        j.left,
+        j.right,
+        j.isNullAwareAntiJoin
+      )
+      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = false).map(
+        _ => v
+      )
     }
   }
 
@@ -1213,8 +1368,11 @@ object VectorJoinPlanner {
       case _: InnerLike => Right(())
       case LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin if j.buildSide == BuildRight => Right(())
       case RightOuter if j.buildSide == BuildLeft => Right(())
-      case FullOuter => Left("full outer nested loop join not supported (needs a matched bitmap over the broadcast side)")
-      case LeftOuter | RightOuter => Left(s"${j.joinType} nested loop join with the preserved side broadcast not supported (needs a matched bitmap over the broadcast side)")
+      case FullOuter =>
+        Left("full outer nested loop join not supported (needs a matched bitmap over the broadcast side)")
+      case LeftOuter | RightOuter => Left(
+          s"${j.joinType} nested loop join with the preserved side broadcast not supported (needs a matched bitmap over the broadcast side)"
+        )
       case other => Left(s"join type $other with build side ${j.buildSide} not supported")
     }
     typeOk.flatMap { _ =>
@@ -1226,7 +1384,9 @@ object VectorJoinPlanner {
     if (j.isSkewJoin) Left("skew join not supported")
     else {
       val v = VectorShuffledHashJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right)
-      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = true).map(_ => v)
+      check(j.leftKeys, j.rightKeys, j.joinType, j.buildSide, j.condition, j.left, j.right, preservedBuild = true).map(
+        _ => v
+      )
     }
   }
 
@@ -1244,11 +1404,15 @@ object VectorJoinPlanner {
         case other => Left(s"join type $other not supported")
       }
       typeOk.flatMap { _ =>
-        val keyFailures = j.leftKeys.flatMap(k => compileKey(k, j.left.output).left.toOption) ++ j.rightKeys.flatMap(k => compileKey(k, j.right.output).left.toOption)
+        val keyFailures = j.leftKeys.flatMap(k => compileKey(k, j.left.output).left.toOption) ++ j.rightKeys.flatMap(
+          k => compileKey(k, j.right.output).left.toOption
+        )
         val laneless = (j.left.output ++ j.right.output).filterNot(a => TypeMapping.hasLane(a.dataType))
         if (keyFailures.nonEmpty) Left(keyFailures.mkString("; "))
-        else if (laneless.nonEmpty) Left(s"unsupported column type ${laneless.head.dataType.simpleString} for ${laneless.head.name}")
-        else j.condition.map(c => compileCondition(c, j.left.output ++ j.right.output).map(_ => ())).getOrElse(Right(()))
+        else if (laneless.nonEmpty)
+          Left(s"unsupported column type ${laneless.head.dataType.simpleString} for ${laneless.head.name}")
+        else
+          j.condition.map(c => compileCondition(c, j.left.output ++ j.right.output).map(_ => ())).getOrElse(Right(()))
       }.map(_ => VectorSortMergeJoinExec(j.leftKeys, j.rightKeys, j.joinType, j.condition, j.left, j.right))
     }
   }
@@ -1264,8 +1428,15 @@ object VectorJoinPlanner {
    * merge already removed (the caller strips them: a hash join does not need them).
    */
   def sortMergeBuildSide(
-      leftKeys: Seq[Expression], rightKeys: Seq[Expression], joinType: JoinType, condition: Option[Expression],
-      isSkewJoin: Boolean, left: SparkPlan, right: SparkPlan, maxBuildSize: Long): Either[String, BuildSide] = {
+      leftKeys: Seq[Expression],
+      rightKeys: Seq[Expression],
+      joinType: JoinType,
+      condition: Option[Expression],
+      isSkewJoin: Boolean,
+      left: SparkPlan,
+      right: SparkPlan,
+      maxBuildSize: Long
+  ): Either[String, BuildSide] = {
     if (isSkewJoin) Left("skew join not supported")
     else {
       val sides: Seq[BuildSide] = joinType match {
@@ -1288,8 +1459,11 @@ object VectorJoinPlanner {
         // A semi or anti join may only build its right side; when that is the larger one (TPC-H q4:
         // orders semi-joined with lineitem), hashing it costs more than the merge over the sorted
         // inputs -- measured 14% slower at SF10 -- so the rewrite declines and the merge join takes it (#311).
-        if (size.exists(sz => streamed.exists(_ < sz))) Left(s"build side estimated at ${size.get} bytes is larger than the streamed side (${streamed.get} bytes)")
-        else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right, preservedBuild = true).map(_ => buildSide)
+        if (size.exists(sz => streamed.exists(_ < sz)))
+          Left(s"build side estimated at ${size.get} bytes is larger than the streamed side (${streamed.get} bytes)")
+        else check(leftKeys, rightKeys, joinType, buildSide, condition, left, right, preservedBuild = true).map(_ =>
+          buildSide
+        )
       }
     }
   }

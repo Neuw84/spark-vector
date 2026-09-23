@@ -672,7 +672,6 @@ object TpchQueries {
       |order by
       |  cntrycode""".stripMargin
 
-
   /** Every query by its report name, in TPC-H order. */
   /**
    * Full-scan probes of the Iceberg merge-on-read harness (#260), which isolate the delete-merging cost from
@@ -682,7 +681,8 @@ object TpchQueries {
   val Probes: Seq[(String, String)] = Seq(
     "probe-count" -> "SELECT count(*) FROM lineitem",
     "probe-sum" -> "SELECT sum(l_extendedprice) FROM lineitem",
-    "probe-group" -> "SELECT l_returnflag, count(*) AS n FROM lineitem GROUP BY l_returnflag ORDER BY l_returnflag")
+    "probe-group" -> "SELECT l_returnflag, count(*) AS n FROM lineitem GROUP BY l_returnflag ORDER BY l_returnflag"
+  )
 
   val All: Seq[(String, String)] = Seq(
     "q1" -> Q1,
@@ -706,5 +706,6 @@ object TpchQueries {
     "q19" -> Q19,
     "q20" -> Q20,
     "q21" -> Q21,
-    "q22" -> Q22)
+    "q22" -> Q22
+  )
 }

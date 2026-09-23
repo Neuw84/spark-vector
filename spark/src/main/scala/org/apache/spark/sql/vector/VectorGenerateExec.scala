@@ -8,7 +8,19 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Explode, Generator, PosExplode}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{GenerateExec, SparkPlan}
-import org.apache.spark.sql.types.{ArrayType, BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, MapType, StringType, TimestampType}
+import org.apache.spark.sql.types.{
+  ArrayType,
+  BooleanType,
+  DataType,
+  DateType,
+  DecimalType,
+  DoubleType,
+  IntegerType,
+  LongType,
+  MapType,
+  StringType,
+  TimestampType
+}
 import org.apache.spark.sql.vectorized.{ColumnarArray, ColumnarBatch, ColumnVector}
 
 /**
@@ -33,8 +45,8 @@ case class VectorGenerateExec(
     requiredChildOutput: Seq[Attribute],
     outer: Boolean,
     generatorOutput: Seq[Attribute],
-    child: SparkPlan)
-    extends VectorExec {
+    child: SparkPlan
+) extends VectorExec {
 
   override def output: Seq[Attribute] = requiredChildOutput ++ generatorOutput
   override def outputPartitioning: Partitioning = child.outputPartitioning
@@ -46,7 +58,8 @@ case class VectorGenerateExec(
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val s = spec
-    val required = requiredChildOutput.map(a => (a.name, a.dataType, child.output.indexWhere(_.exprId == a.exprId))).toArray
+    val required =
+      requiredChildOutput.map(a => (a.name, a.dataType, child.output.indexWhere(_.exprId == a.exprId))).toArray
     val outs = generatorOutput.map(a => (a.name, a.dataType)).toArray
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter => new VectorGenerateIterator(iter, s, required, outs, m) }
@@ -56,7 +69,13 @@ case class VectorGenerateExec(
 }
 
 /** What the iterator needs: where the array column is, its element type, and the forms. */
-final case class GenerateSpec(arrayOrdinal: Int, path: Seq[Int], elementType: DataType, position: Boolean, outer: Boolean) extends Serializable
+final case class GenerateSpec(
+    arrayOrdinal: Int,
+    path: Seq[Int],
+    elementType: DataType,
+    position: Boolean,
+    outer: Boolean
+) extends Serializable
 
 object VectorGeneratePlanner {
   def plan(g: GenerateExec): Either[String, SparkPlan] =
@@ -66,20 +85,30 @@ object VectorGeneratePlanner {
   private[vector] def spec(v: VectorGenerateExec): Either[String, GenerateSpec] =
     spec(v.generator, v.child.output, v.generatorOutput, v.outer)
 
-  private def spec(generator: Generator, input: Seq[Attribute], generatorOutput: Seq[Attribute], outer: Boolean): Either[String, GenerateSpec] = {
+  private def spec(
+      generator: Generator,
+      input: Seq[Attribute],
+      generatorOutput: Seq[Attribute],
+      outer: Boolean
+  ): Either[String, GenerateSpec] = {
     val (arrayExpr, position) = generator match {
       case Explode(c) => (c, false)
       case PosExplode(c) => (c, true)
-      case other => return Left(s"generator ${other.prettyName} not supported (explode and posexplode over an array are)")
+      case other =>
+        return Left(s"generator ${other.prettyName} not supported (explode and posexplode over an array are)")
     }
     val elementType = arrayExpr.dataType match {
       case ArrayType(et, _) => et
       case _: MapType => return Left(s"${generator.prettyName} over a map not supported (arrays are)")
       case other => return Left(s"${generator.prettyName} over ${other.simpleString} not supported")
     }
-    if (!TypeMapping.isSupported(elementType)) return Left(s"array element type ${elementType.simpleString} not supported in ${generator.prettyName}")
-    if (generatorOutput.length != (if (position) 2 else 1)) return Left(s"unexpected generator output ${generatorOutput.map(_.name).mkString(", ")}")
-    ExpressionCompiler.nestedColumnPath(arrayExpr, input).left.map(r => s"${generator.prettyName} over ${arrayExpr.sql}: $r (a column or a struct field of one is required)")
+    if (!TypeMapping.isSupported(elementType))
+      return Left(s"array element type ${elementType.simpleString} not supported in ${generator.prettyName}")
+    if (generatorOutput.length != (if (position) 2 else 1))
+      return Left(s"unexpected generator output ${generatorOutput.map(_.name).mkString(", ")}")
+    ExpressionCompiler.nestedColumnPath(arrayExpr, input).left.map(r =>
+      s"${generator.prettyName} over ${arrayExpr.sql}: $r (a column or a struct field of one is required)"
+    )
       .map { case (ordinal, path) => GenerateSpec(ordinal, path, elementType, position, outer) }
   }
 }
@@ -89,8 +118,8 @@ private[vector] class VectorGenerateIterator(
     spec: GenerateSpec,
     required: Array[(String, DataType, Int)],
     outs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorGenerateExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorGenerateExec") {
 
   private val path = spec.path.toArray
 
@@ -135,7 +164,8 @@ private[vector] class VectorGenerateIterator(
       }
       if (total == 0) null
       else {
-        if (total > Int.MaxValue) throw new IllegalStateException(s"exploding one batch to $total rows exceeds the batch limit")
+        if (total > Int.MaxValue)
+          throw new IllegalStateException(s"exploding one batch to $total rows exceeds the batch limit")
         val count = total.toInt
         // Pass 2: the repeat index and the element index (-1 on the outer row of an empty or null array).
         val rowIdx = new Array[Int](count)
@@ -155,7 +185,8 @@ private[vector] class VectorGenerateIterator(
         while (c < required.length) {
           val (name, dt, ordinal) = required(c)
           columns(c) =
-            if (TypeMapping.isSupported(dt)) ArrowOutput.gather(name, dt, ctx.input(ordinal), rowIdx, 0, count, allocator)
+            if (TypeMapping.isSupported(dt))
+              ArrowOutput.gather(name, dt, ctx.input(ordinal), rowIdx, 0, count, allocator)
             else RemappedColumnVector.of(ctx.column(ordinal), rowIdx)
           c += 1
         }
@@ -163,18 +194,32 @@ private[vector] class VectorGenerateIterator(
         var lastRow = -1
         var lastArr: ColumnarArray = null
         val (elemName, elemDt) = if (spec.position) outs(1) else outs(0)
-        val elements = AggBufferColumns.values(elemName, elemDt, count, { r =>
-          val k = elemIdx(r)
-          if (k < 0) null
-          else {
-            val row = rowIdx(r)
-            if (row != lastRow) { lastArr = arrays.getArray(row); lastRow = row }
-            element(lastArr, k, spec.elementType)
-          }
-        }, allocator)
+        val elements = AggBufferColumns.values(
+          elemName,
+          elemDt,
+          count,
+          { r =>
+            val k = elemIdx(r)
+            if (k < 0) null
+            else {
+              val row = rowIdx(r)
+              if (row != lastRow) { lastArr = arrays.getArray(row); lastRow = row }
+              element(lastArr, k, spec.elementType)
+            }
+          },
+          allocator
+        )
         if (spec.position) {
           val (posName, posDt) = outs(0)
-          columns(required.length) = AggBufferColumns.values(posName, posDt, count, { r => val k = elemIdx(r); if (k < 0) null else java.lang.Integer.valueOf(k) }, allocator)
+          columns(required.length) = AggBufferColumns.values(
+            posName,
+            posDt,
+            count,
+            { r =>
+              val k = elemIdx(r); if (k < 0) null else java.lang.Integer.valueOf(k)
+            },
+            allocator
+          )
           columns(required.length + 1) = elements
         } else columns(required.length) = elements
         metrics.numOutputBatches += 1

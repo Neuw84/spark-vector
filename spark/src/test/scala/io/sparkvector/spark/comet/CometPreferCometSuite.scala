@@ -2,7 +2,14 @@ package io.sparkvector.spark.comet
 
 import io.sparkvector.spark.{VectorConf, VectorPlugin}
 import io.sparkvector.spark.test.{CometTest, TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.{PlanUtils, PreferComet, VectorFallback, VectorFilterExec, VectorProjectExec, VectorToCometExec}
+import org.apache.spark.sql.vector.{
+  PlanUtils,
+  PreferComet,
+  VectorFallback,
+  VectorFilterExec,
+  VectorProjectExec,
+  VectorToCometExec
+}
 
 /**
  * The operator allowlist `spark.vector.comet.preferComet` (#281). Comet's own rule runs first and takes
@@ -20,7 +27,8 @@ class CometPreferCometSuite extends VectorQuerySuite {
     CometTestConf.scanOnly ++ Map(
       "spark.comet.exec.project.enabled" -> "true",
       "spark.comet.exec.expand.enabled" -> "true",
-      VectorConf.CometMixedEnabled -> "true")
+      VectorConf.CometMixedEnabled -> "true"
+    )
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
@@ -51,7 +59,10 @@ class CometPreferCometSuite extends VectorQuerySuite {
       assert(nodesNamed(df, "CometProject").nonEmpty, plan.treeString)
       assert(nodesOf[VectorToCometExec](df).nonEmpty, plan.treeString)
       assert(nodesOf[VectorProjectExec](df).isEmpty, plan.treeString)
-      assert(reasons(df).exists(_ == PreferComet.Reason), s"expected the delegation reason: ${reasons(df)}\n${plan.treeString}")
+      assert(
+        reasons(df).exists(_ == PreferComet.Reason),
+        s"expected the delegation reason: ${reasons(df)}\n${plan.treeString}"
+      )
     }
   }
 
@@ -86,12 +97,21 @@ class CometPreferCometSuite extends VectorQuerySuite {
     withConf(VectorConf.CometPreferComet -> "project") {
       val df = checkVectorized(
         "SELECT a.j, b.s FROM (SELECT i + 1 AS j FROM t WHERE i > 100) a JOIN t b ON a.j = b.i WHERE b.l IS NOT NULL",
-        Seq(Filter))
+        Seq(Filter)
+      )
       val plan = finalPlan(df)
       assert(nodesNamed(df, "CometProject").nonEmpty, plan.treeString)
-      val ourJoins = PlanUtils.allNodes(plan).filter(_.getClass.getSimpleName.startsWith("Vector")).filter(_.nodeName.contains("Join"))
-      assert(ourJoins.nonEmpty, s"expected our join above the delegated projection; reasons: ${reasons(df)}\n${plan.treeString}")
-      assert(!reasons(df).exists(_.contains("is not columnar")), s"the swap must not break the chain above it: ${reasons(df)}")
+      val ourJoins = PlanUtils.allNodes(
+        plan
+      ).filter(_.getClass.getSimpleName.startsWith("Vector")).filter(_.nodeName.contains("Join"))
+      assert(
+        ourJoins.nonEmpty,
+        s"expected our join above the delegated projection; reasons: ${reasons(df)}\n${plan.treeString}"
+      )
+      assert(
+        !reasons(df).exists(_.contains("is not columnar")),
+        s"the swap must not break the chain above it: ${reasons(df)}"
+      )
     }
   }
 
@@ -101,7 +121,10 @@ class CometPreferCometSuite extends VectorQuerySuite {
       val df = checkVectorized(Query, Seq(Filter, Project))
       val plan = finalPlan(df)
       assert(nodesNamed(df, "CometProject").isEmpty, plan.treeString)
-      assert(!reasons(df).contains(PreferComet.Reason), s"the delegation reason must not survive a decline: ${reasons(df)}")
+      assert(
+        !reasons(df).contains(PreferComet.Reason),
+        s"the delegation reason must not survive a decline: ${reasons(df)}"
+      )
     }
   }
 }

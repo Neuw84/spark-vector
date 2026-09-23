@@ -11,9 +11,38 @@ import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, Ve
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, AttributeSet, Cast, CheckOverflowInSum, DecimalDivideWithOverflowCheck, EqualTo, Expression, If, Literal, NamedExpression}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateMode, Average, Complete, DeclarativeAggregate, Final, Partial, PartialMerge, Sum}
-import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning, UnspecifiedDistribution}
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias,
+  Attribute,
+  AttributeReference,
+  AttributeSet,
+  Cast,
+  CheckOverflowInSum,
+  DecimalDivideWithOverflowCheck,
+  EqualTo,
+  Expression,
+  If,
+  Literal,
+  NamedExpression
+}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{
+  AggregateExpression,
+  AggregateMode,
+  Average,
+  Complete,
+  DeclarativeAggregate,
+  Final,
+  Partial,
+  PartialMerge,
+  Sum
+}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  AllTuples,
+  ClusteredDistribution,
+  Distribution,
+  Partitioning,
+  UnspecifiedDistribution
+}
 import org.apache.spark.sql.execution.{PartitioningPreservingUnaryExecNode, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, HashAggregateExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
@@ -47,8 +76,8 @@ case class VectorHashAggregateExec(
     aggregateAttributes: Seq[Attribute],
     resultExpressions: Seq[NamedExpression],
     child: SparkPlan,
-    strictFloatingPoint: Boolean = true)
-    extends VectorExec with PartitioningPreservingUnaryExecNode {
+    strictFloatingPoint: Boolean = true
+) extends VectorExec with PartitioningPreservingUnaryExecNode {
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
 
@@ -99,7 +128,12 @@ case class VectorHashAggregateExec(
     VectorAggregatePlanner.bufferAttributes(groupingExpressions, aggregateExpressions)
 
   @transient private lazy val resultProjection: Array[VectorExpr] =
-    VectorAggregatePlanner.compileFinalResults(groupingExpressions, aggregateExpressions, aggregateAttributes, resultExpressions) match {
+    VectorAggregatePlanner.compileFinalResults(
+      groupingExpressions,
+      aggregateExpressions,
+      aggregateAttributes,
+      resultExpressions
+    ) match {
       case Right(exprs) => exprs.toArray
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate results: $reason")
     }
@@ -112,12 +146,14 @@ case class VectorHashAggregateExec(
   }.toArray
 
   // A merging stage's input is its grouping columns then the buffers (Spark's initialInputBufferOffset).
-  @transient private lazy val compiled: Array[VectorAggFunction] = aggregateExpressions.zip(VectorAggregates.bufferOffsets(groupingExpressions.length, aggregateExpressions)).map { case (agg, offset) =>
-    VectorAggregates.compile(agg, child.output, offset, strictFloatingPoint) match {
-      case Right(f) => f
-      case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate ${agg.sql}: $reason")
-    }
-  }.toArray
+  @transient private lazy val compiled: Array[VectorAggFunction] =
+    aggregateExpressions.zip(VectorAggregates.bufferOffsets(groupingExpressions.length, aggregateExpressions)).map {
+      case (agg, offset) =>
+        VectorAggregates.compile(agg, child.output, offset, strictFloatingPoint) match {
+          case Right(f) => f
+          case Left(reason) => throw new IllegalStateException(s"cannot vectorize aggregate ${agg.sql}: $reason")
+        }
+    }.toArray
 
   override lazy val metrics: Map[String, SQLMetric] = Map(
     "numInputBatches" -> SQLMetrics.createMetric(sparkContext, "number of input batches"),
@@ -125,7 +161,8 @@ case class VectorHashAggregateExec(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in spark-vector kernels"),
     "spills" -> SQLMetrics.createMetric(sparkContext, "number of spills (#363)"),
-    "spilledGroups" -> SQLMetrics.createMetric(sparkContext, "groups spilled or emitted early"))
+    "spilledGroups" -> SQLMetrics.createMetric(sparkContext, "groups spilled or emitted early")
+  )
 
   /**
    * Past the budget (`spark.vector.agg.spillThreshold`, 0 = never): buffer-emitting modes emit the
@@ -135,19 +172,30 @@ case class VectorHashAggregateExec(
    */
   private def spillPolicy(aggs: Array[VectorAggFunction]): AggSpillPolicy = {
     val conf = org.apache.spark.sql.internal.SQLConf.get
-    val threshold = org.apache.spark.network.util.JavaUtils.byteStringAsBytes(conf.getConfString(AggSpillPolicy.ThresholdKey, AggSpillPolicy.DefaultThreshold))
-    val passThrough = conf.getConfString(AggSpillPolicy.PassThroughKey, AggSpillPolicy.DefaultPassThroughRatio.toString).toDouble
+    val threshold = org.apache.spark.network.util.JavaUtils.byteStringAsBytes(conf.getConfString(
+      AggSpillPolicy.ThresholdKey,
+      AggSpillPolicy.DefaultThreshold
+    ))
+    val passThrough =
+      conf.getConfString(AggSpillPolicy.PassThroughKey, AggSpillPolicy.DefaultPassThroughRatio.toString).toDouble
     if (threshold <= 0 || groupingExpressions.isEmpty) AggSpillPolicy.InMemory
     else if (aggregateExpressions.isEmpty) {
       // Keys only (a distinct): before the exchange it emits keys, after it it merges them -- either way re-readable.
-      if (requiredChildDistributionExpressions.isDefined && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType))) {
+      if (
+        requiredChildDistributionExpressions.isDefined && AggregateSpill.supportsKeys(
+          groupingExpressions.map(_.dataType)
+        )
+      ) {
         val buckets = conf.getConfString(AggSpillPolicy.BucketsKey, AggSpillPolicy.DefaultBuckets.toString).toInt
         AggSpillPolicy.GraceHash(threshold, math.max(2, buckets))
       } else AggSpillPolicy.EmitAndReset(threshold, passThrough)
-    }
-    else if (VectorAggregatePlanner.emitsBuffers(modes)) AggSpillPolicy.EmitAndReset(threshold, passThrough)
-    else if (VectorAggregatePlanner.mergesBuffers(modes) && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType)) &&
-      aggregateExpressions.zip(aggs).forall { case (a, f) => val d = a.aggregateFunction.aggBufferAttributes.map(_.dataType); f.emittedTypes(d) == d }) {
+    } else if (VectorAggregatePlanner.emitsBuffers(modes)) AggSpillPolicy.EmitAndReset(threshold, passThrough)
+    else if (
+      VectorAggregatePlanner.mergesBuffers(modes) && AggregateSpill.supportsKeys(groupingExpressions.map(_.dataType)) &&
+      aggregateExpressions.zip(aggs).forall { case (a, f) =>
+        val d = a.aggregateFunction.aggBufferAttributes.map(_.dataType); f.emittedTypes(d) == d
+      }
+    ) {
       val buckets = conf.getConfString(AggSpillPolicy.BucketsKey, AggSpillPolicy.DefaultBuckets.toString).toInt
       AggSpillPolicy.GraceHash(threshold, math.max(2, buckets))
     } else AggSpillPolicy.InMemory
@@ -175,7 +223,9 @@ case class VectorHashAggregateExec(
     val bufferAttrs =
       if (finalMode) {
         val declared = aggregateExpressions.map(_.aggregateFunction.aggBufferAttributes.map(_.dataType))
-        val types = groupingExpressions.map(_.dataType) ++ aggs.zip(declared).flatMap { case (f, d) => f.emittedTypes(d) }
+        val types = groupingExpressions.map(_.dataType) ++ aggs.zip(declared).flatMap { case (f, d) =>
+          f.emittedTypes(d)
+        }
         bufferAttributes.map(_.name).zip(types).toArray
       } else output.map(a => (a.name, a.dataType)).toArray
     val outputAttrs = output.map(a => (a.name, a.dataType)).toArray
@@ -187,10 +237,21 @@ case class VectorHashAggregateExec(
         // Every mode keeps UTF8 keys by id (#377): buffer-emitting modes feed our shuffle writer, which
         // stages the ids per block, and the result modes' byte-record layout (#437) read slower at 1 TB
         // than ids -- q67's final stage 59 -> 67 s, GC 22 -> 38 s -- so it is kept for tests only.
-        else new VectorGroupedAggregateIterator(iter, keys, aggs, l, bufferAttrs, m, policy, Some(spillMetrics), dictionaryStrings = true)
+        else new VectorGroupedAggregateIterator(
+          iter,
+          keys,
+          aggs,
+          l,
+          bufferAttrs,
+          m,
+          policy,
+          Some(spillMetrics),
+          dictionaryStrings = true
+        )
       if (finalMode) {
         // The projection's own bookkeeping goes to unregistered metrics so rows are not counted twice.
-        val scratch = new VectorMetrics(new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("timing"))
+        val scratch =
+          new VectorMetrics(new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("sum"), new SQLMetric("timing"))
         new VectorProjectIterator(buffers, results, identity = false, outputAttrs, emitSelection = false, scratch)
       } else buffers
     }
@@ -240,8 +301,8 @@ private[vector] class VectorUngroupedAggregateIterator(
     aggs: Array[VectorAggFunction],
     layout: Array[OutputSlot],
     outputAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends RollupLevel {
+    metrics: VectorMetrics
+) extends RollupLevel {
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorHashAggregateExec")
   private var emitted = false
@@ -310,8 +371,8 @@ private[vector] class VectorGroupedAggregateIterator(
     metrics: VectorMetrics,
     policy: AggSpillPolicy = AggSpillPolicy.InMemory,
     spillMetrics: Option[(SQLMetric, SQLMetric)] = None,
-    dictionaryStrings: Boolean = true)
-    extends RollupLevel {
+    dictionaryStrings: Boolean = true
+) extends RollupLevel {
 
   private val OutputBatchSize = 4096
 
@@ -340,7 +401,9 @@ private[vector] class VectorGroupedAggregateIterator(
    * footprint and the pool's answer emptied tables that fit).
    */
   private val accumulatorBytesPerGroup: Long =
-    aggs.map(a => math.max(1, a.bufferTypes.length).toLong * 2L * 8L * io.sparkvector.kernels.GroupedAccumulators.INTERLEAVE).sum
+    aggs.map(a =>
+      math.max(1, a.bufferTypes.length).toLong * 2L * 8L * io.sparkvector.kernels.GroupedAccumulators.INTERLEAVE
+    ).sum
   private def estimatedBytes: Long = {
     val groups = table.size()
     var capacity = 64L
@@ -373,7 +436,8 @@ private[vector] class VectorGroupedAggregateIterator(
     false
   }
 
-  private def releaseMemory(): Unit = if (consumer != null && reserved > 0) { consumer.freeMemory(reserved); reserved = 0L }
+  private def releaseMemory(): Unit =
+    if (consumer != null && reserved > 0) { consumer.freeMemory(reserved); reserved = 0L }
 
   Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
@@ -431,7 +495,8 @@ private[vector] class VectorGroupedAggregateIterator(
     while (from < table.size()) {
       val to = math.min(table.size(), from + OutputBatchSize)
       val b = buildBatch(from, to)
-      try spill.write(b) finally b.close()
+      try spill.write(b)
+      finally b.close()
       from = to
     }
     spillMetrics.foreach { case (spills, rows) => spills += 1; rows += table.size() }
@@ -599,7 +664,10 @@ private[vector] class VectorGroupedAggregateIterator(
   private final class SharedDictionary(val vector: VarCharVector, val size: Int) {
     private var refs = 1
     def retain(): Unit = synchronized { refs += 1 }
-    def release(): Unit = synchronized { if (refs <= 0) throw new IllegalStateException(s"dictionary released $refs"); refs -= 1; if (refs == 0) vector.close() }
+    def release(): Unit = synchronized {
+      if (refs <= 0) throw new IllegalStateException(s"dictionary released $refs"); refs -= 1;
+      if (refs == 0) vector.close()
+    }
   }
 
   private def releaseDictionaries(): Unit = {
@@ -607,7 +675,14 @@ private[vector] class VectorGroupedAggregateIterator(
     while (k < keyDicts.length) { if (keyDicts(k) != null) { keyDicts(k).release(); keyDicts(k) = null }; k += 1 }
   }
 
-  private def bufferColumn(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int): ColumnVector =
+  private def bufferColumn(
+      name: String,
+      dt: DataType,
+      state: GroupedAggState,
+      slot: Int,
+      from: Int,
+      to: Int
+  ): ColumnVector =
     AggBufferColumns.column(name, dt, state, slot, from, to, allocator)
 
   private def releaseCurrent(): Unit = {
@@ -618,8 +693,14 @@ private[vector] class VectorGroupedAggregateIterator(
     if (!closed) {
       closed = true
       releaseCurrent()
-      if (bucketInput != null) { try bucketInput.close() catch { case _: Exception => }; bucketInput = null }
-      if (spill != null) { try spill.close() catch { case _: Exception => }; spill = null }
+      if (bucketInput != null) {
+        try bucketInput.close()
+        catch { case _: Exception => }; bucketInput = null
+      }
+      if (spill != null) {
+        try spill.close()
+        catch { case _: Exception => }; spill = null
+      }
       releaseMemory()
       releaseDictionaries()
       allocator.close()
@@ -630,7 +711,8 @@ private[vector] class VectorGroupedAggregateIterator(
 /** Planning-time checks shared by the rule and the operator. */
 object VectorAggregatePlanner {
 
-  private val keyTypes: Set[VecType] = Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64, VecType.DECIMAL128)
+  private val keyTypes: Set[VecType] =
+    Set(VecType.INT32, VecType.INT64, VecType.BOOL, VecType.UTF8, VecType.FLOAT64, VecType.DECIMAL128)
 
   /**
    * Grouping keys: ints, longs, booleans, strings, doubles and wide decimals (two limbs hashed and
@@ -647,14 +729,20 @@ object VectorAggregatePlanner {
     }
 
   /** The merged-buffer batch of a Final aggregate: keys, then every function's buffer slots. */
-  def bufferLayout(groupingExpressions: Seq[NamedExpression], aggregateExpressions: Seq[AggregateExpression]): Seq[OutputSlot] =
+  def bufferLayout(
+      groupingExpressions: Seq[NamedExpression],
+      aggregateExpressions: Seq[AggregateExpression]
+  ): Seq[OutputSlot] =
     groupingExpressions.indices.map(KeySlot(_): OutputSlot) ++
       aggregateExpressions.zipWithIndex.flatMap { case (agg, i) =>
         agg.aggregateFunction.aggBufferAttributes.indices.map(slot => BufferSlot(i, slot): OutputSlot)
       }
 
   /** Attributes of [[bufferLayout]]'s columns, the input of a Final aggregate's result projection. */
-  def bufferAttributes(groupingExpressions: Seq[NamedExpression], aggregateExpressions: Seq[AggregateExpression]): Seq[Attribute] =
+  def bufferAttributes(
+      groupingExpressions: Seq[NamedExpression],
+      aggregateExpressions: Seq[AggregateExpression]
+  ): Seq[Attribute] =
     groupingExpressions.map(_.toAttribute) ++ aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes)
 
   /**
@@ -665,17 +753,20 @@ object VectorAggregatePlanner {
       groupingExpressions: Seq[NamedExpression],
       aggregateExpressions: Seq[AggregateExpression],
       aggregateAttributes: Seq[Attribute],
-      resultExpressions: Seq[NamedExpression]): Either[String, Seq[VectorExpr]] = {
+      resultExpressions: Seq[NamedExpression]
+  ): Either[String, Seq[VectorExpr]] = {
     val input = bufferAttributes(groupingExpressions, aggregateExpressions)
     // The result expressions reference the operator's `aggregateAttributes`, positionally aligned with
     // its aggregate expressions -- not necessarily each expression's own `resultAttribute`: Spark's
     // distinct rewrite builds the Final distinct expression afresh but keeps the original attribute.
-    val evaluate: Map[org.apache.spark.sql.catalyst.expressions.ExprId, Expression] = aggregateExpressions.zip(aggregateAttributes).flatMap { case (agg, attr) =>
-      agg.aggregateFunction match {
-        case d: DeclarativeAggregate => Seq(attr.exprId -> d.evaluateExpression, agg.resultAttribute.exprId -> d.evaluateExpression)
-        case _ => Nil
-      }
-    }.toMap
+    val evaluate: Map[org.apache.spark.sql.catalyst.expressions.ExprId, Expression] =
+      aggregateExpressions.zip(aggregateAttributes).flatMap { case (agg, attr) =>
+        agg.aggregateFunction match {
+          case d: DeclarativeAggregate =>
+            Seq(attr.exprId -> d.evaluateExpression, agg.resultAttribute.exprId -> d.evaluateExpression)
+          case _ => Nil
+        }
+      }.toMap
     val compiled = resultExpressions.map { e =>
       val substituted = e.transform { case a: AttributeReference if evaluate.contains(a.exprId) => evaluate(a.exprId) }
       (wideResult(substituted, input) match {
@@ -695,7 +786,8 @@ object VectorAggregatePlanner {
           }
           val body = forwarded match { case Alias(c, _) => c; case other => other }
           ExpressionCompiler.compileLaneColumn(body, input).flatMap {
-            case v if !TypeMapping.isSupported(e.dataType) && !TypeMapping.hasLane(e.dataType) => Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
+            case v if !TypeMapping.isSupported(e.dataType) && !TypeMapping.hasLane(e.dataType) =>
+              Left(s"unsupported result type ${e.dataType.simpleString} for ${e.name}")
             case v => Right(v)
           }
       }).left.map(r => s"${e.sql}: $r")
@@ -720,11 +812,21 @@ object VectorAggregatePlanner {
       if (ordinal >= 0 && input.exists(_.exprId == other.exprId)) Some(ordinal) else None
     }
     body match {
-      case If(isEmpty: AttributeReference, Literal(null, _), CheckOverflowInSum(sum: AttributeReference, dt: DecimalType, _, _))
+      case If(
+            isEmpty: AttributeReference,
+            Literal(null, _),
+            CheckOverflowInSum(sum: AttributeReference, dt: DecimalType, _, _)
+          )
           if dt.precision > TypeMapping.MAX_DECIMAL_PRECISION && sum.dataType == dt =>
         slot(sum, isEmpty)
-      case If(EqualTo(count: AttributeReference, Literal(0L, _)), Literal(null, _), DecimalDivideWithOverflowCheck(sum: AttributeReference, Cast(count2: AttributeReference, _, _, _), _, _, _))
-          if count.exprId == count2.exprId && sum.dataType.isInstanceOf[DecimalType] && sum.dataType.asInstanceOf[DecimalType].precision > TypeMapping.MAX_DECIMAL_PRECISION =>
+      case If(
+            EqualTo(count: AttributeReference, Literal(0L, _)),
+            Literal(null, _),
+            DecimalDivideWithOverflowCheck(sum: AttributeReference, Cast(count2: AttributeReference, _, _, _), _, _, _)
+          )
+          if count.exprId == count2.exprId && sum.dataType.isInstanceOf[
+            DecimalType
+          ] && sum.dataType.asInstanceOf[DecimalType].precision > TypeMapping.MAX_DECIMAL_PRECISION =>
         slot(sum, count)
       case _ => None
     }
@@ -738,38 +840,49 @@ object VectorAggregatePlanner {
         Seq(agg.aggregateFunction.inputAggBufferAttributes.head.exprId) ++ a.child.output.lift(offset).map(_.exprId)
     }.flatten.toSet
 
-  private def wideDecimalBuffer(f: org.apache.spark.sql.catalyst.expressions.aggregate.AggregateFunction): Boolean = f match {
-    case s: Sum => s.dataType.isInstanceOf[DecimalType]
-    case a: Average => a.child.dataType.isInstanceOf[DecimalType]
-    case _ => false
-  }
+  private def wideDecimalBuffer(f: org.apache.spark.sql.catalyst.expressions.aggregate.AggregateFunction): Boolean =
+    f match {
+      case s: Sum => s.dataType.isInstanceOf[DecimalType]
+      case a: Average => a.child.dataType.isInstanceOf[DecimalType]
+      case _ => false
+    }
 
   /** Maps each result attribute to the grouping key or the (aggregate, buffer slot) producing it. */
   def outputLayout(
       groupingExpressions: Seq[NamedExpression],
       aggregateExpressions: Seq[AggregateExpression],
-      resultExpressions: Seq[NamedExpression]): Either[String, Seq[OutputSlot]] = {
+      resultExpressions: Seq[NamedExpression]
+  ): Either[String, Seq[OutputSlot]] = {
     val keySlots: Map[org.apache.spark.sql.catalyst.expressions.ExprId, OutputSlot] =
       groupingExpressions.zipWithIndex.map { case (g, i) => g.toAttribute.exprId -> (KeySlot(i): OutputSlot) }.toMap
     val bufferSlots: Map[org.apache.spark.sql.catalyst.expressions.ExprId, OutputSlot] =
       aggregateExpressions.zipWithIndex.flatMap { case (agg, i) =>
-        agg.aggregateFunction.inputAggBufferAttributes.zipWithIndex.map { case (a, slot) => a.exprId -> (BufferSlot(i, slot): OutputSlot) }
+        agg.aggregateFunction.inputAggBufferAttributes.zipWithIndex.map { case (a, slot) =>
+          a.exprId -> (BufferSlot(i, slot): OutputSlot)
+        }
       }.toMap
     // A buffer-emitting stage's result attributes are its keys then its buffers in order, so a result
     // attribute whose id matches nothing (a function instance rewritten between planning and this
     // check) is still bound by that position, as Spark binds it.
     val positional: Seq[OutputSlot] =
       groupingExpressions.indices.map(KeySlot(_): OutputSlot) ++
-        aggregateExpressions.zipWithIndex.flatMap { case (agg, i) => agg.aggregateFunction.inputAggBufferAttributes.indices.map(BufferSlot(i, _): OutputSlot) }
+        aggregateExpressions.zipWithIndex.flatMap { case (agg, i) =>
+          agg.aggregateFunction.inputAggBufferAttributes.indices.map(BufferSlot(i, _): OutputSlot)
+        }
     val mapped = resultExpressions.zipWithIndex.map {
       case (a: Attribute, pos) =>
-        keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId)).orElse(if (resultExpressions.length == positional.length) positional.lift(pos) else None)
+        keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId)).orElse(if (
+          resultExpressions.length == positional.length
+        ) positional.lift(pos)
+        else None)
           .toRight(s"result attribute ${a.name} is neither a grouping key nor an aggregation buffer")
       // A grouping key under another name (`ss_customer_sk AS customer_sk ... GROUP BY ss_customer_sk`,
       // TPC-DS q97): the same lane, emitted under the alias's attribute (#328).
       case (Alias(a: Attribute, name), _) =>
         keySlots.get(a.exprId).orElse(bufferSlots.get(a.exprId))
-          .toRight(s"result expression $name aliases ${a.name}, which is neither a grouping key nor an aggregation buffer")
+          .toRight(
+            s"result expression $name aliases ${a.name}, which is neither a grouping key nor an aggregation buffer"
+          )
       case (other, _) => Left(s"result expression ${other.sql} is not a plain attribute")
     }
     mapped.collectFirst { case Left(r) => r } match {
@@ -779,10 +892,12 @@ object VectorAggregatePlanner {
   }
 
   /** Every mode evaluates result expressions (`Final`, `Complete`). */
-  def emitsResults(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(m => m == Final || m == Complete)
+  def emitsResults(modes: Seq[AggregateMode]): Boolean =
+    modes.nonEmpty && modes.forall(m => m == Final || m == Complete)
 
   /** Every mode emits aggregation buffers for a later stage (`Partial`, `PartialMerge`). */
-  def emitsBuffers(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(m => m == Partial || m == PartialMerge)
+  def emitsBuffers(modes: Seq[AggregateMode]): Boolean =
+    modes.nonEmpty && modes.forall(m => m == Partial || m == PartialMerge)
 
   /** Every mode merges buffers (`PartialMerge`, `Final`): the child is an exchange whose types alone matter. */
   def mergesBuffers(modes: Seq[AggregateMode]): Boolean = modes.nonEmpty && modes.forall(VectorAggregates.merges)
@@ -804,22 +919,29 @@ object VectorAggregatePlanner {
    * says whether it emits buffers (`Partial` / `PartialMerge`, as Spark's distinct rewrite mixes
    * them) or results (`Final` / `Complete`). `finalEnabled` gates the modes that read an exchange.
    */
-  def plan(a: BaseAggregateExec, finalEnabled: Boolean, strictFloatingPoint: Boolean = true): Either[String, VectorHashAggregateExec] = {
+  def plan(
+      a: BaseAggregateExec,
+      finalEnabled: Boolean,
+      strictFloatingPoint: Boolean = true
+  ): Either[String, VectorHashAggregateExec] = {
     val modes = a.aggregateExpressions.map(_.mode).distinct
     val keysOnly = a.aggregateExpressions.isEmpty
     // A keys-only aggregate emits its keys in both of Spark's stages: the buffer layout fits both.
     val results = !keysOnly && emitsResults(modes)
     if (keysOnly && a.groupingExpressions.isEmpty) Left("aggregate without keys or functions")
-    else if (!keysOnly && !results && !emitsBuffers(modes)) Left(s"aggregation modes ${modes.mkString(", ")} mix buffer and result output")
+    else if (!keysOnly && !results && !emitsBuffers(modes))
+      Left(s"aggregation modes ${modes.mkString(", ")} mix buffer and result output")
     else if (readsExchange(a) && !finalEnabled) Left("merging aggregation stages disabled by configuration")
     else {
-      val keyFailures = a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
+      val keyFailures =
+        a.groupingExpressions.flatMap(g => compileKey(g, a.child.output).left.toOption.map(r => s"${g.sql}: $r"))
       val aggFailures = a.aggregateExpressions.zip(VectorAggregates.bufferOffsets(a)).flatMap { case (agg, offset) =>
         VectorAggregates.compile(agg, a.child.output, offset).left.toOption.map(r => s"${agg.sql}: $r")
       }
       val failures = keyFailures ++ aggFailures
       val layoutCheck: Either[String, Seq[Any]] =
-        if (results) compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.aggregateAttributes, a.resultExpressions)
+        if (results)
+          compileFinalResults(a.groupingExpressions, a.aggregateExpressions, a.aggregateAttributes, a.resultExpressions)
         else outputLayout(a.groupingExpressions, a.aggregateExpressions, a.resultExpressions)
       if (failures.nonEmpty) Left(failures.mkString("; "))
       else layoutCheck.flatMap { compiled =>
@@ -829,12 +951,20 @@ object VectorAggregatePlanner {
         // arithmetic over such results, which the wide kernels compute (#259).
         val wideOutputs: Set[org.apache.spark.sql.catalyst.expressions.ExprId] =
           if (results) a.resultExpressions.zip(compiled).collect {
-            case (e, v: VectorExpr) if e.dataType.isInstanceOf[DecimalType] && e.dataType.asInstanceOf[DecimalType].precision > TypeMapping.MAX_DECIMAL_PRECISION && v.vecType == VecType.DECIMAL128 => e.toAttribute.exprId
+            case (e, v: VectorExpr)
+                if e.dataType.isInstanceOf[DecimalType] && e.dataType.asInstanceOf[
+                  DecimalType
+                ].precision > TypeMapping.MAX_DECIMAL_PRECISION && v.vecType == VecType.DECIMAL128 =>
+              e.toAttribute.exprId
           }.toSet
-          else (a.groupingExpressions.map(_.toAttribute) ++ a.aggregateExpressions.flatMap(_.aggregateFunction.inputAggBufferAttributes)).collect {
+          else (a.groupingExpressions.map(_.toAttribute) ++ a.aggregateExpressions.flatMap(
+            _.aggregateFunction.inputAggBufferAttributes
+          )).collect {
             case attr if attr.dataType.isInstanceOf[DecimalType] => attr.exprId
           }.toSet
-        a.resultExpressions.map(_.toAttribute).find(attr => !TypeMapping.isSupported(attr.dataType) && !wideOutputs.contains(attr.exprId)) match {
+        a.resultExpressions.map(_.toAttribute).find(attr =>
+          !TypeMapping.isSupported(attr.dataType) && !wideOutputs.contains(attr.exprId)
+        ) match {
           case Some(attr) => Left(s"unsupported output type ${attr.dataType.simpleString} for ${attr.name}")
           case None =>
             Right(VectorHashAggregateExec(
@@ -844,7 +974,8 @@ object VectorAggregatePlanner {
               a.aggregateAttributes,
               a.resultExpressions,
               a.child,
-              strictFloatingPoint))
+              strictFloatingPoint
+            ))
         }
       }
     }
@@ -853,7 +984,15 @@ object VectorAggregatePlanner {
 
 /** Boxed buffer values of a run of groups `[from, to)` as one Arrow column; shared with the window aggregate. */
 object AggBufferColumns {
-  def column(name: String, dt: DataType, state: GroupedAggState, slot: Int, from: Int, to: Int, allocator: BufferAllocator): ColumnVector = {
+  def column(
+      name: String,
+      dt: DataType,
+      state: GroupedAggState,
+      slot: Int,
+      from: Int,
+      to: Int,
+      allocator: BufferAllocator
+  ): ColumnVector = {
     // A state that can write its lane directly does (#416); the rest go value by value, boxed.
     if (dt != org.apache.spark.sql.types.StringType) {
       val out = ArrowOutput.allocateFixed(name, dt, to - from, allocator)
@@ -883,7 +1022,12 @@ object AggBufferColumns {
             case v: java.math.BigDecimal =>
               val unscaled = v.unscaledValue()
               Bitmap.setTo(validity, o, true)
-              io.sparkvector.kernels.Decimal128.set(data, o, io.sparkvector.kernels.Decimal128.hiOf(unscaled), io.sparkvector.kernels.Decimal128.loOf(unscaled))
+              io.sparkvector.kernels.Decimal128.set(
+                data,
+                o,
+                io.sparkvector.kernels.Decimal128.hiOf(unscaled),
+                io.sparkvector.kernels.Decimal128.loOf(unscaled)
+              )
           }
           o += 1
         }
@@ -908,7 +1052,8 @@ object AggBufferColumns {
       get(o) match {
         case null => io.sparkvector.kernels.Bitmap.clear(validity, o)
         case v: java.lang.Double =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())
+          io.sparkvector.kernels.Bitmap.set(validity, o);
+          data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())
         case v: java.lang.Long =>
           io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
         case v: java.lang.Integer =>

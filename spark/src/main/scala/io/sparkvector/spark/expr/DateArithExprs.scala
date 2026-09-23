@@ -1,6 +1,14 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, DateKernels, SegmentVectorBuffers, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  ArrowLayout,
+  Bitmap,
+  BitmapKernels,
+  DateKernels,
+  SegmentVectorBuffers,
+  VecType,
+  VectorBuffers
+}
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, DateType, DoubleType, IntegerType, LongType, TimestampType}
 import org.apache.spark.sql.vector.VectorErrors
@@ -12,7 +20,8 @@ final case class RelabelExpr(child: VectorExpr, dataType: DataType) extends Vect
 }
 
 /** Seconds or millis to micros (Spark's `multiplyExact`: `long overflow` on an active row) and back (`floorDiv`). */
-final case class EpochScaleExpr(child: VectorExpr, factor: Long, toMicros: Boolean, dataType: DataType) extends VectorExpr {
+final case class EpochScaleExpr(child: VectorExpr, factor: Long, toMicros: Boolean, dataType: DataType)
+    extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val v = CaseWhenExpr.materialise(child, ctx)
@@ -22,7 +31,8 @@ final case class EpochScaleExpr(child: VectorExpr, factor: Long, toMicros: Boole
     var i = 0
     while (i < n) {
       if (v.validity() == null || Bitmap.isSet(v.validity(), i)) {
-        val x = if (wide) v.data().getAtIndex(VectorBuffers.LE_LONG, i) else v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong
+        val x = if (wide) v.data().getAtIndex(VectorBuffers.LE_LONG, i)
+        else v.data().getAtIndex(VectorBuffers.LE_INT, i).toLong
         val r =
           if (toMicros) {
             val hi = Math.multiplyHigh(x, factor)
@@ -41,7 +51,12 @@ final case class EpochScaleExpr(child: VectorExpr, factor: Long, toMicros: Boole
 }
 
 /** `last_day`, `weekofyear`, `next_day(date, literal day)` and `add_months(date, months)`: a date in, a date or int out. */
-final case class DateScalarExpr(kind: DateScalarExpr.Kind, child: VectorExpr, arg: Option[VectorExpr], dataType: DataType) extends VectorExpr {
+final case class DateScalarExpr(
+    kind: DateScalarExpr.Kind,
+    child: VectorExpr,
+    arg: Option[VectorExpr],
+    dataType: DataType
+) extends VectorExpr {
   override def children: Seq[VectorExpr] = child +: arg.toSeq
   override def eval(ctx: EvalContext): VectorBuffers = {
     val d = child.eval(ctx)
@@ -79,7 +94,14 @@ object DateScalarExpr {
  * `months_between(a, b[, roundOff])` under a fixed offset. Each side is a timestamp lane or a date lane
  * (Spark casts dates to timestamps; a date's instant is midnight in the session zone).
  */
-final case class MonthsBetweenExpr(a: VectorExpr, b: VectorExpr, aIsDate: Boolean, bIsDate: Boolean, roundOff: Boolean, offsetMicros: Long) extends VectorExpr {
+final case class MonthsBetweenExpr(
+    a: VectorExpr,
+    b: VectorExpr,
+    aIsDate: Boolean,
+    bIsDate: Boolean,
+    roundOff: Boolean,
+    offsetMicros: Long
+) extends VectorExpr {
   override def dataType: DataType = DoubleType
   override def children: Seq[VectorExpr] = Seq(a, b)
   private val MicrosPerDay = 86400000000L
@@ -97,7 +119,11 @@ final case class MonthsBetweenExpr(a: VectorExpr, b: VectorExpr, aIsDate: Boolea
     var i = 0
     while (i < n) {
       if (validity == null || Bitmap.isSet(validity, i)) {
-        out.setAtIndex(VectorBuffers.LE_DOUBLE, i, DateKernels.monthsBetween(micros(va, aIsDate, i), micros(vb, bIsDate, i), roundOff, offsetMicros))
+        out.setAtIndex(
+          VectorBuffers.LE_DOUBLE,
+          i,
+          DateKernels.monthsBetween(micros(va, aIsDate, i), micros(vb, bIsDate, i), roundOff, offsetMicros)
+        )
       }
       i += 1
     }
@@ -106,7 +132,13 @@ final case class MonthsBetweenExpr(a: VectorExpr, b: VectorExpr, aIsDate: Boolea
 }
 
 /** `make_date(y, m, d)`: null (or Spark's out-of-range error under ANSI, active rows only) for an invalid civil date. */
-final case class MakeDateExpr(year: VectorExpr, month: VectorExpr, day: VectorExpr, ansi: Boolean, queryContext: QueryContext) extends VectorExpr {
+final case class MakeDateExpr(
+    year: VectorExpr,
+    month: VectorExpr,
+    day: VectorExpr,
+    ansi: Boolean,
+    queryContext: QueryContext
+) extends VectorExpr {
   override def dataType: DataType = DateType
   override def children: Seq[VectorExpr] = Seq(year, month, day)
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -129,8 +161,11 @@ final case class MakeDateExpr(year: VectorExpr, month: VectorExpr, day: VectorEx
           out.setAtIndex(VectorBuffers.LE_INT, i, r)
         } else if (ansi && (ctx.active == null || Bitmap.isSet(ctx.active, i))) {
           // Spark's own exception for exactly these arguments.
-          val e = try { java.time.LocalDate.of(yy, mm, dd); null } catch { case t: java.time.DateTimeException => t }
-          throw VectorErrors.dateTimeArgumentOutOfRange(if (e != null) e else new java.time.DateTimeException(s"Invalid date $yy-$mm-$dd"))
+          val e =
+            try { java.time.LocalDate.of(yy, mm, dd); null }
+            catch { case t: java.time.DateTimeException => t }
+          throw VectorErrors.dateTimeArgumentOutOfRange(if (e != null) e
+          else new java.time.DateTimeException(s"Invalid date $yy-$mm-$dd"))
         }
       }
       i += 1

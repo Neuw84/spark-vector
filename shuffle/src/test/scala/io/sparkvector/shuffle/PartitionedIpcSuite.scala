@@ -36,7 +36,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     StructField("s", StringType),
     StructField("sd", StringType), // dictionary encoded at the source
     StructField("dec", DecimalType(12, 2)),
-    StructField("wide", DecimalType(30, 4))))
+    StructField("wide", DecimalType(30, 4))
+  ))
 
   /** One row as Spark-visible values (null = SQL null), for comparison. */
   private type Row = IndexedSeq[Any]
@@ -54,8 +55,10 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     val nt = nulls(n); val vt = Array.fill(n)(rnd.nextLong() / 1000)
     val nx = nulls(n); val vx = Array.fill(n)(rnd.nextGaussian())
     val nb = nulls(n); val vb = Array.fill(n)(rnd.nextBoolean())
-    val vs = Array.fill[String](n)(if (rnd.nextDouble() < 0.15) null else rnd.alphanumeric.take(rnd.nextInt(9)).mkString)
-    val dict = if (bigDictionary) Array.tabulate(3000)(i => s"name-$i-${rnd.alphanumeric.take(6).mkString}") else Array("alpha", "beta", "gamma", "δέλτα", "😀")
+    val vs =
+      Array.fill[String](n)(if (rnd.nextDouble() < 0.15) null else rnd.alphanumeric.take(rnd.nextInt(9)).mkString)
+    val dict = if (bigDictionary) Array.tabulate(3000)(i => s"name-$i-${rnd.alphanumeric.take(6).mkString}")
+    else Array("alpha", "beta", "gamma", "δέλτα", "😀")
     val nsd = nulls(n); val ids = Array.fill(n)(rnd.nextInt(dict.length))
     val ndec = nulls(n); val vdec = Array.fill(n)(rnd.nextLong() % 1000000000000L)
     val nw = nulls(n); val vw = Array.fill(n)(new BigInteger(90, rnd.self).subtract(BigInteger.ONE.shiftLeft(89)))
@@ -73,7 +76,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         SegmentVectorBuffers.dictionaryUtf8(n, idb.validity(), idb.data(), ArrowLayout.ofStrings(arena, dict))
       } else ArrowLayout.ofStrings(arena, ids.indices.map(i => if (nsd(i)) null else dict(ids(i))).toArray),
       ArrowLayout.ofLongs(arena, vdec, ndec),
-      ArrowLayout.ofDecimal128(arena, vw, nw))
+      ArrowLayout.ofDecimal128(arena, vw, nw)
+    )
     val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
     io.sparkvector.kernels.Bitmap.fill(all, n, true)
     val columns: Array[ColumnVector] = schema.fields.indices.toArray.map { c =>
@@ -82,9 +86,17 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(columns(7).isInstanceOf[VectorDictionaryColumnVector] == dictStrings)
     val rows = (0 until n).map { r =>
       IndexedSeq[Any](
-        if (ni(r)) null else vi(r), if (nd(r)) null else vd(r), if (nl(r)) null else vl(r), if (nt(r)) null else vt(r),
-        if (nx(r)) null else vx(r), if (nb(r)) null else vb(r), vs(r), if (nsd(r)) null else dict(ids(r)),
-        if (ndec(r)) null else Decimal(vdec(r), 12, 2), if (nw(r)) null else Decimal(new java.math.BigDecimal(vw(r), 4), 30, 4))
+        if (ni(r)) null else vi(r),
+        if (nd(r)) null else vd(r),
+        if (nl(r)) null else vl(r),
+        if (nt(r)) null else vt(r),
+        if (nx(r)) null else vx(r),
+        if (nb(r)) null else vb(r),
+        vs(r),
+        if (nsd(r)) null else dict(ids(r)),
+        if (ndec(r)) null else Decimal(vdec(r), 12, 2),
+        if (nw(r)) null else Decimal(new java.math.BigDecimal(vw(r), 4), 30, 4)
+      )
     }
     (new ColumnarBatch(columns, n), rows)
   }
@@ -104,14 +116,30 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  private def roundTrip(numPartitions: Int, batches: Seq[(Int, Boolean)], flushBytes: Long, batchRows: Int = 8192, bufferBytes: Long = 64L << 20,
+  private def roundTrip(
+      numPartitions: Int,
+      batches: Seq[(Int, Boolean)],
+      flushBytes: Long,
+      batchRows: Int = 8192,
+      bufferBytes: Long = 64L << 20,
       writerAllocator: org.apache.arrow.memory.BufferAllocator = allocator,
-      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] = Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)): Long = {
+      compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] =
+        Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)
+  ): Long = {
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val expected = Array.fill(numPartitions)(mutable.ArrayBuffer.empty[Row])
-    val writer = new PartitionedIpcWriter(schema, numPartitions, writerAllocator, path, flushBytes,
-      compression, batchRows, 1L << 20, bufferBytes)
+    val writer = new PartitionedIpcWriter(
+      schema,
+      numPartitions,
+      writerAllocator,
+      path,
+      flushBytes,
+      compression,
+      batchRows,
+      1L << 20,
+      bufferBytes
+    )
     try {
       batches.foreach { case (n, dictStrings) =>
         val arena = Arena.ofConfined()
@@ -121,7 +149,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
             // Partition on (i, s): ids from the same kernel the exchange uses.
             val keys = Array(
               io.sparkvector.spark.adapter.ColumnVectorAdapters.adapt(b.column(0), n, arena),
-              io.sparkvector.spark.adapter.ColumnVectorAdapters.adapt(b.column(6), n, arena))
+              io.sparkvector.spark.adapter.ColumnVectorAdapters.adapt(b.column(6), n, arena)
+            )
             val hashes = new Array[Int](n); val ids = new Array[Int](n)
             PartitionKernels.hashPartitionIds(keys, Array(KeyKind.INT, KeyKind.UTF8), n, numPartitions, hashes, ids)
             writer.write(b, ids)
@@ -138,7 +167,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           val got = mutable.ArrayBuffer.empty[Row]
           while (reader.hasNext) {
             val b = reader.next()
-            try got ++= read(b) finally b.close()
+            try got ++= read(b)
+            finally b.close()
           }
           assert(got === expected(p), s"partition $p")
         } finally reader.close()
@@ -151,7 +181,9 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test("#377: a dictionary-encoded column is staged as ids and remapped per block -- the aggregate's shared dictionary across batches") {
+  test(
+    "#377: a dictionary-encoded column is staged as ids and remapped per block -- the aggregate's shared dictionary across batches"
+  ) {
     import org.apache.arrow.vector.{IntVector, VarCharVector}
     // One Arrow dictionary vector shared by every batch, as the grouped aggregate emits its keys: the
     // writer maps its entries once and every later batch costs its rows only. Two partitions so a
@@ -182,10 +214,19 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           expected(ids(r)) += ((if (r % 11 == 0) null else words(e), r))
         }
         indices.setValueCount(n); values.setValueCount(n)
-        val batch = new ColumnarBatch(Array[ColumnVector](
-          new VectorDictionaryColumnVector(indices, dictionary, () => ()), // borrowed dictionary: the aggregate's release hook shape
-          new io.sparkvector.spark.arrow.VectorArrowColumnVector(values)), n)
-        try writer.write(batch, ids) finally batch.close()
+        val batch = new ColumnarBatch(
+          Array[ColumnVector](
+            new VectorDictionaryColumnVector(
+              indices,
+              dictionary,
+              () => ()
+            ), // borrowed dictionary: the aggregate's release hook shape
+            new io.sparkvector.spark.arrow.VectorArrowColumnVector(values)
+          ),
+          n
+        )
+        try writer.write(batch, ids)
+        finally batch.close()
       }
       writer.finish()
       for (p <- 0 until 2) {
@@ -193,22 +234,30 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         val got = mutable.ArrayBuffer.empty[(String, Int)]
         var blocks = 0
         try while (reader.hasNext) {
-          val b = reader.next()
-          try {
-            blocks += 1
-            val k = b.column(0)
-            assert(k.isInstanceOf[VectorDictionaryColumnVector], "ids over a per-block dictionary")
-            val d = k.asInstanceOf[VectorDictionaryColumnVector].dictionary()
-            assert(d.getValueCount <= 60 * 6 && d.getValueCount > 0, s"a block's dictionary holds the entries it uses, got ${d.getValueCount}")
-            (0 until b.numRows()).foreach(r => got += ((if (k.isNullAt(r)) null else k.getUTF8String(r).toString, b.column(1).getInt(r))))
-          } finally b.close()
-        } finally reader.close()
+            val b = reader.next()
+            try {
+              blocks += 1
+              val k = b.column(0)
+              assert(k.isInstanceOf[VectorDictionaryColumnVector], "ids over a per-block dictionary")
+              val d = k.asInstanceOf[VectorDictionaryColumnVector].dictionary()
+              assert(
+                d.getValueCount <= 60 * 6 && d.getValueCount > 0,
+                s"a block's dictionary holds the entries it uses, got ${d.getValueCount}"
+              )
+              (0 until b.numRows()).foreach(r =>
+                got += ((if (k.isNullAt(r)) null else k.getUTF8String(r).toString, b.column(1).getInt(r)))
+              )
+            } finally b.close()
+          }
+        finally reader.close()
         assert(got === expected(p), s"partition $p")
       }
     } finally { writer.close(); dictionary.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
   }
 
-  test("#377: in ids mode a block whose distinct values exceed the ratio goes plain from the staging dictionary, and the cap empties it") {
+  test(
+    "#377: in ids mode a block whose distinct values exceed the ratio goes plain from the staging dictionary, and the cap empties it"
+  ) {
     // `sd` dictionary-encoded at the source with the 3000-name dictionary and 3000-row batches: every
     // block is nearly all distinct, so #356 sends it plain -- gathered from the staging dictionary, not
     // decoded from the input. A cap of a few kilobytes forces the flush-and-clear between batches; the
@@ -223,7 +272,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         val arena = Arena.ofConfined()
         try {
           val (b, rows) = batch(3000, arena, dictStrings = true)
-          try writer.write(b, new Array[Int](3000)) finally b.close()
+          try writer.write(b, new Array[Int](3000))
+          finally b.close()
           expected ++= rows
         } finally arena.close()
       }
@@ -232,18 +282,21 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       val got = mutable.ArrayBuffer.empty[Row]
       var plainBlocks = 0
       try while (reader.hasNext) {
-        val b = reader.next()
-        try {
-          if (b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainBlocks += 1
-          got ++= read(b)
-        } finally b.close()
-      } finally reader.close()
+          val b = reader.next()
+          try {
+            if (b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainBlocks += 1
+            got ++= read(b)
+          } finally b.close()
+        }
+      finally reader.close()
       assert(plainBlocks > 0, "the nearly-distinct column went plain in at least one block")
       assert(got === expected)
     } finally { bigDictionary = false; writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
   }
 
-  test("#345: a slice smaller than its dictionary carries only the entries it uses -- 200 partitions, a 3000-name dictionary") {
+  test(
+    "#345: a slice smaller than its dictionary carries only the entries it uses -- 200 partitions, a 3000-name dictionary"
+  ) {
     bigDictionary = true
     try {
       // 4 x 8192 rows over 200 partitions: ~41 rows per slice against 3000 entries. With the whole
@@ -268,7 +321,9 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 256, batches = Seq((3000, true), (3000, false)), flushBytes = 1024)
   }
 
-  test("the stream reader decodes several map outputs' streams concatenated, each with its own schema and dictionaries") {
+  test(
+    "the stream reader decodes several map outputs' streams concatenated, each with its own schema and dictionaries"
+  ) {
     // What an aggregated partition from a shuffle service holds (future work): map output A's stream for
     // partition p, then map output B's. Dictionaries differ between the two.
     val dir = Files.createTempDirectory("svipc")
@@ -280,7 +335,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         val arena = Arena.ofConfined()
         try {
           val (b, rows) = batch(n, arena, dict)
-          try { writer.write(b, new Array[Int](n)); expected ++= rows } finally b.close()
+          try { writer.write(b, new Array[Int](n)); expected ++= rows }
+          finally b.close()
           writer.finish()
         } finally { arena.close(); writer.close() }
       }
@@ -298,24 +354,58 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test("slices of several input batches, dictionary and plain strings mixed, become one record batch with one merged dictionary") {
+  test(
+    "slices of several input batches, dictionary and plain strings mixed, become one record batch with one merged dictionary"
+  ) {
     // 8192-row record batches over 3 partitions: every partition holds slices of all six inputs until finish.
-    roundTrip(numPartitions = 3, batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)), flushBytes = 1L << 20)
+    roundTrip(
+      numPartitions = 3,
+      batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)),
+      flushBytes = 1L << 20
+    )
     // batchRows = 150 forces flushes mid-way: single-slice and multi-slice record batches alternate in one stream.
-    roundTrip(numPartitions = 3, batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)), flushBytes = 1L << 20, batchRows = 150)
+    roundTrip(
+      numPartitions = 3,
+      batches = Seq((300, true), (200, false), (250, true), (100, false), (400, true), (50, false)),
+      flushBytes = 1L << 20,
+      batchRows = 150
+    )
     // A tiny task-wide buffer: the fullest partition is written out whenever the cap is passed.
-    roundTrip(numPartitions = 5, batches = Seq((500, true), (500, false), (500, true)), flushBytes = 1L << 20, bufferBytes = 4096)
+    roundTrip(
+      numPartitions = 5,
+      batches = Seq((500, true), (500, false), (500, true)),
+      flushBytes = 1L << 20,
+      bufferBytes = 4096
+    )
   }
 
-  test("#416: above StagingPartitions the rows are staged and partitioned at the flush -- 400 partitions, several flushes, sliced batches") {
+  test(
+    "#416: above StagingPartitions the rows are staged and partitioned at the flush -- 400 partitions, several flushes, sliced batches"
+  ) {
     // The staged path: every partition's rows arrive in one gather per flush; a small bufferBytes forces
     // several flushes (a record batch per partition per flush) and batchRows = 100 slices a partition's rows.
-    roundTrip(numPartitions = 400, batches = Seq((3000, true), (2000, false), (2500, true), (1000, false)), flushBytes = 1L << 20)
-    roundTrip(numPartitions = 400, batches = Seq((3000, true), (2000, false), (2500, true), (1000, false)), flushBytes = 1L << 20, bufferBytes = 64L << 10)
-    roundTrip(numPartitions = 400, batches = Seq((3000, true), (2000, false), (2500, true)), flushBytes = 4096, batchRows = 100)
+    roundTrip(
+      numPartitions = 400,
+      batches = Seq((3000, true), (2000, false), (2500, true), (1000, false)),
+      flushBytes = 1L << 20
+    )
+    roundTrip(
+      numPartitions = 400,
+      batches = Seq((3000, true), (2000, false), (2500, true), (1000, false)),
+      flushBytes = 1L << 20,
+      bufferBytes = 64L << 10
+    )
+    roundTrip(
+      numPartitions = 400,
+      batches = Seq((3000, true), (2000, false), (2500, true)),
+      flushBytes = 4096,
+      batchRows = 100
+    )
   }
 
-  test("#340: the writer's real allocation stays within bufferBytes -- 200 partitions of string-heavy batches under a 24 MB limit") {
+  test(
+    "#340: the writer's real allocation stays within bufferBytes -- 200 partitions of string-heavy batches under a 24 MB limit"
+  ) {
     // Before #340 the flush decision counted the slices' used bytes while the allocator held their
     // doubled capacity, the per-slice string dictionaries and every partition's last record batch in
     // its root: a 64 MB budget was 1.1 GB in an executor. With the cap on the allocator's own figure
@@ -325,7 +415,13 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     // overrun zeroed the first value of that slice's BigInt column (partition 26, row 85).
     val limited = allocator.newChildAllocator("writer-340", 0L, 24L << 20)
     try {
-      roundTrip(numPartitions = 200, batches = Seq.fill(40)((8192, false)), flushBytes = 1L << 20, bufferBytes = 8L << 20, writerAllocator = limited)
+      roundTrip(
+        numPartitions = 200,
+        batches = Seq.fill(40)((8192, false)),
+        flushBytes = 1L << 20,
+        bufferBytes = 8L << 20,
+        writerAllocator = limited
+      )
       assert(limited.getPeakMemoryAllocation <= (24L << 20), s"peak ${limited.getPeakMemoryAllocation}")
       assert(limited.getAllocatedMemory === 0L, "everything released at close")
     } finally limited.close()
@@ -348,7 +444,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     try {
       (0 until 3).foreach { _ =>
         val (b, rows) = batch(400, arena, dictStrings = false)
-        try writer.write(b, new Array[Int](400)) finally b.close()
+        try writer.write(b, new Array[Int](400))
+        finally b.close()
         expected ++= rows
       }
       writer.finish()
@@ -381,7 +478,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     try {
       (0 until 12).foreach { _ =>
         val (b, rows) = batch(100, arena, dictStrings = false)
-        try writer.write(b, new Array[Int](100)) finally b.close()
+        try writer.write(b, new Array[Int](100))
+        finally b.close()
         expected ++= rows
       }
       writer.finish()
@@ -392,7 +490,10 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         while (reader.hasNext) {
           val b = reader.next()
           sizes += b.numRows()
-          assert(b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "the coalesced column comes out plain")
+          assert(
+            b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector],
+            "the coalesced column comes out plain"
+          )
           got ++= read(b)
         }
         assert(sizes.sum === 1200)
@@ -406,41 +507,59 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
   // or a reader meeting the column's (all-null) id batches refuses the stream. Blocks of 750 rows pass
   // through as ids (#444); blocks of 25 rows (100-row writes over four partitions) are decoded through the dictionary's heap copy, which must take an empty dictionary -- no offsets buffer at all -- as no
   // entries rather than fail (#447's follow-on, q22/q4 at 1 TB).
-  Seq((3, 1000), (30, 100)).foreach { case (writes, rowsPerWrite) => test(s"#416: a string column that is null in every row reads back from the per-file dictionary (TPC-DS c_login), $writes writes of $rowsPerWrite rows") {
-    val dir = Files.createTempDirectory("svipc")
-    val path = dir.resolve("map.ipc")
-    val nullSchema = StructType(Seq(StructField("i", IntegerType), StructField("s", StringType)))
-    val parts = 4
-    val writer = new PartitionedIpcWriter(nullSchema, parts, allocator, path, 1L << 20, batchRows = 25)
-    val arena = Arena.ofConfined()
-    try {
-      (0 until writes).foreach { _ =>
-        val n = rowsPerWrite
-        val ints = Array.tabulate(n)(identity)
-        val strings = Array.fill[String](n)(null)
-        val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
-        io.sparkvector.kernels.Bitmap.fill(all, n, true)
-        val columns: Array[ColumnVector] = Array(
-          ArrowOutput.compact("i", IntegerType, ArrowLayout.ofInts(arena, ints, Array.fill(n)(false)), all, n, allocator),
-          ArrowOutput.compact("s", StringType, ArrowLayout.ofStrings(arena, strings), all, n, allocator))
-        val b = new ColumnarBatch(columns, n)
-        try writer.write(b, Array.tabulate(n)(_ % parts)) finally b.close()
-      }
-      writer.finish()
-      var rows = 0
-      (0 until parts).foreach { p =>
-        val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator, nullSchema)
-        try while (reader.hasNext) {
-          val got = reader.next()
-          (0 until got.numRows()).foreach { r => assert(got.column(1).isNullAt(r), s"row $r of partition $p should be null") }
-          rows += got.numRows()
-        } finally reader.close()
-      }
-      assert(rows === 3000)
-    } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
-  } }
+  Seq((3, 1000), (30, 100)).foreach { case (writes, rowsPerWrite) =>
+    test(
+      s"#416: a string column that is null in every row reads back from the per-file dictionary (TPC-DS c_login), $writes writes of $rowsPerWrite rows"
+    ) {
+      val dir = Files.createTempDirectory("svipc")
+      val path = dir.resolve("map.ipc")
+      val nullSchema = StructType(Seq(StructField("i", IntegerType), StructField("s", StringType)))
+      val parts = 4
+      val writer = new PartitionedIpcWriter(nullSchema, parts, allocator, path, 1L << 20, batchRows = 25)
+      val arena = Arena.ofConfined()
+      try {
+        (0 until writes).foreach { _ =>
+          val n = rowsPerWrite
+          val ints = Array.tabulate(n)(identity)
+          val strings = Array.fill[String](n)(null)
+          val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
+          io.sparkvector.kernels.Bitmap.fill(all, n, true)
+          val columns: Array[ColumnVector] = Array(
+            ArrowOutput.compact(
+              "i",
+              IntegerType,
+              ArrowLayout.ofInts(arena, ints, Array.fill(n)(false)),
+              all,
+              n,
+              allocator
+            ),
+            ArrowOutput.compact("s", StringType, ArrowLayout.ofStrings(arena, strings), all, n, allocator)
+          )
+          val b = new ColumnarBatch(columns, n)
+          try writer.write(b, Array.tabulate(n)(_ % parts))
+          finally b.close()
+        }
+        writer.finish()
+        var rows = 0
+        (0 until parts).foreach { p =>
+          val reader = new PartitionedIpcFile.PartitionReader(path, p, allocator, nullSchema)
+          try while (reader.hasNext) {
+              val got = reader.next()
+              (0 until got.numRows()).foreach { r =>
+                assert(got.column(1).isNullAt(r), s"row $r of partition $p should be null")
+              }
+              rows += got.numRows()
+            }
+          finally reader.close()
+        }
+        assert(rows === 3000)
+      } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+    }
+  }
 
-  test("#356: a record batch's string column is dictionary-encoded only when the dictionary pays; the reader takes either per batch") {
+  test(
+    "#356: a record batch's string column is dictionary-encoded only when the dictionary pays; the reader takes either per batch"
+  ) {
     import org.apache.arrow.vector.{IntVector, VarCharVector}
     // The encoder itself: all-distinct gives up at the sample (nothing allocated stays behind), repeats encode.
     def strings(values: Seq[String]): VarCharVector = {
@@ -456,12 +575,16 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     val repeats = strings((0 until 2000).map(i => if (i % 7 == 0) null else s"state-${i % 40}"))
     try {
       val (ids, dict) = PartitionedIpcWriter.encodeStrings(repeats, "t", allocator)
-      try { assert(dict.getValueCount === 40); assert(ids.getValueCount === 2000); assert(ids.isNull(0) && ids.get(1) === 0 && ids.get(41) === 0) }
-      finally { ids.close(); dict.close() }
+      try {
+        assert(dict.getValueCount === 40); assert(ids.getValueCount === 2000);
+        assert(ids.isNull(0) && ids.get(1) === 0 && ids.get(41) === 0)
+      } finally { ids.close(); dict.close() }
       // ratio 1 always encodes, 0 never.
       val distinct600 = strings((0 until 600).map(i => s"u$i"))
-      try { val (i1, d1) = PartitionedIpcWriter.encodeStrings(distinct600, "t", allocator, maxRatio = 1.0); i1.close(); d1.close() }
-      finally distinct600.close()
+      try {
+        val (i1, d1) = PartitionedIpcWriter.encodeStrings(distinct600, "t", allocator, maxRatio = 1.0); i1.close();
+        d1.close()
+      } finally distinct600.close()
       assert(PartitionedIpcWriter.encodeStrings(repeats, "t", allocator, maxRatio = 0.0) == null)
     } finally repeats.close()
 
@@ -481,7 +604,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
         val expected = mutable.ArrayBuffer.empty[Row]
         (0 until 3).foreach { _ =>
           val (b, rows) = batch(3000, arena, dictStrings = false)
-          try writer.write(b, new Array[Int](3000)) finally b.close()
+          try writer.write(b, new Array[Int](3000))
+          finally b.close()
           expected ++= rows
         }
         writer.finish()
@@ -492,7 +616,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           while (reader.hasNext) {
             val b = reader.next()
             batches += 1
-            if (b.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainS += 1 else encodedS += 1
+            if (b.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainS += 1
+            else encodedS += 1
             assert(b.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
             got ++= read(b)
           }
@@ -502,8 +627,14 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
     }
     val (b1, e1, p1) = roundTripFreeze(8192)
-    assert(e1 == 0 && p1 >= 1, s"frozen before the first flush: every batch plain ($b1 batches: $e1 encoded, $p1 plain)")
+    assert(
+      e1 == 0 && p1 >= 1,
+      s"frozen before the first flush: every batch plain ($b1 batches: $e1 encoded, $p1 plain)"
+    )
     val (b2, e2, p2) = roundTripFreeze(1000)
-    assert(e2 >= 1 && p2 >= 1, s"ids flushed before the freeze stay encoded, the rest plain ($b2 batches: $e2 encoded, $p2 plain)")
+    assert(
+      e2 >= 1 && p2 >= 1,
+      s"ids flushed before the freeze stay encoded, the rest plain ($b2 batches: $e2 encoded, $p2 plain)"
+    )
   }
 }

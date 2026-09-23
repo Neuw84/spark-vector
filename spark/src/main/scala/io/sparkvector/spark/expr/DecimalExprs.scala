@@ -74,8 +74,8 @@ final case class DecimalArithExpr(
     rightType: DecimalType,
     dataType: DecimalType,
     ansi: Boolean,
-    queryContext: QueryContext)
-    extends VectorExpr {
+    queryContext: QueryContext
+) extends VectorExpr {
 
   override def children: Seq[VectorExpr] = Seq(left, right)
 
@@ -88,7 +88,12 @@ final case class DecimalArithExpr(
         (left, right) match {
           case (l, lit: LiteralExpr) =>
             val a = DecimalExprs.rescaled(l.eval(ctx), leftType.scale, s, ctx)
-            ArithKernels.arithScalar(op, a, java.lang.Long.valueOf(DecimalExprs.unscaled(lit.value, rightType, s)), data)
+            ArithKernels.arithScalar(
+              op,
+              a,
+              java.lang.Long.valueOf(DecimalExprs.unscaled(lit.value, rightType, s)),
+              data
+            )
             SegmentVectorBuffers.fixedWidth(VecType.INT64, n, a.validity(), data)
           case (lit: LiteralExpr, r) =>
             val b = DecimalExprs.rescaled(r.eval(ctx), rightType.scale, s, ctx)
@@ -104,11 +109,21 @@ final case class DecimalArithExpr(
         (left, right) match {
           case (l, lit: LiteralExpr) =>
             val a = l.eval(ctx)
-            ArithKernels.arithScalar(op, a, java.lang.Long.valueOf(lit.value.asInstanceOf[Decimal].toUnscaledLong), data)
+            ArithKernels.arithScalar(
+              op,
+              a,
+              java.lang.Long.valueOf(lit.value.asInstanceOf[Decimal].toUnscaledLong),
+              data
+            )
             SegmentVectorBuffers.fixedWidth(VecType.INT64, n, a.validity(), data)
           case (lit: LiteralExpr, r) =>
             val b = r.eval(ctx)
-            ArithKernels.arithScalar(op, b, java.lang.Long.valueOf(lit.value.asInstanceOf[Decimal].toUnscaledLong), data)
+            ArithKernels.arithScalar(
+              op,
+              b,
+              java.lang.Long.valueOf(lit.value.asInstanceOf[Decimal].toUnscaledLong),
+              data
+            )
             SegmentVectorBuffers.fixedWidth(VecType.INT64, n, b.validity(), data)
           case (l, r) =>
             val a = l.eval(ctx)
@@ -144,7 +159,16 @@ final case class DecimalArithExpr(
         if (d == 0L) { divisorZero = ctx.bitmap(); Bitmap.fill(divisorZero, n, true) }
       case (lit: LiteralExpr, r) =>
         val b = r.eval(ctx)
-        DecimalKernels.scalarDivide(lit.value.asInstanceOf[Decimal].toUnscaledLong, b, s1, s2, dataType.scale, dataType.precision, data, overflow)
+        DecimalKernels.scalarDivide(
+          lit.value.asInstanceOf[Decimal].toUnscaledLong,
+          b,
+          s1,
+          s2,
+          dataType.scale,
+          dataType.precision,
+          data,
+          overflow
+        )
         validity = b.validity()
         divisorZero = zeroMask(b, ctx)
       case (l, r) =>
@@ -164,9 +188,20 @@ final case class DecimalArithExpr(
       if (ansi) {
         // Recompute the offending quotient with Spark's own arithmetic for the error message.
         val i = DecimalExprs.firstSet(overflowRows, n)
-        val a = left match { case lit: LiteralExpr => lit.value.asInstanceOf[Decimal]; case e => Decimal.createUnsafe(e.eval(ctx).getLong(i), leftType.precision, s1) }
-        val b = right match { case lit: LiteralExpr => lit.value.asInstanceOf[Decimal]; case e => Decimal.createUnsafe(e.eval(ctx).getLong(i), rightType.precision, s2) }
-        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(a / b, dataType.precision, dataType.scale, queryContext)
+        val a = left match {
+          case lit: LiteralExpr => lit.value.asInstanceOf[Decimal];
+          case e => Decimal.createUnsafe(e.eval(ctx).getLong(i), leftType.precision, s1)
+        }
+        val b = right match {
+          case lit: LiteralExpr => lit.value.asInstanceOf[Decimal];
+          case e => Decimal.createUnsafe(e.eval(ctx).getLong(i), rightType.precision, s2)
+        }
+        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+          a / b,
+          dataType.precision,
+          dataType.scale,
+          queryContext
+        )
       }
       validity = DecimalExprs.without(ctx, validity, overflow)
     }
@@ -185,8 +220,13 @@ final case class DecimalArithExpr(
  * long/int (truncation), decimal to double and double to decimal. A value that does not fit the
  * target is null in legacy mode and an error in ANSI mode, as in Spark's `Cast`.
  */
-final case class DecimalCastExpr(child: VectorExpr, from: DataType, dataType: DataType, ansi: Boolean, queryContext: QueryContext)
-    extends VectorExpr {
+final case class DecimalCastExpr(
+    child: VectorExpr,
+    from: DataType,
+    dataType: DataType,
+    ansi: Boolean,
+    queryContext: QueryContext
+) extends VectorExpr {
 
   override def children: Seq[VectorExpr] = Seq(child)
 
@@ -235,7 +275,11 @@ final case class DecimalCastExpr(child: VectorExpr, from: DataType, dataType: Da
         val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
         if (count > 0 && ansi) {
           val i = DecimalExprs.firstSet(rows, n)
-          throw org.apache.spark.sql.vector.VectorErrors.castOverflow(Decimal.createUnsafe(a.getLong(i), f.precision, f.scale), f, IntegerType)
+          throw org.apache.spark.sql.vector.VectorErrors.castOverflow(
+            Decimal.createUnsafe(a.getLong(i), f.precision, f.scale),
+            f,
+            IntegerType
+          )
         }
         // Legacy mode wraps, exactly what the kernel wrote.
         SegmentVectorBuffers.fixedWidth(VecType.INT32, n, a.validity(), data)
@@ -244,7 +288,14 @@ final case class DecimalCastExpr(child: VectorExpr, from: DataType, dataType: Da
   }
 
   /** Applies the invalid-row bitmap: ANSI raises for the first affected row, legacy nulls them. */
-  private def finishDecimal(ctx: EvalContext, in: VectorBuffers, data: MemorySegment, invalid: MemorySegment, f: DataType, t: DecimalType): VectorBuffers = {
+  private def finishDecimal(
+      ctx: EvalContext,
+      in: VectorBuffers,
+      data: MemorySegment,
+      invalid: MemorySegment,
+      f: DataType,
+      t: DecimalType
+  ): VectorBuffers = {
     val n = ctx.numRows
     val (rows, count) = DecimalExprs.affected(ctx, invalid, in.validity())
     var validity = in.validity()
@@ -261,7 +312,12 @@ final case class DecimalCastExpr(child: VectorExpr, from: DataType, dataType: Da
             Decimal(d)
           case _ => throw new IllegalStateException(s"unexpected source type $f")
         }
-        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(value, t.precision, t.scale, queryContext)
+        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+          value,
+          t.precision,
+          t.scale,
+          queryContext
+        )
       }
       validity = DecimalExprs.without(ctx, validity, invalid)
     }
@@ -295,7 +351,8 @@ final case class MakeDecimalExpr(child: VectorExpr, dataType: DecimalType, nullO
     else {
       val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
       if (count == 0) a
-      else if (nullOnOverflow) SegmentVectorBuffers.fixedWidth(VecType.INT64, n, DecimalExprs.without(ctx, a.validity(), invalid), a.data())
+      else if (nullOnOverflow)
+        SegmentVectorBuffers.fixedWidth(VecType.INT64, n, DecimalExprs.without(ctx, a.validity(), invalid), a.data())
       else {
         // Decimal.set raises Spark's own error for the value.
         Decimal(a.getLong(DecimalExprs.firstSet(rows, n)), dataType.precision, dataType.scale)
@@ -304,7 +361,6 @@ final case class MakeDecimalExpr(child: VectorExpr, dataType: DecimalType, nullO
     }
   }
 }
-
 
 /** Rows an operator had to recompute exactly because the speculative narrow result overflowed 64 bits (#26). */
 object SpeculativeDecimals {
@@ -322,19 +378,23 @@ trait SpeculativeDecimalExpr extends VectorExpr {
   def dataType: DecimalType
   def evalChecked(ctx: EvalContext): SpeculativeChecked
   override def eval(ctx: EvalContext): VectorBuffers =
-    throw new IllegalStateException(s"speculative narrow decimal ${dataType.simpleString} is consumed only by the wide decimal aggregates")
+    throw new IllegalStateException(
+      s"speculative narrow decimal ${dataType.simpleString} is consumed only by the wide decimal aggregates"
+    )
 }
 
 /** One operand as a speculative loop reads it: a literal, a lane, or a speculative child with its escalated rows. */
 private[expr] final class SpeculativeOperand(e: VectorExpr, ctx: EvalContext) {
   val literal: Boolean = e.isInstanceOf[LiteralExpr]
   val lit: Long = if (literal) e.asInstanceOf[LiteralExpr].value.asInstanceOf[Decimal].toUnscaledLong else 0L
-  private val checked: SpeculativeChecked = e match { case s: SpeculativeDecimalExpr => s.evalChecked(ctx); case _ => null }
+  private val checked: SpeculativeChecked =
+    e match { case s: SpeculativeDecimalExpr => s.evalChecked(ctx); case _ => null }
   private val lane: VectorBuffers = if (literal) null else if (checked != null) checked.lane else e.eval(ctx)
   private val validity = if (lane == null) null else lane.validity()
   private var k = 0 // cursor into the child's escalated rows (rows ascend with i)
   /** Row `i` is null (a real null, not an escalation). */
   def isNull(i: Int): Boolean = !literal && validity != null && !Bitmap.isSet(validity, i) && !escalated(i)
+
   /** Row `i` was escalated by the child: its exact value is `exactAt`. */
   def escalated(i: Int): Boolean = {
     if (checked == null) return false
@@ -355,10 +415,17 @@ private[expr] final class Escalations(dataType: DecimalType, ansi: Boolean, quer
   def add(i: Int, v: java.math.BigInteger): Unit = {
     if (v.abs.compareTo(limit) >= 0) {
       // Past the declared precision: Spark's operator yields null (legacy) or raises (ANSI) for this row.
-      if (ansi) throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(Decimal(new java.math.BigDecimal(v, dataType.scale)), dataType.precision, dataType.scale, queryContext)
+      if (ansi) throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+        Decimal(new java.math.BigDecimal(v, dataType.scale)),
+        dataType.precision,
+        dataType.scale,
+        queryContext
+      )
     } else {
       if (rows == null) { rows = new Array[Int](8); exact = new Array[java.math.BigInteger](8) }
-      if (count == rows.length) { rows = java.util.Arrays.copyOf(rows, count * 2); exact = java.util.Arrays.copyOf(exact, count * 2) }
+      if (count == rows.length) {
+        rows = java.util.Arrays.copyOf(rows, count * 2); exact = java.util.Arrays.copyOf(exact, count * 2)
+      }
       rows(count) = i; exact(count) = v; count += 1
     }
   }
@@ -391,8 +458,8 @@ final case class SpeculativeDecimalMulExpr(
     rightType: DecimalType,
     dataType: DecimalType,
     ansi: Boolean,
-    queryContext: QueryContext)
-    extends SpeculativeDecimalExpr {
+    queryContext: QueryContext
+) extends SpeculativeDecimalExpr {
 
   override def children: Seq[VectorExpr] = Seq(left, right)
 
@@ -410,8 +477,9 @@ final case class SpeculativeDecimalMulExpr(
         else {
           val x = a.narrow(i); val y = b.narrow(i)
           val lo = x * y
-          if (Math.multiplyHigh(x, y) == (lo >> 63)) { data.set(VectorBuffers.LE_LONG, i.toLong << 3, lo); Bitmap.set(validity, i) }
-          else out.add(i, java.math.BigInteger.valueOf(x).multiply(java.math.BigInteger.valueOf(y)))
+          if (Math.multiplyHigh(x, y) == (lo >> 63)) {
+            data.set(VectorBuffers.LE_LONG, i.toLong << 3, lo); Bitmap.set(validity, i)
+          } else out.add(i, java.math.BigInteger.valueOf(x).multiply(java.math.BigInteger.valueOf(y)))
         }
       }
       i += 1
@@ -439,8 +507,8 @@ final case class SpeculativeDecimalAddExpr(
     rightType: DecimalType,
     dataType: DecimalType,
     ansi: Boolean,
-    queryContext: QueryContext)
-    extends SpeculativeDecimalExpr {
+    queryContext: QueryContext
+) extends SpeculativeDecimalExpr {
   require(dataType.scale == math.max(leftType.scale, rightType.scale), "the declared scale must be the common scale")
 
   override def children: Seq[VectorExpr] = Seq(left, right)
@@ -504,8 +572,8 @@ final case class WideDecimalArithExpr(
     rightType: DecimalType,
     dataType: DecimalType,
     ansi: Boolean,
-    queryContext: QueryContext)
-    extends VectorExpr {
+    queryContext: QueryContext
+) extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(left, right)
 
   private def operand(e: VectorExpr, buffers: VectorBuffers, shift: Int): WideDecimalKernels.Operand = e match {
@@ -518,7 +586,8 @@ final case class WideDecimalArithExpr(
     case _ => WideDecimalKernels.Operand.of(buffers, shift)
   }
 
-  private def validityOf(e: VectorExpr, buffers: VectorBuffers): MemorySegment = if (buffers == null) null else buffers.validity()
+  private def validityOf(e: VectorExpr, buffers: VectorBuffers): MemorySegment =
+    if (buffers == null) null else buffers.validity()
 
   override def eval(ctx: EvalContext): VectorBuffers = {
     val n = ctx.numRows
@@ -533,13 +602,42 @@ final case class WideDecimalArithExpr(
     op match {
       case ArithOp.ADD | ArithOp.SUB =>
         val working = math.max(s1, s2)
-        WideDecimalKernels.addSub(operand(left, a, working - s1), operand(right, b, working - s2), op == ArithOp.SUB,
-          working, dataType.scale, dataType.precision, n, data, overflow)
+        WideDecimalKernels.addSub(
+          operand(left, a, working - s1),
+          operand(right, b, working - s2),
+          op == ArithOp.SUB,
+          working,
+          dataType.scale,
+          dataType.precision,
+          n,
+          data,
+          overflow
+        )
       case ArithOp.MUL =>
-        WideDecimalKernels.mul(operand(left, a, 0), operand(right, b, 0), s1 + s2, dataType.scale, dataType.precision, n, data, overflow)
+        WideDecimalKernels.mul(
+          operand(left, a, 0),
+          operand(right, b, 0),
+          s1 + s2,
+          dataType.scale,
+          dataType.precision,
+          n,
+          data,
+          overflow
+        )
       case ArithOp.DIV =>
         divisorZero = ctx.bitmap()
-        WideDecimalKernels.divide(operand(left, a, 0), s1, operand(right, b, 0), s2, dataType.scale, dataType.precision, n, data, overflow, divisorZero)
+        WideDecimalKernels.divide(
+          operand(left, a, 0),
+          s1,
+          operand(right, b, 0),
+          s2,
+          dataType.scale,
+          dataType.precision,
+          n,
+          data,
+          overflow,
+          divisorZero
+        )
     }
     if (divisorZero != null) {
       val (_, zeroCount) = DecimalExprs.affected(ctx, divisorZero, validity)
@@ -561,7 +659,12 @@ final case class WideDecimalArithExpr(
           case ArithOp.MUL => x * y
           case ArithOp.DIV => x / y
         }
-        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(v, dataType.precision, dataType.scale, queryContext)
+        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+          v,
+          dataType.precision,
+          dataType.scale,
+          queryContext
+        )
       }
       validity = DecimalExprs.without(ctx, validity, overflow)
     }
@@ -569,7 +672,9 @@ final case class WideDecimalArithExpr(
   }
 
   private def bigAt(e: VectorExpr, buffers: VectorBuffers, i: Int): java.math.BigInteger = e match {
-    case lit: LiteralExpr => lit.number match { case bi: java.math.BigInteger => bi; case num => java.math.BigInteger.valueOf(num.longValue()) }
+    case lit: LiteralExpr => lit.number match {
+        case bi: java.math.BigInteger => bi; case num => java.math.BigInteger.valueOf(num.longValue())
+      }
     case _ if buffers.`type`() == VecType.DECIMAL128 => buffers.getDecimal128(i)
     case _ => java.math.BigInteger.valueOf(buffers.getLong(i))
   }
@@ -591,8 +696,13 @@ final case class WideDecimalArithExpr(
  * int or string. A value that does not fit the target is null in legacy mode and Spark's
  * `CAST_OVERFLOW` error in ANSI mode, for the active rows only, as in [[DecimalCastExpr]].
  */
-final case class WideDecimalCastExpr(child: VectorExpr, from: DataType, dataType: DataType, ansi: Boolean, queryContext: QueryContext)
-    extends VectorExpr {
+final case class WideDecimalCastExpr(
+    child: VectorExpr,
+    from: DataType,
+    dataType: DataType,
+    ansi: Boolean,
+    queryContext: QueryContext
+) extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
 
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -622,10 +732,17 @@ final case class WideDecimalCastExpr(child: VectorExpr, from: DataType, dataType
         // turns that into null in every mode: not an overflow, so never an ANSI error (#326).
         val nonFinite = ctx.bitmap()
         var i = 0
-        while (i < n) { if (!a.isNull(i) && !java.lang.Double.isFinite(a.getDouble(i))) Bitmap.set(nonFinite, i); i += 1 }
+        while (i < n) {
+          if (!a.isNull(i) && !java.lang.Double.isFinite(a.getDouble(i))) Bitmap.set(nonFinite, i); i += 1
+        }
         BitmapKernels.andNot(invalid, nonFinite, invalid, n)
         val out = finish(ctx, a, VecType.DECIMAL128, data, invalid)
-        SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, n, DecimalExprs.without(ctx, out.validity(), nonFinite), data)
+        SegmentVectorBuffers.fixedWidth(
+          VecType.DECIMAL128,
+          n,
+          DecimalExprs.without(ctx, out.validity(), nonFinite),
+          data
+        )
       case (f: DecimalType, DoubleType) =>
         val data = ArrowLayout.allocateData(ctx.arena, VecType.FLOAT64, n)
         WideDecimalCastKernels.toDouble(a, f.scale, n, data)
@@ -652,7 +769,8 @@ final case class WideDecimalCastExpr(child: VectorExpr, from: DataType, dataType
 
   /** The Spark value of input row `i`, for the ANSI error message. */
   private def sourceValue(a: VectorBuffers, i: Int): Any = from match {
-    case f: DecimalType if a.`type`() == VecType.DECIMAL128 => Decimal(new java.math.BigDecimal(a.getDecimal128(i), f.scale))
+    case f: DecimalType if a.`type`() == VecType.DECIMAL128 =>
+      Decimal(new java.math.BigDecimal(a.getDecimal128(i), f.scale))
     case f: DecimalType => Decimal.createUnsafe(a.getLong(i), f.precision, f.scale)
     case IntegerType | DateType => a.getInt(i)
     case LongType => a.getLong(i)
@@ -668,7 +786,13 @@ final case class WideDecimalCastExpr(child: VectorExpr, from: DataType, dataType
     }
   }
 
-  private def finish(ctx: EvalContext, a: VectorBuffers, lane: VecType, data: MemorySegment, invalid: MemorySegment): VectorBuffers = {
+  private def finish(
+      ctx: EvalContext,
+      a: VectorBuffers,
+      lane: VecType,
+      data: MemorySegment,
+      invalid: MemorySegment
+  ): VectorBuffers = {
     val n = ctx.numRows
     val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
     var validity = a.validity()

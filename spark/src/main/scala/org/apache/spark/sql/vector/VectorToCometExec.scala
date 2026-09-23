@@ -28,7 +28,8 @@ case class VectorToCometExec(child: SparkPlan) extends UnaryExecNode {
 
   override lazy val metrics: Map[String, SQLMetric] = Map(
     "numOutputBatches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"),
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows")
+  )
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val names = output.map(_.name).toArray
@@ -79,16 +80,18 @@ object CometShuffle {
     def flag(key: String, alt: String) =
       conf.getConfString(key, conf.getConfString(alt, "true")).trim.equalsIgnoreCase("true")
     isAvailable &&
-      flag("spark.comet.shuffle.enabled", "spark.comet.exec.shuffle.enabled") &&
-      shuffleManager == ManagerClass
+    flag("spark.comet.shuffle.enabled", "spark.comet.exec.shuffle.enabled") &&
+    shuffleManager == ManagerClass
   }
 
   def isCometExchange(plan: SparkPlan): Boolean = plan.getClass.getName == ExchangeClass
 
   /** Comet's own switch for native range partitioning (default on). */
   def rangePartitioningEnabled(conf: SQLConf): Boolean =
-    conf.getConfString("spark.comet.shuffle.native.partitioning.range.enabled",
-      conf.getConfString("spark.comet.native.shuffle.partitioning.range.enabled", "true")).trim.equalsIgnoreCase("true")
+    conf.getConfString(
+      "spark.comet.shuffle.native.partitioning.range.enabled",
+      conf.getConfString("spark.comet.native.shuffle.partitioning.range.enabled", "true")
+    ).trim.equalsIgnoreCase("true")
 
   /** True for a Comet exchange already using the native writer. */
   def isNative(plan: SparkPlan): Boolean =
@@ -100,12 +103,20 @@ object CometShuffle {
       child: SparkPlan,
       originalPlan: ShuffleExchangeLike,
       origin: ShuffleOrigin,
-      advisoryPartitionSize: Option[Long]): SparkPlan = {
+      advisoryPartitionSize: Option[Long]
+  ): SparkPlan = {
     val cls = exchange.getOrElse(throw new IllegalStateException("Comet is not on the classpath"))
     val nativeType = Class.forName(NativeType, true, cls.getClassLoader).getField("MODULE$").get(null)
     val ctor = cls.getConstructors.find(_.getParameterCount == 6)
       .getOrElse(throw new IllegalStateException("unexpected CometShuffleExchangeExec constructor"))
-    ctor.newInstance(partitioning, child, originalPlan, origin, nativeType, advisoryPartitionSize).asInstanceOf[SparkPlan]
+    ctor.newInstance(
+      partitioning,
+      child,
+      originalPlan,
+      origin,
+      nativeType,
+      advisoryPartitionSize
+    ).asInstanceOf[SparkPlan]
   }
 
   /** Rebuilds an existing Comet exchange (any type) as a native one over `newChild`. */
@@ -116,7 +127,8 @@ object CometShuffle {
       newChild,
       field[ShuffleExchangeLike]("originalPlan"),
       field[ShuffleOrigin]("shuffleOrigin"),
-      field[Option[Long]]("advisoryPartitionSize"))
+      field[Option[Long]]("advisoryPartitionSize")
+    )
   }
 
   def native(spark: ShuffleExchangeExec, newChild: SparkPlan): SparkPlan =

@@ -1,6 +1,14 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, DateKernels, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  ArrowLayout,
+  Bitmap,
+  DateKernels,
+  SegmentVectorBuffers,
+  StringConcatKernels,
+  VecType,
+  VectorBuffers
+}
 import org.apache.spark.sql.types.{DataType, LongType, StringType, TimestampType}
 import org.apache.spark.sql.vector.SparkFormatters
 import org.apache.spark.unsafe.types.UTF8String
@@ -18,10 +26,18 @@ private[expr] object Instants {
  * `TimestampFormatter` for the session zone, applied per row, the results written as one UTF8 lane.
  * A date side needs a fixed offset (its instant is our arithmetic); a timestamp side takes any zone.
  */
-final case class FormatInstantExpr(child: VectorExpr, childIsDate: Boolean, secondsIn: Boolean, pattern: String, timeZoneId: String, offsetMicros: Long) extends VectorExpr {
+final case class FormatInstantExpr(
+    child: VectorExpr,
+    childIsDate: Boolean,
+    secondsIn: Boolean,
+    pattern: String,
+    timeZoneId: String,
+    offsetMicros: Long
+) extends VectorExpr {
   override def dataType: DataType = StringType
   override def children: Seq[VectorExpr] = Seq(child)
-  @transient private lazy val formatter = SparkFormatters.timestampFormatter(pattern, SparkFormatters.zoneId(timeZoneId))
+  @transient private lazy val formatter =
+    SparkFormatters.timestampFormatter(pattern, SparkFormatters.zoneId(timeZoneId))
 
   override def eval(ctx: EvalContext): VectorBuffers = {
     val v = CaseWhenExpr.materialise(child, ctx)
@@ -31,7 +47,8 @@ final case class FormatInstantExpr(child: VectorExpr, childIsDate: Boolean, seco
     while (i < n) {
       if (v.validity() == null || Bitmap.isSet(v.validity(), i)) {
         val micros =
-          if (secondsIn) v.data().getAtIndex(VectorBuffers.LE_LONG, i) * 1000000L // Spark multiplies without an overflow check
+          if (secondsIn)
+            v.data().getAtIndex(VectorBuffers.LE_LONG, i) * 1000000L // Spark multiplies without an overflow check
           else Instants.micros(v, childIsDate, offsetMicros, i)
         rows(i) = UTF8String.fromString(formatter.format(micros)).getBytes
       }
@@ -61,7 +78,12 @@ final case class UnixTimestampExpr(child: VectorExpr, childIsDate: Boolean, offs
 }
 
 /** `date_trunc(literal unit, ts)` under a fixed offset: Spark's `truncTimestamp` -- floor in local time. */
-final case class TruncTimestampExpr(unit: TruncTimestampExpr.Unit, child: VectorExpr, childIsDate: Boolean, offsetMicros: Long) extends VectorExpr {
+final case class TruncTimestampExpr(
+    unit: TruncTimestampExpr.Unit,
+    child: VectorExpr,
+    childIsDate: Boolean,
+    offsetMicros: Long
+) extends VectorExpr {
   override def dataType: DataType = TimestampType
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
@@ -91,10 +113,13 @@ final case class TruncTimestampExpr(unit: TruncTimestampExpr.Unit, child: Vector
 object TruncTimestampExpr {
   sealed trait Unit
   case object Micros extends Unit
+
   /** Millisecond / second: independent of the zone. */
   final case class Sub(micros: Long) extends Unit
+
   /** Minute / hour / day: a floor in local time. */
   final case class Local(micros: Long) extends Unit
+
   /** Week / month / quarter / year: the date kernel's truncation of the local day. */
   final case class Date(unit: DateKernels.TruncUnit) extends Unit
 

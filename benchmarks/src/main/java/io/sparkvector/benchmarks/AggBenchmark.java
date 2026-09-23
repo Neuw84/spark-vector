@@ -1,12 +1,13 @@
 package io.sparkvector.benchmarks;
 
+import java.lang.foreign.Arena;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;
+
 import io.sparkvector.kernels.AggKernels;
 import io.sparkvector.kernels.ArrowLayout;
 import io.sparkvector.kernels.VectorBuffers;
 import io.sparkvector.kernels.reference.ScalarReference;
-import java.lang.foreign.Arena;
-import java.util.Random;
-import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -28,72 +29,71 @@ import org.openjdk.jmh.annotations.Warmup;
 @OperationsPerInvocation(AggBenchmark.N)
 @Warmup(iterations = 3, time = 1)
 @Measurement(iterations = 5, time = 1)
-@Fork(
-    value = 1,
-    jvmArgsAppend = {"--add-modules=jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED"})
+@Fork(value = 1,
+        jvmArgsAppend = {"--add-modules=jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED"})
 @State(Scope.Thread)
 public class AggBenchmark {
 
-  static final int N = 8192;
+    static final int N = 8192;
 
-  /** Fraction of null rows: 0 (fast path), sparse, dense. */
-  @Param({"0.0", "0.01", "0.3"})
-  double nullFraction;
+    /** Fraction of null rows: 0 (fast path), sparse, dense. */
+    @Param({"0.0", "0.01", "0.3"})
+    double nullFraction;
 
-  Arena arena;
-  VectorBuffers doubles;
-  VectorBuffers longs;
+    Arena arena;
+    VectorBuffers doubles;
+    VectorBuffers longs;
 
-  @Setup(Level.Trial)
-  public void setup() {
-    arena = Arena.ofShared();
-    Random rnd = new Random(5);
-    boolean[] nulls = nullFraction == 0.0 ? null : new boolean[N];
-    double[] d = new double[N];
-    long[] l = new long[N];
-    for (int i = 0; i < N; i++) {
-      d[i] = rnd.nextDouble() * 1000;
-      l[i] = rnd.nextLong(1_000_000);
-      if (nulls != null) {
-        nulls[i] = rnd.nextDouble() < nullFraction;
-      }
+    @Setup(Level.Trial)
+    public void setup() {
+        arena = Arena.ofShared();
+        Random rnd = new Random(5);
+        boolean[] nulls = nullFraction == 0.0 ? null : new boolean[N];
+        double[] d = new double[N];
+        long[] l = new long[N];
+        for (int i = 0; i < N; i++) {
+            d[i] = rnd.nextDouble() * 1000;
+            l[i] = rnd.nextLong(1_000_000);
+            if (nulls != null) {
+                nulls[i] = rnd.nextDouble() < nullFraction;
+            }
+        }
+        doubles = ArrowLayout.ofDoubles(arena, d, nulls);
+        longs = ArrowLayout.ofLongs(arena, l, nulls);
     }
-    doubles = ArrowLayout.ofDoubles(arena, d, nulls);
-    longs = ArrowLayout.ofLongs(arena, l, nulls);
-  }
 
-  @TearDown(Level.Trial)
-  public void tearDown() {
-    arena.close();
-  }
+    @TearDown(Level.Trial)
+    public void tearDown() {
+        arena.close();
+    }
 
-  @Benchmark
-  public double sumDouble_simd() {
-    return AggKernels.sumDouble(doubles);
-  }
+    @Benchmark
+    public double sumDouble_simd() {
+        return AggKernels.sumDouble(doubles);
+    }
 
-  @Benchmark
-  public double sumDouble_reference() {
-    return ScalarReference.sumDouble(doubles);
-  }
+    @Benchmark
+    public double sumDouble_reference() {
+        return ScalarReference.sumDouble(doubles);
+    }
 
-  @Benchmark
-  public long sumLong_simd() {
-    return AggKernels.sumLong(longs);
-  }
+    @Benchmark
+    public long sumLong_simd() {
+        return AggKernels.sumLong(longs);
+    }
 
-  @Benchmark
-  public long sumLong_reference() {
-    return ScalarReference.sumLong(longs);
-  }
+    @Benchmark
+    public long sumLong_reference() {
+        return ScalarReference.sumLong(longs);
+    }
 
-  @Benchmark
-  public double minDouble_simd() {
-    return AggKernels.minDouble(doubles);
-  }
+    @Benchmark
+    public double minDouble_simd() {
+        return AggKernels.minDouble(doubles);
+    }
 
-  @Benchmark
-  public double minDouble_reference() {
-    return ScalarReference.minDouble(doubles);
-  }
+    @Benchmark
+    public double minDouble_reference() {
+        return ScalarReference.minDouble(doubles);
+    }
 }

@@ -31,8 +31,8 @@ case class VectorRollupExec(
     levels: Seq[VectorHashAggregateExec],
     projections: Seq[Seq[Expression]],
     output: Seq[Attribute],
-    child: SparkPlan)
-    extends VectorExec {
+    child: SparkPlan
+) extends VectorExec {
 
   require(levels.nonEmpty && levels.length == projections.length)
 
@@ -62,7 +62,10 @@ case class VectorRollupExec(
   }
 
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan =
-    copy(levels = levels.updated(0, levels.head.withNewChildren(Seq(newChild)).asInstanceOf[VectorHashAggregateExec]), child = newChild)
+    copy(
+      levels = levels.updated(0, levels.head.withNewChildren(Seq(newChild)).asInstanceOf[VectorHashAggregateExec]),
+      child = newChild
+    )
 
   override def simpleString(maxFields: Int): String =
     s"VectorRollup(levels=${levels.length}, keys=${levels.head.groupingExpressions.map(_.sql).mkString(", ")})"
@@ -79,8 +82,8 @@ private[vector] class RollupChainIterator(
     levels: Array[RollupLevel],
     slots: Array[Array[VectorExpr]],
     outputAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch]
+    metrics: VectorMetrics
+) extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
   private val allocator: BufferAllocator = VectorAllocators.newChild("VectorRollupExec")
@@ -159,7 +162,10 @@ private[vector] class RollupChainIterator(
       closed = true
       releaseEmitted()
       while (!pending.isEmpty) { val p = pending.poll(); p._1.close(); if (p._2 != null) p._2.close() }
-      levels.foreach(l => try l.close() catch { case _: Exception => })
+      levels.foreach(l =>
+        try l.close()
+        catch { case _: Exception => }
+      )
       allocator.close()
     }
   }

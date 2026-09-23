@@ -50,19 +50,22 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
     } finally arena.close()
   }
 
-  private val types = Seq(IntegerType, DateType, LongType, DoubleType, BooleanType, StringType, DecimalType(7, 2), DecimalType(15, 3))
+  private val types =
+    Seq(IntegerType, DateType, LongType, DoubleType, BooleanType, StringType, DecimalType(7, 2), DecimalType(15, 3))
 
   test("OnHeapColumnVector copies into Arrow layout, with and without nulls") {
     for (dt <- types; withNulls <- Seq(true, false)) {
       val cv = new OnHeapColumnVector(n, dt)
-      try { fill(cv, dt, withNulls); check(cv, dt, withNulls) } finally cv.close()
+      try { fill(cv, dt, withNulls); check(cv, dt, withNulls) }
+      finally cv.close()
     }
   }
 
   test("OffHeapColumnVector copies into Arrow layout, with and without nulls") {
     for (dt <- types; withNulls <- Seq(true, false)) {
       val cv = new OffHeapColumnVector(n, dt)
-      try { fill(cv, dt, withNulls); check(cv, dt, withNulls) } finally cv.close()
+      try { fill(cv, dt, withNulls); check(cv, dt, withNulls) }
+      finally cv.close()
     }
   }
 
@@ -155,7 +158,8 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
         "cast(id as double) / 7 as d",
         "date_add(date '2020-01-01', cast(id % 365 as int)) as dt",
         "id % 2 = 0 as b",
-        "if(id % 10 = 0, null, concat('s', id)) as s")
+        "if(id % 10 = 0, null, concat('s', id)) as s"
+      )
       .write
       .parquet(path)
 
@@ -196,22 +200,35 @@ class SparkColumnVectorBuffersSuite extends SparkVectorFunSuite {
     // Expected values computed by Spark itself.
     val expected = df
       .selectExpr(
-        "sum(i)", "count(i)",
-        "sum(l)", "count(l)",
-        "round(sum(d))", "count(d)",
-        "sum(datediff(dt, date '1970-01-01'))", "count(dt)",
-        "sum(if(b, 1, 0))", "count(b)",
-        "sum(length(s))", "count(s)")
+        "sum(i)",
+        "count(i)",
+        "sum(l)",
+        "count(l)",
+        "round(sum(d))",
+        "count(d)",
+        "sum(datediff(dt, date '1970-01-01'))",
+        "count(dt)",
+        "sum(if(b, 1, 0))",
+        "count(b)",
+        "sum(length(s))",
+        "count(s)"
+      )
       .collect()
       .head
     def sumOf(c: Int) = byCol(c).map(_._6).sum
     def validOf(c: Int) = byCol(c).map(_._4.toLong).sum
-    assert(byCol(0).head._2 === "INT32"); assert(sumOf(0) === expected.getLong(0)); assert(validOf(0) === expected.getLong(1))
-    assert(byCol(1).head._2 === "INT64"); assert(sumOf(1) === expected.getLong(2)); assert(validOf(1) === expected.getLong(3))
-    assert(byCol(2).head._2 === "FLOAT64"); assert(math.abs(sumOf(2) - expected.getDouble(4).round) <= 1); assert(validOf(2) === expected.getLong(5))
-    assert(byCol(3).head._2 === "INT32"); assert(sumOf(3) === expected.getLong(6)); assert(validOf(3) === expected.getLong(7))
-    assert(byCol(4).head._2 === "BOOL"); assert(sumOf(4) === expected.getLong(8)); assert(validOf(4) === expected.getLong(9))
-    assert(byCol(5).head._2 === "UTF8"); assert(sumOf(5) === expected.getLong(10)); assert(validOf(5) === expected.getLong(11))
+    assert(byCol(0).head._2 === "INT32"); assert(sumOf(0) === expected.getLong(0));
+    assert(validOf(0) === expected.getLong(1))
+    assert(byCol(1).head._2 === "INT64"); assert(sumOf(1) === expected.getLong(2));
+    assert(validOf(1) === expected.getLong(3))
+    assert(byCol(2).head._2 === "FLOAT64"); assert(math.abs(sumOf(2) - expected.getDouble(4).round) <= 1);
+    assert(validOf(2) === expected.getLong(5))
+    assert(byCol(3).head._2 === "INT32"); assert(sumOf(3) === expected.getLong(6));
+    assert(validOf(3) === expected.getLong(7))
+    assert(byCol(4).head._2 === "BOOL"); assert(sumOf(4) === expected.getLong(8));
+    assert(validOf(4) === expected.getLong(9))
+    assert(byCol(5).head._2 === "UTF8"); assert(sumOf(5) === expected.getLong(10));
+    assert(validOf(5) === expected.getLong(11))
 
     info(summaries.sortBy(s => (s._1, -s._3)).take(6).map { case (c, t, len, valid, bytes, _) =>
       s"col $c $t rows=$len valid=$valid dataBytes=$bytes"

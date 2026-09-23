@@ -50,15 +50,18 @@ case class VectorMergeRowsExec(
     notMatchedBySourceInstructions: Seq[Instruction],
     checkCardinality: Boolean,
     output: Seq[Attribute],
-    child: SparkPlan)
-    extends VectorExec {
+    child: SparkPlan
+) extends VectorExec {
 
   override def outputOrdering: Seq[SortOrder] = Nil
   override def outputPartitioning: Partitioning = child.outputPartitioning
 
   /** Compiled on the driver; failure here is a bug because the rule already checked it. */
   @transient private lazy val program: MergeProgram =
-    VectorMergeRowsPlanner.compile(this).fold(r => throw new IllegalStateException(s"cannot vectorize merge: $r"), identity)
+    VectorMergeRowsPlanner.compile(this).fold(
+      r => throw new IllegalStateException(s"cannot vectorize merge: $r"),
+      identity
+    )
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val p = program
@@ -93,7 +96,8 @@ private[vector] final case class MergeProgram(
     notMatched: Seq[CompiledInstruction],
     notMatchedBySource: Seq[CompiledInstruction],
     /** Ordinal of the `__row_id` column in the child's output, -1 when the cardinality check is off. */
-    rowIdOrdinal: Int)
+    rowIdOrdinal: Int
+)
 
 object VectorMergeRowsPlanner {
 
@@ -101,27 +105,50 @@ object VectorMergeRowsPlanner {
   def reason(m: MergeRowsExec): Option[String] = compile(m).left.toOption
 
   private[vector] def compile(m: MergeRowsExec): Either[String, MergeProgram] =
-    compile(m.isSourceRowPresent, m.isTargetRowPresent, m.matchedInstructions, m.notMatchedInstructions,
-      m.notMatchedBySourceInstructions, m.checkCardinality, m.output, m.child)
+    compile(
+      m.isSourceRowPresent,
+      m.isTargetRowPresent,
+      m.matchedInstructions,
+      m.notMatchedInstructions,
+      m.notMatchedBySourceInstructions,
+      m.checkCardinality,
+      m.output,
+      m.child
+    )
 
   /** Why a hand-built operator would not compile (tests). */
   def reason(v: VectorMergeRowsExec): Option[String] = compile(v).left.toOption
 
   private[vector] def compile(v: VectorMergeRowsExec): Either[String, MergeProgram] =
-    compile(v.isSourceRowPresent, v.isTargetRowPresent, v.matchedInstructions, v.notMatchedInstructions,
-      v.notMatchedBySourceInstructions, v.checkCardinality, v.output, v.child)
+    compile(
+      v.isSourceRowPresent,
+      v.isTargetRowPresent,
+      v.matchedInstructions,
+      v.notMatchedInstructions,
+      v.notMatchedBySourceInstructions,
+      v.checkCardinality,
+      v.output,
+      v.child
+    )
 
   private def compile(
-      isSourceRowPresent: Expression, isTargetRowPresent: Expression,
-      matched: Seq[Instruction], notMatched: Seq[Instruction], notMatchedBySource: Seq[Instruction],
-      checkCardinality: Boolean, output: Seq[Attribute], child: SparkPlan): Either[String, MergeProgram] = {
+      isSourceRowPresent: Expression,
+      isTargetRowPresent: Expression,
+      matched: Seq[Instruction],
+      notMatched: Seq[Instruction],
+      notMatchedBySource: Seq[Instruction],
+      checkCardinality: Boolean,
+      output: Seq[Attribute],
+      child: SparkPlan
+  ): Either[String, MergeProgram] = {
     val input = child.output
     val rowIdOrdinal =
       if (!checkCardinality) Right(-1)
       else {
         val i = input.indexWhere(a => a.name.equalsIgnoreCase(MergeRows.ROW_ID))
         if (i < 0) Left(s"merge cardinality check without a ${MergeRows.ROW_ID} column")
-        else if (input(i).dataType != org.apache.spark.sql.types.LongType) Left(s"${MergeRows.ROW_ID} of type ${input(i).dataType.simpleString}")
+        else if (input(i).dataType != org.apache.spark.sql.types.LongType)
+          Left(s"${MergeRows.ROW_ID} of type ${input(i).dataType.simpleString}")
         else Right(i)
       }
     for {
@@ -147,11 +174,16 @@ object VectorMergeRowsPlanner {
   private def all[T](rs: Seq[Either[String, T]]): Either[String, Seq[T]] =
     rs.collectFirst { case Left(r) => r }.map(Left(_)).getOrElse(Right(rs.collect { case Right(v) => v }))
 
-  private def instruction(i: Instruction, input: Seq[Attribute], output: Seq[Attribute]): Either[String, CompiledInstruction] = {
+  private def instruction(
+      i: Instruction,
+      input: Seq[Attribute],
+      output: Seq[Attribute]
+  ): Either[String, CompiledInstruction] = {
     val outs: Either[String, Seq[Array[CompiledOutput]]] = i match {
       case Keep(_, _, out) => projection(out, input, output).map(Seq(_))
       case Discard(_) => Right(Nil)
-      case Split(_, out, other) => for (a <- projection(out, input, output); b <- projection(other, input, output)) yield Seq(a, b)
+      case Split(_, out, other) =>
+        for (a <- projection(out, input, output); b <- projection(other, input, output)) yield Seq(a, b)
       case other => Left(s"merge instruction ${other.getClass.getSimpleName} not supported")
     }
     // An unconditional clause (`WHEN MATCHED THEN ...`) carries a `true` literal; a folded `false` never fires.
@@ -171,16 +203,22 @@ object VectorMergeRowsPlanner {
    * or -- for an output type with no lane (Iceberg's struct `_partition` metadata) -- the bare input
    * column it forwards, remapped by row id at emission like the project operator does (#19).
    */
-  private def projection(exprs: Seq[Expression], input: Seq[Attribute], output: Seq[Attribute]): Either[String, Array[CompiledOutput]] = {
+  private def projection(
+      exprs: Seq[Expression],
+      input: Seq[Attribute],
+      output: Seq[Attribute]
+  ): Either[String, Array[CompiledOutput]] = {
     if (exprs.length != output.length) Left(s"merge projection of ${exprs.length} columns for ${output.length} outputs")
     else all(exprs.zip(output).map { case (e, out) =>
       if (TypeMapping.hasLane(out.dataType)) {
-        val compiled = if (TypeMapping.isSupported(out.dataType)) ExpressionCompiler.compile(e, input) else ExpressionCompiler.compileLaneColumn(e, input)
+        val compiled = if (TypeMapping.isSupported(out.dataType)) ExpressionCompiler.compile(e, input)
+        else ExpressionCompiler.compileLaneColumn(e, input)
         compiled.left.map(r => s"${e.sql}: $r").map(c => CompiledOutput(out.name, out.dataType, c, -1))
       } else e match {
         case a: AttributeReference =>
           val ordinal = input.indexWhere(_.exprId == a.exprId)
-          if (ordinal < 0) Left(s"unbound attribute ${a.name}") else Right(CompiledOutput(out.name, out.dataType, null, ordinal))
+          if (ordinal < 0) Left(s"unbound attribute ${a.name}")
+          else Right(CompiledOutput(out.name, out.dataType, null, ordinal))
         // An inserted row has no partition struct yet: a `NULL` of the lane-less type is a null column (#273).
         case Literal(null, _) => Right(CompiledOutput(out.name, out.dataType, NullLiteralExpr(out.dataType), -1))
         case other => Left(s"${other.sql}: unsupported output type ${out.dataType.simpleString} for ${out.name}")
@@ -189,13 +227,17 @@ object VectorMergeRowsPlanner {
   }
 }
 
-private[vector] class VectorMergeRowsIterator(input: Iterator[ColumnarBatch], program: MergeProgram, metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch] with AutoCloseable {
+private[vector] class VectorMergeRowsIterator(
+    input: Iterator[ColumnarBatch],
+    program: MergeProgram,
+    metrics: VectorMetrics
+) extends Iterator[ColumnarBatch] with AutoCloseable {
 
   private val allocator = io.sparkvector.spark.arrow.VectorAllocators.newChild("VectorMergeRowsExec")
   private val pending = new ArrayDeque[ColumnarBatch]()
   private var emitted: ColumnarBatch = _
   private var closed = false
+
   /** Row ids of the target rows matched so far in this partition (Spark's `BitmapCardinalityValidator`). */
   private val matchedRowIds: Roaring64Bitmap = if (program.rowIdOrdinal >= 0) new Roaring64Bitmap() else null
 
@@ -262,7 +304,12 @@ private[vector] class VectorMergeRowsIterator(input: Iterator[ColumnarBatch], pr
    * earlier ones left undecided, and the rows it takes are removed from that set. A condition that
    * is null counts as false, as in Spark's `BasePredicate`.
    */
-  private def applyGroup(ctx: EvalContext, instructions: Seq[CompiledInstruction], group: MemorySegment, n: Int): Unit = {
+  private def applyGroup(
+      ctx: EvalContext,
+      instructions: Seq[CompiledInstruction],
+      group: MemorySegment,
+      n: Int
+  ): Unit = {
     if (instructions.isEmpty || Bitmap.popcount(group, n) == 0) return
     val remaining = ctx.bitmap()
     BitmapKernels.copy(group, remaining, n)
@@ -289,7 +336,13 @@ private[vector] class VectorMergeRowsIterator(input: Iterator[ColumnarBatch], pr
   }
 
   /** One projection compacted by its mask: every column is a fresh, owned vector (several outputs share one input batch). */
-  private def emit(ctx: EvalContext, outputs: Array[CompiledOutput], mask: MemorySegment, count: Int, n: Int): ColumnarBatch = {
+  private def emit(
+      ctx: EvalContext,
+      outputs: Array[CompiledOutput],
+      mask: MemorySegment,
+      count: Int,
+      n: Int
+  ): ColumnarBatch = {
     val columns = new Array[ColumnVector](outputs.length)
     var foreignRows: Array[Int] = null
     var c = 0
@@ -301,10 +354,12 @@ private[vector] class VectorMergeRowsIterator(input: Iterator[ColumnarBatch], pr
           RemappedColumnVector.of(ctx.column(o.foreignOrdinal), foreignRows)
         } else o.expr match {
           case _: NullLiteralExpr if !TypeMapping.hasLane(o.dataType) =>
-            val v = new org.apache.spark.sql.execution.vectorized.ConstantColumnVector(count, o.dataType); v.setNull(); v
+            val v = new org.apache.spark.sql.execution.vectorized.ConstantColumnVector(count, o.dataType); v.setNull();
+            v
           case lit: LiteralExpr if lit.value == null => ArrowOutput.nulls(o.name, o.dataType, count, allocator)
           case lit: LiteralExpr => ArrowOutput.constant(o.name, o.dataType, lit.value, count, allocator)
-          case ColumnRef(ordinal, _) => ArrowOutput.compact(o.name, o.dataType, ctx.input(ordinal), mask, count, allocator)
+          case ColumnRef(ordinal, _) =>
+            ArrowOutput.compact(o.name, o.dataType, ctx.input(ordinal), mask, count, allocator)
           case e => ArrowOutput.compact(o.name, o.dataType, ctx.withActive(mask)(e.eval(ctx)), mask, count, allocator)
         }
       c += 1

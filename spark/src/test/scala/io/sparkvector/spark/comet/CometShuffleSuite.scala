@@ -4,7 +4,13 @@ import io.sparkvector.spark.VectorPlugin
 import io.sparkvector.spark.test.{CometTest, TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
-import org.apache.spark.sql.vector.{CometShuffle, PlanUtils, VectorFilterExec, VectorHashAggregateExec, VectorToCometExec}
+import org.apache.spark.sql.vector.{
+  CometShuffle,
+  PlanUtils,
+  VectorFilterExec,
+  VectorHashAggregateExec,
+  VectorToCometExec
+}
 
 /**
  * Comet scan and Comet native shuffle around spark-vector operators: partial aggregates hand their
@@ -43,7 +49,8 @@ class CometShuffleSuite extends VectorQuerySuite {
     "spark.memory.offHeap.enabled" -> "true",
     "spark.memory.offHeap.size" -> "1g",
     "spark.comet.explainFallback.enabled" -> "false",
-    "spark.sql.adaptive.enabled" -> "true")
+    "spark.sql.adaptive.enabled" -> "true"
+  )
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
@@ -54,7 +61,8 @@ class CometShuffleSuite extends VectorQuerySuite {
     spark.read.parquet(newTempPath("comet-shuffle/t_struct")).createOrReplaceTempView("t_struct")
   }
 
-  private def cometExchanges(plan: SparkPlan): Seq[SparkPlan] = PlanUtils.allNodes(plan).filter(CometShuffle.isCometExchange)
+  private def cometExchanges(plan: SparkPlan): Seq[SparkPlan] =
+    PlanUtils.allNodes(plan).filter(CometShuffle.isCometExchange)
 
   private def assertBridgedShuffle(df: org.apache.spark.sql.DataFrame): Unit = {
     val plan = finalPlan(df)
@@ -81,8 +89,12 @@ class CometShuffleSuite extends VectorQuerySuite {
   test("wide decimals cross the native shuffle as 128-bit lanes (#281)", CometTest) {
     // sum(decimal(16,6)) is decimal(26,6), avg decimal(20,10): the partial's results and a wide key
     // are DECIMAL128 lanes; the export once widened them word by word, so every value became two rows.
-    spark.range(0, 20000).selectExpr("cast(id as int) as i", "cast(id % 997 as decimal(12,2)) / 7 as m",
-      "cast(id % 40 as decimal(22,4)) * 1000000000 as w", "if(id % 10 = 0, null, concat('g', id % 40)) as g")
+    spark.range(0, 20000).selectExpr(
+      "cast(id as int) as i",
+      "cast(id % 997 as decimal(12,2)) / 7 as m",
+      "cast(id % 40 as decimal(22,4)) * 1000000000 as w",
+      "if(id % 10 = 0, null, concat('g', id % 40)) as g"
+    )
       .repartition(3).write.mode("overwrite").parquet(newTempPath("comet-shuffle/dec"))
     spark.read.parquet(newTempPath("comet-shuffle/dec")).createOrReplaceTempView("dec")
     val df = checkVectorized("SELECT g, sum(m), avg(m), max(w) FROM dec WHERE i > 100 GROUP BY g", Seq(Filter, Agg))
@@ -94,8 +106,14 @@ class CometShuffleSuite extends VectorQuerySuite {
 
   test("grouped keys of every supported type cross the bridge, nulls included", CometTest) {
     assertBridgedShuffle(checkVectorized("SELECT s, count(*), sum(d2) FROM t GROUP BY s", Seq(Agg)))
-    assertBridgedShuffle(checkVectorized("SELECT b, dt, i > 100 AS big, count(*), max(d) FROM t GROUP BY b, dt, i > 100", Seq(Agg)))
-    assertBridgedShuffle(checkVectorized("SELECT l, s, count(*), avg(d2) FROM t WHERE i < 3000 GROUP BY l, s", Seq(Filter, Agg)))
+    assertBridgedShuffle(checkVectorized(
+      "SELECT b, dt, i > 100 AS big, count(*), max(d) FROM t GROUP BY b, dt, i > 100",
+      Seq(Agg)
+    ))
+    assertBridgedShuffle(checkVectorized(
+      "SELECT l, s, count(*), avg(d2) FROM t WHERE i < 3000 GROUP BY l, s",
+      Seq(Filter, Agg)
+    ))
     assertNoLeak()
   }
 
@@ -113,10 +131,15 @@ class CometShuffleSuite extends VectorQuerySuite {
     val df = checkVectorized(sql, Seq(Agg, classOf[org.apache.spark.sql.vector.VectorSortExec]))
     val plan = finalPlan(df)
     val exchanges = cometExchanges(plan)
-    val range = exchanges.filter(_.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning])
+    val range = exchanges.filter(
+      _.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning]
+    )
     assert(range.nonEmpty, s"expected a Comet range exchange:\n${plan.treeString}")
     range.foreach { e =>
-      assert(e.children.head.isInstanceOf[VectorToCometExec], s"range exchange should sit on the bridge:\n${plan.treeString}")
+      assert(
+        e.children.head.isInstanceOf[VectorToCometExec],
+        s"range exchange should sit on the bridge:\n${plan.treeString}"
+      )
       assert(CometShuffle.isNative(e), s"range exchange should be native:\n${plan.treeString}")
     }
     // The rows come back in order: the sort ran over Comet's columnar shuffle output.
@@ -125,7 +148,9 @@ class CometShuffleSuite extends VectorQuerySuite {
     assertNoLeak()
     withConf(io.sparkvector.spark.VectorConf.CometRangeShuffleEnabled -> "false") {
       val plain = checkVectorized(sql, Seq(Agg))
-      val ranges = cometExchanges(finalPlan(plain)).filter(_.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning])
+      val ranges = cometExchanges(
+        finalPlan(plain)
+      ).filter(_.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.RangePartitioning])
       assert(ranges.forall(e => !e.children.head.isInstanceOf[VectorToCometExec]), finalPlan(plain).treeString)
     }
   }

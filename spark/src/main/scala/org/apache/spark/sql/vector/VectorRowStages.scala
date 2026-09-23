@@ -10,7 +10,19 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, UnsafeRowSerializer}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
-import org.apache.spark.sql.types.{BooleanType, ByteType, DateType, DecimalType, DoubleType, IntegerType, LongType, ShortType, StringType, StructType, TimestampType}
+import org.apache.spark.sql.types.{
+  BooleanType,
+  ByteType,
+  DateType,
+  DecimalType,
+  DoubleType,
+  IntegerType,
+  LongType,
+  ShortType,
+  StringType,
+  StructType,
+  TimestampType
+}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -35,10 +47,18 @@ object VectorRowStages {
       rows: RDD[InternalRow],
       attrs: Seq[Attribute],
       writeMetrics: Map[String, SQLMetric],
-      readMetrics: Map[String, SQLMetric]): RDD[InternalRow] =
+      readMetrics: Map[String, SQLMetric]
+  ): RDD[InternalRow] =
     new ShuffledRowRDD(
-      ShuffleExchangeExec.prepareShuffleDependency(rows, attrs, SinglePartition, new UnsafeRowSerializer(attrs.size), writeMetrics),
-      readMetrics)
+      ShuffleExchangeExec.prepareShuffleDependency(
+        rows,
+        attrs,
+        SinglePartition,
+        new UnsafeRowSerializer(attrs.size),
+        writeMetrics
+      ),
+      readMetrics
+    )
 
   /**
    * One columnar batch of on-heap vectors holding `rows`. Covers exactly the Spark types

@@ -3,7 +3,16 @@ package io.sparkvector.spark
 import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.{CollectLimitExec, GlobalLimitExec, LocalLimitExec}
-import org.apache.spark.sql.vector.{VectorBroadcastHashJoinExec, VectorCollectLimitExec, VectorFallback, VectorFilterExec, VectorGlobalLimitExec, VectorHashAggregateExec, VectorLocalLimitExec, VectorSortExec}
+import org.apache.spark.sql.vector.{
+  VectorBroadcastHashJoinExec,
+  VectorCollectLimitExec,
+  VectorFallback,
+  VectorFilterExec,
+  VectorGlobalLimitExec,
+  VectorHashAggregateExec,
+  VectorLocalLimitExec,
+  VectorSortExec
+}
 
 /**
  * The three limit operators. A `LIMIT` without an `ORDER BY` returns *some* n rows, and which ones
@@ -24,10 +33,19 @@ class VectorLimitSuite extends VectorQuerySuite {
   }
 
   /** Runs `sql` with the plugin, asserts `n` rows come back through our operator and Spark's is gone. */
-  private def checkCut(sql: String, n: Int, extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil): DataFrame = {
+  private def checkCut(
+      sql: String,
+      n: Int,
+      extra: Seq[Class[_ <: org.apache.spark.sql.execution.SparkPlan]] = Nil
+  ): DataFrame = {
     val df = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); d }
     assert(df.collect().length === n, s"row count for: $sql\n${finalPlan(df).treeString}")
-    (Collect +: extra).foreach(cls => assert(nodesOf(df)(scala.reflect.ClassTag(cls)).nonEmpty, s"expected ${cls.getSimpleName} in plan for: $sql\n${finalPlan(df).treeString}"))
+    (Collect +: extra).foreach(cls =>
+      assert(
+        nodesOf(df)(scala.reflect.ClassTag(cls)).nonEmpty,
+        s"expected ${cls.getSimpleName} in plan for: $sql\n${finalPlan(df).treeString}"
+      )
+    )
     assert(nodesOf[CollectLimitExec](df).isEmpty, s"Spark's CollectLimitExec should be gone for: $sql")
     df
   }
@@ -56,16 +74,25 @@ class VectorLimitSuite extends VectorQuerySuite {
     assert(grouped.collect().forall(r => r.isNullAt(0) || r.getString(0).startsWith("s")))
     // 50 groups under LIMIT 100: adaptive execution may drop the limit once the stage statistics show it is a no-op.
     checkVectorized("SELECT s, count(*) AS c, sum(l) AS sl FROM t GROUP BY s LIMIT 100", Seq(Agg))
-    val joined = checkCut("SELECT t.i, d.k FROM t JOIN (SELECT i AS k FROM t WHERE i < 100) d ON t.i = d.k LIMIT 30", 30, Seq(classOf[VectorBroadcastHashJoinExec]))
+    val joined = checkCut(
+      "SELECT t.i, d.k FROM t JOIN (SELECT i AS k FROM t WHERE i < 100) d ON t.i = d.k LIMIT 30",
+      30,
+      Seq(classOf[VectorBroadcastHashJoinExec])
+    )
     assert(joined.collect().forall(r => r.getInt(0) == r.getInt(1) && r.getInt(0) < 100))
-    checkVectorized("SELECT t.i, d.k FROM t JOIN (SELECT i AS k FROM t WHERE i < 100) d ON t.i = d.k LIMIT 500", Seq(Collect, classOf[VectorBroadcastHashJoinExec]))
+    checkVectorized(
+      "SELECT t.i, d.k FROM t JOIN (SELECT i AS k FROM t WHERE i < 100) d ON t.i = d.k LIMIT 500",
+      Seq(Collect, classOf[VectorBroadcastHashJoinExec])
+    )
     checkCut("SELECT i FROM t WHERE i < 5000 SORT BY i LIMIT 12", 12, Seq(classOf[VectorSortExec]))
     checkCut("SELECT l_returnflag, count(*) FROM lineitem GROUP BY l_returnflag LIMIT 2", 2, Seq(Agg))
   }
 
   test("LOCAL LIMIT in a subquery is ours; the GLOBAL LIMIT above Spark's row shuffle stays Spark's") {
     // LIMIT inside a subquery plans as LocalLimit -> single-partition exchange -> GlobalLimit.
-    val df = withPlugin(enabled = true) { val d = spark.sql("SELECT i FROM (SELECT i FROM t LIMIT 5000) WHERE i >= 0"); d.collect(); d }
+    val df = withPlugin(enabled = true) {
+      val d = spark.sql("SELECT i FROM (SELECT i FROM t LIMIT 5000) WHERE i >= 0"); d.collect(); d
+    }
     assert(df.collect().length === 5000)
     assert(nodesOf[VectorLocalLimitExec](df).nonEmpty, finalPlan(df).treeString)
     assert(nodesOf[LocalLimitExec](df).isEmpty, "Spark's LocalLimitExec should be gone")

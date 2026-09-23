@@ -29,8 +29,8 @@ case class VectorSampleExec(
     upperBound: Double,
     seed: Long,
     child: SparkPlan,
-    emitSelection: Boolean = false)
-    extends VectorExec {
+    emitSelection: Boolean = false
+) extends VectorExec {
 
   override def output: Seq[Attribute] = child.output
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
@@ -56,8 +56,8 @@ private[vector] class VectorSampleIterator(
     sampler: BernoulliCellSampler[AnyRef],
     outputAttrs: Array[(String, DataType)],
     emitSelection: Boolean,
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorSampleExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorSampleExec") {
 
   override protected def process(batch: ColumnarBatch): ColumnarBatch = metrics.timed {
     metrics.numInputBatches += 1

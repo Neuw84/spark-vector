@@ -41,8 +41,14 @@ class VectorScanSuite extends VectorQuerySuite {
     val wrappedBefore = SparkColumnVectorBuffers.wrappedOffHeapColumns()
     withConf("spark.sql.columnVector.offheap.enabled" -> "true") {
       checkVectorized("SELECT i, l, d, dt FROM t WHERE d > 100 AND l IS NOT NULL", Seq(Filter))
-      checkVectorized("SELECT i + 1 AS j, l * 2 AS m, d / 2 AS h, year(dt) AS y, s, b FROM t WHERE i < 5000", Seq(Filter, Project))
-      checkVectorized("SELECT s, count(*) AS n, sum(l) AS sl, avg(d) AS ad, min(dt) AS mdt, max(i) AS mi FROM t GROUP BY s", Seq(Agg))
+      checkVectorized(
+        "SELECT i + 1 AS j, l * 2 AS m, d / 2 AS h, year(dt) AS y, s, b FROM t WHERE i < 5000",
+        Seq(Filter, Project)
+      )
+      checkVectorized(
+        "SELECT s, count(*) AS n, sum(l) AS sl, avg(d) AS ad, min(dt) AS mdt, max(i) AS mi FROM t GROUP BY s",
+        Seq(Agg)
+      )
       checkVectorized("SELECT count(*) AS n, count(l) AS nl, count(d) AS nd FROM t", Seq(Agg))
     }
     val wrapped = SparkColumnVectorBuffers.wrappedOffHeapColumns() - wrappedBefore
@@ -59,13 +65,21 @@ class VectorScanSuite extends VectorQuerySuite {
     val df = checkVectorized("SELECT i, l, d, s FROM t_orc WHERE i % 3 = 0 AND l IS NOT NULL", Seq(Filter))
     assert(nodesOf[FileSourceScanExec](df).exists(_.supportsColumnar), finalPlan(df).treeString)
     checkVectorized("SELECT i + 1 AS j, upper(s) AS us, dt, d2, b FROM t_orc WHERE i < 3000", Seq(Filter, Project))
-    checkVectorized("SELECT s, count(*) AS n, sum(l) AS sl, max(dt) AS mdt, sum(d2) AS sd FROM t_orc GROUP BY s", Seq(Agg))
+    checkVectorized(
+      "SELECT s, count(*) AS n, sum(l) AS sl, max(dt) AS mdt, sum(d2) AS sd FROM t_orc GROUP BY s",
+      Seq(Agg)
+    )
     assert(ColumnVectorAdapters.copiedColumns() > copiedBefore, "ORC vectors are foreign and copied")
   }
 
-  test("a nested column keeps Spark's scan columnar; the filter passes it through, a field of it is read from the child vector") {
+  test(
+    "a nested column keeps Spark's scan columnar; the filter passes it through, a field of it is read from the child vector"
+  ) {
     val df = checkVectorized("SELECT i, st.a AS a FROM t_struct WHERE i > 10", Seq(Filter, Project))
-    assert(nodesOf[FileSourceScanExec](df).exists(_.supportsColumnar), "Spark 4's nested vectorized reader keeps the scan columnar\n" + finalPlan(df).treeString)
+    assert(
+      nodesOf[FileSourceScanExec](df).exists(_.supportsColumnar),
+      "Spark 4's nested vectorized reader keeps the scan columnar\n" + finalPlan(df).treeString
+    )
     checkVectorized("SELECT i, st FROM t_struct WHERE i > 10", Seq(Filter))
     // Pruned away, the struct column plays no part.
     checkVectorized("SELECT i, l FROM t_struct WHERE i > 10 AND l IS NOT NULL", Seq(Filter))

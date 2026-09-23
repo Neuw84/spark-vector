@@ -13,7 +13,8 @@ class SparkOnJdkSmokeSuite extends SparkVectorFunSuite {
     assert(Runtime.version().feature() >= 25, s"expected JDK 25+, got ${Runtime.version()}")
     assert(
       ModuleLayer.boot().findModule("jdk.incubator.vector").isPresent,
-      "jdk.incubator.vector is not resolved; pass --add-modules=jdk.incubator.vector")
+      "jdk.incubator.vector is not resolved; pass --add-modules=jdk.incubator.vector"
+    )
   }
 
   test("vectorized Parquet scan is columnar") {

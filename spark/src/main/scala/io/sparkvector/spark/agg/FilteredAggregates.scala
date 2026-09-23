@@ -44,6 +44,7 @@ final case class FilteredAgg(inner: VectorAggFunction, predicate: VectorExpr) ex
 }
 
 object FilteredAgg {
+
   /** Compiles a `FILTER` predicate against the operator's input. */
   def predicate(p: Expression, input: Seq[Attribute]): Either[String, VectorExpr] =
     ExpressionCompiler.compile(p, input).flatMap {
@@ -57,7 +58,8 @@ object FilteredAgg {
     val n = ctx.numRows
     val p = predicate.eval(ctx)
     val bits = ctx.bitmap()
-    if (p.validity() == null) BitmapKernels.copy(p.data(), bits, n) else BitmapKernels.and(p.data(), p.validity(), bits, n)
+    if (p.validity() == null) BitmapKernels.copy(p.data(), bits, n)
+    else BitmapKernels.and(p.data(), p.validity(), bits, n)
     if (ctx.selection != null) BitmapKernels.and(bits, ctx.selection, bits, n)
     bits
   }
@@ -68,7 +70,8 @@ object FilteredAgg {
  * with Spark's `(first, valueSet)` buffer. Ints, longs, doubles, dates and booleans; the buffer is
  * boxed per group as the output path expects.
  */
-final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boolean = true) extends VectorAggFunction {
+final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Boolean = true)
+    extends VectorAggFunction {
   override def bufferTypes: Seq[DataType] = Seq(dataType, BooleanType)
 
   override def newState(): AggState = new AggState {
@@ -78,8 +81,19 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Bo
       val v = input.eval(ctx)
       // With ignoreNulls the first selected non-null row; without, the first selected row, null or not.
       val i = if (ignoreNulls) FirstAgg.firstValid(ctx.masked(v), ctx.numRows, 0)
-        else if (ctx.selection == null) (if (ctx.numRows > 0) 0 else -1)
-        else FirstAgg.firstValid(new io.sparkvector.kernels.SegmentVectorBuffers(v.`type`(), ctx.numRows, ctx.selection, v.data(), v.offsets(), v.dictionary()), ctx.numRows, 0)
+      else if (ctx.selection == null) (if (ctx.numRows > 0) 0 else -1)
+      else FirstAgg.firstValid(
+        new io.sparkvector.kernels.SegmentVectorBuffers(
+          v.`type`(),
+          ctx.numRows,
+          ctx.selection,
+          v.data(),
+          v.offsets(),
+          v.dictionary()
+        ),
+        ctx.numRows,
+        0
+      )
       if (i >= 0) { value = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; set = true }
     }
     override def bufferValues: Array[Any] = Array(value, java.lang.Boolean.valueOf(set))
@@ -100,12 +114,15 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Bo
       var i = 0
       while (i < n) {
         val g = ids(i)
-        if (g >= 0 && !set(g) && (!ignoreNulls || Rows.valid(v, i))) { values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; set(g) = true }
+        if (g >= 0 && !set(g) && (!ignoreNulls || Rows.valid(v, i))) {
+          values(g) = if (Rows.valid(v, i)) FirstAgg.box(v, i, dataType) else null; set(g) = true
+        }
         i += 1
       }
     }
     override def bufferValue(g: Int, slot: Int): Any =
-      if (slot == 0) (if (g < set.length && set(g)) values(g) else null) else java.lang.Boolean.valueOf(g < set.length && set(g))
+      if (slot == 0) (if (g < set.length && set(g)) values(g) else null)
+      else java.lang.Boolean.valueOf(g < set.length && set(g))
   }
 }
 
@@ -129,7 +146,10 @@ object FirstAgg {
   /** Row `i` of a DECIMAL128 lane as well, boxed with the scale of `dt` (first / last over a wide decimal, #259). */
   private[agg] def box(v: VectorBuffers, i: Int, dt: DataType): Any = v.`type`() match {
     case VecType.DECIMAL128 =>
-      new java.math.BigDecimal(Decimal128.toBigInteger(Decimal128.hi(v.data(), i), Decimal128.lo(v.data(), i)), dt.asInstanceOf[org.apache.spark.sql.types.DecimalType].scale)
+      new java.math.BigDecimal(
+        Decimal128.toBigInteger(Decimal128.hi(v.data(), i), Decimal128.lo(v.data(), i)),
+        dt.asInstanceOf[org.apache.spark.sql.types.DecimalType].scale
+      )
     case _ => box(v, i)
   }
 
@@ -198,11 +218,13 @@ final case class FirstMergeAgg(first: VectorExpr, valueSet: VectorExpr, dataType
       }
     }
     override def bufferValue(g: Int, slot: Int): Any =
-      if (slot == 0) (if (g < set.length && set(g)) values(g) else null) else java.lang.Boolean.valueOf(g < set.length && set(g))
+      if (slot == 0) (if (g < set.length && set(g)) values(g) else null)
+      else java.lang.Boolean.valueOf(g < set.length && set(g))
   }
 }
 
 object FirstMergeAgg {
+
   /** First row at or after `from` whose `valueSet` is valid and true, or -1. */
   private[agg] def firstSet(s: VectorBuffers, n: Int, from: Int): Int = {
     val validity = s.validity()

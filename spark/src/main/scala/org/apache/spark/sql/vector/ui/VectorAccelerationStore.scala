@@ -14,7 +14,8 @@ final case class ExecutionSummary(
     plan: AcceleratedPlan,
     /** True once classified from the real operators rather than the serialised plan. */
     exact: Boolean,
-    physicalPlanDescription: String) {
+    physicalPlanDescription: String
+) {
 
   def status: String =
     if (failed) "FAILED" else if (completionTime.isDefined) "COMPLETED" else "RUNNING"

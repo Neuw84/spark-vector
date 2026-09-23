@@ -15,8 +15,10 @@ import org.apache.spark.sql.vector.{VectorFallback, VectorPlan}
  * [[VectorFallback]] tag with the reason). See `VectorExecRule`.
  */
 sealed abstract class Engine(val id: String, val label: String, val shortLabel: String) {
+
   /** CSS class applied to the node in the DAG and to its legend swatch. */
   def cssClass: String = s"sv-engine-$id"
+
   /** Counted against "fully accelerated": only plain Spark operators are. */
   def isAccelerated: Boolean = true
 }
@@ -69,7 +71,8 @@ final case class PlanNode(
     name: String,
     detail: String,
     engine: Engine,
-    fallbackReason: Option[String]) {
+    fallbackReason: Option[String]
+) {
 
   /** `label` is what shows in the box, `tooltip` what shows on hover. */
   private def dotAttrs: String = {
@@ -81,7 +84,8 @@ final case class PlanNode(
       s"""id="node$id"""",
       s"""label="${StringEscapeUtils.escapeJava(name)}"""",
       s"""tooltip="${StringEscapeUtils.escapeJava(tooltip)}"""",
-      s"""class="${engine.cssClass}"""").mkString(" ")
+      s"""class="${engine.cssClass}""""
+    ).mkString(" ")
   }
 
   def toDot: String = s"  $id [$dotAttrs];"
@@ -152,8 +156,14 @@ object PlanAcceleration {
 
   /** Wrappers that carry no execution of their own; unwrapped so the DAG shows real operators. */
   private val UnwrappedNames = Set(
-    "AdaptiveSparkPlan", "WholeStageCodegen", "InputAdapter", "ResultQueryStage",
-    "ShuffleQueryStage", "BroadcastQueryStage", "TableCacheQueryStage")
+    "AdaptiveSparkPlan",
+    "WholeStageCodegen",
+    "InputAdapter",
+    "ResultQueryStage",
+    "ShuffleQueryStage",
+    "BroadcastQueryStage",
+    "TableCacheQueryStage"
+  )
 
   /**
    * Row/columnar transitions: the only nodes that convert between rows and batches. Neither is an
@@ -212,7 +222,8 @@ object PlanAcceleration {
       case _: VectorPlan => Engine.Vector
       case _ if p.nodeName == "VectorToComet" => Engine.Bridge
       // The mixed-chain leaf (#280): Comet's one-child union over our export node is the hand-off, not an operator.
-      case _ if isCometClass(p.getClass) && p.children.size == 1 && p.children.head.nodeName == "VectorToComet" => Engine.Bridge
+      case _ if isCometClass(p.getClass) && p.children.size == 1 && p.children.head.nodeName == "VectorToComet" =>
+        Engine.Bridge
       case _ if isCometClass(p.getClass) => Engine.Comet
       case _ if isTransition(p.nodeName) => Engine.Transition
       case _ if isShuffleRead(p.nodeName) => Engine.ShuffleRead
@@ -240,7 +251,8 @@ object PlanAcceleration {
           p.nodeName,
           detailOf(p),
           engineOf(p),
-          VectorFallback.reason(p))
+          VectorFallback.reason(p)
+        )
         parent.foreach(pid => edges += PlanEdge(id, pid))
         childrenOf(p).foreach(visit(_, Some(id)))
       }
@@ -283,7 +295,8 @@ object PlanAcceleration {
       else if (isTransition(name)) Engine.Transition
       else if (isShuffleRead(name)) Engine.ShuffleRead
       // "Scan parquet", "Scan In-memory table <name>", or an unnamed cache's "InMemoryTableScan".
-      else if (i.children.isEmpty && (name.startsWith("Scan") || name.startsWith("InMemoryTableScan"))) Engine.ColumnarSource
+      else if (i.children.isEmpty && (name.startsWith("Scan") || name.startsWith("InMemoryTableScan")))
+        Engine.ColumnarSource
       else Engine.Spark
     }
 

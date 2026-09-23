@@ -10,7 +10,9 @@ class VectorPluginSuite extends SparkVectorFunSuite {
     Map("spark.plugins" -> classOf[VectorPlugin].getName)
 
   test("plugin registers the session extension") {
-    assert(spark.sparkContext.getConf.get("spark.sql.extensions").contains(classOf[VectorSparkSessionExtensions].getName))
+    assert(
+      spark.sparkContext.getConf.get("spark.sql.extensions").contains(classOf[VectorSparkSessionExtensions].getName)
+    )
     TestTables.createMixed(spark, newTempPath("plugin/t"), rows = 2000)
     val df = spark.sql("SELECT i FROM t WHERE i > 100")
     assert(df.count() === 1899)

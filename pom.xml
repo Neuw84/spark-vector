@@ -48,6 +48,14 @@
     <scala-maven-plugin.version>4.9.10</scala-maven-plugin.version>
     <scalatest-maven-plugin.version>2.2.0</scalatest-maven-plugin.version>
     <build-helper-maven-plugin.version>3.6.0</build-helper-maven-plugin.version>
+    <!-- Formatting (#423): Spotless runs Netflix's jfmt over Java (a modular JAR fetched by dependency:copy at
+         validate, run through the JDK's java on standard input) and scalafmt over Scala; `mvn spotless:check`
+         fails the build on a file that is not formatted (bound to `verify`), `mvn spotless:apply` formats. -->
+    <spotless-maven-plugin.version>3.10.2</spotless-maven-plugin.version>
+    <maven-dependency-plugin.version>3.8.1</maven-dependency-plugin.version>
+    <jfmt.version>0.8.2</jfmt.version>
+    <jfmt.jar>${maven.multiModuleProjectDirectory}/target/jfmt/com.netflix.tools.jfmt-${jfmt.version}.jar</jfmt.jar>
+    <scalafmt.version>3.9.4</scalafmt.version>
 
     <!-- Java Vector API (incubator) and FFM restricted methods. -->
     <vector.jvm.args>--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow</vector.jvm.args>
@@ -220,8 +228,99 @@
           <artifactId>build-helper-maven-plugin</artifactId>
           <version>${build-helper-maven-plugin.version}</version>
         </plugin>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>${spotless-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <version>${maven-dependency-plugin.version}</version>
+        </plugin>
       </plugins>
     </pluginManagement>
+    <plugins>
+      <plugin>
+        <!-- The jfmt JAR into target/jfmt at the root (once per build; `mvn validate` before a standalone `mvn spotless:apply`). -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>fetch-jfmt</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>com.netflix</groupId>
+                  <artifactId>com.netflix.tools.jfmt</artifactId>
+                  <version>${jfmt.version}</version>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${maven.multiModuleProjectDirectory}/target/jfmt</outputDirectory>
+              <overWriteIfNewer>false</overWriteIfNewer>
+              <overWriteReleases>false</overWriteReleases>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <configuration>
+          <java>
+            <includes>
+              <include>src/main/java/**/*.java</include>
+              <include>src/test/java/**/*.java</include>
+            </includes>
+            <!-- jfmt (google-java-format's engine, Sun conventions: 4-space blocks, 8-space continuations, no
+                 column limit on code, Javadoc at 80). It reads javac's internals like google-java-format does,
+                 hence the exports. Standard input carries the file, so the import normalisation that needs a
+                 compile context is skipped and the rest (order, unused imports) applies. -->
+            <nativeCmd>
+              <name>jfmt</name>
+              <pathToExe>${java.home}/bin/java</pathToExe>
+              <arguments>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.api=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.code=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.file=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.main=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.parser=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.tree=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.util=com.netflix.tools.jfmt</argument>
+                <argument>--module-path</argument><argument>${jfmt.jar}</argument>
+                <argument>--module</argument><argument>com.netflix.tools.jfmt</argument>
+                <argument>-</argument>
+              </arguments>
+            </nativeCmd>
+            <trimTrailingWhitespace />
+            <endWithNewline />
+          </java>
+          <scala>
+            <includes>
+              <include>src/main/scala/**/*.scala</include>
+              <include>src/test/scala/**/*.scala</include>
+            </includes>
+            <scalafmt>
+              <version>${scalafmt.version}</version>
+              <file>${maven.multiModuleProjectDirectory}/.scalafmt.conf</file>
+            </scalafmt>
+          </scala>
+        </configuration>
+        <executions>
+          <execution>
+            <id>spotless-check</id>
+            <goals>
+              <goal>check</goal>
+            </goals>
+            <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
   </build>
 
   <profiles>

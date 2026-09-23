@@ -71,9 +71,12 @@ class AllExecutionsPage(parent: VectorAccelerationTab) extends WebUIPage("") {
       <td><a href={s"$base/vector/execution/?id=${e.executionId}"}>{e.executionId}</a></td>
       <td>
         <a href={s"$base/vector/execution/?id=${e.executionId}"}>{e.description}</a>
-        {if (!e.exact) <span class="sv-muted" title={
-          "Classified from the plan on the listener event; the final plan was not reachable"
-        }> (approximate)</span> else scala.xml.NodeSeq.Empty}
+        {
+      if (!e.exact) <span class="sv-muted" title={
+        "Classified from the plan on the listener event; the final plan was not reachable"
+      }> (approximate)</span>
+      else scala.xml.NodeSeq.Empty
+    }
       </td>
       <td sorttable_customkey={e.submissionTime.toString}>{UIUtils.formatDate(e.submissionTime)}</td>
       <td sorttable_customkey={e.duration.getOrElse(-1L).toString}>
@@ -90,10 +93,12 @@ class AllExecutionsPage(parent: VectorAccelerationTab) extends WebUIPage("") {
   /** A compact per-engine breakdown, so the list is readable without opening each plan. */
   private def operatorCounts(plan: AcceleratedPlan): Seq[Node] =
     <span class="sv-counts">
-      {Engine.all.filter(e => plan.countBy(e) > 0).map { e =>
+      {
+      Engine.all.filter(e => plan.countBy(e) > 0).map { e =>
         <span class={s"sv-count ${e.cssClass}"} title={e.label}>
           {e.shortLabel} {plan.countBy(e)}
         </span>
-      }}
+      }
+    }
     </span>
 }

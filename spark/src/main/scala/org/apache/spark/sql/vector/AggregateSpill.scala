@@ -38,7 +38,8 @@ final class AggregateSpill(
     allocator: BufferAllocator,
     seed: Int = AggregateSpill.BucketSeed,
     /** The key types when the keys are not columns of the batch but values given to `writeBuffers` (the join, #416). */
-    keyTypes: Array[DataType] = null) extends AutoCloseable {
+    keyTypes: Array[DataType] = null
+) extends AutoCloseable {
 
   private val kinds: Array[KeyKind] =
     (if (keyTypes != null) keyTypes else keyOrdinals.map(o => columns(o)._2)).map(AggregateSpill.keyKind)
@@ -72,8 +73,13 @@ final class AggregateSpill(
    * the batch, for the join (#416) the evaluated key expressions. `arena` holds the scratch (masks).
    * A dictionary-encoded string column among `buffers` must already be decoded (the buckets are plain).
    */
-  def writeBuffers(buffers: Array[VectorBuffers], keys: Array[VectorBuffers], n: Int, arena: Arena,
-      selection: java.lang.foreign.MemorySegment = null): Unit = {
+  def writeBuffers(
+      buffers: Array[VectorBuffers],
+      keys: Array[VectorBuffers],
+      n: Int,
+      arena: Arena,
+      selection: java.lang.foreign.MemorySegment = null
+  ): Unit = {
     if (n == 0) return
     {
       val ids = new Array[Int](n)
@@ -97,7 +103,8 @@ final class AggregateSpill(
             val (name, dt) = columns(c)
             val col = ArrowOutput.compact(name, dt, buffers(c), masks(b), n, allocator)
             // The compacted vector moves into the bucket's root (the root's previous buffers are released by the transfer).
-            try AggregateSpill.vectorOf(col).makeTransferPair(root.getVector(c)).transfer() finally col.close()
+            try AggregateSpill.vectorOf(col).makeTransferPair(root.getVector(c)).transfer()
+            finally col.close()
             c += 1
           }
           root.setRowCount(counts(b))
@@ -112,7 +119,12 @@ final class AggregateSpill(
 
   private def open(b: Int): Unit = if (writers(b) == null) {
     files(b) = AggregateSpill.newFile()
-    channels(b) = FileChannel.open(files(b).toPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+    channels(b) = FileChannel.open(
+      files(b).toPath,
+      StandardOpenOption.CREATE,
+      StandardOpenOption.WRITE,
+      StandardOpenOption.TRUNCATE_EXISTING
+    )
     roots(b) = VectorSchemaRoot.of(columns.map { case (name, dt) => ArrowOutput.newVector(name, dt, allocator) }: _*)
     writers(b) = new ArrowStreamWriter(roots(b), null, channels(b))
     writers(b).start()
@@ -171,7 +183,8 @@ final class AggregateSpill(
     closed = true
     var b = 0
     while (b < numBuckets) {
-      try endWriting(b) catch { case _: Exception => }
+      try endWriting(b)
+      catch { case _: Exception => }
       if (files(b) != null) { files(b).delete(); files(b) = null }
       b += 1
     }
@@ -179,6 +192,7 @@ final class AggregateSpill(
 }
 
 object AggregateSpill {
+
   /** The bucket hash's seed: any value but the shuffle's `PartitionKernels.SPARK_SEED` (42) -- see the class note. */
   val BucketSeed: Int = 0x5bd1e995
 
@@ -196,14 +210,16 @@ object AggregateSpill {
 
   /** Whether every grouping key type can be bucketed. */
   def supportsKeys(types: Seq[DataType]): Boolean = types.forall {
-    case IntegerType | DateType | LongType | TimestampType | DoubleType | BooleanType | StringType | _: DecimalType => true
+    case IntegerType | DateType | LongType | TimestampType | DoubleType | BooleanType | StringType | _: DecimalType =>
+      true
     case _ => false
   }
 
   private[vector] def vectorOf(col: ColumnVector): FieldVector = col match {
     case v: VectorArrowColumnVector => v.getValueVector.asInstanceOf[FieldVector]
     case d: VectorDecimalColumnVector => d.vector()
-    case other => throw new IllegalStateException(s"a spilled column must be a plain vector, not ${other.getClass.getSimpleName}")
+    case other =>
+      throw new IllegalStateException(s"a spilled column must be a plain vector, not ${other.getClass.getSimpleName}")
   }
 
   /** A file in the task's local directory (Spark's disk block manager), or a plain temp file outside Spark. */
@@ -222,15 +238,19 @@ object AggregateSpill {
 /** How a grouped aggregate behaves past its memory budget (#363). */
 sealed trait AggSpillPolicy extends Serializable
 object AggSpillPolicy {
+
   /** Everything stays in memory (the budget is off, or the modes cannot re-read their own output). */
   case object InMemory extends AggSpillPolicy
+
   /**
    * Buffer-emitting modes (Partial, PartialMerge): emit the table as output and start over -- the next stage
    * merges. `passThroughRatio` (#376): once a full table has reduced its input by less than this factor, the
    * rest of the input goes out one batch at a time -- a partial aggregate that does not reduce only costs
    * memory and copies; 0 keeps aggregating whatever the ratio.
    */
-  final case class EmitAndReset(thresholdBytes: Long, passThroughRatio: Double = DefaultPassThroughRatio) extends AggSpillPolicy
+  final case class EmitAndReset(thresholdBytes: Long, passThroughRatio: Double = DefaultPassThroughRatio)
+      extends AggSpillPolicy
+
   /** Result modes merging buffers (Final): spill the table into `buckets` and merge one bucket at a time. */
   final case class GraceHash(thresholdBytes: Long, buckets: Int) extends AggSpillPolicy
 

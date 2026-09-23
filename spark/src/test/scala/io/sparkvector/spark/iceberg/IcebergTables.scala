@@ -31,7 +31,8 @@ object IcebergTables {
     s"spark.sql.catalog.$Catalog.type" -> "hadoop",
     s"spark.sql.catalog.$Catalog.warehouse" -> warehouse,
     // Tables are also committed to outside Spark (equality deletes); never serve a stale Table.
-    s"spark.sql.catalog.$Catalog.cache-enabled" -> "false")
+    s"spark.sql.catalog.$Catalog.cache-enabled" -> "false"
+  )
 
   val MixedRows = 20000
   val LineitemRows = 60000
@@ -51,7 +52,8 @@ object IcebergTables {
     "write.update.mode" -> "merge-on-read",
     "write.merge.mode" -> "merge-on-read",
     // Several data files so deletes span files and the reader has to match them per file.
-    "write.target-file-size-bytes" -> (256 * 1024).toString)
+    "write.target-file-size-bytes" -> (256 * 1024).toString
+  )
 
   def createAll(spark: SparkSession): Unit = {
     spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $Db")
@@ -97,7 +99,8 @@ object IcebergTables {
         s"case when k < $MixedRows and k % 13 = 2 and k % 101 = 0 then -1.0 else 10.0 + cast(k % 7 as double) end as d2",
         "date_add(date '2021-06-01', cast(k % 100 as int)) as dt",
         "k % 2 = 0 as b",
-        "if(k % 15 = 0, null, concat('m', k % 5)) as s")
+        "if(k % 15 = 0, null, concat('m', k % 5)) as s"
+      )
       .createOrReplaceTempView("src")
   }
 
@@ -145,7 +148,8 @@ object IcebergTables {
       table.spec(),
       Array(keyField.fieldId()),
       deleteSchema,
-      null)
+      null
+    )
     val outputFile = OutputFileFactory.builderFor(table, 1, 1).format(FileFormat.PARQUET).build().newOutputFile()
     val writer = factory.newEqDeleteWriter(outputFile, FileFormat.PARQUET, null)
     try {

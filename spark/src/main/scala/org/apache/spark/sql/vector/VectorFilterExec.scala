@@ -59,8 +59,8 @@ private[vector] class VectorFilterIterator(
     predicate: VectorExpr,
     outputAttrs: Array[(String, org.apache.spark.sql.types.DataType)],
     emitSelection: Boolean,
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorFilterExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorFilterExec") {
 
   override protected def process(batch: ColumnarBatch): ColumnarBatch = metrics.timed {
     metrics.numInputBatches += 1
@@ -106,6 +106,7 @@ private[vector] class VectorFilterIterator(
  * carry; a dense one (Q1 keeps 98%) is cheaper to carry.
  */
 object SelectionPolicy {
+
   /** Minimum surviving fraction for forwarding a selection; `sparkvector.selection.minFraction`. */
   val MinFraction: Double = java.lang.Double.parseDouble(System.getProperty("sparkvector.selection.minFraction", "0.5"))
 

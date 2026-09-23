@@ -14,7 +14,9 @@ class VectorMergeJoinGateSuite extends VectorQuerySuite {
     super.beforeAll()
     TestTables.createMixed(spark, newTempPath("diag402/t"))
     val tk = newTempPath("diag402/tk")
-    spark.sql("SELECT *, cast(i % 50 as int) AS i50, cast(i % 7 as int) AS m FROM t").write.mode("overwrite").parquet(tk)
+    spark.sql(
+      "SELECT *, cast(i % 50 as int) AS i50, cast(i % 7 as int) AS m FROM t"
+    ).write.mode("overwrite").parquet(tk)
     spark.read.parquet(tk).createOrReplaceTempView("tk")
   }
 
@@ -31,7 +33,13 @@ class VectorMergeJoinGateSuite extends VectorQuerySuite {
           |  FROM v1, v1 v1_lag, v1 v1_lead
           |  WHERE v1.i50 = v1_lag.i50 AND v1.i50 = v1_lead.i50 AND v1.rn = v1_lag.rn + 1 AND v1.rn = v1_lead.rn - 1)
           |SELECT * FROM v2 WHERE avg_d > 0 ORDER BY sum_d - avg_d, i50, m LIMIT 100""".stripMargin
-      val df = checkVectorized(sql, Seq(classOf[org.apache.spark.sql.vector.VectorSortMergeJoinExec], classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec]))
+      val df = checkVectorized(
+        sql,
+        Seq(
+          classOf[org.apache.spark.sql.vector.VectorSortMergeJoinExec],
+          classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec]
+        )
+      )
       val reasons = VectorFallback.reasons(finalPlan(df)).map(_._2)
       assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](df).isEmpty, finalPlan(df).treeString)
       assert(nodesOf[org.apache.spark.sql.vector.VectorSortMergeJoinExec](df).length === 2, finalPlan(df).treeString)

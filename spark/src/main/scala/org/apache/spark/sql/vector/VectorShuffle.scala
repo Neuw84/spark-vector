@@ -25,7 +25,11 @@ object VectorShuffle {
     companion.isDefined && conf.get("spark.shuffle.manager", "sort") == ManagerClass
 
   def supports(partitioning: Partitioning, output: Seq[Attribute]): Boolean = companion.exists { c =>
-    c.getClass.getMethod("supports", classOf[Partitioning], classOf[Seq[_]]).invoke(c, partitioning, output).asInstanceOf[Boolean]
+    c.getClass.getMethod(
+      "supports",
+      classOf[Partitioning],
+      classOf[Seq[_]]
+    ).invoke(c, partitioning, output).asInstanceOf[Boolean]
   }
 
   val RegistryClass = "org.apache.spark.sql.vector.shuffle.flight.FlightRegistry"
@@ -53,6 +57,12 @@ object VectorShuffle {
   def exchange(s: ShuffleExchangeExec, materializedKeys: Int = 0): SparkPlan = {
     val cls = Class.forName(ExchangeClass, true, getClass.getClassLoader)
     val ctor = cls.getConstructors.find(_.getParameterCount == 5).get
-    ctor.newInstance(s.outputPartitioning, s.child, s.shuffleOrigin, s.advisoryPartitionSize, Integer.valueOf(materializedKeys)).asInstanceOf[SparkPlan]
+    ctor.newInstance(
+      s.outputPartitioning,
+      s.child,
+      s.shuffleOrigin,
+      s.advisoryPartitionSize,
+      Integer.valueOf(materializedKeys)
+    ).asInstanceOf[SparkPlan]
   }
 }

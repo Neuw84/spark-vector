@@ -45,11 +45,18 @@ object FlightBench {
       strings: String,
       compression: String,
       serverThreads: Int,
-      chunkBytes: Int) extends AutoCloseable {
+      chunkBytes: Int
+  ) extends AutoCloseable {
 
     val schema: StructType = {
-      val numbers = Seq(StructField("k1", LongType), StructField("k2", LongType), StructField("i1", IntegerType),
-        StructField("i2", IntegerType), StructField("d1", DoubleType), StructField("d2", DoubleType))
+      val numbers = Seq(
+        StructField("k1", LongType),
+        StructField("k2", LongType),
+        StructField("i1", IntegerType),
+        StructField("i2", IntegerType),
+        StructField("d1", DoubleType),
+        StructField("d2", DoubleType)
+      )
       val texts = strings match {
         case "none" => Nil
         case "low" => Seq(StructField("s_low", StringType))
@@ -80,10 +87,21 @@ object FlightBench {
     }
     val rowsWritten: Long = Servers.toLong * maps * rowsPerMap
 
-    private val pools = Array.fill(Servers)(Executors.newFixedThreadPool(serverThreads, r => { val t = new Thread(r, "flight-bench"); t.setDaemon(true); t }))
+    private val pools = Array.fill(Servers)(Executors.newFixedThreadPool(
+      serverThreads,
+      r => { val t = new Thread(r, "flight-bench"); t.setDaemon(true); t }
+    ))
     private val servers: Array[FlightServer] = Array.tabulate(Servers) { server =>
-      val producer = new FlightShuffle.Producer((_: Int, mapId: Long, start: Int, end: Int) => blockData(server, mapId.toInt, start, end), allocator, chunkBytes)
-      val s = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer).executor(pools(server)).build()
+      val producer = new FlightShuffle.Producer(
+        (_: Int, mapId: Long, start: Int, end: Int) => blockData(server, mapId.toInt, start, end),
+        allocator,
+        chunkBytes
+      )
+      val s = FlightServer.builder(
+        allocator,
+        Location.forGrpcInsecure("127.0.0.1", 0),
+        producer
+      ).executor(pools(server)).build()
       s.start()
       s
     }
@@ -110,7 +128,8 @@ object FlightBench {
           try {
             val batch = makeBatch(arena, n, random)
             val ids = Array.tabulate(n)(_ => random.nextInt(partitions))
-            try writer.write(batch, ids) finally batch.close()
+            try writer.write(batch, ids)
+            finally batch.close()
           } finally arena.close()
           left -= n
         }
@@ -143,7 +162,9 @@ object FlightBench {
 
     /** A reduce task: one stream per executor for partitions `[reduce, reduce + width)`, opened together (#347), drained in turn. */
     def reduceTask(reduce: Int, width: Int, touch: java.util.function.Consumer[ColumnarBatch]): Long = {
-      val streams = locations.map(l => new FlightBlockStream(l, 0, mapIds, reduce, reduce + width, schema, codec, conf, allocator, metrics))
+      val streams = locations.map(l =>
+        new FlightBlockStream(l, 0, mapIds, reduce, reduce + width, schema, codec, conf, allocator, metrics)
+      )
       var rows = 0L
       try streams.foreach { s => while (s.hasNext) { val b = s.next(); rows += b.numRows(); touch.accept(b) } }
       finally streams.foreach(_.close())
@@ -156,11 +177,13 @@ object FlightBench {
       val streams = locations.map(l => FlightShuffle.Clients.client(l).getStream(ticket))
       var bytes = 0L
       try streams.foreach { s =>
-        while (s.next()) {
-          val root = s.getRoot
-          if (root.getRowCount > 0) bytes += root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector].getValueLength(0)
+          while (s.next()) {
+            val root = s.getRoot
+            if (root.getRowCount > 0)
+              bytes += root.getVector(0).asInstanceOf[org.apache.arrow.vector.VarBinaryVector].getValueLength(0)
+          }
         }
-      } finally streams.foreach(_.close())
+      finally streams.foreach(_.close())
       bytes
     }
 
@@ -173,7 +196,8 @@ object FlightBench {
         while (map < maps) {
           val buf = blockData(server, map, reduce, reduce + width)
           if (buf.size() > 0) {
-            val reader = new PartitionedIpcFile.StreamReader(PartitionedIpcFile.blockChannel(buf), allocator, schema, codec)
+            val reader =
+              new PartitionedIpcFile.StreamReader(PartitionedIpcFile.blockChannel(buf), allocator, schema, codec)
             try while (reader.hasNext) { val b = reader.next(); rows += b.numRows(); touch.accept(b) }
             finally reader.close()
           }

@@ -11,6 +11,7 @@ import org.apache.spark.sql.vector.VectorErrors
  * literal; the kernel sums the per-row lengths across the inputs and copies once.
  */
 private[expr] object StringConcats {
+
   /** Evaluates the inputs to kernel parts; the lanes come back separately for the validity. */
   def parts(inputs: Seq[VectorExpr], ctx: EvalContext): (Array[Part], Seq[VectorBuffers]) = {
     val lanes = Seq.newBuilder[VectorBuffers]
@@ -51,7 +52,8 @@ final case class ConcatWsExpr(sep: VectorExpr, inputs: Seq[VectorExpr]) extends 
  * (under ANSI an out-of-range index on an active row raises Spark's INVALID_ARRAY_INDEX) or a null
  * pick.
  */
-final case class EltExpr(index: VectorExpr, inputs: Seq[VectorExpr], ansi: Boolean, queryContext: QueryContext) extends VectorExpr {
+final case class EltExpr(index: VectorExpr, inputs: Seq[VectorExpr], ansi: Boolean, queryContext: QueryContext)
+    extends VectorExpr {
   override def dataType: DataType = StringType
   override def children: Seq[VectorExpr] = index +: inputs
   override def eval(ctx: EvalContext): VectorBuffers = {

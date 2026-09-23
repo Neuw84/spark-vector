@@ -14,6 +14,7 @@ import org.apache.spark.unsafe.types.UTF8String
  * bytes for those rows.
  */
 private[expr] object StringSlices {
+
   /** The int argument as (lane or null, scalar). */
   def intArg(e: VectorExpr, ctx: EvalContext): (VectorBuffers, Int) = e match {
     case lit: LiteralExpr => (null, lit.number.intValue())
@@ -84,7 +85,8 @@ final case class SpaceExpr(count: VectorExpr) extends VectorExpr {
   }
 }
 
-final case class OverlayExpr(input: VectorExpr, replace: VectorExpr, pos: VectorExpr, len: VectorExpr) extends VectorExpr {
+final case class OverlayExpr(input: VectorExpr, replace: VectorExpr, pos: VectorExpr, len: VectorExpr)
+    extends VectorExpr {
   override def dataType: DataType = StringType
   override def children: Seq[VectorExpr] = Seq(input, replace, pos, len)
   override def eval(ctx: EvalContext): VectorBuffers = {

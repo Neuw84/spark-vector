@@ -19,7 +19,11 @@ class FlightSmokeSuite extends AnyFunSuite {
     val allocator = new RootAllocator()
     val schema = new Schema(java.util.List.of(new Field("v", FieldType.nullable(new ArrowType.Int(32, true)), null)))
     val producer = new NoOpFlightProducer {
-      override def getStream(context: FlightProducer.CallContext, ticket: Ticket, listener: FlightProducer.ServerStreamListener): Unit = {
+      override def getStream(
+          context: FlightProducer.CallContext,
+          ticket: Ticket,
+          listener: FlightProducer.ServerStreamListener
+      ): Unit = {
         val root = VectorSchemaRoot.create(schema, allocator)
         try {
           val v = root.getVector("v").asInstanceOf[IntVector]

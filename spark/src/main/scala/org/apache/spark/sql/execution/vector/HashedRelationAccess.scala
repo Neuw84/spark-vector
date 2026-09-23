@@ -1,7 +1,12 @@
 package org.apache.spark.sql.execution.vector
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.execution.joins.{EmptyHashedRelation, HashedRelation, HashedRelationWithAllNullKeys, LongHashedRelation}
+import org.apache.spark.sql.execution.joins.{
+  EmptyHashedRelation,
+  HashedRelation,
+  HashedRelationWithAllNullKeys,
+  LongHashedRelation
+}
 
 /**
  * `HashedRelation` is `private[execution]`; this bridge lives inside that package so the join

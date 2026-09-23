@@ -9,138 +9,141 @@ import org.apache.spark.sql.vectorized.ColumnarMap;
 import org.apache.spark.unsafe.types.UTF8String;
 
 /**
- * A decimal column of at most 18 digits over an Arrow {@link BigIntVector} of unscaled values.
+ * A decimal column of at most 18 digits over an Arrow {@link BigIntVector} of
+ * unscaled values.
  *
- * <p>Arrow Java's own {@code DecimalVector} is 128 bits wide and Spark's {@code ArrowColumnVector}
- * reads it through {@code BigDecimal}; the kernels hold small decimals as 64-bit lanes exactly like
- * Spark's own {@code WritableColumnVector} does for {@code Decimal(p <= 18)}. This class gives
- * Spark's row conversion {@link #getDecimal} over those lanes while spark-vector operators
- * downstream read the {@link BigIntVector} zero copy (see {@code ColumnVectorAdapters}).
+ * <p>Arrow Java's own {@code DecimalVector} is 128 bits wide and Spark's {@code
+ * ArrowColumnVector} reads it through {@code BigDecimal}; the kernels hold
+ * small decimals as 64-bit lanes exactly like Spark's own {@code
+ * WritableColumnVector} does for {@code Decimal(p <= 18)}. This class gives
+ * Spark's row conversion {@link #getDecimal} over those lanes while
+ * spark-vector operators downstream read the {@link BigIntVector} zero copy
+ * (see {@code ColumnVectorAdapters}).
  */
 public final class VectorDecimalColumnVector extends ColumnVector {
 
-  private final BigIntVector vector;
-  private final int precision;
-  private final int scale;
-  private final boolean owns;
+    private final BigIntVector vector;
+    private final int precision;
+    private final int scale;
+    private final boolean owns;
 
-  public VectorDecimalColumnVector(BigIntVector vector, DecimalType type) {
-    this(vector, type, true);
-  }
-
-  private VectorDecimalColumnVector(BigIntVector vector, DecimalType type, boolean owns) {
-    super(type);
-    this.vector = vector;
-    this.precision = type.precision();
-    this.scale = type.scale();
-    this.owns = owns;
-  }
-
-  public BigIntVector vector() {
-    return vector;
-  }
-
-  public boolean ownsMemory() {
-    return owns;
-  }
-
-  /** Same vector, not owned. */
-  public VectorDecimalColumnVector borrow() {
-    return new VectorDecimalColumnVector(vector, (DecimalType) dataType(), false);
-  }
-
-  @Override
-  public void close() {
-    if (owns) {
-      vector.close();
+    public VectorDecimalColumnVector(BigIntVector vector, DecimalType type) {
+        this(vector, type, true);
     }
-  }
 
-  @Override
-  public boolean hasNull() {
-    return vector.getNullCount() > 0;
-  }
-
-  @Override
-  public int numNulls() {
-    return vector.getNullCount();
-  }
-
-  @Override
-  public boolean isNullAt(int rowId) {
-    return vector.isNull(rowId);
-  }
-
-  @Override
-  public Decimal getDecimal(int rowId, int precision, int scale) {
-    if (vector.isNull(rowId)) {
-      return null;
+    private VectorDecimalColumnVector(BigIntVector vector, DecimalType type, boolean owns) {
+        super(type);
+        this.vector = vector;
+        this.precision = type.precision();
+        this.scale = type.scale();
+        this.owns = owns;
     }
-    return Decimal.createUnsafe(vector.get(rowId), this.precision, this.scale);
-  }
 
-  /** The unscaled value, for consumers that know the scale. */
-  @Override
-  public long getLong(int rowId) {
-    return vector.get(rowId);
-  }
+    public BigIntVector vector() {
+        return vector;
+    }
 
-  @Override
-  public boolean getBoolean(int rowId) {
-    throw unsupported();
-  }
+    public boolean ownsMemory() {
+        return owns;
+    }
 
-  @Override
-  public byte getByte(int rowId) {
-    throw unsupported();
-  }
+    /** Same vector, not owned. */
+    public VectorDecimalColumnVector borrow() {
+        return new VectorDecimalColumnVector(vector, (DecimalType) dataType(), false);
+    }
 
-  @Override
-  public short getShort(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public void close() {
+        if (owns) {
+            vector.close();
+        }
+    }
 
-  @Override
-  public int getInt(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public boolean hasNull() {
+        return vector.getNullCount() > 0;
+    }
 
-  @Override
-  public float getFloat(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public int numNulls() {
+        return vector.getNullCount();
+    }
 
-  @Override
-  public double getDouble(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public boolean isNullAt(int rowId) {
+        return vector.isNull(rowId);
+    }
 
-  @Override
-  public ColumnarArray getArray(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public Decimal getDecimal(int rowId, int precision, int scale) {
+        if (vector.isNull(rowId)) {
+            return null;
+        }
+        return Decimal.createUnsafe(vector.get(rowId), this.precision, this.scale);
+    }
 
-  @Override
-  public ColumnarMap getMap(int ordinal) {
-    throw unsupported();
-  }
+    /** The unscaled value, for consumers that know the scale. */
+    @Override
+    public long getLong(int rowId) {
+        return vector.get(rowId);
+    }
 
-  @Override
-  public UTF8String getUTF8String(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public boolean getBoolean(int rowId) {
+        throw unsupported();
+    }
 
-  @Override
-  public byte[] getBinary(int rowId) {
-    throw unsupported();
-  }
+    @Override
+    public byte getByte(int rowId) {
+        throw unsupported();
+    }
 
-  @Override
-  public ColumnVector getChild(int ordinal) {
-    throw unsupported();
-  }
+    @Override
+    public short getShort(int rowId) {
+        throw unsupported();
+    }
 
-  private static UnsupportedOperationException unsupported() {
-    return new UnsupportedOperationException("decimal column");
-  }
+    @Override
+    public int getInt(int rowId) {
+        throw unsupported();
+    }
+
+    @Override
+    public float getFloat(int rowId) {
+        throw unsupported();
+    }
+
+    @Override
+    public double getDouble(int rowId) {
+        throw unsupported();
+    }
+
+    @Override
+    public ColumnarArray getArray(int rowId) {
+        throw unsupported();
+    }
+
+    @Override
+    public ColumnarMap getMap(int ordinal) {
+        throw unsupported();
+    }
+
+    @Override
+    public UTF8String getUTF8String(int rowId) {
+        throw unsupported();
+    }
+
+    @Override
+    public byte[] getBinary(int rowId) {
+        throw unsupported();
+    }
+
+    @Override
+    public ColumnVector getChild(int ordinal) {
+        throw unsupported();
+    }
+
+    private static UnsupportedOperationException unsupported() {
+        return new UnsupportedOperationException("decimal column");
+    }
 }

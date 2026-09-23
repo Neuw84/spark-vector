@@ -21,10 +21,31 @@ object TpcdsRunner {
 
   /** The 24 TPC-DS tables, each a Parquet directory of that name under `--data` (see `gen-tpcds.sh`). */
   val Tables: Seq[String] = Seq(
-    "call_center", "catalog_page", "catalog_returns", "catalog_sales", "customer", "customer_address",
-    "customer_demographics", "date_dim", "household_demographics", "income_band", "inventory", "item",
-    "promotion", "reason", "ship_mode", "store", "store_returns", "store_sales", "time_dim", "warehouse",
-    "web_page", "web_returns", "web_sales", "web_site")
+    "call_center",
+    "catalog_page",
+    "catalog_returns",
+    "catalog_sales",
+    "customer",
+    "customer_address",
+    "customer_demographics",
+    "date_dim",
+    "household_demographics",
+    "income_band",
+    "inventory",
+    "item",
+    "promotion",
+    "reason",
+    "ship_mode",
+    "store",
+    "store_returns",
+    "store_sales",
+    "time_dim",
+    "warehouse",
+    "web_page",
+    "web_returns",
+    "web_sales",
+    "web_site"
+  )
 
   /** `q1`..`q99`, with the a/b variants of 14, 23, 24 and 39: the 103 files Spark ships. */
   val QueryNames: Seq[String] = (1 to 99).flatMap {
@@ -36,8 +57,12 @@ object TpcdsRunner {
   def query(name: String): String = {
     val path = s"tpcds/$name.sql"
     val in = Thread.currentThread.getContextClassLoader.getResourceAsStream(path)
-    require(in != null, s"$path not on the classpath: the spark-sql tests jar (classifier `tests`) is missing (see benchmarks/pom.xml)")
-    try new String(in.readAllBytes(), StandardCharsets.UTF_8) finally in.close()
+    require(
+      in != null,
+      s"$path not on the classpath: the spark-sql tests jar (classifier `tests`) is missing (see benchmarks/pom.xml)"
+    )
+    try new String(in.readAllBytes(), StandardCharsets.UTF_8)
+    finally in.close()
   }
 
   lazy val Queries: Seq[(String, String)] = QueryNames.map(n => n -> query(n))

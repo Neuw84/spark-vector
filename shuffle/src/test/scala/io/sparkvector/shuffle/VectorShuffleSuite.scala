@@ -37,9 +37,14 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.vector.exec.strictFloatingPoint", "true")
       .getOrCreate()
     val data = spark.range(0, 20000).selectExpr(
-      "id", "cast(id % 97 as int) as k", "cast(id % 1000 as string) as s",
-      "cast(id % 7 as double) / 3 as x", "date_add(date '2020-01-01', cast(id % 400 as int)) as d",
-      "cast(id % 13 as decimal(12,2)) / 7 as dec", "id % 3 = 0 as b")
+      "id",
+      "cast(id % 97 as int) as k",
+      "cast(id % 1000 as string) as s",
+      "cast(id % 7 as double) / 3 as x",
+      "date_add(date '2020-01-01', cast(id % 400 as int)) as d",
+      "cast(id % 13 as decimal(12,2)) / 7 as dec",
+      "id % 3 = 0 as b"
+    )
     data.write.mode("overwrite").parquet(tempDir.resolve("t").toString)
     spark.read.parquet(tempDir.resolve("t").toString).createOrReplaceTempView("t")
   }
@@ -104,20 +109,34 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
   test("hash keys that are expressions (q47's self-join on rn + 1) are materialised under our exchange") {
     // A sort-merge self-join whose one side partitions on `k + 1`: without the materialised key the
     // exchange stayed Spark's, with a row Sort and a RowToColumnar over it.
-    val sql = "select a.k, a.c, b.c from (select k, count(*) c from t group by k) a join (select k, count(*) c from t group by k) b on a.k = b.k + 1"
+    val sql =
+      "select a.k, a.c, b.c from (select k, count(*) c from t group by k) a join (select k, count(*) c from t group by k) b on a.k = b.k + 1"
     spark.sessionState.conf.setConfString("spark.sql.autoBroadcastJoinThreshold", "-1")
     try {
-      val plan = assertOurExchange(spark.sql(sql), expectedCount = 2) // the aggregate's exchange is reused for the other side
+      val plan =
+        assertOurExchange(spark.sql(sql), expectedCount = 2) // the aggregate's exchange is reused for the other side
       assert(nodes(plan).collect { case r: RowToColumnarExec => r }.isEmpty, s"RowToColumnar in\n$plan")
-      assert(nodes(plan).collect { case s: org.apache.spark.sql.execution.SortExec => s }.isEmpty, s"Spark's Sort in\n$plan")
+      assert(
+        nodes(plan).collect { case s: org.apache.spark.sql.execution.SortExec => s }.isEmpty,
+        s"Spark's Sort in\n$plan"
+      )
       // The exchange declares the original keys (what the join required); the projection under it holds the value.
-      val computed = nodes(plan).collect { case e: VectorShuffleExchangeExec => e }.filter(_.outputPartitioning.toString.contains("+ 1"))
+      val computed = nodes(
+        plan
+      ).collect { case e: VectorShuffleExchangeExec => e }.filter(_.outputPartitioning.toString.contains("+ 1"))
       assert(computed.size === 1, s"expected one exchange on k + 1 in\n$plan")
-      assert(computed.head.child.output.exists(_.name.startsWith("_shuffle_key_")), s"no materialised key under\n${computed.head}")
+      assert(
+        computed.head.child.output.exists(_.name.startsWith("_shuffle_key_")),
+        s"no materialised key under\n${computed.head}"
+      )
       checkAgainstSpark(sql)
       // The same key with the plain side of the join the other way round, and a wider expression.
-      val sql2 = "select a.k, b.c from (select k, count(*) c from t group by k) a join (select k, count(*) c from t group by k) b on a.k - 2 = b.k * 1"
-      assertOurExchange(spark.sql(sql2), expectedCount = 3) // b.k * 1 folds to b.k: its aggregate's exchange serves the join
+      val sql2 =
+        "select a.k, b.c from (select k, count(*) c from t group by k) a join (select k, count(*) c from t group by k) b on a.k - 2 = b.k * 1"
+      assertOurExchange(
+        spark.sql(sql2),
+        expectedCount = 3
+      ) // b.k * 1 folds to b.k: its aggregate's exchange serves the join
       checkAgainstSpark(sql2)
     } finally spark.sessionState.conf.unsetConf("spark.sql.autoBroadcastJoinThreshold")
   }
@@ -140,7 +159,8 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
     val sql = "select s, x, k from t order by s desc, x, k limit 5000"
     val ours = spark.sql(sql).collect().toSeq
     spark.sessionState.conf.setConfString("spark.vector.enabled", "false")
-    try assert(ours === spark.sql(sql).collect().toSeq) finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
+    try assert(ours === spark.sql(sql).collect().toSeq)
+    finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
     val plan = collectPlan(spark.sql("select s, x, k from t order by s desc, x, k"))
     assert(exchanges(plan).exists(_.isInstanceOf[VectorShuffleExchangeExec]), s"$plan")
   }
@@ -165,24 +185,40 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
   test("the stage metrics see our shuffle: bytes and records written, local blocks and bytes read, AQE's data size") {
     val stages = scala.collection.mutable.ArrayBuffer.empty[org.apache.spark.scheduler.StageInfo]
     val listener = new org.apache.spark.scheduler.SparkListener {
-      override def onStageCompleted(e: org.apache.spark.scheduler.SparkListenerStageCompleted): Unit = stages.synchronized { stages += e.stageInfo }
+      override def onStageCompleted(e: org.apache.spark.scheduler.SparkListenerStageCompleted): Unit =
+        stages.synchronized { stages += e.stageInfo }
     }
     spark.sparkContext.addSparkListener(listener)
     try {
       val df = spark.sql("select k, count(*) c, sum(x) sx from t group by k")
       val plan = collectPlan(df)
       val deadline = System.nanoTime() + 10000000000L
-      while (System.nanoTime() < deadline && stages.synchronized(stages.map(_.taskMetrics.shuffleReadMetrics.localBlocksFetched).sum) == 0) Thread.sleep(50)
+      while (
+        System.nanoTime() < deadline && stages.synchronized(
+          stages.map(_.taskMetrics.shuffleReadMetrics.localBlocksFetched).sum
+        ) == 0
+      ) Thread.sleep(50)
       val ex = exchanges(plan).collectFirst { case e: VectorShuffleExchangeExec => e }.get
       val write = stages.synchronized(stages.map(_.taskMetrics.shuffleWriteMetrics.bytesWritten).sum)
       val read = stages.synchronized(stages.map(_.taskMetrics.shuffleReadMetrics))
       assert(write > 0, "shuffle bytes written")
-      val sql = ex.metrics.filter(_._1.matches(".*(Blocks|Bytes|records|Wait|Time|Size|dataSize).*")).map { case (k, m) => s"$k=${m.value}" }.toSeq.sorted.mkString(", ")
-      assert(read.map(_.localBlocksFetched).sum > 0, s"local blocks fetched; SQL metrics: $sql; stage read totals: blocks=${read.map(_.localBlocksFetched).sum}/${read.map(_.remoteBlocksFetched).sum} bytes=${read.map(_.totalBytesRead).sum}")
-      assert(read.map(_.totalBytesRead).sum === write, s"bytes read ${read.map(_.totalBytesRead).sum} vs written $write")
+      val sql = ex.metrics.filter(_._1.matches(".*(Blocks|Bytes|records|Wait|Time|Size|dataSize).*")).map {
+        case (k, m) => s"$k=${m.value}"
+      }.toSeq.sorted.mkString(", ")
+      assert(
+        read.map(_.localBlocksFetched).sum > 0,
+        s"local blocks fetched; SQL metrics: $sql; stage read totals: blocks=${read.map(_.localBlocksFetched).sum}/${read.map(_.remoteBlocksFetched).sum} bytes=${read.map(_.totalBytesRead).sum}"
+      )
+      assert(
+        read.map(_.totalBytesRead).sum === write,
+        s"bytes read ${read.map(_.totalBytesRead).sum} vs written $write"
+      )
       assert(read.map(_.recordsRead).sum > 0, "records read")
       // dataSize is the pre-compression Arrow size, as Spark's is its rows' pre-compression size: at least the compressed bytes.
-      assert(ex.metrics("dataSize").value >= write, s"AQE's data size ${ex.metrics("dataSize").value} vs bytes written $write")
+      assert(
+        ex.metrics("dataSize").value >= write,
+        s"AQE's data size ${ex.metrics("dataSize").value} vs bytes written $write"
+      )
       assert(ex.runtimeStatistics.sizeInBytes.toLong === ex.metrics("dataSize").value)
     } finally spark.sparkContext.removeSparkListener(listener)
   }
@@ -204,7 +240,8 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
   test("a shuffled hash join and a merge join read both sides from our exchanges") {
     spark.sessionState.conf.setConfString("spark.sql.autoBroadcastJoinThreshold", "-1")
     try {
-      val sql = "select a.k, count(*) from t a join (select k, count(*) n from t group by k) b on a.k = b.k group by a.k"
+      val sql =
+        "select a.k, count(*) from t a join (select k, count(*) n from t group by k) b on a.k = b.k group by a.k"
       val plan = collectPlan(spark.sql(sql))
       val ex = exchanges(plan)
       assert(ex.nonEmpty && ex.forall(_.isInstanceOf[VectorShuffleExchangeExec]), s"$plan")

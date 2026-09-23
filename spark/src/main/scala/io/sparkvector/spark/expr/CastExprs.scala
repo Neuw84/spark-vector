@@ -1,8 +1,27 @@
 package io.sparkvector.spark.expr
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, BitmapKernels, CastKernels, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
+import io.sparkvector.kernels.{
+  ArrowLayout,
+  Bitmap,
+  BitmapKernels,
+  CastKernels,
+  SegmentVectorBuffers,
+  StringConcatKernels,
+  VecType,
+  VectorBuffers
+}
 import org.apache.spark.QueryContext
-import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DoubleType, IntegerType, LongType, ShortType, StringType, TimestampType}
+import org.apache.spark.sql.types.{
+  BooleanType,
+  ByteType,
+  DataType,
+  DoubleType,
+  IntegerType,
+  LongType,
+  ShortType,
+  StringType,
+  TimestampType
+}
 import org.apache.spark.sql.vector.{SparkCasts, SparkFormatters, VectorErrors}
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -11,7 +30,13 @@ import org.apache.spark.unsafe.types.UTF8String
  * zero, saturates, NaN is 0), and under ANSI Spark's `CAST_OVERFLOW` for the first out-of-range value
  * among the batch's active rows -- a filtered row never raises.
  */
-final case class NarrowCastExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext, nullOnOverflow: Boolean = false) extends VectorExpr {
+final case class NarrowCastExpr(
+    child: VectorExpr,
+    dataType: DataType,
+    ansi: Boolean,
+    queryContext: QueryContext,
+    nullOnOverflow: Boolean = false
+) extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val a = child.eval(ctx)
@@ -29,8 +54,14 @@ final case class NarrowCastExpr(child: VectorExpr, dataType: DataType, ansi: Boo
     if (ansi && ArithExpr.anyActive(overflow, a.validity(), ctx)) {
       var i = 0
       while (i < n) {
-        if (Bitmap.isSet(overflow, i) && (a.validity() == null || Bitmap.isSet(a.validity(), i)) && (ctx.active == null || Bitmap.isSet(ctx.active, i))) {
-          val value: Any = if (a.`type`() == VecType.INT64) a.data().getAtIndex(VectorBuffers.LE_LONG, i) else a.data().getAtIndex(VectorBuffers.LE_DOUBLE, i)
+        if (
+          Bitmap.isSet(overflow, i) && (a.validity() == null || Bitmap.isSet(
+            a.validity(),
+            i
+          )) && (ctx.active == null || Bitmap.isSet(ctx.active, i))
+        ) {
+          val value: Any = if (a.`type`() == VecType.INT64) a.data().getAtIndex(VectorBuffers.LE_LONG, i)
+          else a.data().getAtIndex(VectorBuffers.LE_DOUBLE, i)
           throw VectorErrors.castOverflow(value, child.dataType, dataType)
         }
         i += 1
@@ -117,7 +148,8 @@ final case class StringToBooleanExpr(child: VectorExpr, ansi: Boolean, queryCont
         val s = UTF8String.fromBytes(a.getUtf8Bytes(i))
         if (VectorErrors.isTrueString(s)) { Bitmap.set(bits, i); Bitmap.set(validity, i) }
         else if (VectorErrors.isFalseString(s)) Bitmap.set(validity, i)
-        else if (ansi && (ctx.active == null || Bitmap.isSet(ctx.active, i))) throw VectorErrors.invalidBooleanInput(s, queryContext)
+        else if (ansi && (ctx.active == null || Bitmap.isSet(ctx.active, i)))
+          throw VectorErrors.invalidBooleanInput(s, queryContext)
       }
       i += 1
     }
@@ -131,7 +163,8 @@ final case class StringToBooleanExpr(child: VectorExpr, ansi: Boolean, queryCont
  * `Double.parseDouble` with Spark's special literals (`NaN`, `Infinity`, `inf`, ...); under ANSI the
  * exact parsers raise Spark's CAST_INVALID_INPUT, checked for active rows only.
  */
-final case class StringToNumberExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext) extends VectorExpr {
+final case class StringToNumberExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext)
+    extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = {
     val a = child.eval(ctx)
@@ -147,11 +180,17 @@ final case class StringToNumberExpr(child: VectorExpr, dataType: DataType, ansi:
         val active = ctx.active == null || Bitmap.isSet(ctx.active, i)
         vecType match {
           case VecType.INT32 =>
-            if (ansi && active) { out.setAtIndex(VectorBuffers.LE_INT, i, SparkCasts.toIntExact(s, queryContext)); Bitmap.set(validity, i) }
-            else if (s.toInt(intBox)) { out.setAtIndex(VectorBuffers.LE_INT, i, intBox.value); Bitmap.set(validity, i) }
+            if (ansi && active) {
+              out.setAtIndex(VectorBuffers.LE_INT, i, SparkCasts.toIntExact(s, queryContext)); Bitmap.set(validity, i)
+            } else if (s.toInt(intBox)) {
+              out.setAtIndex(VectorBuffers.LE_INT, i, intBox.value); Bitmap.set(validity, i)
+            }
           case VecType.INT64 =>
-            if (ansi && active) { out.setAtIndex(VectorBuffers.LE_LONG, i, SparkCasts.toLongExact(s, queryContext)); Bitmap.set(validity, i) }
-            else if (s.toLong(longBox)) { out.setAtIndex(VectorBuffers.LE_LONG, i, longBox.value); Bitmap.set(validity, i) }
+            if (ansi && active) {
+              out.setAtIndex(VectorBuffers.LE_LONG, i, SparkCasts.toLongExact(s, queryContext)); Bitmap.set(validity, i)
+            } else if (s.toLong(longBox)) {
+              out.setAtIndex(VectorBuffers.LE_LONG, i, longBox.value); Bitmap.set(validity, i)
+            }
           case _ =>
             val str = s.toString
             val d: java.lang.Double =
@@ -180,7 +219,8 @@ final case class DateTimeToStringExpr(child: VectorExpr, isDate: Boolean, timeZo
     var i = 0
     while (i < n) {
       if (a.validity() == null || Bitmap.isSet(a.validity(), i)) {
-        val str = if (isDate) dates.format(a.data().getAtIndex(VectorBuffers.LE_INT, i)) else timestamps.format(a.data().getAtIndex(VectorBuffers.LE_LONG, i))
+        val str = if (isDate) dates.format(a.data().getAtIndex(VectorBuffers.LE_INT, i))
+        else timestamps.format(a.data().getAtIndex(VectorBuffers.LE_LONG, i))
         rows(i) = UTF8String.fromString(str).getBytes
       }
       i += 1
@@ -190,7 +230,13 @@ final case class DateTimeToStringExpr(child: VectorExpr, isDate: Boolean, timeZo
 }
 
 /** `string -> date / timestamp` with Spark's own parser per row (every form Spark accepts, any zone); null or, under ANSI, Spark's error for an active row. */
-final case class StringToDateTimeExpr(child: VectorExpr, toTimestamp: Boolean, timeZoneId: String, ansi: Boolean, queryContext: QueryContext) extends VectorExpr {
+final case class StringToDateTimeExpr(
+    child: VectorExpr,
+    toTimestamp: Boolean,
+    timeZoneId: String,
+    ansi: Boolean,
+    queryContext: QueryContext
+) extends VectorExpr {
   override def dataType: DataType = if (toTimestamp) TimestampType else org.apache.spark.sql.types.DateType
   override def children: Seq[VectorExpr] = Seq(child)
   @transient private lazy val zone = SparkFormatters.zoneId(timeZoneId)
@@ -205,11 +251,19 @@ final case class StringToDateTimeExpr(child: VectorExpr, toTimestamp: Boolean, t
         val s = UTF8String.fromBytes(a.getUtf8Bytes(i))
         val active = ctx.active == null || Bitmap.isSet(ctx.active, i)
         if (toTimestamp) {
-          if (ansi && active) { out.setAtIndex(VectorBuffers.LE_LONG, i, SparkCasts.stringToTimestampAnsi(s, zone, queryContext)); Bitmap.set(validity, i) }
-          else SparkCasts.stringToTimestamp(s, zone).foreach { v => out.setAtIndex(VectorBuffers.LE_LONG, i, v); Bitmap.set(validity, i) }
+          if (ansi && active) {
+            out.setAtIndex(VectorBuffers.LE_LONG, i, SparkCasts.stringToTimestampAnsi(s, zone, queryContext));
+            Bitmap.set(validity, i)
+          } else SparkCasts.stringToTimestamp(s, zone).foreach { v =>
+            out.setAtIndex(VectorBuffers.LE_LONG, i, v); Bitmap.set(validity, i)
+          }
         } else {
-          if (ansi && active) { out.setAtIndex(VectorBuffers.LE_INT, i, SparkCasts.stringToDateAnsi(s, queryContext)); Bitmap.set(validity, i) }
-          else SparkCasts.stringToDate(s).foreach { v => out.setAtIndex(VectorBuffers.LE_INT, i, v); Bitmap.set(validity, i) }
+          if (ansi && active) {
+            out.setAtIndex(VectorBuffers.LE_INT, i, SparkCasts.stringToDateAnsi(s, queryContext));
+            Bitmap.set(validity, i)
+          } else SparkCasts.stringToDate(s).foreach { v =>
+            out.setAtIndex(VectorBuffers.LE_INT, i, v); Bitmap.set(validity, i)
+          }
         }
       }
       i += 1
@@ -219,8 +273,10 @@ final case class StringToDateTimeExpr(child: VectorExpr, toTimestamp: Boolean, t
 }
 
 object CastExprs {
+
   /** The lane types the first cast slice writes strings for. */
-  def stringable(dt: DataType): Boolean = dt == IntegerType || dt == LongType || dt == DoubleType || dt == BooleanType || dt == ByteType || dt == ShortType
+  def stringable(dt: DataType): Boolean =
+    dt == IntegerType || dt == LongType || dt == DoubleType || dt == BooleanType || dt == ByteType || dt == ShortType
 }
 
 /**
@@ -231,8 +287,14 @@ object CastExprs {
  * expression narrows the result of a byte or short `+ - *` computed on the int lane, and the ANSI
  * error is the arithmetic overflow, as in Spark.
  */
-final case class NarrowIntExpr(child: VectorExpr, dataType: DataType, ansi: Boolean, queryContext: QueryContext,
-    nullOnOverflow: Boolean = false, arithmetic: Boolean = false) extends VectorExpr {
+final case class NarrowIntExpr(
+    child: VectorExpr,
+    dataType: DataType,
+    ansi: Boolean,
+    queryContext: QueryContext,
+    nullOnOverflow: Boolean = false,
+    arithmetic: Boolean = false
+) extends VectorExpr {
   override def children: Seq[VectorExpr] = Seq(child)
   private val isByte = dataType == ByteType
 
@@ -273,8 +335,14 @@ final case class NarrowIntExpr(child: VectorExpr, dataType: DataType, ansi: Bool
     if (ansi && ArithExpr.anyActive(overflow, a.validity(), ctx)) {
       var j = 0
       while (j < n) {
-        if (Bitmap.isSet(overflow, j) && (a.validity() == null || Bitmap.isSet(a.validity(), j)) && (ctx.active == null || Bitmap.isSet(ctx.active, j))) {
-          if (arithmetic) throw VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(VecType.INT32), "", queryContext)
+        if (
+          Bitmap.isSet(overflow, j) && (a.validity() == null || Bitmap.isSet(
+            a.validity(),
+            j
+          )) && (ctx.active == null || Bitmap.isSet(ctx.active, j))
+        ) {
+          if (arithmetic)
+            throw VectorErrors.arithmeticOverflow(ArithExpr.overflowMessage(VecType.INT32), "", queryContext)
           val value: Any = lane match {
             case VecType.INT32 => if (child.dataType == ShortType) a.getInt(j).toShort else a.getInt(j)
             case VecType.INT64 => a.getLong(j)

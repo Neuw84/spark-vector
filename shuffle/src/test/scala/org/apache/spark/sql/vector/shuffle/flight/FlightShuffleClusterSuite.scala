@@ -30,9 +30,14 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
     System.setProperty("spark.test.home", tempDir.toString)
     // The launcher, in testing mode, derives the Scala version from a build directory under spark.test.home.
     Files.createDirectories(tempDir.resolve("launcher/target/scala-2.13"))
-    Files.createDirectories(tempDir.resolve("assembly/target/scala-2.13/jars")) // may be empty: the classpath is extraClassPath
-    val jvmArgs = Seq("--add-modules=jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED",
-      "--sun-misc-unsafe-memory-access=allow").mkString(" ")
+    Files.createDirectories(
+      tempDir.resolve("assembly/target/scala-2.13/jars")
+    ) // may be empty: the classpath is extraClassPath
+    val jvmArgs = Seq(
+      "--add-modules=jdk.incubator.vector",
+      "--enable-native-access=ALL-UNNAMED",
+      "--sun-misc-unsafe-memory-access=allow"
+    ).mkString(" ")
     val b = SparkSession.builder()
       .master("local-cluster[2,1,1024]")
       .appName("FlightShuffleClusterSuite")
@@ -49,7 +54,8 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.vector.exec.strictFloatingPoint", "true")
       // Small record batches: a block holds several, each with its own string dictionary (#338).
       .config("spark.vector.shuffle.batchBytes", "16k")
-    if (authenticate) b.config("spark.authenticate", "true").config("spark.authenticate.secret", "flight-shuffle-test-secret")
+    if (authenticate)
+      b.config("spark.authenticate", "true").config("spark.authenticate.secret", "flight-shuffle-test-secret")
     b.getOrCreate()
   }
 
@@ -66,7 +72,9 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
     val sql = "select k, count(*) c, count(distinct s) ds, max(s) ms from t group by k"
     val ours = spark.sql(sql).collect().toSeq.sortBy(_.toString)
     spark.sessionState.conf.setConfString("spark.vector.enabled", "false")
-    val expected = try spark.sql(sql).collect().toSeq.sortBy(_.toString) finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
+    val expected =
+      try spark.sql(sql).collect().toSeq.sortBy(_.toString)
+      finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
     assert(ours === expected)
     assert(ours.size === 53)
     // Remote fetches happened: the metrics of the last query's shuffle read stages.
@@ -88,7 +96,10 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
     // executor id -- the flaky failure of every fourth gate.
     val allocator = new RootAllocator()
     val block = Array.emptyByteArray
-    val producer = new FlightShuffle.Producer((_, _, _) => new org.apache.spark.network.buffer.NioManagedBuffer(java.nio.ByteBuffer.wrap(block)), allocator)
+    val producer = new FlightShuffle.Producer(
+      (_, _, _) => new org.apache.spark.network.buffer.NioManagedBuffer(java.nio.ByteBuffer.wrap(block)),
+      allocator
+    )
     val server = FlightServer.builder(allocator, Location.forGrpcInsecure("127.0.0.1", 0), producer)
       .headerAuthenticator(new FlightShuffle.SecretAuthenticator("flight-shuffle-test-secret")).build()
     server.start()
@@ -97,15 +108,19 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
       val ticket = FlightShuffle.ticket(0, 0L, 0)
       val e = intercept[FlightRuntimeException] {
         val s = client.getStream(ticket)
-        try s.next() finally s.close()
+        try s.next()
+        finally s.close()
       }
       assert(e.status().code() === FlightStatusCode.UNAUTHENTICATED, e.toString)
       // With the secret the call is authenticated and the (empty) block is served.
-      val s = client.getStream(ticket, new CredentialCallOption(new BearerCredentialWriter("flight-shuffle-test-secret")))
-      try s.next() finally s.close()
+      val s =
+        client.getStream(ticket, new CredentialCallOption(new BearerCredentialWriter("flight-shuffle-test-secret")))
+      try s.next()
+      finally s.close()
       val e3 = intercept[FlightRuntimeException] {
         val s = client.getStream(ticket, new CredentialCallOption(new BearerCredentialWriter("wrong")))
-        try s.next() finally s.close()
+        try s.next()
+        finally s.close()
       }
       assert(e3.status().code() === FlightStatusCode.UNAUTHENTICATED, e3.toString)
     } finally {
@@ -115,20 +130,28 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test("#338: a remote block of several record batches, each with its own string dictionary, decodes every batch right") {
+  test(
+    "#338: a remote block of several record batches, each with its own string dictionary, decodes every batch right"
+  ) {
     // A block is one record batch per `batchBytes` of held rows; with a small cap a reduce partition's
     // block holds many, and the writer gives each its own replacement dictionary (the slice's distinct
     // strings). Flight writes a stream's dictionaries once, at its start: before #338 the client decoded
     // batches 2..n against batch 1's dictionary -- out-of-bounds indices, or the wrong string silently.
     // Strings unique per row make every batch's dictionary different (batchBytes is set on the session).
     {
-      val df = spark.range(0, 200000, 1, 8).selectExpr("id", "cast(id % 7 as int) as k", "concat('s-', cast(id as string)) as s")
+      val df = spark.range(0, 200000, 1, 8).selectExpr(
+        "id",
+        "cast(id % 7 as int) as k",
+        "concat('s-', cast(id as string)) as s"
+      )
       df.createOrReplaceTempView("u")
       // The shuffle carries s; the aggregate reads it back on the other executor.
       val sql = "select k, count(distinct s) ds, max(s) ms, min(s) mn from u group by k order by k"
       val ours = spark.sql(sql).collect().toSeq
       spark.sessionState.conf.setConfString("spark.vector.enabled", "false")
-      val expected = try spark.sql(sql).collect().toSeq finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
+      val expected =
+        try spark.sql(sql).collect().toSeq
+        finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
       assert(ours === expected)
       assert(ours.map(_.getLong(1)).sum === 200000L)
     }

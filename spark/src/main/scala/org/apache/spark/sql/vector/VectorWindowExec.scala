@@ -8,10 +8,54 @@ import io.sparkvector.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, DenseRank, Expression, NamedExpression, Rank, RowNumber, SortOrder, SpecifiedWindowFrame, UnboundedFollowing, UnboundedPreceding, WindowExpression, WindowSpecDefinition}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, Complete, Count, First, Last, Max, Min, Sum}
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, CumeDist, EmptyRow, FrameLessOffsetWindowFunction, Literal, NTile, NthValue, PercentRank, UnboundedFollowing => UnboundedFollowingBound}
-import org.apache.spark.sql.types.{ByteType, ShortType, DateType, IntegerType, StringType, TimestampType, BooleanType, DecimalType => SparkDecimalType}
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias,
+  Ascending,
+  Attribute,
+  DenseRank,
+  Expression,
+  NamedExpression,
+  Rank,
+  RowNumber,
+  SortOrder,
+  SpecifiedWindowFrame,
+  UnboundedFollowing,
+  UnboundedPreceding,
+  WindowExpression,
+  WindowSpecDefinition
+}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{
+  AggregateExpression,
+  Average,
+  Complete,
+  Count,
+  First,
+  Last,
+  Max,
+  Min,
+  Sum
+}
+import org.apache.spark.sql.catalyst.expressions.{
+  AttributeReference,
+  CumeDist,
+  EmptyRow,
+  FrameLessOffsetWindowFunction,
+  Literal,
+  NTile,
+  NthValue,
+  PercentRank,
+  UnboundedFollowing => UnboundedFollowingBound
+}
+import org.apache.spark.sql.types.{
+  ByteType,
+  ShortType,
+  DateType,
+  IntegerType,
+  StringType,
+  TimestampType,
+  BooleanType,
+  DecimalType => SparkDecimalType
+}
 import org.apache.spark.sql.catalyst.expressions.{CurrentRow, EvalMode, RangeFrame, RowFrame}
 import org.apache.spark.sql.catalyst.plans.physical.{AllTuples, ClusteredDistribution, Distribution, Partitioning}
 import org.apache.spark.sql.execution.SparkPlan
@@ -81,8 +125,8 @@ case class VectorWindowExec(
     windowExpression: Seq[NamedExpression],
     partitionSpec: Seq[Expression],
     orderSpec: Seq[SortOrder],
-    child: SparkPlan)
-    extends VectorExec {
+    child: SparkPlan
+) extends VectorExec {
 
   override def output: Seq[Attribute] = child.output ++ windowExpression.map(_.toAttribute)
 
@@ -100,27 +144,45 @@ case class VectorWindowExec(
 
   // A constant key never separates two rows (`ORDER BY length('abc')` folds to a literal: every row is a
   // peer), so literals are dropped rather than evaluated as columns.
-  @transient private lazy val partitionKeys: Array[VectorExpr] = partitionSpec.map(compileKey).filterNot(_.isInstanceOf[LiteralExpr]).toArray
-  @transient private lazy val orderKeys: Array[VectorExpr] = orderSpec.map(o => compileKey(o.child)).filterNot(_.isInstanceOf[LiteralExpr]).toArray
+  @transient private lazy val partitionKeys: Array[VectorExpr] =
+    partitionSpec.map(compileKey).filterNot(_.isInstanceOf[LiteralExpr]).toArray
+  @transient private lazy val orderKeys: Array[VectorExpr] =
+    orderSpec.map(o => compileKey(o.child)).filterNot(_.isInstanceOf[LiteralExpr]).toArray
 
   private def aggregateMode: Boolean = VectorWindowPlanner.aggregateWindows(windowExpression).isDefined
-  private def offsetMode: Boolean = !aggregateMode && VectorWindowPlanner.offsetWindows(windowExpression, child.output).isRight
+  private def offsetMode: Boolean =
+    !aggregateMode && VectorWindowPlanner.offsetWindows(windowExpression, child.output).isRight
   @transient private lazy val offsets: Array[VectorWindowPlanner.OffsetFunction] =
-    VectorWindowPlanner.offsetWindows(windowExpression, child.output).getOrElse(throw new IllegalStateException("window expressions are not offset functions")).toArray
+    VectorWindowPlanner.offsetWindows(
+      windowExpression,
+      child.output
+    ).getOrElse(throw new IllegalStateException("window expressions are not offset functions")).toArray
 
-  @transient private lazy val kinds: Array[Int] = windowExpression.map(e => VectorWindowPlanner.rankKind(e).getOrElse(
-    throw new IllegalStateException(s"cannot vectorize window function ${e.sql}"))).toArray
+  @transient private lazy val kinds: Array[Int] = windowExpression.map(e =>
+    VectorWindowPlanner.rankKind(e).getOrElse(
+      throw new IllegalStateException(s"cannot vectorize window function ${e.sql}")
+    )
+  ).toArray
 
-  @transient private lazy val (aggregates: Seq[AggregateExpression], frame: Int) = VectorWindowPlanner.aggregateWindows(windowExpression).getOrElse(
-    throw new IllegalStateException("window expressions are not aggregates over one supported frame"))
+  @transient private lazy val (aggregates: Seq[AggregateExpression], frame: Int) =
+    VectorWindowPlanner.aggregateWindows(windowExpression).getOrElse(
+      throw new IllegalStateException("window expressions are not aggregates over one supported frame")
+    )
   @transient private lazy val combiners: Array[Array[VectorWindowPlanner.Combine]] =
     if (frame == VectorWindowPlanner.WholePartition) null
-    else aggregates.map(a => VectorWindowPlanner.prefixCombiners(a).getOrElse(throw new IllegalStateException(s"no running frame for ${a.sql}"))).toArray
+    else aggregates.map(a =>
+      VectorWindowPlanner.prefixCombiners(
+        a
+      ).getOrElse(throw new IllegalStateException(s"no running frame for ${a.sql}"))
+    ).toArray
   @transient private lazy val finalizers: Array[Array[Any] => Array[Any]] =
-    if (combiners == null) null else aggregates.map(a => VectorWindowPlanner.prefixFinalizer(a).getOrElse(identity[Array[Any]] _)).toArray
+    if (combiners == null) null
+    else aggregates.map(a => VectorWindowPlanner.prefixFinalizer(a).getOrElse(identity[Array[Any]] _)).toArray
   @transient private lazy val aggFunctions: Array[VectorAggFunction] = aggregates.map { a =>
     // A running decimal sum or average runs in its partial form; the prefix pass finalises per row (#259).
-    val compiled = if (combiners != null && VectorWindowPlanner.runsPartial(a)) a.copy(mode = org.apache.spark.sql.catalyst.expressions.aggregate.Partial) else a
+    val compiled = if (combiners != null && VectorWindowPlanner.runsPartial(a))
+      a.copy(mode = org.apache.spark.sql.catalyst.expressions.aggregate.Partial)
+    else a
     VectorAggregates.compile(compiled, child.output) match {
       case Right(f) => f
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize window aggregate ${a.sql}: $reason")
@@ -156,7 +218,21 @@ case class VectorWindowExec(
         declared.map(_.name).zip(emitted)
       }.toArray
       child.executeColumnar().mapPartitionsInternal { iter =>
-        new VectorWindowAggregateIterator(iter, pk, ok, fr, cb, fz, aggs, layout, bufferAttrs, results, childAttrs, windowAttrs, m)
+        new VectorWindowAggregateIterator(
+          iter,
+          pk,
+          ok,
+          fr,
+          cb,
+          fz,
+          aggs,
+          layout,
+          bufferAttrs,
+          results,
+          childAttrs,
+          windowAttrs,
+          m
+        )
       }
     } else if (offsetMode) {
       val ok = orderKeys
@@ -193,14 +269,17 @@ object VectorWindowPlanner {
   /** Which ranking function a window expression is, or why it is not one this layer computes. */
   def rankKind(e: NamedExpression): Either[String, Int] = e match {
     case Alias(WindowExpression(f, _), _) => f match {
-      case _: RowNumber => Right(RowNumberKind)
-      case _: Rank => Right(RankKind)
-      case _: DenseRank => Right(DenseRankKind)
-      case _: PercentRank | _: CumeDist | _: NTile => Left(s"window function ${f.prettyName} needs the partition size (held-partition path)")
-      // Only reached beside a ranking function: the aggregate frames themselves are judged first.
-      case a: AggregateExpression => Left(s"window aggregate ${a.aggregateFunction.prettyName} beside a ranking function in one operator not supported")
-      case other => Left(s"window function ${other.prettyName} not supported (row_number, rank and dense_rank are)")
-    }
+        case _: RowNumber => Right(RowNumberKind)
+        case _: Rank => Right(RankKind)
+        case _: DenseRank => Right(DenseRankKind)
+        case _: PercentRank | _: CumeDist | _: NTile =>
+          Left(s"window function ${f.prettyName} needs the partition size (held-partition path)")
+        // Only reached beside a ranking function: the aggregate frames themselves are judged first.
+        case a: AggregateExpression => Left(
+            s"window aggregate ${a.aggregateFunction.prettyName} beside a ranking function in one operator not supported"
+          )
+        case other => Left(s"window function ${other.prettyName} not supported (row_number, rank and dense_rank are)")
+      }
     case other => Left(s"window expression ${other.sql} not supported")
   }
 
@@ -214,8 +293,10 @@ object VectorWindowPlanner {
 
   /** Aggregate frames this operator computes. */
   val WholePartition = 0
+
   /** `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`: a prefix over rows. */
   val RunningRows = 1
+
   /** `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (Spark's default with `ORDER BY`): a prefix over peer groups. */
   val RunningRange = 2
 
@@ -232,8 +313,10 @@ object VectorWindowPlanner {
   /** The aggregate and frame kind of `e`, if it is a Complete aggregate without FILTER over a frame we compute. */
   private def aggregateWindow(e: NamedExpression): Option[(AggregateExpression, Int)] = e match {
     // first_value / last_value are positions in the frame, not prefixes: the offset family computes them.
-    case Alias(WindowExpression(a: AggregateExpression, _), _) if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
-    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, f)), _) if a.mode == Complete && a.filter.isEmpty =>
+    case Alias(WindowExpression(a: AggregateExpression, _), _)
+        if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
+    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, f)), _)
+        if a.mode == Complete && a.filter.isEmpty =>
       frameKind(f).map(k => (a, k))
     case _ => None
   }
@@ -259,9 +342,20 @@ object VectorWindowPlanner {
    * which row, `frame` (an aggregate frame kind) where the frame ends for the position-based ones,
    * `default` (Spark's internal representation) what a shifted row outside the partition yields.
    */
-  final case class OffsetFunction(kind: Int, inputOrdinal: Int, dataType: DataType, offset: Int, default: Any, frame: Int,
-      frameLo: Int = 0, frameHi: Int = 0, checked: Boolean = false, countAll: Boolean = false, context: org.apache.spark.QueryContext = null,
-      inputType: DataType = null)
+  final case class OffsetFunction(
+      kind: Int,
+      inputOrdinal: Int,
+      dataType: DataType,
+      offset: Int,
+      default: Any,
+      frame: Int,
+      frameLo: Int = 0,
+      frameHi: Int = 0,
+      checked: Boolean = false,
+      countAll: Boolean = false,
+      context: org.apache.spark.QueryContext = null,
+      inputType: DataType = null
+  )
 
   /** Sliding-frame aggregates (`ROWS BETWEEN a AND b`, any bounds): re-aggregated per row over the frame's rows, in order, as Spark does. */
   val SlidingSum = 10
@@ -269,9 +363,11 @@ object VectorWindowPlanner {
   val SlidingAvg = 12
   val SlidingMin = 13
   val SlidingMax = 14
+
   /** Frame bound sentinels in `frameLo` / `frameHi` (relative row offsets otherwise). */
   val UnboundedLo = Int.MinValue
   val UnboundedHi = Int.MaxValue
+
   /** `frameHi` for the `RANGE ... CURRENT ROW` upper bound: the end of the current peer group. */
   val PeerEndHi = Int.MaxValue - 1
 
@@ -283,12 +379,20 @@ object VectorWindowPlanner {
   }
 
   /** A sum/count/avg/min/max over a `ROWS` frame with literal bounds (or a `RANGE` frame's unbounded/current-row bounds). */
-  private def slidingAggregate(a: AggregateExpression, frame: Expression, output: Seq[Attribute]): Either[String, OffsetFunction] = {
+  private def slidingAggregate(
+      a: AggregateExpression,
+      frame: Expression,
+      output: Seq[Attribute]
+  ): Either[String, OffsetFunction] = {
     val name = a.aggregateFunction.prettyName
     if (a.filter.nonEmpty) return Left(s"window aggregate $name with FILTER not supported")
     if (a.mode != Complete) return Left(s"window aggregate $name in mode ${a.mode} not supported")
-    if (a.dataType.isInstanceOf[DecimalType] || a.aggregateFunction.children.exists(_.dataType.isInstanceOf[DecimalType]))
-      return Left(s"window aggregate $name over decimals in a sliding frame not supported (the sliding kernels are long and double)")
+    if (
+      a.dataType.isInstanceOf[DecimalType] || a.aggregateFunction.children.exists(_.dataType.isInstanceOf[DecimalType])
+    )
+      return Left(
+        s"window aggregate $name over decimals in a sliding frame not supported (the sliding kernels are long and double)"
+      )
     val bounds: Either[String, (Int, Int)] = frame match {
       case SpecifiedWindowFrame(RowFrame, lower, upper) =>
         (frameBound(lower, upper = false), frameBound(upper, upper = true)) match {
@@ -296,33 +400,61 @@ object VectorWindowPlanner {
           case _ => Left(s"window aggregate $name over frame ${frame.sql}: bounds must be literals")
         }
       case SpecifiedWindowFrame(RangeFrame, UnboundedPreceding, CurrentRow) => Right((UnboundedLo, PeerEndHi))
-      case SpecifiedWindowFrame(RangeFrame, UnboundedPreceding, UnboundedFollowingBound) => Right((UnboundedLo, UnboundedHi))
-      case SpecifiedWindowFrame(RangeFrame, _, _) => Left(s"window aggregate $name over frame ${frame.sql} not supported (RANGE frames with value offsets)")
+      case SpecifiedWindowFrame(RangeFrame, UnboundedPreceding, UnboundedFollowingBound) =>
+        Right((UnboundedLo, UnboundedHi))
+      case SpecifiedWindowFrame(RangeFrame, _, _) =>
+        Left(s"window aggregate $name over frame ${frame.sql} not supported (RANGE frames with value offsets)")
       case other => Left(s"window aggregate $name over frame ${other.sql} not supported")
     }
     bounds.flatMap { case (lo, hi) =>
       a.aggregateFunction match {
-        case sum: Sum if sum.evalContext.evalMode == EvalMode.TRY => Left(s"window aggregate try_sum over a sliding frame not supported")
+        case sum: Sum if sum.evalContext.evalMode == EvalMode.TRY =>
+          Left(s"window aggregate try_sum over a sliding frame not supported")
         case sum: Sum if sum.dataType == LongType || sum.dataType == DoubleType =>
-          inputOrdinal(sum.child, output).map(ord => OffsetFunction(SlidingSum, ord, sum.dataType, 0, null, WholePartition, lo, hi,
-            checked = sum.evalContext.evalMode == EvalMode.ANSI, context = sum.origin.context, inputType = sum.child.dataType))
+          inputOrdinal(sum.child, output).map(ord =>
+            OffsetFunction(
+              SlidingSum,
+              ord,
+              sum.dataType,
+              0,
+              null,
+              WholePartition,
+              lo,
+              hi,
+              checked = sum.evalContext.evalMode == EvalMode.ANSI,
+              context = sum.origin.context,
+              inputType = sum.child.dataType
+            )
+          )
         case c: Count => c.children match {
-          case Seq(l: Literal) if l.value != null => Right(OffsetFunction(SlidingCount, -1, LongType, 0, null, WholePartition, lo, hi, countAll = true))
-          case Seq(child) => inputOrdinal(child, output).map(ord => OffsetFunction(SlidingCount, ord, LongType, 0, null, WholePartition, lo, hi, inputType = child.dataType))
-          case _ => Left("window count over several columns in a sliding frame not supported")
-        }
+            case Seq(l: Literal) if l.value != null =>
+              Right(OffsetFunction(SlidingCount, -1, LongType, 0, null, WholePartition, lo, hi, countAll = true))
+            case Seq(child) => inputOrdinal(child, output).map(ord =>
+                OffsetFunction(SlidingCount, ord, LongType, 0, null, WholePartition, lo, hi, inputType = child.dataType)
+              )
+            case _ => Left("window count over several columns in a sliding frame not supported")
+          }
         case av: Average if av.dataType == DoubleType =>
-          inputOrdinal(av.child, output).map(ord => OffsetFunction(SlidingAvg, ord, DoubleType, 0, null, WholePartition, lo, hi, inputType = av.child.dataType))
-        case m: Min => inputOrdinal(m.child, output).map(ord => OffsetFunction(SlidingMin, ord, m.dataType, 0, null, WholePartition, lo, hi))
-        case m: Max => inputOrdinal(m.child, output).map(ord => OffsetFunction(SlidingMax, ord, m.dataType, 0, null, WholePartition, lo, hi))
-        case other => Left(s"window aggregate ${other.prettyName} over a sliding frame not supported (sum, avg, count, min and max are)")
+          inputOrdinal(av.child, output).map(ord =>
+            OffsetFunction(SlidingAvg, ord, DoubleType, 0, null, WholePartition, lo, hi, inputType = av.child.dataType)
+          )
+        case m: Min => inputOrdinal(m.child, output).map(ord =>
+            OffsetFunction(SlidingMin, ord, m.dataType, 0, null, WholePartition, lo, hi)
+          )
+        case m: Max => inputOrdinal(m.child, output).map(ord =>
+            OffsetFunction(SlidingMax, ord, m.dataType, 0, null, WholePartition, lo, hi)
+          )
+        case other => Left(
+            s"window aggregate ${other.prettyName} over a sliding frame not supported (sum, avg, count, min and max are)"
+          )
       }
     }
   }
 
   private def literalInt(e: Expression): Option[Int] = e match {
     case l: Literal if l.foldable && l.value != null && (l.dataType == IntegerType) => Some(l.value.asInstanceOf[Int])
-    case other if other.foldable && other.dataType == IntegerType => Option(other.eval(EmptyRow)).map(_.asInstanceOf[Int])
+    case other if other.foldable && other.dataType == IntegerType =>
+      Option(other.eval(EmptyRow)).map(_.asInstanceOf[Int])
     case _ => None
   }
 
@@ -339,7 +471,8 @@ object VectorWindowPlanner {
     case a: AttributeReference =>
       val i = output.indexWhere(_.exprId == a.exprId)
       if (i < 0) Left(s"input ${a.sql} is not a column of the child")
-      else if (!TypeMapping.hasLane(a.dataType)) Left(s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
+      else if (!TypeMapping.hasLane(a.dataType))
+        Left(s"unsupported column type ${a.dataType.simpleString} for ${a.name}")
       else Right(i)
     case other => Left(s"input ${other.sql} is not a column (Spark projects complex inputs below the window)")
   }
@@ -351,7 +484,10 @@ object VectorWindowPlanner {
       else literalInt(f.offset) match {
         case None => Left(s"${f.prettyName} offset must be an integer literal")
         case Some(off) =>
-          for (ord <- inputOrdinal(f.input, output); dflt <- literalDefault(f.default, f.dataType).left.map(r => s"${f.prettyName}: $r"))
+          for (
+            ord <- inputOrdinal(f.input, output);
+            dflt <- literalDefault(f.default, f.dataType).left.map(r => s"${f.prettyName}: $r")
+          )
             yield OffsetFunction(Shift, ord, f.dataType, off, dflt, WholePartition)
       }
     case Alias(WindowExpression(n: NthValue, WindowSpecDefinition(_, _, frame)), _) =>
@@ -359,9 +495,11 @@ object VectorWindowPlanner {
       else (literalInt(n.offset), frameKind(frame)) match {
         case (None, _) => Left("nth_value offset must be an integer literal")
         case (_, None) => Left(s"nth_value over frame ${frame.sql} not supported")
-        case (Some(k), Some(fk)) => inputOrdinal(n.input, output).map(ord => OffsetFunction(NthValueKind, ord, n.dataType, k, null, fk))
+        case (Some(k), Some(fk)) =>
+          inputOrdinal(n.input, output).map(ord => OffsetFunction(NthValueKind, ord, n.dataType, k, null, fk))
       }
-    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] =>
+    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _)
+        if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] =>
       val (child, ignoreNulls, isFirst) = a.aggregateFunction match {
         case fst: First => (fst.child, fst.ignoreNulls, true)
         case lst: Last => (lst.child, lst.ignoreNulls, false)
@@ -371,14 +509,22 @@ object VectorWindowPlanner {
       else if (a.filter.nonEmpty) Left(s"$name with FILTER not supported")
       else frameKind(frame) match {
         case None => Left(s"$name over frame ${frame.sql} not supported")
-        case Some(fk) => inputOrdinal(child, output).map(ord => OffsetFunction(if (isFirst) FirstValue else LastValue, ord, a.dataType, 0, null, fk))
+        case Some(fk) => inputOrdinal(child, output).map(ord =>
+            OffsetFunction(if (isFirst) FirstValue else LastValue, ord, a.dataType, 0, null, fk)
+          )
       }
-    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) => slidingAggregate(a, frame, output)
-    case Alias(WindowExpression(_: RowNumber, _), _) => Right(OffsetFunction(RowNumberAt, -1, IntegerType, 0, null, WholePartition))
-    case Alias(WindowExpression(_: Rank, _), _) => Right(OffsetFunction(RankAt, -1, IntegerType, 0, null, WholePartition))
-    case Alias(WindowExpression(_: DenseRank, _), _) => Right(OffsetFunction(DenseRankAt, -1, IntegerType, 0, null, WholePartition))
-    case Alias(WindowExpression(_: PercentRank, _), _) => Right(OffsetFunction(PercentRankAt, -1, DoubleType, 0, null, WholePartition))
-    case Alias(WindowExpression(_: CumeDist, _), _) => Right(OffsetFunction(CumeDistAt, -1, DoubleType, 0, null, WholePartition))
+    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) =>
+      slidingAggregate(a, frame, output)
+    case Alias(WindowExpression(_: RowNumber, _), _) =>
+      Right(OffsetFunction(RowNumberAt, -1, IntegerType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: Rank, _), _) =>
+      Right(OffsetFunction(RankAt, -1, IntegerType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: DenseRank, _), _) =>
+      Right(OffsetFunction(DenseRankAt, -1, IntegerType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: PercentRank, _), _) =>
+      Right(OffsetFunction(PercentRankAt, -1, DoubleType, 0, null, WholePartition))
+    case Alias(WindowExpression(_: CumeDist, _), _) =>
+      Right(OffsetFunction(CumeDistAt, -1, DoubleType, 0, null, WholePartition))
     case Alias(WindowExpression(n: NTile, _), _) =>
       literalInt(n.buckets) match {
         case Some(b) if b > 0 => Right(OffsetFunction(NTileAt, -1, IntegerType, b, null, WholePartition))
@@ -397,7 +543,8 @@ object VectorWindowPlanner {
   /** All of the operator's expressions as aggregates over ONE frame kind, or None when any is something else. */
   def aggregateWindows(es: Seq[NamedExpression]): Option[(Seq[AggregateExpression], Int)] = {
     val aggs = es.map(aggregateWindow)
-    if (es.nonEmpty && aggs.forall(_.isDefined) && aggs.flatten.map(_._2).distinct.length == 1) Some((aggs.flatten.map(_._1), aggs.flatten.head._2))
+    if (es.nonEmpty && aggs.forall(_.isDefined) && aggs.flatten.map(_._2).distinct.length == 1)
+      Some((aggs.flatten.map(_._1), aggs.flatten.head._2))
     else None
   }
 
@@ -406,10 +553,16 @@ object VectorWindowPlanner {
     val a = p.asInstanceOf[java.lang.Long].longValue(); val b = c.asInstanceOf[java.lang.Long].longValue()
     if (checked) {
       try java.lang.Long.valueOf(Math.addExact(a, b))
-      catch { case _: ArithmeticException => throw VectorErrors.arithmeticOverflow("long overflow", "try_sum", context) }
+      catch {
+        case _: ArithmeticException => throw VectorErrors.arithmeticOverflow("long overflow", "try_sum", context)
+      }
     } else java.lang.Long.valueOf(a + b)
   }
-  private val addDouble: Combine = nullSafe((p, c) => java.lang.Double.valueOf(p.asInstanceOf[java.lang.Double].doubleValue() + c.asInstanceOf[java.lang.Double].doubleValue()))
+  private val addDouble: Combine = nullSafe((p, c) =>
+    java.lang.Double.valueOf(
+      p.asInstanceOf[java.lang.Double].doubleValue() + c.asInstanceOf[java.lang.Double].doubleValue()
+    )
+  )
   private def extreme(isMin: Boolean): Combine = nullSafe { (p, c) =>
     // Boxed Integer / Long / Double / Boolean / UTF8String: Comparable with Spark's ordering (doubles total, strings binary).
     val cmp = p.asInstanceOf[Comparable[Any]].compareTo(c)
@@ -419,15 +572,20 @@ object VectorWindowPlanner {
   /** How a running frame carries each buffer slot forward, or why this function has no running form here. */
   def prefixCombiners(a: AggregateExpression): Either[String, Array[Combine]] = a.aggregateFunction match {
     case s: Sum if s.evalContext.evalMode == EvalMode.TRY => Left("running try_sum not supported")
-    case s: Sum if s.dataType == LongType => Right(Array(addLong(s.evalContext.evalMode == EvalMode.ANSI, s.origin.context)))
+    case s: Sum if s.dataType == LongType =>
+      Right(Array(addLong(s.evalContext.evalMode == EvalMode.ANSI, s.origin.context)))
     case s: Sum if s.dataType == DoubleType => Right(Array(addDouble))
     // A decimal sum's partial buffer is (exact total or null past the buffer precision, isEmpty): the total is
     // added exactly and poisons once it overflows, as Spark's buffer does, the emptiness is an AND (#259).
-    case s: Sum if s.dataType.isInstanceOf[SparkDecimalType] => Right(Array(addDecimal(s.dataType.asInstanceOf[SparkDecimalType]), andEmpty))
+    case s: Sum if s.dataType.isInstanceOf[SparkDecimalType] =>
+      Right(Array(addDecimal(s.dataType.asInstanceOf[SparkDecimalType]), andEmpty))
     case _: Count => Right(Array(addLong(checked = false, null)))
     case av: Average if av.dataType == DoubleType => Right(Array(addDouble, addLong(checked = false, null)))
     case av: Average if av.child.dataType.isInstanceOf[SparkDecimalType] =>
-      Right(Array(addDecimal(av.aggBufferAttributes.head.dataType.asInstanceOf[SparkDecimalType]), addLong(checked = false, null)))
+      Right(Array(
+        addDecimal(av.aggBufferAttributes.head.dataType.asInstanceOf[SparkDecimalType]),
+        addLong(checked = false, null)
+      ))
     case _: Min => Right(Array(extreme(isMin = true)))
     case _: Max => Right(Array(extreme(isMin = false)))
     case other => Left(s"running frame for ${other.prettyName} not supported (sum, avg, count, min and max are)")
@@ -443,7 +601,8 @@ object VectorWindowPlanner {
         if (r.unscaledValue().abs().compareTo(limit) >= 0) null else r
       }
   }
-  private val andEmpty: Combine = (p, c) => java.lang.Boolean.valueOf(p.asInstanceOf[java.lang.Boolean] && c.asInstanceOf[java.lang.Boolean])
+  private val andEmpty: Combine =
+    (p, c) => java.lang.Boolean.valueOf(p.asInstanceOf[java.lang.Boolean] && c.asInstanceOf[java.lang.Boolean])
 
   /**
    * The decimal aggregates run a running frame in their *partial* form (so the prefix can add exact
@@ -468,7 +627,8 @@ object VectorWindowPlanner {
       val result = io.sparkvector.spark.agg.DecimalAvgResult(av)
       Some { slots =>
         val out = slots.clone()
-        out(0) = result.value(slots(0).asInstanceOf[java.math.BigDecimal], slots(1).asInstanceOf[java.lang.Long].longValue())
+        out(0) =
+          result.value(slots(0).asInstanceOf[java.math.BigDecimal], slots(1).asInstanceOf[java.lang.Long].longValue())
         out
       }
     case _ => None
@@ -479,20 +639,30 @@ object VectorWindowPlanner {
 
   /** Why a window aggregate is not computed: the frame, or the function itself. */
   private def aggregateReason(e: NamedExpression, input: Seq[Attribute]): Option[String] = e match {
-    case Alias(WindowExpression(a: AggregateExpression, _), _) if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
+    case Alias(WindowExpression(a: AggregateExpression, _), _)
+        if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
     case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) =>
       frameKind(frame) match {
         case Some(kind) =>
           // Decimal aggregates run on the aggregate machinery (the 128-bit accumulators, #259): a running frame
           // takes the partial buffer and finalises per row (prefixFinalizer), a whole partition the final form.
-          VectorAggregates.compile(if (kind != WholePartition && runsPartial(a)) a.copy(mode = org.apache.spark.sql.catalyst.expressions.aggregate.Partial) else a, input)
+          VectorAggregates.compile(
+            if (kind != WholePartition && runsPartial(a))
+              a.copy(mode = org.apache.spark.sql.catalyst.expressions.aggregate.Partial)
+            else a,
+            input
+          )
             .left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r")
-            .orElse(if (kind == WholePartition) None else prefixCombiners(a).left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r"))
+            .orElse(if (kind == WholePartition) None
+            else prefixCombiners(a).left.toOption.map(r => s"window aggregate ${a.aggregateFunction.prettyName}: $r"))
         case None => frame match {
-          case SpecifiedWindowFrame(RowFrame, lower, upper) if frameBound(lower, upper = false).isDefined && frameBound(upper, upper = true).isDefined =>
-            slidingAggregate(a, frame, input).left.toOption
-          case _ => Some(s"window aggregate ${a.aggregateFunction.prettyName} over frame ${frame.sql} not supported (RANGE frames with value offsets)")
-        }
+            case SpecifiedWindowFrame(RowFrame, lower, upper)
+                if frameBound(lower, upper = false).isDefined && frameBound(upper, upper = true).isDefined =>
+              slidingAggregate(a, frame, input).left.toOption
+            case _ => Some(
+                s"window aggregate ${a.aggregateFunction.prettyName} over frame ${frame.sql} not supported (RANGE frames with value offsets)"
+              )
+          }
       }
     case _ => None
   }
@@ -500,7 +670,8 @@ object VectorWindowPlanner {
   def plan(w: WindowExec): Either[String, VectorWindowExec] = {
     val keys = w.partitionSpec ++ w.orderSpec.map(_.child)
     val keyFailures = keys.flatMap { k =>
-      if (k.dataType == DoubleType) Some(s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)")
+      if (k.dataType == DoubleType)
+        Some(s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)")
       else if (!TypeMapping.hasLane(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
       else ExpressionCompiler.compileLaneColumn(k, w.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
     }
@@ -508,32 +679,54 @@ object VectorWindowPlanner {
       case Some((aggs, _)) =>
         val reasons = w.windowExpression.flatMap(aggregateReason(_, w.child.output))
         val attrs = aggs.map(_.resultAttribute)
-        val resultReason = if (reasons.nonEmpty) None else VectorAggregatePlanner.compileFinalResults(Nil, aggs, attrs, attrs).left.toOption.map(r => s"window aggregate result: $r")
-        (reasons ++ resultReason ++ keyFailures).headOption.toLeft(VectorWindowExec(w.windowExpression, w.partitionSpec, w.orderSpec, w.child))
+        val resultReason = if (reasons.nonEmpty) None
+        else VectorAggregatePlanner.compileFinalResults(Nil, aggs, attrs, attrs).left.toOption.map(r =>
+          s"window aggregate result: $r"
+        )
+        (reasons ++ resultReason ++ keyFailures).headOption.toLeft(VectorWindowExec(
+          w.windowExpression,
+          w.partitionSpec,
+          w.orderSpec,
+          w.child
+        ))
       case None =>
         val kinds = w.windowExpression.map(rankKind)
         kinds.collectFirst { case Left(reason) => reason } match {
           case Some(reason) =>
             offsetWindows(w.windowExpression, w.child.output) match {
-              case Right(_) => keyFailures.headOption.toLeft(VectorWindowExec(w.windowExpression, w.partitionSpec, w.orderSpec, w.child))
+              case Right(_) => keyFailures.headOption.toLeft(VectorWindowExec(
+                  w.windowExpression,
+                  w.partitionSpec,
+                  w.orderSpec,
+                  w.child
+                ))
               case Left(offsetReason) =>
                 // A ranking function beside an aggregate in one spec, an aggregate over another frame, two
                 // frame kinds in one operator, or an offset function we cannot read: say which.
                 val mixed = w.windowExpression.map(aggregateWindow).flatten.map(_._2).distinct.length > 1
                 val offsetLike = w.windowExpression.exists {
-                  case Alias(WindowExpression(f, _), _) => f.isInstanceOf[FrameLessOffsetWindowFunction] || f.isInstanceOf[NthValue] ||
-                    f.isInstanceOf[PercentRank] || f.isInstanceOf[CumeDist] || f.isInstanceOf[NTile] || f.isInstanceOf[AggregateExpression] ||
-                    (f match { case a: AggregateExpression => a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last]; case _ => false })
+                  case Alias(WindowExpression(f, _), _) =>
+                    f.isInstanceOf[FrameLessOffsetWindowFunction] || f.isInstanceOf[NthValue] ||
+                    f.isInstanceOf[PercentRank] || f.isInstanceOf[CumeDist] || f.isInstanceOf[NTile] || f.isInstanceOf[
+                      AggregateExpression
+                    ] ||
+                    (f match {
+                      case a: AggregateExpression =>
+                        a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last];
+                      case _ => false
+                    })
                   case _ => false
                 }
                 Left(w.windowExpression.flatMap(aggregateReason(_, w.child.output)).headOption.getOrElse(
                   if (mixed) "window aggregates over different frames in one operator not supported"
                   else if (offsetLike && !offsetReason.contains("is not an offset function")) offsetReason
                   else if (offsetLike) "offset functions beside other window functions in one operator not supported"
-                  else reason))
+                  else reason
+                ))
             }
           case None if w.orderSpec.isEmpty => Left("ranking window without an ORDER BY")
-          case None => keyFailures.headOption.toLeft(VectorWindowExec(w.windowExpression, w.partitionSpec, w.orderSpec, w.child))
+          case None =>
+            keyFailures.headOption.toLeft(VectorWindowExec(w.windowExpression, w.partitionSpec, w.orderSpec, w.child))
         }
     }
   }
@@ -578,8 +771,8 @@ private[vector] class VectorWindowIterator(
     kinds: Array[Int],
     childAttrs: Array[(String, DataType)],
     windowAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorWindowExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorWindowExec") {
 
   private val partition = new KeyTracker(partitionKeys)
   private val order = new KeyTracker(orderKeys)
@@ -634,7 +827,8 @@ private[vector] class VectorWindowIterator(
       while (c < childAttrs.length) {
         val (name, dt) = childAttrs(c)
         // Forwarded columns are never copied: the child keeps them alive until its next batch.
-        columns(c) = if (live == null) BorrowedColumnVector.of(batch.column(c)) else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
+        columns(c) = if (live == null) BorrowedColumnVector.of(batch.column(c))
+        else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
         c += 1
       }
       f = 0
@@ -675,8 +869,8 @@ private[vector] class VectorWindowAggregateIterator(
     results: Array[VectorExpr],
     childAttrs: Array[(String, DataType)],
     windowAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch] with AutoCloseable {
+    metrics: VectorMetrics
+) extends Iterator[ColumnarBatch] with AutoCloseable {
 
   /** A held batch: owned copies of the live rows and each row's partition ordinal. */
   private final class Held(val columns: Array[ColumnVector], val numRows: Int, val groups: Array[Int])
@@ -742,7 +936,8 @@ private[vector] class VectorWindowAggregateIterator(
       while (c < childAttrs.length) {
         val (name, dt) = childAttrs(c)
         // The child reuses or releases its batch once we pull the next one: the held rows are copies.
-        columns(c) = if (live == null) ArrowOutput.copy(name, dt, ctx.input(c), allocator) else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
+        columns(c) = if (live == null) ArrowOutput.copy(name, dt, ctx.input(c), allocator)
+        else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
         c += 1
       }
       held.enqueue(new Held(columns, outRows, groups))
@@ -766,8 +961,10 @@ private[vector] class VectorWindowAggregateIterator(
       while (c < layout.length) {
         val (name, dt) = bufferAttrs(c)
         bufferColumns(c) = layout(c) match {
-          case BufferSlot(aggIdx, slot) if prefixes == null => AggBufferColumns.column(name, dt, states(aggIdx), slot, from, to, allocator)
-          case BufferSlot(aggIdx, slot) => AggBufferColumns.values(name, dt, to - from, o => prefixes(o)(aggIdx)(slot), allocator)
+          case BufferSlot(aggIdx, slot) if prefixes == null =>
+            AggBufferColumns.column(name, dt, states(aggIdx), slot, from, to, allocator)
+          case BufferSlot(aggIdx, slot) =>
+            AggBufferColumns.values(name, dt, to - from, o => prefixes(o)(aggIdx)(slot), allocator)
           case KeySlot(_) => throw new IllegalStateException("key slot in a window aggregate")
         }
         c += 1
@@ -817,7 +1014,8 @@ private[vector] class VectorWindowAggregateIterator(
           a += 1
         }
         lastPrefix = value
-        val emitted = if (finalizers == null) value else { val e = value.clone(); var i = 0; while (i < e.length) { e(i) = finalizers(i)(value(i)); i += 1 }; e }
+        val emitted = if (finalizers == null) value
+        else { val e = value.clone(); var i = 0; while (i < e.length) { e(i) = finalizers(i)(value(i)); i += 1 }; e }
         lastEmitted = emitted
         prefixDone = g + 1
         out(g - from) = emitted
@@ -880,8 +1078,8 @@ case class VectorWindowGroupLimitExec(
     rankLikeFunction: Expression,
     limit: Int,
     mode: WindowGroupLimitMode,
-    child: SparkPlan)
-    extends VectorExec {
+    child: SparkPlan
+) extends VectorExec {
 
   override def output: Seq[Attribute] = child.output
 
@@ -897,10 +1095,13 @@ case class VectorWindowGroupLimitExec(
     case Right(v) => v
     case Left(reason) => throw new IllegalStateException(s"cannot vectorize window group limit key ${e.sql}: $reason")
   }
-  @transient private lazy val partitionKeys: Array[VectorExpr] = partitionSpec.map(compileKey).filterNot(_.isInstanceOf[LiteralExpr]).toArray
-  @transient private lazy val orderKeys: Array[VectorExpr] = orderSpec.map(o => compileKey(o.child)).filterNot(_.isInstanceOf[LiteralExpr]).toArray
+  @transient private lazy val partitionKeys: Array[VectorExpr] =
+    partitionSpec.map(compileKey).filterNot(_.isInstanceOf[LiteralExpr]).toArray
+  @transient private lazy val orderKeys: Array[VectorExpr] =
+    orderSpec.map(o => compileKey(o.child)).filterNot(_.isInstanceOf[LiteralExpr]).toArray
   @transient private lazy val kind: Int = VectorWindowPlanner.rankLikeKind(rankLikeFunction).getOrElse(
-    throw new IllegalStateException(s"cannot vectorize window group limit function ${rankLikeFunction.sql}"))
+    throw new IllegalStateException(s"cannot vectorize window group limit function ${rankLikeFunction.sql}")
+  )
 
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val pk = partitionKeys
@@ -933,11 +1134,21 @@ object VectorWindowGroupLimitPlanner {
       case Right(_) =>
         val keys = g.partitionSpec ++ g.orderSpec.map(_.child)
         val keyFailures = keys.flatMap { k =>
-          if (k.dataType == DoubleType) Some(s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)")
+          if (k.dataType == DoubleType) Some(
+            s"window key ${k.sql}: double keys not supported (Spark compares them after NaN and zero normalisation)"
+          )
           else if (!TypeMapping.hasLane(k.dataType)) Some(s"window key type ${k.dataType.simpleString} not supported")
-          else ExpressionCompiler.compileLaneColumn(k, g.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
+          else
+            ExpressionCompiler.compileLaneColumn(k, g.child.output).left.toOption.map(r => s"window key ${k.sql}: $r")
         }
-        keyFailures.headOption.toLeft(VectorWindowGroupLimitExec(g.partitionSpec, g.orderSpec, g.rankLikeFunction, g.limit, g.mode, g.child))
+        keyFailures.headOption.toLeft(VectorWindowGroupLimitExec(
+          g.partitionSpec,
+          g.orderSpec,
+          g.rankLikeFunction,
+          g.limit,
+          g.mode,
+          g.child
+        ))
     }
   }
 }
@@ -950,8 +1161,8 @@ private[vector] class VectorWindowGroupLimitIterator(
     kind: Int,
     limit: Int,
     childAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends VectorBatchIterator(input, "VectorWindowGroupLimitExec") {
+    metrics: VectorMetrics
+) extends VectorBatchIterator(input, "VectorWindowGroupLimitExec") {
 
   private val partition = new KeyTracker(partitionKeys)
   private val order = new KeyTracker(orderKeys)
@@ -1032,12 +1243,19 @@ private[vector] class VectorWindowOffsetIterator(
     functions: Array[VectorWindowPlanner.OffsetFunction],
     childAttrs: Array[(String, DataType)],
     windowAttrs: Array[(String, DataType)],
-    metrics: VectorMetrics)
-    extends Iterator[ColumnarBatch] with AutoCloseable {
+    metrics: VectorMetrics
+) extends Iterator[ColumnarBatch] with AutoCloseable {
 
   /** A held batch: owned copies of the live rows, each row's partition ordinal, position in it, and peer ordinal. */
-  private final class Held(val columns: Array[ColumnVector], val numRows: Int, val firstGlobal: Long,
-      val partOf: Array[Int], val posOf: Array[Int], val peerOf: Array[Int]) {
+  private final class Held(
+      val columns: Array[ColumnVector],
+      val numRows: Int,
+      val firstGlobal: Long,
+      val partOf: Array[Int],
+      val posOf: Array[Int],
+      val peerOf: Array[Int]
+  ) {
+
     /** The consumer has moved past this batch's output (whose columns are borrowed from here). */
     var consumed = false
     def close(): Unit = columns.foreach(_.close())
@@ -1116,7 +1334,8 @@ private[vector] class VectorWindowOffsetIterator(
       var c = 0
       while (c < childAttrs.length) {
         val (name, dt) = childAttrs(c)
-        columns(c) = if (live == null) ArrowOutput.copy(name, dt, ctx.input(c), allocator) else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
+        columns(c) = if (live == null) ArrowOutput.copy(name, dt, ctx.input(c), allocator)
+        else ArrowOutput.compact(name, dt, ctx.input(c), live, outRows, allocator)
         c += 1
       }
       held.enqueue(new Held(columns, outRows, globalRows, partOf, posOf, peerOf))
@@ -1145,7 +1364,12 @@ private[vector] class VectorWindowOffsetIterator(
       case DoubleType => java.lang.Double.valueOf(col.getDouble(r))
       case BooleanType => java.lang.Boolean.valueOf(col.getBoolean(r))
       case StringType => col.getUTF8String(r).clone()
-      case d: SparkDecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION => col.getDecimal(r, d.precision, d.scale).toJavaBigDecimal // a wide value, boxed as the DECIMAL128 column builder reads it (#259)
+      case d: SparkDecimalType if d.precision > TypeMapping.MAX_DECIMAL_PRECISION =>
+        col.getDecimal(
+          r,
+          d.precision,
+          d.scale
+        ).toJavaBigDecimal // a wide value, boxed as the DECIMAL128 column builder reads it (#259)
       case d: SparkDecimalType => java.lang.Long.valueOf(col.getDecimal(r, d.precision, d.scale).toUnscaledLong)
       case other => throw new IllegalStateException(s"offset window over $other")
     }
@@ -1178,45 +1402,51 @@ private[vector] class VectorWindowOffsetIterator(
   /** Running aggregate over the rows of one frame, fed in row order (Spark re-aggregates a frame the same way). */
   private abstract class SlidingState { def reset(): Unit; def add(v: Any): Unit; def result: Any }
   private def newState(fn: VectorWindowPlanner.OffsetFunction): SlidingState = fn.kind match {
-    case VectorWindowPlanner.SlidingSum if fn.dataType == LongType => new SlidingState {
-      var sum = 0L; var count = 0L
-      def reset(): Unit = { sum = 0L; count = 0L }
-      def add(v: Any): Unit = if (v != null) {
-        val x = v match { case l: java.lang.Long => l.longValue(); case i: java.lang.Integer => i.longValue() }
-        if (fn.checked) { try sum = Math.addExact(sum, x) catch { case _: ArithmeticException => throw VectorErrors.arithmeticOverflow("long overflow", "try_sum", fn.context) } }
-        else sum += x
-        count += 1
+    case VectorWindowPlanner.SlidingSum if fn.dataType == LongType =>
+      new SlidingState {
+        var sum = 0L; var count = 0L
+        def reset(): Unit = { sum = 0L; count = 0L }
+        def add(v: Any): Unit = if (v != null) {
+          val x = v match { case l: java.lang.Long => l.longValue(); case i: java.lang.Integer => i.longValue() }
+          if (fn.checked) {
+            try sum = Math.addExact(sum, x)
+            catch {
+              case _: ArithmeticException =>
+                throw VectorErrors.arithmeticOverflow("long overflow", "try_sum", fn.context)
+            }
+          } else sum += x
+          count += 1
+        }
+        def result: Any = if (count == 0) null else java.lang.Long.valueOf(sum)
       }
-      def result: Any = if (count == 0) null else java.lang.Long.valueOf(sum)
-    }
     case VectorWindowPlanner.SlidingSum => new SlidingState {
-      var sum = 0.0; var count = 0L
-      def reset(): Unit = { sum = 0.0; count = 0L }
-      def add(v: Any): Unit = if (v != null) { sum += v.asInstanceOf[java.lang.Double].doubleValue(); count += 1 }
-      def result: Any = if (count == 0) null else java.lang.Double.valueOf(sum)
-    }
-    case VectorWindowPlanner.SlidingCount => new SlidingState {
-      var n = 0L
-      def reset(): Unit = n = 0L
-      def add(v: Any): Unit = if (fn.countAll || v != null) n += 1
-      def result: Any = java.lang.Long.valueOf(n)
-    }
-    case VectorWindowPlanner.SlidingAvg => new SlidingState {
-      var sum = 0.0; var count = 0L
-      def reset(): Unit = { sum = 0.0; count = 0L }
-      def add(v: Any): Unit = if (v != null) { sum += v.asInstanceOf[Number].doubleValue(); count += 1 }
-      def result: Any = if (count == 0) null else java.lang.Double.valueOf(sum / count)
-    }
-    case k => new SlidingState {
-      val isMin = k == VectorWindowPlanner.SlidingMin
-      var current: Any = null
-      def reset(): Unit = current = null
-      def add(v: Any): Unit = if (v != null) {
-        if (current == null) current = v
-        else { val cmp = current.asInstanceOf[Comparable[Any]].compareTo(v); if ((cmp > 0) == isMin) current = v }
+        var sum = 0.0; var count = 0L
+        def reset(): Unit = { sum = 0.0; count = 0L }
+        def add(v: Any): Unit = if (v != null) { sum += v.asInstanceOf[java.lang.Double].doubleValue(); count += 1 }
+        def result: Any = if (count == 0) null else java.lang.Double.valueOf(sum)
       }
-      def result: Any = current
-    }
+    case VectorWindowPlanner.SlidingCount => new SlidingState {
+        var n = 0L
+        def reset(): Unit = n = 0L
+        def add(v: Any): Unit = if (fn.countAll || v != null) n += 1
+        def result: Any = java.lang.Long.valueOf(n)
+      }
+    case VectorWindowPlanner.SlidingAvg => new SlidingState {
+        var sum = 0.0; var count = 0L
+        def reset(): Unit = { sum = 0.0; count = 0L }
+        def add(v: Any): Unit = if (v != null) { sum += v.asInstanceOf[Number].doubleValue(); count += 1 }
+        def result: Any = if (count == 0) null else java.lang.Double.valueOf(sum / count)
+      }
+    case k => new SlidingState {
+        val isMin = k == VectorWindowPlanner.SlidingMin
+        var current: Any = null
+        def reset(): Unit = current = null
+        def add(v: Any): Unit = if (v != null) {
+          if (current == null) current = v
+          else { val cmp = current.asInstanceOf[Comparable[Any]].compareTo(v); if ((cmp > 0) == isMin) current = v }
+        }
+        def result: Any = current
+      }
   }
 
   /** Reads the function's input at partition-relative position `target` of the partition row `r` of `h` belongs to. */
@@ -1225,7 +1455,12 @@ private[vector] class VectorWindowOffsetIterator(
     else {
       val g = h.firstGlobal + r + (target - pos)
       val src = if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) h else batchOf(g)
-      valueAt(src, fn.inputOrdinal, (g - src.firstGlobal).toInt, if (fn.inputType != null) fn.inputType else fn.dataType)
+      valueAt(
+        src,
+        fn.inputOrdinal,
+        (g - src.firstGlobal).toInt,
+        if (fn.inputType != null) fn.inputType else fn.dataType
+      )
     }
   }
 
@@ -1275,30 +1510,36 @@ private[vector] class VectorWindowOffsetIterator(
       while (f < functions.length) {
         val fn = functions(f)
         val (name, dt) = windowAttrs(f)
-        columns(childAttrs.length + f) = AggBufferColumns.values(name, dt, h.numRows, { r =>
-          val part = h.partOf(r); val pos = h.posOf(r); val len = partitionLength(part)
-          val frameEnd = fn.frame match {
-            case VectorWindowPlanner.WholePartition => len - 1
-            case VectorWindowPlanner.RunningRows => pos
-            case _ => peerEnd(h.peerOf(r))
-          }
-          if (fn.kind >= VectorWindowPlanner.SlidingSum) slidingValue(f, fn, h, r, pos, len)
-          else if (fn.kind >= VectorWindowPlanner.RowNumberAt) rankingValue(fn, h, r, pos, len)
-          else {
-          val target: Int = fn.kind match {
-            case VectorWindowPlanner.Shift => pos + fn.offset
-            case VectorWindowPlanner.FirstValue => 0
-            case VectorWindowPlanner.LastValue => frameEnd
-            case _ => if (fn.offset - 1 <= frameEnd) fn.offset - 1 else -1
-          }
-          if (target < 0 || target >= len) { if (fn.kind == VectorWindowPlanner.Shift) fn.default else null }
-          else {
-            val g = h.firstGlobal + r + (target - pos)
-            val src = if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) h else batchOf(g)
-            valueAt(src, fn.inputOrdinal, (g - src.firstGlobal).toInt, fn.dataType)
-          }
-          }
-        }, allocator)
+        columns(childAttrs.length + f) = AggBufferColumns.values(
+          name,
+          dt,
+          h.numRows,
+          { r =>
+            val part = h.partOf(r); val pos = h.posOf(r); val len = partitionLength(part)
+            val frameEnd = fn.frame match {
+              case VectorWindowPlanner.WholePartition => len - 1
+              case VectorWindowPlanner.RunningRows => pos
+              case _ => peerEnd(h.peerOf(r))
+            }
+            if (fn.kind >= VectorWindowPlanner.SlidingSum) slidingValue(f, fn, h, r, pos, len)
+            else if (fn.kind >= VectorWindowPlanner.RowNumberAt) rankingValue(fn, h, r, pos, len)
+            else {
+              val target: Int = fn.kind match {
+                case VectorWindowPlanner.Shift => pos + fn.offset
+                case VectorWindowPlanner.FirstValue => 0
+                case VectorWindowPlanner.LastValue => frameEnd
+                case _ => if (fn.offset - 1 <= frameEnd) fn.offset - 1 else -1
+              }
+              if (target < 0 || target >= len) { if (fn.kind == VectorWindowPlanner.Shift) fn.default else null }
+              else {
+                val g = h.firstGlobal + r + (target - pos)
+                val src = if (g >= h.firstGlobal && g < h.firstGlobal + h.numRows) h else batchOf(g)
+                valueAt(src, fn.inputOrdinal, (g - src.firstGlobal).toInt, fn.dataType)
+              }
+            }
+          },
+          allocator
+        )
         f += 1
       }
       metrics.numOutputBatches += 1
