@@ -1148,7 +1148,7 @@ So the scan's values are right when read through Spark's `ColumnarToRow`, and th
 when the batches are consumed by a native operator pipeline -- Comet's own or ours -- through the
 Arrow C data export; the loss sits in the second `cs_ui` instance's join against the broadcast of
 `store_sales(2000) ⋈ store_returns`, and SF10 never reproduces it. Reported upstream as
-apache/datafusion-comet#6133; q64 stays marked as a Comet issue in the tables and our own row is right.
+apache/datafusion-comet#6133 (intermittent -- see the four-configuration table below); q64 stays marked as a Comet issue in the tables and our own row is right.
 
 **Comet's scan against ours, per query (v10, 300 partitions, one window).** Over 101 queries our
 scan totals 2752 s and Comet's native scan over the same operators and shuffle 2730 s -- a wash that
@@ -1161,6 +1161,74 @@ gives it back -- Comet's vectors cross into our operators through the Arrow C ex
 reader's dictionary encoding of strings and our batch sizing, so joins and aggregates on string keys
 run on plain strings, the input-side twin of the #416 finding above. The converter is the cheaper
 lever; the reader the larger project.
+
+**The four configurations on one day (v19 image, 300 partitions, 2026-09-23).** The v19 image is main
+at #451: the 32 MB spilling sort (#448/#451), the merge join under `auto`, the cluster-trained AOT
+cache; Spark's leg ran in the morning, the other three in the afternoon on the same cluster, one run
+per query. `comet` is Comet 1.0.0 end to end (scan, native operators, native shuffle); `csvo` is
+Comet's scan under our shuffle and operators; `ours` is our reader, shuffle and operators. Seconds.
+
+| query | Spark | Comet | csvo | ours |
+|---|---|---|---|---|
+| q2 | 42.8 | 46.9 | 39.5 | 52.3 |
+| q4 | 93.2 | 58.8 | 77.6 | 96.8 |
+| q9 | 95.5 | 79.8 | 76.4 | 142.1 |
+| q11 | 43.0 | 35.2 | 42.1 | 53.1 |
+| q14a | 100.8 | 76.4 | 96.6 | 123.7 |
+| q14b | 97.7 | 66.6 | 80.3 | 93.6 |
+| q16 | 36.6 | 20.7 | 21.9 | 27.1 |
+| q23a | 210.9 | 137.0 | 125.5 | 148.5 |
+| q23b | 293.9 | 163.8 | 134.2 | 172.8 |
+| q24a | 113.2 | 101.1 | 116.0 | 134.6 |
+| q24b | 110.6 | 98.8 | 110.0 | 130.8 |
+| q28 | 116.6 | 107.7 | 101.0 | 169.8 |
+| q38 | 32.6 | 19.8 | 18.1 | 21.6 |
+| q44 | 38.8 | 38.9 | 32.2 | 40.8 |
+| q49 | 43.7 | 51.9 | 37.1 | 41.4 |
+| q50 | 69.6 | 58.2 | 38.8 | 41.6 |
+| q51 | 32.8 | 14.0 | 15.7 | 23.4 |
+| q59 | 37.6 | 38.5 | 36.7 | 42.8 |
+| q64 | 95.6 | 68.0 | 60.7 | 62.2 |
+| q65 | 30.1 | 16.8 | 22.7 | 27.9 |
+| q67 | 127.6 | 60.6 | 98.3 | 114.6 |
+| q72 | 33.1 | 38.2 | 34.4 | 39.9 |
+| q74 | 43.9 | 30.5 | 43.3 | 42.2 |
+| q75 | 75.4 | 80.5 | 76.8 | 76.5 |
+| q76 | 42.5 | 49.9 | 47.0 | 46.2 |
+| q78 | 123.3 | 80.7 | 103.5 | 111.0 |
+| q80 | 54.1 | 48.2 | 46.5 | 43.2 |
+| q87 | 33.8 | 19.2 | 17.0 | 23.4 |
+| q88 | 140.6 | 141.3 | 131.8 | 142.2 |
+| q90 | 41.5 | 32.0 | 37.4 | 28.1 |
+| q93 | 143.8 | 90.9 | 69.9 | 67.9 |
+| q94 | 68.3 | 53.0 | 61.5 | 56.6 |
+| q95 | 144.1 | 68.3 | 61.3 | 82.4 |
+| q97 | 37.4 | 20.4 | 17.6 | 23.3 |
+| 68 queries under 30 s | 563 | 442 | 452 | 515 |
+| **all 102** | **3408** | **2555** | **2581** | **3059** |
+
+`csvo` is faster than Spark on 85 of 102 queries (24% less total time) and
+faster than Comet on 52 of 102, its total within 1% of Comet's: ahead on the join-heavy
+shapes (q23a/q23b, q50, q64, q93, q95 -- our shuffle, hash joins and the spilling merge join under
+Comet's scan), behind on the scan-and-aggregate ones where Comet's native aggregate follows its own
+scan with no boundary (q4, q67, q74, q78). `ours` is faster than Spark on 64 of 102 but its
+leg ran degraded -- right after a node-group stall, with the join window pulling from S3 on the other
+node group -- and shows it on scan-bound queries the image did not touch (q9 142 s where the same
+image reads 76 under Comet's scan and its own v18 leg read 106; q28 170 versus 137); its figure is the
+reader gap plus that noise and is re-measured on a quiet cluster before it is read as one. Comet's own
+leg is 4% faster today than its run of the day before on the same image (2555 versus 2660 s) -- the
+run-to-run band on this cluster, and the reason every comparison here is drawn within one day.
+
+Two rows are read with care. **q5** fails under `csvo` on this image
+(`SubqueryAdaptiveBroadcastExec does not support the execute() code path`: the dynamic-partition-pruning
+subquery on `ws_sold_date_sk` evaluated before adaptive execution rewrote it; it passes under `ours`
+and passed under `csvo` on v10) and is missing from the table. **q65**'s checksum differs in every
+configuration, Spark against Comet included: its `ORDER BY s_store_name, i_item_desc LIMIT 100` has
+ties, so the hundred rows follow the physical order. Every other query's checksum agrees across the
+four. And the q64 zero-row result reported above is intermittent: the two configurations that lost
+the rows in the morning returned the correct 12,185 in the afternoon on the same image and data --
+q64 too reads `store_sales` through a dynamic-partition-pruning filter, so one timing-dependent
+evaluation of the Comet scan's pruning subquery would account for both it and q5.
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
