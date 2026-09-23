@@ -530,12 +530,19 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
  * only then does each streamed row become kept/dropped (semi/anti) or its passing pairs / one
  * null-padded row (outer). A full outer join records which build rows were ever paired and emits
  * the others, null-padded on the streamed side, once the input is exhausted.
+ *
+ * `closeOnTaskEnd`: whether the iterator registers its own task-completion listener. An operator's
+ * one iterator per task does; one of many per task -- a bucket's in [[GraceHashJoin]] -- must not,
+ * because the listener keeps the iterator, its build table and every heap array of it reachable until
+ * the task ends: a closed bucket then costs what an open one does, and the task's heap grows with its
+ * input instead of with a bucket (#416). The owner closes such an iterator itself.
  */
 private[vector] class VectorHashJoinIterator(
     input: Iterator[ColumnarBatch],
     build: BuildTable,
     spec: JoinSpec,
-    metrics: VectorMetrics
+    metrics: VectorMetrics,
+    closeOnTaskEnd: Boolean = true
 ) extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
@@ -631,7 +638,7 @@ private[vector] class VectorHashJoinIterator(
   private val buildMatched: Array[Boolean] = if (preservesBuild) new Array[Boolean](build.numRows) else null
   private var buildDrained = !preservesBuild
 
-  Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
+  if (closeOnTaskEnd) Option(TaskContext.get()).foreach(_.addTaskCompletionListener[Unit](_ => close()))
 
   override def hasNext: Boolean = {
     while (pending.isEmpty && input.hasNext) {
