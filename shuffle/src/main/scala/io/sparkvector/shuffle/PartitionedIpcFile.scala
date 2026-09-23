@@ -411,9 +411,11 @@ object PartitionedIpcFile {
         val buffers = ArrowVectorBuffers.forRead(vector)
         // Bounded by the offsets buffer present, not the value count alone: a dictionary buffer can be
         // sized to the entries the stream references, and the original per-row reads never went past it.
-        val n = math.min(vector.getValueCount, (buffers.offsets().byteSize() >> 2).toInt - 1)
+        // An empty dictionary (a string column null in every row of the map task, #447) arrives with no
+        // offsets buffer at all: no entries, every id null.
+        val n = math.max(0, math.min(vector.getValueCount, (buffers.offsets().byteSize() >> 2).toInt - 1))
         starts = new Array[Int](n + 1)
-        java.lang.foreign.MemorySegment.copy(buffers.offsets(), VectorBuffers.LE_INT, 0L, starts, 0, n + 1)
+        if (n > 0) java.lang.foreign.MemorySegment.copy(buffers.offsets(), VectorBuffers.LE_INT, 0L, starts, 0, n + 1)
         // Likewise the bytes: the data buffer carries the entries the stream references, which can end
         // before the last offset (#345's slices); a referenced entry is always within it.
         val dataLen = math.min(starts(n).toLong, buffers.data().byteSize()).toInt
