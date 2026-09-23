@@ -244,9 +244,11 @@ case class VectorShuffledHashJoinExec(
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val spec = joinSpec
     val m = vectorMetrics
+    // Past the build budget the task splits both sides into buckets on disk (#416, GraceHashJoin).
+    val budget = io.sparkvector.spark.VectorConf.joinSpillBytes(conf, sparkContext.getConf)
+    val buckets = io.sparkvector.spark.VectorConf.joinSpillBuckets(conf)
     buildPlan.executeColumnar().zipPartitions(streamedPlan.executeColumnar()) { (buildIter, streamIter) =>
-      val build = BuildTable.fromBatches(buildIter, spec)
-      new VectorHashJoinIterator(streamIter, build, spec, m)
+      GraceHashJoin.iterator(buildIter, streamIter, spec, m, budget, buckets)
     }
   }
 

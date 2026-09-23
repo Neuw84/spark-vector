@@ -461,6 +461,30 @@ class VectorJoinSuite extends VectorQuerySuite {
     checkFallback("SELECT /*+ SHUFFLE_HASH(nk) */ nk.i, nk.st, dim.name FROM dim JOIN nk ON dim.di = nk.i50 WHERE dim.di < 10", Seq(SHJ), "unsupported column type struct")
   }
 
+  test("#416: a build side past spark.vector.join.spillBytes splits both sides into buckets on disk -- every join type") {
+    // A one-byte budget: the first build batch overflows, every build and streamed row is bucketed,
+    // and the buckets are joined one at a time. Rows compared with Spark's; four buckets so that
+    // several keys share one and a bucket receives rows from several batches.
+    withConf(VectorConf.JoinSpillBytes -> "1", VectorConf.JoinSpillBuckets -> "4") {
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, tk.l, dim.name FROM tk LEFT JOIN dim ON tk.l = dim.dl", Seq(SHJ))
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name FROM tk RIGHT JOIN dim ON tk.i50 = dim.di AND tk.i < 500", Seq(SHJ))
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name, dim.di FROM tk FULL OUTER JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i FROM tk LEFT SEMI JOIN dim ON tk.s = dim.ds", Seq(SHJ))
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i FROM tk LEFT ANTI JOIN dim ON tk.i50 = dim.di AND dim.weight > tk.d", Seq(SHJ))
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name, dim.weight FROM tk RIGHT JOIN dim ON tk.i50 = dim.di AND tk.d > dim.weight WHERE tk.i IS NULL OR tk.i < 3000", Seq(SHJ))
+      // Null keys on both sides of a full outer join: never matched, never lost.
+      val nulls = checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.l, dim.dl FROM tk FULL OUTER JOIN dim ON tk.l = dim.dl", Seq(SHJ))
+      assert(nulls.filter("l IS NULL").count() > 0 && nulls.filter("dl IS NULL").count() > 0 && nulls.filter("l = dl").count() > 0)
+      // String keys (dictionary-encoded at the source) and a build side larger than the streamed side.
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(tk) */ tk.i, dim.name FROM dim JOIN tk ON dim.ds = tk.s", Seq(SHJ))
+    }
+    // The split off: the same joins in memory.
+    withConf(VectorConf.JoinSpillBytes -> "0") {
+      checkVectorized("SELECT /*+ SHUFFLE_HASH(dim) */ tk.i, dim.name, dim.di FROM tk FULL OUTER JOIN dim ON tk.i50 = dim.di", Seq(SHJ))
+    }
+  }
+
   test("outer joins that preserve the build side in the shuffled hash join (#273)") {
     // RIGHT JOIN built from the right (preserved) side and LEFT JOIN built from the left: the matched
     // bitmap of the full outer join emits the unmatched build rows once, with null streamed columns.

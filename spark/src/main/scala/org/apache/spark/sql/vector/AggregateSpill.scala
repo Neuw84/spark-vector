@@ -72,16 +72,21 @@ final class AggregateSpill(
    * the batch, for the join (#416) the evaluated key expressions. `arena` holds the scratch (masks).
    * A dictionary-encoded string column among `buffers` must already be decoded (the buckets are plain).
    */
-  def writeBuffers(buffers: Array[VectorBuffers], keys: Array[VectorBuffers], n: Int, arena: Arena): Unit = {
+  def writeBuffers(buffers: Array[VectorBuffers], keys: Array[VectorBuffers], n: Int, arena: Arena,
+      selection: java.lang.foreign.MemorySegment = null): Unit = {
     if (n == 0) return
     {
       val ids = new Array[Int](n)
       PartitionKernels.hashPartitionIds(keys, kinds, n, numBuckets, seed, new Array[Int](n), ids)
-      // One selection mask per bucket, from one pass over the ids (a fresh segment is all clear).
+      // One selection mask per bucket, from one pass over the ids (a fresh segment is all clear); a row
+      // outside `selection` goes nowhere.
       val masks = Array.fill(numBuckets)(arena.allocate(Bitmap.bytesFor(n), 8))
       val counts = new Array[Int](numBuckets)
       var i = 0
-      while (i < n) { Bitmap.set(masks(ids(i)), i); counts(ids(i)) += 1; i += 1 }
+      while (i < n) {
+        if (selection == null || Bitmap.isSet(selection, i)) { Bitmap.set(masks(ids(i)), i); counts(ids(i)) += 1 }
+        i += 1
+      }
       var b = 0
       while (b < numBuckets) {
         if (counts(b) > 0) {

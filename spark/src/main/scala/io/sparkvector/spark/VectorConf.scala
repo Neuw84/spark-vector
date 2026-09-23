@@ -36,6 +36,8 @@ object VectorConf {
   val SortMergeJoinEnabled = "spark.vector.exec.sortMergeJoin.enabled"
   val SortMergeJoinMode = "spark.vector.exec.sortMergeJoin.mode"
   val JoinMaxBuildSize = "spark.vector.join.maxBuildSize"
+  val JoinSpillBuckets = "spark.vector.join.spillBuckets"
+  val JoinSpillBytes = "spark.vector.join.spillBytes"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
   /** Mixed chains (#280): Comet's native operators above ours through the sink leaf. Off until #281 decides an allowlist. */
   val CometMixedEnabled = "spark.vector.comet.mixed.enabled"
@@ -137,6 +139,23 @@ object VectorConf {
    * the joins hold the build side in memory per task. Default: a per-core share of the off-heap
    * budget (`spark.memory.offHeap.size / spark.executor.cores`) when off-heap is configured, else 1 GiB.
    */
+  /**
+   * The buckets a shuffled hash join splits into when its build side outgrows [[joinMaxBuildSize]]
+   * (#416, the grace hash join): both sides are hashed into this many local files and joined one
+   * bucket at a time. `1` or less turns the split off (the build side is always held in memory).
+   */
+  /**
+   * The build bytes a shuffled hash join holds in memory before it splits (#416); default the build
+   * budget [[joinMaxBuildSize]], which the planner applies to the statistics where this applies to the
+   * rows that arrive. `0` or negative: never split.
+   */
+  def joinSpillBytes(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
+    val explicit = conf.getConfString(JoinSpillBytes, "").trim
+    val v = if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit) else joinMaxBuildSize(conf, sparkConf)
+    if (v <= 0) Long.MaxValue else v
+  }
+  def joinSpillBuckets(conf: SQLConf): Int =
+    scala.util.Try(conf.getConfString(JoinSpillBuckets, "").trim.toInt).toOption.getOrElse(32)
   def joinMaxBuildSize(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
     val explicit = conf.getConfString(JoinMaxBuildSize, "")
     if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit)
