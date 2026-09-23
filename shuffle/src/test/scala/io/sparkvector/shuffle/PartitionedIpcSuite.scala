@@ -402,18 +402,20 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
   }
 
-  test("#416: a string column that is null in every row reads back from the per-file dictionary (TPC-DS c_login)") {
-    // The column stays in ids mode with an empty dictionary; the section must still carry that dictionary,
-    // or a reader meeting the column's (all-null) id batches refuses the stream.
+  // The column stays in ids mode with an empty dictionary; the section must still carry that dictionary,
+  // or a reader meeting the column's (all-null) id batches refuses the stream. Blocks of 750 rows pass
+  // through as ids (#444); blocks of 25 rows (100-row writes over four partitions) are decoded through the dictionary's heap copy, which must take an empty dictionary -- no offsets buffer at all -- as no
+  // entries rather than fail (#447's follow-on, q22/q4 at 1 TB).
+  Seq((3, 1000), (30, 100)).foreach { case (writes, rowsPerWrite) => test(s"#416: a string column that is null in every row reads back from the per-file dictionary (TPC-DS c_login), $writes writes of $rowsPerWrite rows") {
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val nullSchema = StructType(Seq(StructField("i", IntegerType), StructField("s", StringType)))
     val parts = 4
-    val writer = new PartitionedIpcWriter(nullSchema, parts, allocator, path, 1L << 20, batchRows = 400)
+    val writer = new PartitionedIpcWriter(nullSchema, parts, allocator, path, 1L << 20, batchRows = 25)
     val arena = Arena.ofConfined()
     try {
-      (0 until 3).foreach { _ =>
-        val n = 1000
+      (0 until writes).foreach { _ =>
+        val n = rowsPerWrite
         val ints = Array.tabulate(n)(identity)
         val strings = Array.fill[String](n)(null)
         val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
@@ -436,7 +438,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
       assert(rows === 3000)
     } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
-  }
+  } }
 
   test("#356: a record batch's string column is dictionary-encoded only when the dictionary pays; the reader takes either per batch") {
     import org.apache.arrow.vector.{IntVector, VarCharVector}
