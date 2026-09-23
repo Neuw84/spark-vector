@@ -62,14 +62,14 @@ public final class RangeResidual {
             int count) {
         if (validity == null) {
             for (int p = from; p < to; p++) {
-                int c = Integer.compare(lane[p] + laneOffset, value) + 1;
+                int c = threeWay(lane[p] + laneOffset, value);
                 if (((mask >>> c) & 1) != 0) {
                     out[count++] = p;
                 }
             }
         } else {
             for (int p = from; p < to; p++) {
-                int c = Integer.compare(lane[p] + laneOffset, value) + 1;
+                int c = threeWay(lane[p] + laneOffset, value);
                 if (((mask >>> c) & 1) != 0 && ((validity[p >>> 6] >>> (p & 63)) & 1L) != 0L) {
                     out[count++] = p;
                 }
@@ -91,14 +91,14 @@ public final class RangeResidual {
             int count) {
         if (validity == null) {
             for (int p = from; p < to; p++) {
-                int c = Long.compare(lane[p] + laneOffset, value) + 1;
+                int c = threeWay(lane[p] + laneOffset, value);
                 if (((mask >>> c) & 1) != 0) {
                     out[count++] = p;
                 }
             }
         } else {
             for (int p = from; p < to; p++) {
-                int c = Long.compare(lane[p] + laneOffset, value) + 1;
+                int c = threeWay(lane[p] + laneOffset, value);
                 if (((mask >>> c) & 1) != 0 && ((validity[p >>> 6] >>> (p & 63)) & 1L) != 0L) {
                     out[count++] = p;
                 }
@@ -138,5 +138,21 @@ public final class RangeResidual {
             }
         }
         return HeapMirror.clustered(mirror.type, n, ints, longs, validity);
+    }
+
+    /**
+     * 0, 1 or 2 for {@code a < b}, {@code a == b}, {@code a > b}: the bit of
+     * the operator mask to test.
+     */
+    private static int threeWay(int a, int b) {
+        return a < b
+                ? 0
+                : (a == b ? 1 : 2);
+    }
+
+    private static int threeWay(long a, long b) {
+        return a < b
+                ? 0
+                : (a == b ? 1 : 2);
     }
 }

@@ -56,7 +56,8 @@ class ArithKernelsTest {
     @ParameterizedTest
     @EnumSource(ArithOp.class)
     void columnColumnMatchesReference(ArithOp op) {
-        Random rnd = new Random(op.ordinal());
+        Random rnd = new Random(op.name()
+                .hashCode());
         for (int n : TestData.LENGTHS) {
             try (Arena arena = Arena.ofConfined()) {
                 VectorBuffers[] as = {wideInts(arena, rnd, n), wideLongs(arena, rnd, n), TestData.doubles(arena, rnd, n, null)};
@@ -80,7 +81,7 @@ class ArithKernelsTest {
     @ParameterizedTest
     @EnumSource(ArithOp.class)
     void scalarOperandsMatchReference(ArithOp op) {
-        Random rnd = new Random(100 + op.ordinal());
+        Random rnd = new Random(100L + op.name().hashCode());
         for (int n : TestData.LENGTHS) {
             try (Arena arena = Arena.ofConfined()) {
                 VectorBuffers[] as = {wideInts(arena, rnd, n), wideLongs(arena, rnd, n), TestData.doubles(arena, rnd, n, null)};

@@ -59,15 +59,15 @@ final class TestData {
         return ArrowLayout.ofLongs(arena, v, nulls);
     }
 
-    /**
+    /*
      * Doubles including NaN, infinities and signed zeros to exercise NaN-safe
      * ordering.
      */
-    /**
-     * Random 128-bit unscaled values: a mix of small values, values straddling
-     * the limb boundary, and the extremes (+-(10^38 - 1), -2^127,
-     * Long.MIN_VALUE in either limb).
-     */
+/**
+            * Random 128-bit unscaled values: a mix of small values, values straddling
+            * the limb boundary, and the extremes (+-(10^38 - 1), -2^127,
+            * Long.MIN_VALUE in either limb).
+            */
     static SegmentVectorBuffers decimal128s(Arena arena, Random rnd, int n,
             boolean[] nulls) {
         java.math.BigInteger[] v = new java.math.BigInteger[n];

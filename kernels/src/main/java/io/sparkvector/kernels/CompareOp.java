@@ -3,6 +3,7 @@ package io.sparkvector.kernels;
 import jdk.incubator.vector.VectorOperators;
 
 /** Comparison operators, with their Vector API counterparts. */
+@SuppressWarnings("ImmutableEnumChecker") // VectorOperators constants are immutable, just not annotated so
 public enum CompareOp {
     EQ(VectorOperators.EQ),
     NE(VectorOperators.NE),

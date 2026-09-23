@@ -55,12 +55,12 @@ public final class Bitmap {
     }
 
     public static void set(MemorySegment bm, int index) {
-        long byteIndex = index >>> 3;
+        int byteIndex = index >>> 3;
         bm.set(BYTE, byteIndex, (byte) (bm.get(BYTE, byteIndex) | (1 << (index & 7))));
     }
 
     public static void clear(MemorySegment bm, int index) {
-        long byteIndex = index >>> 3;
+        int byteIndex = index >>> 3;
         bm.set(BYTE, byteIndex, (byte) (bm.get(BYTE, byteIndex) & ~(1 << (index & 7))));
     }
 
@@ -72,7 +72,6 @@ public final class Bitmap {
         }
     }
 
-    /** Sets or clears the first {@code numBits} bits. */
     /**
      * Sets bits {@code [from, from + count)} to {@code value}; the rest of the
      * bitmap is left as it is.

@@ -43,7 +43,11 @@ public final class DecimalKernels {
     static final VectorSpecies<Long> L = Species.L;
     static final ByteOrder LE = ByteOrder.LITTLE_ENDIAN;
 
-    /** {@code POW10[k] == 10^k} for {@code 0 <= k <= 18}. */
+    /**
+     * {@code POW10[k] == 10^k} for {@code 0 <= k <= 18}; a lookup table, never
+     * written after the static initialiser.
+     */
+    @SuppressWarnings("MutablePublicArray")
     public static final long[] POW10 = new long[19];
 
     static {
@@ -226,7 +230,6 @@ public final class DecimalKernels {
         private final int resultScale;
         private final int k; // 10^k scales the dividend so that num / den is the result's unscaled value
         private final long bound;
-        private final int n;
         private final MemorySegment out;
         private final MemorySegment overflowBits;
         int overflows;
@@ -244,7 +247,6 @@ public final class DecimalKernels {
             this.resultScale = resultScale;
             this.k = s2 + resultScale - s1;
             this.bound = maxUnscaled(resultPrecision);
-            this.n = n;
             this.out = out;
             this.overflowBits = overflowBits;
             Bitmap.fill(overflowBits, n, false);

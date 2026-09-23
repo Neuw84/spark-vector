@@ -71,7 +71,7 @@ public final class ColumnBuilder {
             Bitmap.fill(validity, start, true);
         }
         switch (type) {
-            case UTF8 -> appendUtf8(in, selection, count, start);
+            case UTF8 -> appendUtf8(in, selection, start);
             case BOOL -> {
                 if (selection == null) {
                     for (int i = 0; i < count; i++) {
@@ -141,8 +141,7 @@ public final class ColumnBuilder {
         }
     }
 
-    private void appendUtf8(VectorBuffers in, MemorySegment selection, int count,
-                            int start) {
+    private void appendUtf8(VectorBuffers in, MemorySegment selection, int start) {
         if (selection == null && !in.isDictionaryEncoded()) {
             // A plain Arrow string vector's values are one contiguous range of its data buffer, so the
             // whole batch is one copy and the offsets move by a constant (#394: one MemorySegment.copy
@@ -152,7 +151,7 @@ public final class ColumnBuilder {
             MemorySegment off = in.offsets();
             int first = off.get(VectorBuffers.LE_INT, 0L);
             int last = off.get(VectorBuffers.LE_INT, (long) n << 2);
-            long bytes = last - first;
+            long bytes = (long) last - first;
             ensureBytes(bytesUsed + bytes);
             MemorySegment.copy(in.data(), ValueLayout.JAVA_BYTE, first, data, ValueLayout.JAVA_BYTE,
                     bytesUsed, bytes);

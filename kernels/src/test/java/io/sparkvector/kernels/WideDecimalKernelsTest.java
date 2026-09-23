@@ -19,8 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class WideDecimalKernelsTest {
 
-    private static final BigInteger MAX38 = BigInteger.TEN.pow(38).subtract(BigInteger.ONE);
-
     /**
      * A value: the extremes, both limb boundaries, small values, and random
      * 128-bit ones; nulls in a fifth of the rows.

@@ -43,7 +43,7 @@ public final class Species {
         return VectorShape.forBitSize(bits);
     }
 
-    /** Sanity: the three species agree on width. */
+    /* Sanity: the three species agree on width. */
     static {
         if (I.vectorBitSize() != L.vectorBitSize() || L.vectorBitSize() != D.vectorBitSize()) {
             throw new IllegalStateException("species width mismatch");
