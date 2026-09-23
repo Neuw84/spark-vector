@@ -36,6 +36,15 @@ object PartitionedIpcFile {
    * (the transport benchmark sweeps it per fork; on a cluster, `spark.executor.extraJavaOptions`).
    */
   val CoalesceRows: Int = Integer.getInteger("sparkvector.shuffle.reader.coalesceRows", 1024)
+  /**
+   * A small block with a dictionary-encoded column reaches the operators as it is -- ids over its
+   * dictionary -- once it has at least this many rows (#416, item 6). Decoding it into the coalesced
+   * plain batch trades the per-batch costs coalescing saves for a decode of every row plus the
+   * aggregate hashing the strings it would otherwise have consumed as ids; q67's final stage at 1000
+   * partitions, whose blocks are a few hundred rows over their map's dictionary, was 10-30% slower
+   * for it. Below the floor a block is too small to amortise the kernels' set-up either way.
+   */
+  val PassEncodedRows: Int = Integer.getInteger("sparkvector.shuffle.reader.passEncodedRows", 128)
 
   final case class Index(offsets: Array[Long], lengths: Array[Long], rows: Array[Long]) {
     def numPartitions: Int = offsets.length
@@ -651,12 +660,13 @@ object PartitionedIpcFile {
           try {
             val (root, loader) = rootFor(encoded)
             loader.load(batch)
-            if (root.getRowCount < CoalesceRows) {
+            if (root.getRowCount < CoalesceRows && (encoded.isEmpty || root.getRowCount < PassEncodedRows)) {
               // A small batch (a block of a few dozen rows at 1000 partitions) is appended to the
               // pending batch instead of reaching the operators on its own: their per-batch costs --
               // kernel set-up, a hash table's probe round, an output batch per input batch -- were
               // most of a reduce task's time over ten-row blocks (#411). A dictionary-encoded column
-              // of such a block is decoded into the pending plain column (#416).
+              // of a tiny block is decoded into the pending plain column (#416); an encoded block of
+              // `PassEncodedRows` or more goes through as ids, the shape the aggregate is fastest on.
               append(root)
               if (pendingRows >= CoalesceRows) nextBatch = takePending()
             } else {
