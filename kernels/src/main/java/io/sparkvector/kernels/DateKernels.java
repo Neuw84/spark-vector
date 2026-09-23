@@ -198,7 +198,7 @@ public final class DateKernels {
         int day = field(Field.DAY, days);
         long total = year * 12 + (month - 1) + months;
         long y = Math.floorDiv(total, 12);
-        int m = (int) Math.floorMod(total, 12) + 1;
+        int m = Math.floorMod(total, 12) + 1;
         return daysFromCivil((int) y, m, Math.min(day, lengthOfMonth(y, m)));
     }
 

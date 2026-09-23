@@ -476,7 +476,7 @@ public final class StringSliceKernels {
             MemorySegment.copy(rd, rStart, out, at, rLen);
             at += rLen;
             MemorySegment.copy(data, sStart + (tail[i] >>> 32), out, at,
-                    (int) tail[i]);
+                    tail[i] & 0xFFFFFFFFL);
         }
         return SegmentVectorBuffers.utf8(n, validity, offsets, out);
     }

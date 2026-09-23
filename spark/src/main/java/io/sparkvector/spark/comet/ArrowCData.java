@@ -66,7 +66,6 @@ public final class ArrowCData {
     static final long ARROW_FLAG_NULLABLE = 2;
 
     private static final ValueLayout.OfLong I64 = ValueLayout.JAVA_LONG;
-    private static final ValueLayout.OfInt I32 = ValueLayout.JAVA_INT;
 
     private static final MemorySegment RELEASE_ARRAY;
     private static final MemorySegment RELEASE_SCHEMA;

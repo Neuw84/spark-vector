@@ -28,6 +28,7 @@ public final class VectorArrowColumnVector extends ArrowColumnVector {
         this.owns = owns;
     }
 
+    @Override
     public ValueVector getValueVector() {
         return valueVector;
     }

@@ -147,7 +147,7 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
             return null;
         }
         VectorBuffers dict = wrap(dictVector, (Integer) getValueCount.invoke(dictVector), VecType.UTF8);
-        MemorySegment validity = validityOf(indexVector, numRows);
+        MemorySegment validity = validityOf(indexVector);
         MemorySegment data = segment(getDataBuffer.invoke(indexVector));
         return SegmentVectorBuffers.dictionaryUtf8(numRows, validity, data, dict);
     }
@@ -156,7 +156,7 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
         if (type == VecType.UTF8 && largeVarChar.isInstance(vector)) {
             return null; // 64-bit offsets: let the copy path handle it
         }
-        MemorySegment validity = validityOf(vector, numRows);
+        MemorySegment validity = validityOf(vector);
         MemorySegment data = segment(getDataBuffer.invoke(vector));
         if (type == VecType.UTF8) {
             MemorySegment offsets = segment(getOffsetBuffer.invoke(vector));
@@ -165,7 +165,7 @@ public final class CometVectorAdapter implements ColumnVectorAdapters.Adapter {
         return SegmentVectorBuffers.fixedWidth(type, numRows, validity, data);
     }
 
-    private MemorySegment validityOf(Object vector, int numRows) throws ReflectiveOperationException {
+    private MemorySegment validityOf(Object vector) throws ReflectiveOperationException {
         int nulls = (Integer) getNullCount.invoke(vector);
         if (nulls == 0) {
             return null;

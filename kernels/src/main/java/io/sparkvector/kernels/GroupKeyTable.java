@@ -57,7 +57,6 @@ public final class GroupKeyTable {
 
     private int[] hashScratch = new int[0]; // row hashes, or combined indices on the memoised path
     private byte[] emitScratch = new byte[0]; // a column's values gathered from the dictionary before one bulk copy out
-    private int[] idxScratch = new int[0];
     private int[] memo = new int[0];
 
     /**
@@ -297,7 +296,7 @@ public final class GroupKeyTable {
         return matched;
     }
 
-    /**
+    /*
      * The probe batch's key columns as Java arrays, for the probe of a join
      * (#409). A join probes one row at a time -- hash, slot, compare -- and
      * each compare read the row's key through {@link VectorBuffers#getInt} /
@@ -310,18 +309,19 @@ public final class GroupKeyTable {
      * type keeps the segment path. Per thread, since a broadcast table is
      * probed by several tasks at once.
      */
-    /**
-     * The batch's key columns bound once per call (#377): each column's data,
-     * offsets and validity segments -- and its dictionary's -- as fields of the
-     * concrete segment type. The per-row path (hash slot, compare, insert,
-     * append) read every key through {@link VectorBuffers#isNull}, {@link
-     * VectorBuffers#getInt} and {@code offsets()}/{@code data()}: interface
-     * calls whose receiver profile mixes the adapters' buffers, Arrow-backed
-     * buffers and encoded short strings, so they stayed virtual, and each
-     * carried a segment liveness and bounds check of its own -- 34% of an
-     * executor's samples in q67's rollup at 1 TB were those checks. Per thread,
-     * as {@link ProbeKeys}.
-     */
+/**
+            * The batch's key columns bound once per call (#377): each column's
+            * data, offsets and validity segments -- and its dictionary's -- as
+            * fields of the concrete segment type. The per-row path (hash slot,
+            * compare, insert, append) read every key through {@link
+            * VectorBuffers#isNull}, {@link VectorBuffers#getInt} and {@code
+            * offsets()}/{@code data()}: interface calls whose receiver profile
+            * mixes the adapters' buffers, Arrow-backed buffers and encoded
+            * short strings, so they stayed virtual, and each carried a segment
+            * liveness and bounds check of its own -- 34% of an executor's
+            * samples in q67's rollup at 1 TB were those checks. Per thread, as
+            * {@link ProbeKeys}.
+            */
     private static final class Bound {
         /** Columns bound by the last {@link #of}; the arrays may be longer. */
         int count;
@@ -570,6 +570,7 @@ public final class GroupKeyTable {
      * unknown value gets id -1, which no group carries. Returns null when the
      * table has no UTF8 key or the batch is empty.
      */
+    @SuppressWarnings("ReferenceEquality") // the dictionary cache is keyed on the buffer object itself
     private IdScratch toIds(VectorBuffers[] keys, int n, boolean insert) {
         if (strCols == 0 || n == 0) {
             return null;

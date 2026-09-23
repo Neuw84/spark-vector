@@ -26,6 +26,7 @@ class CompareKernelsTest {
         // Wide decimals: random 128-bit values plus the extremes, so both limbs are exercised (#258).
         (a, r, n) -> TestData.decimal128s(a, r, n, null),};
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private static final Function<Random, Number>[] SCALARS = new Function[] {
         (Function<Random, Number>) r -> r.nextInt(-20, 20),
         (Function<Random, Number>) r -> r.nextLong(-20, 20),
@@ -47,7 +48,7 @@ class CompareKernelsTest {
     @ParameterizedTest
     @EnumSource(CompareOp.class)
     void columnVersusScalarMatchesReference(CompareOp op) {
-        Random rnd = new Random(op.ordinal() * 31L);
+        Random rnd = new Random(op.name().hashCode() * 31L);
         for (int t = 0; t < GENS.length; t++) {
             for (int n : TestData.LENGTHS) {
                 for (int rep = 0; rep < 3; rep++) {
@@ -70,7 +71,7 @@ class CompareKernelsTest {
     @ParameterizedTest
     @EnumSource(CompareOp.class)
     void columnVersusColumnMatchesReference(CompareOp op) {
-        Random rnd = new Random(1000L + op.ordinal());
+        Random rnd = new Random(1000L + op.name().hashCode());
         for (Gen gen : GENS) {
             for (int n : TestData.LENGTHS) {
                 try (Arena arena = Arena.ofConfined()) {

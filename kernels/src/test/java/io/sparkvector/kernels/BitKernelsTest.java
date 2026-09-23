@@ -72,7 +72,7 @@ class BitKernelsTest {
                     BitKernels.binaryScalar(op, ai, s, outi);
                     BitKernels.binaryScalar(op, al, s, outl);
                     for (int i = 0; i < n; i++) {
-                        assertEquals((int) ref(op, xi[i], (int) s, true), outi.getAtIndex(VectorBuffers.LE_INT, i),
+                        assertEquals((int) ref(op, xi[i], (long) (int) s, true), outi.getAtIndex(VectorBuffers.LE_INT, i),
                                 op + " int scalar " + s + " row " + i);
                         assertEquals(
                                 ref(op, xl[i],

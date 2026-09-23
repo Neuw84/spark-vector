@@ -31,6 +31,7 @@ public final class BitKernels {
      * Binary operators; the shift amount operand is always INT32 (Spark casts
      * it).
      */
+    @SuppressWarnings("ImmutableEnumChecker") // VectorOperators constants are immutable, just not annotated so
     public enum BitOp {
         AND(VectorOperators.AND),
         OR(VectorOperators.OR),
