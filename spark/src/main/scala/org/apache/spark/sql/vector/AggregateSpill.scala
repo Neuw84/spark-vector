@@ -25,13 +25,18 @@ import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
  * Grace hash aggregation.
  *
  * `columns` are the batches' (name, Spark type) in the operator's layout; `keyOrdinals` the
- * positions of the grouping keys among them.
+ * positions of the grouping keys among them. The buckets are Spark's hash of the keys under `seed`,
+ * which must not be the shuffle's (#416): the rows of one reduce task all share their Spark hash
+ * modulo the partition count, so bucketing by that same hash fills `buckets / gcd(partitions,
+ * buckets)` of the buckets -- two of sixteen at 200 or 1000 partitions, each eight times the size
+ * the bucket count was meant to bound.
  */
 final class AggregateSpill(
     numBuckets: Int,
     columns: Array[(String, DataType)],
     keyOrdinals: Array[Int],
-    allocator: BufferAllocator) extends AutoCloseable {
+    allocator: BufferAllocator,
+    seed: Int = AggregateSpill.BucketSeed) extends AutoCloseable {
 
   private val kinds: Array[KeyKind] = keyOrdinals.map(o => AggregateSpill.keyKind(columns(o)._2))
   private val files = new Array[File](numBuckets)
@@ -55,7 +60,7 @@ final class AggregateSpill(
         if (b.`type`() == VecType.UTF8 && b.isDictionaryEncoded()) ArrowOutput.decodeDictionary(b, arena) else b
       }
       val ids = new Array[Int](n)
-      PartitionKernels.hashPartitionIds(keyOrdinals.map(buffers(_)), kinds, n, numBuckets, new Array[Int](n), ids)
+      PartitionKernels.hashPartitionIds(keyOrdinals.map(buffers(_)), kinds, n, numBuckets, seed, new Array[Int](n), ids)
       // One selection mask per bucket, from one pass over the ids (a fresh segment is all clear).
       val masks = Array.fill(numBuckets)(arena.allocate(Bitmap.bytesFor(n), 8))
       val counts = new Array[Int](numBuckets)
@@ -153,6 +158,9 @@ final class AggregateSpill(
 }
 
 object AggregateSpill {
+  /** The bucket hash's seed: any value but the shuffle's `PartitionKernels.SPARK_SEED` (42) -- see the class note. */
+  val BucketSeed: Int = 0x5bd1e995
+
   /** The same key kinds as the shuffle's hash partitioning, so the buckets are Spark's hashes over the same lanes. */
   def keyKind(dt: DataType): KeyKind = dt match {
     case IntegerType | DateType => KeyKind.INT
