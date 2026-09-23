@@ -139,8 +139,7 @@ class MathKernelsTest {
                 }
                 // Scalar forms, both orders.
                 MathKernels.remainderScalar(op, al, 3L, false, outl);
-                MathKernels.remainderScalar(op, al, 3L, true,
-                        outi.byteSize() >= outl.byteSize() ? outl : outl);
+                MathKernels.remainderScalar(op, al, 3L, true, outl);
                 MathKernels.remainderScalar(op, al, 3L, false, outl);
                 for (int i = 0; i < n; i++) {
                     long e = op == RemOp.REM ? xl[i] % 3L : sparkPmod(xl[i], 3L);

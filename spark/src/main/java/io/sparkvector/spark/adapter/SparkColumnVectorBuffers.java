@@ -418,6 +418,7 @@ public final class SparkColumnVectorBuffers {
         }
     }
 
+    @SuppressWarnings("ReferenceEquality") // the decoded-dictionary cache is keyed on the dictionary object itself
     private static DecodedDictionary decodedDictionary(Dictionary dict, VecType type) {
         Object key = dict;
         boolean transform = false;

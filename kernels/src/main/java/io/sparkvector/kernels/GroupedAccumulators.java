@@ -228,11 +228,6 @@ public final class GroupedAccumulators {
         }
     }
 
-    /** Re-lays {@code [copy][group]} arrays out for a larger group capacity. */
-    private static double[] regroup(double[] old, int oldCap, int newCap) {
-        return regroup(old, oldCap, newCap, INTERLEAVE);
-    }
-
     private static double[] regroup(double[] old, int oldCap, int newCap,
             int copies) {
         double[] out = new double[newCap * copies];

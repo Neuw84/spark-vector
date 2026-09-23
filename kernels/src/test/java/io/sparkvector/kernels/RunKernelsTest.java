@@ -28,18 +28,14 @@ class RunKernelsTest {
             for (int n : SIZES) {
                 for (boolean nullsFirst : new boolean[] {true, false}) {
                     int nulls = n == 0 ? 0 : rnd.nextInt(Math.max(1, n / 4));
-                    check(arena, sortedInts(arena, rnd, n, nulls, nullsFirst),
-                            n, "int32 n=" + n);
-                    check(arena, sortedLongs(arena, rnd, n, nulls, nullsFirst),
-                            n, "int64 n=" + n);
-                    check(arena, sortedDoubles(arena, rnd, n, nulls, nullsFirst),
-                            n, "float64 n=" + n);
-                    check(arena, sortedStrings(arena, rnd, n, nulls, nullsFirst, false),
+                    check(sortedInts(arena, rnd, n, nulls, nullsFirst), n, "int32 n=" + n);
+                    check(sortedLongs(arena, rnd, n, nulls, nullsFirst), n, "int64 n=" + n);
+                    check(sortedDoubles(arena, rnd, n, nulls, nullsFirst), n, "float64 n=" + n);
+                    check(sortedStrings(arena, rnd, n, nulls, nullsFirst, false),
                             n, "utf8 n=" + n);
-                    check(arena, sortedStrings(arena, rnd, n, nulls, nullsFirst, true),
+                    check(sortedStrings(arena, rnd, n, nulls, nullsFirst, true),
                             n, "dictionary n=" + n);
-                    check(arena, sortedBooleans(arena, rnd, n, nulls, nullsFirst),
-                            n, "bool n=" + n);
+                    check(sortedBooleans(arena, rnd, n, nulls, nullsFirst), n, "bool n=" + n);
                 }
             }
         }
@@ -68,8 +64,7 @@ class RunKernelsTest {
         }
     }
 
-    private static void check(Arena arena, VectorBuffers key, int n,
-            String what) {
+    private static void check(VectorBuffers key, int n, String what) {
         VectorBuffers[] keys = {key};
         int[] expected = referenceStarts(keys, n);
         assertArrayEquals(expected, starts(keys, n), what);

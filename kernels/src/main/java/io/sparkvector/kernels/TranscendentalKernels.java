@@ -16,7 +16,7 @@ import java.lang.foreign.MemorySegment;
  * StrictMath} and are deliberately not used here (a measured follow-up, see the
  * expression matrix). Nothing here touches validity: the caller nulls the lanes
  * Spark nulls -- the log family at or below its asymptote ({@link #asymptote}),
- * {@code log(base, x)} for a non-positive operand ({@link #positive}); every
+ * {@code log(base, x)} for a non-positive operand ({@link #above}); every
  * other domain edge is {@code Math}'s NaN.
  */
 public final class TranscendentalKernels {

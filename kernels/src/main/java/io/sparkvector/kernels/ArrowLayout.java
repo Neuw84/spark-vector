@@ -50,8 +50,8 @@ public final class ArrowLayout {
     }
 
     /**
-     * Builds a validity bitmap from a nullability array; returns {@code null}
-     * when there are no nulls (or when {@code nulls} itself is {@code null}).
+     * Builds a validity bitmap from a nullability array; the result is a null
+     * reference when no row is null, or when no array is given.
      */
     public static MemorySegment validityFrom(Arena arena, boolean[] nulls, int length) {
         if (nulls == null) {

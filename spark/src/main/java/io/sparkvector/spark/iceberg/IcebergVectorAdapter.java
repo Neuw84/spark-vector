@@ -239,6 +239,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         }
     }
 
+    @SuppressWarnings("ReferenceEquality") // every column must share the one mapping array, by identity
     private ColumnarBatch unwrap(ColumnarBatch batch) throws ReflectiveOperationException {
         int numCols = batch.numCols();
         int live = batch.numRows();

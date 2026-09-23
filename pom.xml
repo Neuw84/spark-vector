@@ -58,6 +58,9 @@
          and plugins sorted; `sortpom:verify` at validate fails the build on a pom out of order, `mvn sortpom:sort`
          sorts. -->
     <sortpom-maven-plugin.version>4.0.0</sortpom-maven-plugin.version>
+    <!-- Static analysis (#423, step 3): Error Prone runs inside javac on every Java compile; an ERROR-level
+         finding fails the build, WARNING-level ones are printed. -->
+    <errorprone.version>2.50.0</errorprone.version>
     <maven-dependency-plugin.version>3.8.1</maven-dependency-plugin.version>
     <jfmt.version>0.8.2</jfmt.version>
     <jfmt.jar>${maven.multiModuleProjectDirectory}/target/jfmt/com.netflix.tools.jfmt-${jfmt.version}.jar</jfmt.jar>
@@ -288,11 +291,38 @@
           <version>${maven-compiler-plugin.version}</version>
           <configuration>
             <release>${maven.compiler.release}</release>
+            <!-- javac forked so that the exports Error Prone needs from jdk.compiler stay in this pom rather
+                 than in the Maven JVM's own options. -->
+            <fork>true</fork>
             <compilerArgs>
               <arg>--add-modules=jdk.incubator.vector</arg>
-              <arg>-Xlint:all,-preview,-processing</arg>
+              <arg>-Xlint:all,-preview,-processing,-restricted</arg>
+              <!-- restricted off: the FFM restricted methods are the point of this code; the runtime enables
+                   native access explicitly. -->
+              <arg>-XDcompilePolicy=simple</arg>
+              <arg>--should-stop=ifError=FLOW</arg>
+              <arg>-Xplugin:ErrorProne -Xep:StatementSwitchToExpressionSwitch:OFF -Xep:RefactorSwitch:OFF -Xep:UnnecessaryParentheses:OFF</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED</arg>
+              <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED</arg>
+              <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</arg>
+              <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</arg>
             </compilerArgs>
+            <annotationProcessorPaths>
+              <path>
+                <groupId>com.google.errorprone</groupId>
+                <artifactId>error_prone_core</artifactId>
+                <version>${errorprone.version}</version>
+              </path>
+            </annotationProcessorPaths>
             <showWarnings>true</showWarnings>
+            <!-- A finding is a build failure (#423, step 3): the count is zero and stays there. -->
+            <failOnWarning>true</failOnWarning>
           </configuration>
         </plugin>
         <plugin>
