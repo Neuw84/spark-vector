@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
@@ -20,17 +18,24 @@
       <artifactId>spark-vector-kernels</artifactId>
     </dependency>
     <dependency>
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
-    </dependency>
-    <dependency>
       <!-- #288: the columnar shuffle (its own jar in a deployment, as here on the benchmark classpath). -->
       <groupId>io.sparkvector</groupId>
       <artifactId>spark-vector-shuffle_${scala.binary.version}</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.scala-lang</groupId>
-      <artifactId>scala-library</artifactId>
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.openjdk.jmh</groupId>
+      <artifactId>jmh-core</artifactId>
+    </dependency>
+    <dependency>
+      <!-- The Iceberg merge-on-read harness (IcebergMorGenerator, the runner's Iceberg source). Provided,
+           like Spark: on the local classpath the scripts build, supplied by the image on a cluster. -->
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-spark-runtime-4.1_${scala.binary.version}</artifactId>
+      <version>${iceberg.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
@@ -47,20 +52,13 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <!-- The Iceberg merge-on-read harness (IcebergMorGenerator, the runner's Iceberg source). Provided,
-           like Spark: on the local classpath the scripts build, supplied by the image on a cluster. -->
-      <groupId>org.apache.iceberg</groupId>
-      <artifactId>iceberg-spark-runtime-4.1_${scala.binary.version}</artifactId>
-      <version>${iceberg.version}</version>
+      <groupId>org.openjdk.jmh</groupId>
+      <artifactId>jmh-generator-annprocess</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>org.openjdk.jmh</groupId>
-      <artifactId>jmh-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.openjdk.jmh</groupId>
-      <artifactId>jmh-generator-annprocess</artifactId>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
       <scope>provided</scope>
     </dependency>
   </dependencies>
@@ -73,11 +71,11 @@
         <executions>
           <execution>
             <id>scala-compile-first</id>
-            <phase>process-resources</phase>
             <goals>
               <goal>add-source</goal>
               <goal>compile</goal>
             </goals>
+            <phase>process-resources</phase>
           </execution>
         </executions>
       </plugin>
@@ -97,23 +95,16 @@
           </annotationProcessorPaths>
         </configuration>
       </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <configuration>
-          <skipTests>true</skipTests>
-        </configuration>
-      </plugin>
       <!-- Executable JMH jar: java <flags> -jar benchmarks/target/benchmarks.jar -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
         <executions>
           <execution>
-            <phase>package</phase>
             <goals>
               <goal>shade</goal>
             </goals>
+            <phase>package</phase>
             <configuration>
               <finalName>benchmarks</finalName>
               <artifactSet>
@@ -132,6 +123,13 @@
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
       </plugin>
     </plugins>
   </build>
