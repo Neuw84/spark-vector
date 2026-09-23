@@ -48,6 +48,8 @@ final class AggregateSpill(
   private val roots = new Array[VectorSchemaRoot](numBuckets)
   private val writers = new Array[ArrowStreamWriter](numBuckets)
   private var closed = false
+  private var hashScratch = new Array[Int](0)
+  private var idScratch = new Array[Int](0)
 
   var spilledBatches: Long = 0L
   var spilledRows: Long = 0L
@@ -82,8 +84,10 @@ final class AggregateSpill(
   ): Unit = {
     if (n == 0) return
     {
-      val ids = new Array[Int](n)
-      PartitionKernels.hashPartitionIds(keys, kinds, n, numBuckets, seed, new Array[Int](n), ids)
+      // The hash and id scratch, kept across calls (sized by the largest batch so far).
+      if (hashScratch.length < n) { hashScratch = new Array[Int](n); idScratch = new Array[Int](n) }
+      val ids = idScratch
+      PartitionKernels.hashPartitionIds(keys, kinds, n, numBuckets, seed, hashScratch, ids)
       // One selection mask per bucket, from one pass over the ids (a fresh segment is all clear); a row
       // outside `selection` goes nowhere.
       val masks = Array.fill(numBuckets)(arena.allocate(Bitmap.bytesFor(n), 8))
@@ -183,6 +187,8 @@ final class AggregateSpill(
 
   override def close(): Unit = if (!closed) {
     closed = true
+    hashScratch = new Array[Int](0)
+    idScratch = new Array[Int](0)
     var b = 0
     while (b < numBuckets) {
       try endWriting(b)
