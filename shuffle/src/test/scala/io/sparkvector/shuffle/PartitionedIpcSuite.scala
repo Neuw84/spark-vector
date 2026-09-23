@@ -336,10 +336,10 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
     roundTrip(numPartitions = 64, batches = Seq((3, false)), flushBytes = 1L << 20)
   }
 
-  test("#416: small blocks whose strings arrived dictionary-encoded are decoded into the coalesced batch") {
-    // batchRows = 400: the 1200 staged rows leave as three record batches, each above DictionaryMinRows
-    // (so the five-word column is encoded per batch, with its own dictionary) and below CoalesceRows (so
-    // the reader accumulates them) -- one 1200-row batch comes out, every column plain, the rows in order.
+  test("#416: a small dictionary-encoded block of PassEncodedRows or more reaches the operators as ids") {
+    // batchRows = 400: the 1200 staged rows leave as three record batches below CoalesceRows, the five-word
+    // column as ids over the map file's dictionary. Each is at or above PassEncodedRows, so none is decoded
+    // into a coalesced batch: three 400-row batches come out, the column still dictionary-encoded, in order.
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
     val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchRows = 400)
@@ -354,11 +354,50 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       writer.finish()
       val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
       try {
-        val got = reader.next()
-        assert(got.numRows() === 1200, "three blocks coalesced into one batch")
-        assert(got.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "the encoded column comes out plain")
-        assert(read(got) === expected)
-        assert(!reader.hasNext)
+        val got = mutable.ArrayBuffer.empty[Row]
+        var batches = 0
+        while (reader.hasNext) {
+          val b = reader.next()
+          batches += 1
+          assert(b.numRows() === 400, "an encoded block above the floor is handed out as it is")
+          assert(b.column(7).isInstanceOf[VectorDictionaryColumnVector], "the encoded column stays dictionary-encoded")
+          got ++= read(b)
+        }
+        assert(batches === 3)
+        assert(got === expected)
+      } finally reader.close()
+    } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
+  }
+
+  test("#416: dictionary-encoded blocks below PassEncodedRows are decoded into the coalesced batch") {
+    // Twelve 100-row input batches, each leaving as its own block below the floor; the reader decodes
+    // each into the pending plain columns and hands out a batch once CoalesceRows are pending -- 1100
+    // rows, then the last 100 -- every column plain, the rows in order.
+    val dir = Files.createTempDirectory("svipc")
+    val path = dir.resolve("map.ipc")
+    val writer = new PartitionedIpcWriter(schema, 1, allocator, path, 1L << 20, batchRows = 100)
+    val arena = Arena.ofConfined()
+    val expected = mutable.ArrayBuffer.empty[Row]
+    try {
+      (0 until 12).foreach { _ =>
+        val (b, rows) = batch(100, arena, dictStrings = false)
+        try writer.write(b, new Array[Int](100)) finally b.close()
+        expected ++= rows
+      }
+      writer.finish()
+      val reader = new PartitionedIpcFile.PartitionReader(path, 0, allocator, schema)
+      try {
+        val got = mutable.ArrayBuffer.empty[Row]
+        val sizes = mutable.ArrayBuffer.empty[Int]
+        while (reader.hasNext) {
+          val b = reader.next()
+          sizes += b.numRows()
+          assert(b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector], "the coalesced column comes out plain")
+          got ++= read(b)
+        }
+        assert(sizes.sum === 1200)
+        assert(sizes.head >= PartitionedIpcFile.CoalesceRows, s"small blocks coalesce up to CoalesceRows: $sizes")
+        assert(got === expected)
       } finally reader.close()
     } finally { arena.close(); writer.close(); Files.deleteIfExists(path); Files.deleteIfExists(dir) }
   }
