@@ -199,6 +199,7 @@ private[vector] class VectorSortIterator(
         from = to
       }
       if (writer != null) writer.end()
+      AggregateSpill.reportSpill(channel.size(), run.bytes) // before the writer's close, which closes the channel
     } finally {
       if (writer != null) writer.close()
       if (root != null) root.close()
