@@ -201,7 +201,11 @@ public final class StringSearchKernels {
       int idx = -1;
       while (count > 0) {
         idx = find(h, hStart, idx + 1, len, d, dStart, dLen);
-        if (idx >= 0) count--; else return len; // whole string
+        if (idx >= 0) {
+          count--;
+        } else {
+          return len; // whole string
+        }
       }
       return idx == 0 ? 0L : (long) idx; // offset 0, length idx
     }
