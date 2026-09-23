@@ -5,9 +5,7 @@
   build: it only exists under the `spark-sql-tests` profile and takes a long time. See
   benchmarks/scripts/run-spark-sql-tests.sh.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
@@ -23,11 +21,11 @@
     <!-- Regex over test case names; -DsqlTests.filter=... selects a subset (see the script). -->
     <sqlTests.filter>.*</sqlTests.filter>
     <!-- Regex over test case names to skip; empty (^$) means none. The default is in the suite. -->
-    <sqlTests.exclude></sqlTests.exclude>
+    <sqlTests.exclude/>
     <!-- -DsqlTests.updateBaseline=true rewrites src/test/resources/vector-sql-coverage.tsv from a full run. -->
     <sqlTests.updateBaseline>false</sqlTests.updateBaseline>
     <!-- Extra JVM arguments, e.g. -Dspark.vector.exec.sortMergeJoin.enabled=true to run the suite under a non-default configuration. -->
-    <sqlTests.jvmArgs></sqlTests.jvmArgs>
+    <sqlTests.jvmArgs/>
     <spark.test.home>${project.build.directory}/spark-home</spark.test.home>
   </properties>
 
@@ -38,13 +36,10 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.scala-lang</groupId>
-      <artifactId>scala-library</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+      <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
     <!-- Spark's test infrastructure: SparkFunSuite, SharedSparkSession, SQLQueryTestSuite. -->
@@ -57,9 +52,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
-      <version>${spark.version}</version>
-      <classifier>tests</classifier>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -67,6 +60,11 @@
       <artifactId>spark-sql_${scala.binary.version}</artifactId>
       <version>${spark.version}</version>
       <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -88,6 +86,19 @@
       </testResource>
     </testResources>
     <plugins>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>scala-test-compile-first</id>
+            <goals>
+              <goal>testCompile</goal>
+            </goals>
+            <phase>process-test-resources</phase>
+          </execution>
+        </executions>
+      </plugin>
       <!-- The golden files ship inside spark-sql's tests jar; SQLQueryTestSuite reads them from
            $spark.test.home/sql/core/src/test/resources/sql-tests. -->
       <plugin>
@@ -96,10 +107,10 @@
         <executions>
           <execution>
             <id>unpack-sql-tests</id>
-            <phase>generate-test-resources</phase>
             <goals>
               <goal>unpack</goal>
             </goals>
+            <phase>generate-test-resources</phase>
             <configuration>
               <artifactItems>
                 <artifactItem>
@@ -112,19 +123,6 @@
                 </artifactItem>
               </artifactItems>
             </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>net.alchim31.maven</groupId>
-        <artifactId>scala-maven-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>scala-test-compile-first</id>
-            <phase>process-test-resources</phase>
-            <goals>
-              <goal>testCompile</goal>
-            </goals>
           </execution>
         </executions>
       </plugin>

@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>io.sparkvector</groupId>
@@ -22,31 +20,10 @@
       <version>${project.version}</version>
     </dependency>
     <dependency>
-      <groupId>org.scala-lang</groupId>
-      <artifactId>scala-library</artifactId>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.spark</groupId>
-      <artifactId>spark-sql_${scala.binary.version}</artifactId>
-      <scope>provided</scope>
-    </dependency>
-    <!-- Spark bundles Arrow 18.3.0 and Netty 4.2; we compile against those and never ship them. -->
-    <dependency>
-      <groupId>org.apache.arrow</groupId>
-      <artifactId>arrow-vector</artifactId>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
       <!-- LZ4 / ZSTD body compression of the shuffle's record batches; lz4-java and zstd-jni come from Spark at runtime. -->
       <groupId>org.apache.arrow</groupId>
       <artifactId>arrow-compression</artifactId>
       <version>${arrow.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.arrow</groupId>
-      <artifactId>arrow-memory-netty</artifactId>
-      <scope>provided</scope>
     </dependency>
     <!--
       Arrow Flight at exactly Spark's Arrow version (it shares VectorSchemaRoot/ArrowBuf with
@@ -60,8 +37,8 @@
       <version>${arrow.version}</version>
       <exclusions>
         <exclusion>
-          <groupId>org.apache.arrow</groupId>
-          <artifactId>arrow-vector</artifactId>
+          <groupId>io.netty</groupId>
+          <artifactId>*</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.apache.arrow</groupId>
@@ -72,10 +49,31 @@
           <artifactId>arrow-memory-netty</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>io.netty</groupId>
-          <artifactId>*</artifactId>
+          <groupId>org.apache.arrow</groupId>
+          <artifactId>arrow-vector</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-netty</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Spark bundles Arrow 18.3.0 and Netty 4.2; we compile against those and never ship them. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.scalatest</groupId>
@@ -91,18 +89,18 @@
         <executions>
           <execution>
             <id>scala-compile-first</id>
-            <phase>process-resources</phase>
             <goals>
               <goal>add-source</goal>
               <goal>compile</goal>
             </goals>
+            <phase>process-resources</phase>
           </execution>
           <execution>
             <id>scala-test-compile-first</id>
-            <phase>process-test-resources</phase>
             <goals>
               <goal>testCompile</goal>
             </goals>
+            <phase>process-test-resources</phase>
           </execution>
         </executions>
       </plugin>

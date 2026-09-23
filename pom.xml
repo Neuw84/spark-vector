@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>io.sparkvector</groupId>
@@ -24,6 +22,10 @@
 
     <!-- Pinned to Apache Spark 4.1.3's pom.xml -->
     <spark.version>4.1.3</spark.version>
+    <netty.version>4.2.7.Final</netty.version>
+    <jackson.version>2.21.2</jackson.version>
+    <!-- Spark 4.1.3's -->
+    <!-- Spark 4.1.3's -->
     <scala.version>2.13.17</scala.version>
     <scala.binary.version>2.13</scala.binary.version>
     <arrow.version>18.3.0</arrow.version>
@@ -52,6 +54,10 @@
          validate, run through the JDK's java on standard input) and scalafmt over Scala; `mvn spotless:check`
          fails the build on a file that is not formatted (bound to `verify`), `mvn spotless:apply` formats. -->
     <spotless-maven-plugin.version>3.10.2</spotless-maven-plugin.version>
+    <!-- pom formatting (#423, step 2): sortpom keeps every pom in the canonical element order with dependencies
+         and plugins sorted; `sortpom:verify` at validate fails the build on a pom out of order, `mvn sortpom:sort`
+         sorts. -->
+    <sortpom-maven-plugin.version>4.0.0</sortpom-maven-plugin.version>
     <maven-dependency-plugin.version>3.8.1</maven-dependency-plugin.version>
     <jfmt.version>0.8.2</jfmt.version>
     <jfmt.jar>${maven.multiModuleProjectDirectory}/target/jfmt/com.netflix.tools.jfmt-${jfmt.version}.jar</jfmt.jar>
@@ -61,8 +67,7 @@
     <vector.jvm.args>--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow</vector.jvm.args>
 
     <!-- Spark on JDK 17+ module options (mirrors org.apache.spark.launcher.JavaModuleOptions). -->
-    <spark.jvm.args>
-      -XX:+IgnoreUnrecognizedVMOptions
+    <spark.jvm.args>-XX:+IgnoreUnrecognizedVMOptions
       --add-opens=java.base/java.lang=ALL-UNNAMED
       --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
       --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
@@ -78,20 +83,64 @@
       --add-opens=java.base/sun.security.action=ALL-UNNAMED
       --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
       -Djdk.reflect.useDirectMethodHandle=false
-      -Dio.netty.tryReflectionSetAccessible=true
-    </spark.jvm.args>
+      -Dio.netty.tryReflectionSetAccessible=true</spark.jvm.args>
   </properties>
 
   <dependencyManagement>
     <dependencies>
+      <!-- Versions Spark 4.1.3 ships, pinned: several libraries arrive from Spark and from Arrow / Iceberg /
+           Comet at different versions, and which one Maven picked used to depend on the declaration order:
+           the sorted poms (#423) flipped netty-common (4.1 over 4.2: netty-transport 4.2 needs
+           ThreadAwareExecutor), jackson (2.18 over 2.21: jackson-module-scala 2.21 refuses it), commons-codec,
+           commons-compress, protobuf-java and zstd-jni. Pinned here the classpath no longer depends on order. -->
       <dependency>
-        <groupId>io.sparkvector</groupId>
-        <artifactId>spark-vector-kernels</artifactId>
-        <version>${project.version}</version>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-annotations</artifactId>
+        <version>2.21</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-core</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.datatype</groupId>
+        <artifactId>jackson-datatype-jsr310</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.github.luben</groupId>
+        <artifactId>zstd-jni</artifactId>
+        <version>1.5.7-6</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java</artifactId>
+        <version>4.33.0</version>
+      </dependency>
+      <dependency>
+        <groupId>commons-codec</groupId>
+        <artifactId>commons-codec</artifactId>
+        <version>1.19.0</version>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-buffer</artifactId>
+        <version>${netty.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-common</artifactId>
+        <version>${netty.version}</version>
       </dependency>
       <dependency>
         <groupId>io.sparkvector</groupId>
-        <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+        <artifactId>spark-vector-kernels</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
@@ -100,34 +149,9 @@
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>org.scala-lang</groupId>
-        <artifactId>scala-library</artifactId>
-        <version>${scala.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.apache.spark</groupId>
-        <artifactId>spark-sql_${scala.binary.version}</artifactId>
-        <version>${spark.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.apache.spark</groupId>
-        <artifactId>spark-core_${scala.binary.version}</artifactId>
-        <version>${spark.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.apache.hadoop</groupId>
-        <artifactId>hadoop-client-api</artifactId>
-        <version>${hadoop.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.apache.hadoop</groupId>
-        <artifactId>hadoop-client-runtime</artifactId>
-        <version>${hadoop.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.apache.arrow</groupId>
-        <artifactId>arrow-vector</artifactId>
-        <version>${arrow.version}</version>
+        <groupId>io.sparkvector</groupId>
+        <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.arrow</groupId>
@@ -140,14 +164,39 @@
         <version>${arrow.version}</version>
       </dependency>
       <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-vector</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-compress</artifactId>
+        <version>1.28.0</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-client-api</artifactId>
+        <version>${hadoop.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-client-runtime</artifactId>
+        <version>${hadoop.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-core_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-sql_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+      </dependency>
+      <dependency>
         <groupId>org.junit.jupiter</groupId>
         <artifactId>junit-jupiter</artifactId>
         <version>${junit.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.scalatest</groupId>
-        <artifactId>scalatest_${scala.binary.version}</artifactId>
-        <version>${scalatest.version}</version>
       </dependency>
       <dependency>
         <groupId>org.openjdk.jmh</groupId>
@@ -159,6 +208,30 @@
         <artifactId>jmh-generator-annprocess</artifactId>
         <version>${jmh.version}</version>
       </dependency>
+      <dependency>
+        <groupId>org.scala-lang</groupId>
+        <artifactId>scala-library</artifactId>
+        <version>${scala.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest_${scala.binary.version}</artifactId>
+        <version>${scalatest.version}</version>
+      </dependency>
+      <!-- Scope too: with the order changed these two arrived at compile scope in the shuffle module and
+           would have been shaded into its jar; Spark provides them. -->
+      <dependency>
+        <groupId>commons-io</groupId>
+        <artifactId>commons-io</artifactId>
+        <version>2.21.0</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-lang3</artifactId>
+        <version>3.19.0</version>
+        <scope>provided</scope>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -166,36 +239,27 @@
     <pluginManagement>
       <plugins>
         <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-compiler-plugin</artifactId>
-          <version>${maven-compiler-plugin.version}</version>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>${spotless-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>com.github.ekryd.sortpom</groupId>
+          <artifactId>sortpom-maven-plugin</artifactId>
+          <version>${sortpom-maven-plugin.version}</version>
           <configuration>
-            <release>${maven.compiler.release}</release>
-            <compilerArgs>
-              <arg>--add-modules=jdk.incubator.vector</arg>
-              <arg>-Xlint:all,-preview,-processing</arg>
-            </compilerArgs>
-            <showWarnings>true</showWarnings>
+            <predefinedSortOrder>recommended_2008_06</predefinedSortOrder>
+            <sortDependencies>scope,groupId,artifactId</sortDependencies>
+            <sortDependencyExclusions>groupId,artifactId</sortDependencyExclusions>
+            <sortPlugins>groupId,artifactId</sortPlugins>
+            <sortModules>false</sortModules>
+            <sortProperties>false</sortProperties>
+            <keepBlankLines>true</keepBlankLines>
+            <nrOfIndentSpace>2</nrOfIndentSpace>
+            <expandEmptyElements>false</expandEmptyElements>
+            <createBackupFile>false</createBackupFile>
+            <lineSeparator>\n</lineSeparator>
           </configuration>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-surefire-plugin</artifactId>
-          <version>${maven-surefire-plugin.version}</version>
-          <configuration>
-            <argLine>${vector.jvm.args}</argLine>
-            <trimStackTrace>false</trimStackTrace>
-          </configuration>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-jar-plugin</artifactId>
-          <version>${maven-jar-plugin.version}</version>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-shade-plugin</artifactId>
-          <version>${maven-shade-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>net.alchim31.maven</groupId>
@@ -219,9 +283,41 @@
           </configuration>
         </plugin>
         <plugin>
-          <groupId>org.scalatest</groupId>
-          <artifactId>scalatest-maven-plugin</artifactId>
-          <version>${scalatest-maven-plugin.version}</version>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>${maven-compiler-plugin.version}</version>
+          <configuration>
+            <release>${maven.compiler.release}</release>
+            <compilerArgs>
+              <arg>--add-modules=jdk.incubator.vector</arg>
+              <arg>-Xlint:all,-preview,-processing</arg>
+            </compilerArgs>
+            <showWarnings>true</showWarnings>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <version>${maven-dependency-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${maven-jar-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <version>${maven-shade-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>${maven-surefire-plugin.version}</version>
+          <configuration>
+            <argLine>${vector.jvm.args}</argLine>
+            <trimStackTrace>false</trimStackTrace>
+          </configuration>
         </plugin>
         <plugin>
           <groupId>org.codehaus.mojo</groupId>
@@ -229,44 +325,13 @@
           <version>${build-helper-maven-plugin.version}</version>
         </plugin>
         <plugin>
-          <groupId>com.diffplug.spotless</groupId>
-          <artifactId>spotless-maven-plugin</artifactId>
-          <version>${spotless-maven-plugin.version}</version>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-dependency-plugin</artifactId>
-          <version>${maven-dependency-plugin.version}</version>
+          <groupId>org.scalatest</groupId>
+          <artifactId>scalatest-maven-plugin</artifactId>
+          <version>${scalatest-maven-plugin.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>
     <plugins>
-      <plugin>
-        <!-- The jfmt JAR into target/jfmt at the root (once per build; `mvn validate` before a standalone `mvn spotless:apply`). -->
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>fetch-jfmt</id>
-            <phase>validate</phase>
-            <goals>
-              <goal>copy</goal>
-            </goals>
-            <configuration>
-              <artifactItems>
-                <artifactItem>
-                  <groupId>com.netflix</groupId>
-                  <artifactId>com.netflix.tools.jfmt</artifactId>
-                  <version>${jfmt.version}</version>
-                </artifactItem>
-              </artifactItems>
-              <outputDirectory>${maven.multiModuleProjectDirectory}/target/jfmt</outputDirectory>
-              <overWriteIfNewer>false</overWriteIfNewer>
-              <overWriteReleases>false</overWriteReleases>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
@@ -284,20 +349,29 @@
               <name>jfmt</name>
               <pathToExe>${java.home}/bin/java</pathToExe>
               <arguments>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.api=com.netflix.tools.jfmt</argument>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.code=com.netflix.tools.jfmt</argument>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.file=com.netflix.tools.jfmt</argument>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.main=com.netflix.tools.jfmt</argument>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.parser=com.netflix.tools.jfmt</argument>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.tree=com.netflix.tools.jfmt</argument>
-                <argument>--add-exports</argument><argument>jdk.compiler/com.sun.tools.javac.util=com.netflix.tools.jfmt</argument>
-                <argument>--module-path</argument><argument>${jfmt.jar}</argument>
-                <argument>--module</argument><argument>com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.api=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.code=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.file=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.main=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.parser=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.tree=com.netflix.tools.jfmt</argument>
+                <argument>--add-exports</argument>
+                <argument>jdk.compiler/com.sun.tools.javac.util=com.netflix.tools.jfmt</argument>
+                <argument>--module-path</argument>
+                <argument>${jfmt.jar}</argument>
+                <argument>--module</argument>
+                <argument>com.netflix.tools.jfmt</argument>
                 <argument>-</argument>
               </arguments>
             </nativeCmd>
-            <trimTrailingWhitespace />
-            <endWithNewline />
+            <trimTrailingWhitespace/>
+            <endWithNewline/>
           </java>
           <scala>
             <includes>
@@ -317,6 +391,48 @@
               <goal>check</goal>
             </goals>
             <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>com.github.ekryd.sortpom</groupId>
+        <artifactId>sortpom-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>sortpom-verify</id>
+            <goals>
+              <goal>verify</goal>
+            </goals>
+            <phase>validate</phase>
+            <configuration>
+              <verifyFail>stop</verifyFail>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- The jfmt JAR into target/jfmt at the root (once per build; `mvn validate` before a standalone `mvn spotless:apply`). -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>fetch-jfmt</id>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <phase>validate</phase>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>com.netflix</groupId>
+                  <artifactId>com.netflix.tools.jfmt</artifactId>
+                  <version>${jfmt.version}</version>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${maven.multiModuleProjectDirectory}/target/jfmt</outputDirectory>
+              <overWriteIfNewer>false</overWriteIfNewer>
+              <overWriteReleases>false</overWriteReleases>
+            </configuration>
           </execution>
         </executions>
       </plugin>
