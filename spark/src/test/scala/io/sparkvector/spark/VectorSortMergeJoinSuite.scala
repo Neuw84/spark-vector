@@ -188,12 +188,18 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
         Seq(classOf[VectorShuffledHashJoinExec])
       )
     }
-    // No statistics (adaptive execution off): still the hash join, built from the right side -- past its
-    // budget it splits into buckets on disk (#416), so neither size nor statistics decide; the merge join
-    // is for the plans whose order shows.
+    // No statistics (adaptive execution off): nothing to judge the hash join's budget by, so the merge
+    // join -- its memory is bounded by the sort's budget whatever the inputs weigh (#416).
     withConf((auto :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
-      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
+      val n = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
+      assert(why(n).contains("no size estimate"), why(n))
       checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20", Seq(SMJ))
+    }
+    // The cap removed: the hash join without statistics too.
+    withConf(
+      (auto :+ ("spark.sql.adaptive.enabled" -> "false") :+ (VectorConf.JoinHashMaxBuildSize -> "0")): _*
+    ) {
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
     }
     // A tiny sort budget: the merge join's inputs spill and the join still answers.
     withConf((auto :+ (VectorConf.SortSpillBytes -> "1") :+ (VectorConf.SortRunRows -> "64")): _*) {
@@ -203,6 +209,38 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     // The boolean flag reads as auto.
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1", VectorConf.SortMergeJoinEnabled -> "true") {
       checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20", Seq(SMJ))
+    }
+  }
+
+  test(
+    "auto: the size rule -- in memory within spillBytes, buckets within hashMaxBuildSize, the merge join past it (#416)"
+  ) {
+    val auto = Seq(
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      "spark.sql.join.preferSortMergeJoin" -> "true",
+      "spark.sql.shuffle.partitions" -> "2",
+      VectorConf.SortMergeJoinMode -> "auto"
+    )
+    def why(df: org.apache.spark.sql.DataFrame): String =
+      (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](
+        df
+      )).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
+    val q = "SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki"
+    // b (the smaller side) weighs some tens of kilobytes per task by the stage's statistics.
+    // Budgets far above it: the in-memory hash join, the reason says so.
+    withConf((auto :+ (VectorConf.JoinSpillBytes -> "1g")): _*) {
+      val m = checkVectorized(q, Seq(classOf[VectorShuffledHashJoinExec]))
+      assert(why(m).contains("in memory"), why(m))
+    }
+    // A per-bucket budget below it but a cap (buckets x budget) above: the hash join, split into buckets.
+    withConf((auto :+ (VectorConf.JoinSpillBytes -> "1k") :+ (VectorConf.JoinSpillBuckets -> "64")): _*) {
+      val g = checkVectorized(q, Seq(classOf[VectorShuffledHashJoinExec]))
+      assert(why(g).contains("split into 64 buckets"), why(g))
+    }
+    // The cap below it: the merge join, the reason names the cap.
+    withConf((auto :+ (VectorConf.JoinSpillBytes -> "1k") :+ (VectorConf.JoinHashMaxBuildSize -> "2k")): _*) {
+      val s = checkVectorized(q, Seq(SMJ))
+      assert(why(s).contains(VectorConf.JoinHashMaxBuildSize), why(s))
     }
   }
 

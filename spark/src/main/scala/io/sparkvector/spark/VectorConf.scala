@@ -38,6 +38,7 @@ object VectorConf {
   val SortMergeJoinEnabled = "spark.vector.exec.sortMergeJoin.enabled"
   val SortMergeJoinMode = "spark.vector.exec.sortMergeJoin.mode"
   val JoinMaxBuildSize = "spark.vector.join.maxBuildSize"
+  val JoinHashMaxBuildSize = "spark.vector.join.hashMaxBuildSize"
   val JoinSpillBuckets = "spark.vector.join.spillBuckets"
   val JoinSpillBytes = "spark.vector.join.spillBytes"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
@@ -183,6 +184,24 @@ object VectorConf {
   }
   def joinSpillBuckets(conf: SQLConf): Int =
     scala.util.Try(conf.getConfString(JoinSpillBuckets, "").trim.toInt).toOption.getOrElse(32)
+
+  /**
+   * The most a sort-merge join's build side may weigh per task, by statistics, for `mode=auto` to
+   * re-express it as the hash join: within `spark.vector.join.spillBytes` it builds in memory, within
+   * this cap it splits into buckets on disk once (`spillBuckets` buckets of at most `spillBytes`
+   * each), and past it -- or without an estimate -- the merge join over the spilling sort takes it
+   * (#416). Default `spillBuckets * spillBytes`; `0` or a negative value removes the cap.
+   */
+  def joinHashMaxBuildBytes(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
+    val explicit = conf.getConfString(JoinHashMaxBuildSize, "").trim
+    val v =
+      if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit)
+      else {
+        val perBucket = joinSpillBytes(conf, sparkConf)
+        if (perBucket == Long.MaxValue) Long.MaxValue else perBucket * joinSpillBuckets(conf)
+      }
+    if (v <= 0) Long.MaxValue else v
+  }
   def joinMaxBuildSize(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
     val explicit = conf.getConfString(JoinMaxBuildSize, "")
     if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit)

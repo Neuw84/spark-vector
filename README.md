@@ -85,9 +85,10 @@ Configuration keys (all default to `true` except the last):
 | `spark.vector.join.maxBuildSize` | build-side budget (bytes or a size string): the broadcast joins convert only for a relation estimated within it (they hold it in memory per task); the shuffled hash join holds its build side in memory up to it and past it splits both sides into buckets on disk (#416, the default of `spark.vector.join.spillBytes`); default 1 GiB, or `spark.memory.offHeap.size / spark.executor.cores` when off-heap is configured |
 | `spark.vector.join.spillBytes` | the build bytes a shuffled hash join holds in memory before it splits (#416); default `spark.vector.join.maxBuildSize`; `0` never splits |
 | `spark.vector.join.spillBuckets` | the buckets a split shuffled hash join writes each side into and joins one at a time (#416); default 32 |
+| `spark.vector.join.hashMaxBuildSize` | the most a sort-merge join's build side may weigh per task, by statistics, for `mode=auto` to make it the hash join (#416): within `spark.vector.join.spillBytes` it builds in memory, within this cap it splits into buckets once, past it -- or without an estimate -- the merge join over the spilling sort takes it, its memory bounded whatever the inputs weigh; default `spillBuckets` x `spillBytes` (one bucketing pass), `0` removes the cap |
 | `spark.vector.exec.shuffledHashJoin.enabled` | convert `ShuffledHashJoinExec` (both inputs are exchanges; Spark's row shuffle is converted below us) |
 | `spark.vector.exec.sortMergeJoin.enabled` | compatibility alias: `false` reads as `spark.vector.exec.sortMergeJoin.mode=off`, `true` as `auto` (the default since #311). Kept for compatibility -- set the mode instead. The hash rewrite (#10): `SortMergeJoinExec` re-expressed as our shuffled hash join when the smaller side's statistics fit `spark.vector.join.maxBuildSize` and no parent relies on the merge's ordering; tie order under `ORDER BY` and the rows an unordered `LIMIT` picks can differ from Spark's order-preserving merge, which is why `auto` sends such joins to the merge join instead. Comet's equivalent replacement, `spark.comet.exec.forceShuffledHashJoin`, is also off by default (experimental); Comet executes the merge join natively (`spark.comet.exec.sortMergeJoin.enabled`, on by default), as `mode=merge` does here since #286. |
-| `spark.vector.exec.sortMergeJoin.mode` | `auto` (default since #311; was `off`), `off`, `hash` (the rewrite above), `merge` (our order-preserving merge join over Spark's sorted inputs, #286 -- every join type, no statistics needed, Spark's row order kept) or `auto` (#287): per join, the merge join where a parent relies on the ordering, where the row order can reach a `LIMIT` or a sort without an exchange in between (the hash rewrite's tie order would show), or where the hash rewrite is not allowed -- no statistics, both sides over the budget, a skew join -- and the hash rewrite where a side's statistics fit. The boolean flag reads as `auto`. The plan prints the decision on the join (`Sort-merge join as hash join: right side fits ...`). |
+| `spark.vector.exec.sortMergeJoin.mode` | `auto` (default since #311; was `off`), `off`, `hash` (the rewrite above), `merge` (our order-preserving merge join over Spark's sorted inputs, #286 -- every join type, no statistics needed, Spark's row order kept) or `auto` (#287): per join, the merge join where a parent relies on the ordering, where the row order can reach a `LIMIT` or a sort without an exchange in between (the hash rewrite's tie order would show), or where the hash rewrite is not allowed -- no statistics, the build side past `spark.vector.join.hashMaxBuildSize` per task, a skew join -- and the hash rewrite where a side's statistics fit: in memory within `spark.vector.join.spillBytes`, in buckets on disk within the cap. The boolean flag reads as `auto`. The plan prints the decision on the join (`Sort-merge join as hash join: right side fits ...`). |
 | `spark.vector.sort.spillBytes` | the sort's memory budget per task (#416): runs past it are written to local disk in sorted order and merged from there, which is what lets our merge join take inputs of any size; default 32 MB -- measured fastest at 1 TB (gigabyte runs under the join budget were 25-45% slower on the merge-join queries, 16 MB slower again); `0` turns spilling off |
 | `spark.vector.comet.shuffle.range.enabled` | also hand range-partitioned exchanges (global `ORDER BY`) to Comet's native shuffle |
 | `spark.vector.comet.mixed.enabled` | `false`; with Comet on the classpath, a Spark operator left to Spark whose children are ours goes to Comet's native operator through the sink leaf (`docs/comet.md`, #280) -- for the operator kinds `spark.vector.comet.preferComet` names. |
@@ -687,12 +688,14 @@ by run (the rows sharing one key), the current run is the only buffered state, e
 cross product in Spark's order, every join type is covered and no statistics are needed. `hash`
 (#10) re-expresses the join as the shuffled hash join, dropping the sorts -- same rows, but tied rows
 can come out in another order than Spark's, so it is never chosen where the order can show. Under
-`auto` (the default) a sort-merge join whose order no parent relies on is the hash join whatever its
-inputs weigh -- past `spark.vector.join.spillBytes` the join splits both sides into buckets on disk
-(#416, a grace hash join), built from the smaller side by statistics or the right one without them --
-and one whose order can show (a limit, a sort, a window above) is our merge join over the spilling
-sort. Nothing is left to Spark's own operator (#311's size gate, set when Spark's row sort fed our
-join, is gone).
+`auto` (the default) a sort-merge join whose order no parent relies on is judged by what its smaller
+side weighs per task, by statistics (#416): within `spark.vector.join.spillBytes` it is the hash join
+built in memory; within `spark.vector.join.hashMaxBuildSize` (default one bucketing pass,
+`spillBuckets` x `spillBytes`) it is the hash join splitting both sides into buckets on disk (a grace
+hash join); past that, or without an estimate, it is our merge join over the spilling sort, whose
+memory the sort's budget bounds whatever the inputs weigh. One whose order can show (a limit, a sort,
+a window above) is the merge join regardless. Nothing is left to Spark's own operator (#311's size
+gate, set when Spark's row sort fed our join, is gone).
 
 ### Spark's SQL test suite
 
