@@ -49,41 +49,48 @@ object TpchRunner {
    * A benchmark: its tables (each a Parquet directory of that name under `--data`), the table whose
    * row count labels a dataset in the reports, and its queries in report order.
    */
-  final case class Suite(name: String, title: String, tables: Seq[String], anchorTable: String, queries: Seq[(String, String)],
+  final case class Suite(
+      name: String,
+      title: String,
+      tables: Seq[String],
+      anchorTable: String,
+      queries: Seq[(String, String)],
       /** Runnable by name but not part of a default run (the MoR probes). */
-      probes: Seq[(String, String)] = Nil) {
+      probes: Seq[(String, String)] = Nil
+  ) {
     lazy val queryMap: Map[String, String] = (queries ++ probes).toMap
     def queryOrder: Seq[String] = queries.map(_._1)
   }
 
   /** Comet with only its native Parquet scan active; every Comet operator and its shuffle are off. */
   val CometScanOnly: Map[String, String] = Map(
-      "spark.comet.enabled" -> "true",
-      "spark.comet.scan.enabled" -> "true",
-      // Comet 1.0's only scan is the native DataFusion one, which requires exec to be enabled; keep
-      // every Comet operator off so the scan is the only native piece and Spark's shuffle is used.
-      "spark.comet.exec.enabled" -> "true",
-      "spark.comet.exec.shuffle.enabled" -> "false",
-      "spark.comet.exec.project.enabled" -> "false",
-      "spark.comet.exec.filter.enabled" -> "false",
-      "spark.comet.exec.aggregate.enabled" -> "false",
-      "spark.comet.exec.sort.enabled" -> "false",
-      "spark.comet.exec.localLimit.enabled" -> "false",
-      "spark.comet.exec.globalLimit.enabled" -> "false",
-      "spark.comet.exec.takeOrderedAndProject.enabled" -> "false",
-      "spark.comet.exec.hashJoin.enabled" -> "false",
-      "spark.comet.exec.sortMergeJoin.enabled" -> "false",
-      "spark.comet.exec.broadcastHashJoin.enabled" -> "false",
-      "spark.comet.exec.broadcastExchange.enabled" -> "false",
-      "spark.comet.exec.expand.enabled" -> "false",
-      "spark.comet.exec.union.enabled" -> "false",
-      "spark.comet.exec.window.enabled" -> "false",
-      "spark.comet.exec.coalesce.enabled" -> "false",
-      "spark.comet.exec.collectLimit.enabled" -> "false",
-      "spark.comet.exec.explode.enabled" -> "false",
-      "spark.comet.exec.sample.enabled" -> "false",
-      "spark.memory.offHeap.enabled" -> "true",
-      "spark.memory.offHeap.size" -> "1g")
+    "spark.comet.enabled" -> "true",
+    "spark.comet.scan.enabled" -> "true",
+    // Comet 1.0's only scan is the native DataFusion one, which requires exec to be enabled; keep
+    // every Comet operator off so the scan is the only native piece and Spark's shuffle is used.
+    "spark.comet.exec.enabled" -> "true",
+    "spark.comet.exec.shuffle.enabled" -> "false",
+    "spark.comet.exec.project.enabled" -> "false",
+    "spark.comet.exec.filter.enabled" -> "false",
+    "spark.comet.exec.aggregate.enabled" -> "false",
+    "spark.comet.exec.sort.enabled" -> "false",
+    "spark.comet.exec.localLimit.enabled" -> "false",
+    "spark.comet.exec.globalLimit.enabled" -> "false",
+    "spark.comet.exec.takeOrderedAndProject.enabled" -> "false",
+    "spark.comet.exec.hashJoin.enabled" -> "false",
+    "spark.comet.exec.sortMergeJoin.enabled" -> "false",
+    "spark.comet.exec.broadcastHashJoin.enabled" -> "false",
+    "spark.comet.exec.broadcastExchange.enabled" -> "false",
+    "spark.comet.exec.expand.enabled" -> "false",
+    "spark.comet.exec.union.enabled" -> "false",
+    "spark.comet.exec.window.enabled" -> "false",
+    "spark.comet.exec.coalesce.enabled" -> "false",
+    "spark.comet.exec.collectLimit.enabled" -> "false",
+    "spark.comet.exec.explode.enabled" -> "false",
+    "spark.comet.exec.sample.enabled" -> "false",
+    "spark.memory.offHeap.enabled" -> "true",
+    "spark.memory.offHeap.size" -> "1g"
+  )
 
   /**
    * Our plugin as benchmarked: fast floating point (lane-parallel and interleaved double sums), the
@@ -101,7 +108,8 @@ object TpchRunner {
     // and its off-heap column vectors already hold Arrow's fixed-width layout, so those lanes are wrapped
     // in place instead of copied (SF10: q8 1.46 -> 1.14 s, q47 6.28 -> 5.30).
     "spark.sql.parquet.enableVectorizedReader" -> "true",
-    "spark.sql.columnVector.offheap.enabled" -> "true")
+    "spark.sql.columnVector.offheap.enabled" -> "true"
+  )
 
   /** Spark configurations under comparison. Comet configs need the Comet jar on the classpath. */
   val Configs: Map[String, Map[String, String]] = Map(
@@ -110,25 +118,31 @@ object TpchRunner {
     // #288: our columnar exchange over Arrow IPC files and Arrow Flight, no row conversion around shuffles.
     "vector-shuffle" -> (VectorFast ++ Map(
       "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
-      "spark.vector.shuffle.enabled" -> "true")),
+      "spark.vector.shuffle.enabled" -> "true"
+    )),
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
-    "comet-scan-vector" -> (VectorFast ++ Map("spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin") ++ CometScanOnly),
+    "comet-scan-vector" -> (VectorFast ++ Map(
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin"
+    ) ++ CometScanOnly),
     // The same with strict floating point (the plugin's own default): double sums and averages in
     // Spark's order, so every result equals vanilla Spark's bit for bit. The maintainer's question
     // for the 1 TB runs: what exact agreement costs against the fast mode the benchmarks use.
     "vector-shuffle-strict" -> (VectorFast ++ Map(
       "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
       "spark.vector.shuffle.enabled" -> "true",
-      "spark.vector.exec.strictFloatingPoint" -> "true")),
+      "spark.vector.exec.strictFloatingPoint" -> "true"
+    )),
     // #311: Comet's native scan, our operators, and OUR columnar shuffle (#288) -- Comet's shuffle off.
     "comet-scan-vector-ourshuffle" -> (VectorFast ++ Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
       "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
-      "spark.vector.shuffle.enabled" -> "true") ++ CometScanOnly),
+      "spark.vector.shuffle.enabled" -> "true"
+    ) ++ CometScanOnly),
     // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.
     "comet-scan-vector-shuffle" -> (VectorFast ++ Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
-      "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
+      "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager"
+    ) ++
       CometScanOnly ++ Map("spark.comet.exec.shuffle.enabled" -> "true")),
     // #281: comet-scan-vector-shuffle plus the mixed-chain pass and the shipped allowlist. The allowlist is
     // the repository default (empty until an entry meets the three-part rule of docs/comet.md), and Comet's
@@ -136,14 +150,16 @@ object TpchRunner {
     // `--conf spark.comet.exec.<kind>.enabled=true --conf spark.vector.comet.preferComet=<kind> --label <kind>`.
     "hybrid" -> (VectorFast ++ Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
-      "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager") ++
+      "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager"
+    ) ++
       CometScanOnly ++ Map(
         "spark.comet.exec.shuffle.enabled" -> "true",
         "spark.vector.comet.mixed.enabled" -> "true",
         // Comet's operators take their memory from Spark's off-heap pool; without it Comet's sort grew its
         // native allocation until the kernel killed the JVM (TPC-H q5 at SF10, 12.7 GB resident).
         "spark.memory.offHeap.enabled" -> "true",
-        "spark.memory.offHeap.size" -> "3g")),
+        "spark.memory.offHeap.size" -> "3g"
+      )),
     "comet" -> Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin",
       "spark.comet.enabled" -> "true",
@@ -152,9 +168,22 @@ object TpchRunner {
       "spark.comet.exec.shuffle.enabled" -> "true",
       "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager",
       "spark.memory.offHeap.enabled" -> "true",
-      "spark.memory.offHeap.size" -> "3g"))
+      "spark.memory.offHeap.size" -> "3g"
+    )
+  )
 
-  val ConfigOrder: Seq[String] = Seq("spark", "vector", "vector-shuffle", "vector-shuffle-strict", "comet-scan", "comet-scan-vector-ourshuffle", "comet-scan-vector", "comet-scan-vector-shuffle", "hybrid", "comet")
+  val ConfigOrder: Seq[String] = Seq(
+    "spark",
+    "vector",
+    "vector-shuffle",
+    "vector-shuffle-strict",
+    "comet-scan",
+    "comet-scan-vector-ourshuffle",
+    "comet-scan-vector",
+    "comet-scan-vector-shuffle",
+    "hybrid",
+    "comet"
+  )
 
   /** The two pure configurations `hybrid` is judged against, query by query (#281). */
   val HybridBaselines: Seq[String] = Seq("comet-scan-vector-shuffle", "comet")
@@ -202,7 +231,8 @@ object TpchRunner {
       /** Local Iceberg merge-on-read harness (#260): the Hadoop catalog warehouse `gen-iceberg-mor.sh` wrote ... */
       icebergWarehouse: Option[String] = None,
       /** ... and the `<namespace>.<variant>` table in it that stands in for `lineitem`; the dataset label is `iceberg:<namespace>.<variant>`. */
-      icebergVariant: Option[String] = None)
+      icebergVariant: Option[String] = None
+  )
 
   def main(argv: Array[String]): Unit = mainWith(Tpch, argv)
 
@@ -245,7 +275,10 @@ object TpchRunner {
   }
 
   private def run(args: Args): Unit = {
-    val conf = Configs.getOrElse(args.config, throw new IllegalArgumentException(s"unknown config ${args.config}; known: ${ConfigOrder.mkString(", ")}"))
+    val conf = Configs.getOrElse(
+      args.config,
+      throw new IllegalArgumentException(s"unknown config ${args.config}; known: ${ConfigOrder.mkString(", ")}")
+    )
     val spark =
       if (args.cluster) {
         // spark-submit built the context: master, plugins, shuffle manager and memory come from the
@@ -254,7 +287,9 @@ object TpchRunner {
         val s = SparkSession.builder().getOrCreate()
         (conf ++ args.extraConf).foreach { case (k, v) =>
           val actual = s.conf.getOption(k)
-          if (!actual.contains(v)) println(s"[${args.suite.name}] WARNING: ${args.config} expects $k=$v, the session has ${actual.getOrElse("(unset)")}")
+          if (!actual.contains(v)) println(
+            s"[${args.suite.name}] WARNING: ${args.config} expects $k=$v, the session has ${actual.getOrElse("(unset)")}"
+          )
         }
         s
       } else {
@@ -268,7 +303,9 @@ object TpchRunner {
         (conf ++ args.extraConf).foreach { case (k, v) => builder.config(k, v) }
         // The Iceberg MoR harness: the generator's Hadoop catalog on this session (the plugin comes
         // through spark.plugins, so Iceberg's SQL extensions do not displace it).
-        args.icebergWarehouse.foreach(w => IcebergMorGenerator.catalogConf(new File(w).getAbsolutePath).foreach { case (k, v) => builder.config(k, v) })
+        args.icebergWarehouse.foreach(w =>
+          IcebergMorGenerator.catalogConf(new File(w).getAbsolutePath).foreach { case (k, v) => builder.config(k, v) }
+        )
         builder.getOrCreate()
       }
     val listener = new ClusterRunner.StageMetricsListener
@@ -285,34 +322,51 @@ object TpchRunner {
           p.foreach(t => spark.read.parquet(new File(args.data, t).getPath).createOrReplaceTempView(t))
           p
         }
-      require(present.contains(suite.anchorTable), s"$source holds no ${suite.anchorTable} table (see gen-${suite.name}.sh)")
+      require(
+        present.contains(suite.anchorTable),
+        s"$source holds no ${suite.anchorTable} table (see gen-${suite.name}.sh)"
+      )
       // The Iceberg MoR harness: one generated variant stands in for lineitem; the other tables stay Parquet.
       val variant = args.icebergVariant.map { v =>
         require(args.icebergWarehouse.isDefined, "--variant needs --iceberg <warehouse>")
         require(suite.anchorTable == "lineitem", "--variant is a TPC-H lineitem table")
         val table = s"${IcebergMorGenerator.Catalog}.$v"
-        require(spark.catalog.tableExists(table), s"$table does not exist in ${args.icebergWarehouse.get} (see gen-iceberg-mor.sh)")
+        require(
+          spark.catalog.tableExists(table),
+          s"$table does not exist in ${args.icebergWarehouse.get} (see gen-iceberg-mor.sh)"
+        )
         spark.table(table).createOrReplaceTempView("lineitem")
-        val snapshot = spark.sql(s"SELECT snapshot_id FROM $table.snapshots ORDER BY committed_at DESC LIMIT 1").collect()(0).getLong(0)
+        val snapshot = spark.sql(
+          s"SELECT snapshot_id FROM $table.snapshots ORDER BY committed_at DESC LIMIT 1"
+        ).collect()(0).getLong(0)
         println(s"[${suite.name}] lineitem is the Iceberg table $table at snapshot $snapshot")
         v
       }
       val rowCount = spark.table(suite.anchorTable).count()
       // The dataset label the reports group by: the last path element (`sf1`, `sf10`), or --dataset.
-      val data = args.dataset.getOrElse(variant.map(v => s"iceberg:$v").getOrElse(if (args.cluster) source.stripSuffix("/").split('/').last else args.data))
+      val data = args.dataset.getOrElse(variant.map(v => s"iceberg:$v").getOrElse(if (args.cluster)
+        source.stripSuffix("/").split('/').last
+      else args.data))
       // Query texts: the classpath (the tests jar) or, on a cluster image without it, `<dir>/<name>.sql`.
-      val queryMap = args.queriesDir.map(d => ClusterRunner.queriesFrom(spark, d, args.queries).toMap).getOrElse(suite.queryMap)
+      val queryMap =
+        args.queriesDir.map(d => ClusterRunner.queriesFrom(spark, d, args.queries).toMap).getOrElse(suite.queryMap)
       val env = ClusterRunner.Environment.of(spark)
-      println(s"[${suite.name}] config=${args.config} data=$data tables=${present.mkString(",")} ${suite.anchorTable} rows=$rowCount " +
-        (if (args.cluster) s"spark=${env.sparkVersion} executors=${env.executors}" else s"threads=${args.threads}"))
+      println(
+        s"[${suite.name}] config=${args.config} data=$data tables=${present.mkString(",")} ${suite.anchorTable} rows=$rowCount " +
+          (if (args.cluster) s"spark=${env.sparkVersion} executors=${env.executors}" else s"threads=${args.threads}")
+      )
 
       val writer =
         if (args.cluster) ClusterRunner.openOutput(spark, args.out, args.config, args.label)
         else {
           Files.createDirectories(Paths.get(args.out))
           val outFile = Paths.get(args.out, s"${args.config}${if (args.label.isEmpty) "" else "-" + args.label}.jsonl")
-          new PrintWriter(Files.newBufferedWriter(outFile, java.nio.charset.StandardCharsets.UTF_8,
-            java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND))
+          new PrintWriter(Files.newBufferedWriter(
+            outFile,
+            java.nio.charset.StandardCharsets.UTF_8,
+            java.nio.file.StandardOpenOption.CREATE,
+            java.nio.file.StandardOpenOption.APPEND
+          ))
         }
       val failed = scala.collection.mutable.ArrayBuffer.empty[String]
       try {
@@ -320,7 +374,9 @@ object TpchRunner {
           val sql = queryMap.getOrElse(q, throw new IllegalArgumentException(s"unknown query $q"))
           val missing = tablesOf(suite, sql) -- present.toSet
           if (missing.nonEmpty) {
-            println(s"[${suite.name}] skipping $q: ${missing.toSeq.sorted.mkString(", ")} not generated (rerun gen-${suite.name}.sh)")
+            println(
+              s"[${suite.name}] skipping $q: ${missing.toSeq.sorted.mkString(", ")} not generated (rerun gen-${suite.name}.sh)"
+            )
           } else {
             // A query that fails (an analysis error against the generated schema, an engine bug) is
             // reported and leaves no record; the rest of the suite still runs.
@@ -328,30 +384,44 @@ object TpchRunner {
               val result = measure(spark, listener, q, sql, args)
               writer.println(result.toJson(args.config, data, rowCount, env))
               writer.flush()
-              println(s"[${args.suite.name}] ${args.config} $q median=${result.medianMs}ms p90=${result.p90Ms}ms min=${result.minMs}ms rows=${result.rows} " +
-                s"accelerated=${result.acceleratedOps}/${result.operatorCount} operators=${result.operators}")
+              println(
+                s"[${args.suite.name}] ${args.config} $q median=${result.medianMs}ms p90=${result.p90Ms}ms min=${result.minMs}ms rows=${result.rows} " +
+                  s"accelerated=${result.acceleratedOps}/${result.operatorCount} operators=${result.operators}"
+              )
               if (result.scan.nonEmpty || result.morPhysicalRows > 0)
                 println(s"[${args.suite.name}]   scan=${result.scan} " +
-                  (if (result.morPhysicalRows > 0) f"merge-on-read live/physical=${result.morLiveRows}/${result.morPhysicalRows} (${100.0 * result.morLiveRows / result.morPhysicalRows}%.1f%% live)" else "merge-on-read batches=0"))
-              result.metrics.foreach(m => println(s"[${args.suite.name}]   stages=${m.stages} executorRunTime=${m.executorRunTimeMs}ms gc=${m.jvmGcTimeMs}ms " +
-                s"shuffleRead=${m.shuffleReadBytes} shuffleWrite=${m.shuffleWriteBytes} spill=${m.spillBytes} peakMemory=${m.peakExecutionMemory}"))
+                  (if (result.morPhysicalRows > 0)
+                     f"merge-on-read live/physical=${result.morLiveRows}/${result.morPhysicalRows} (${100.0 * result.morLiveRows / result.morPhysicalRows}%.1f%% live)"
+                   else "merge-on-read batches=0"))
+              result.metrics.foreach(m =>
+                println(s"[${args.suite.name}]   stages=${m.stages} executorRunTime=${m.executorRunTimeMs}ms gc=${m.jvmGcTimeMs}ms " +
+                  s"shuffleRead=${m.shuffleReadBytes} shuffleWrite=${m.shuffleWriteBytes} spill=${m.spillBytes} peakMemory=${m.peakExecutionMemory}")
+              )
               result.fallbacks.foreach(f => println(s"[${args.suite.name}]   fallback: $f"))
             } catch {
               case e: Exception =>
                 failed += q
-                println(s"[${suite.name}] ${args.config} $q FAILED: ${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}")
+                println(
+                  s"[${suite.name}] ${args.config} $q FAILED: ${e.getClass.getSimpleName}: ${Option(e.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}"
+                )
                 // A future's "Boxed Exception" hides the cause: name the root and where it was thrown.
                 val root = Iterator.iterate(e: Throwable)(_.getCause).takeWhile(_ != null).toSeq.last
-                if (root ne e) println(s"[${suite.name}]   cause: ${root.getClass.getName}: ${Option(root.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}")
+                if (root ne e) println(
+                  s"[${suite.name}]   cause: ${root.getClass.getName}: ${Option(root.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}"
+                )
                 root.getStackTrace.take(6).foreach(f => println(s"[${suite.name}]     at $f"))
             }
           }
         }
       } finally writer.close()
-      if (failed.nonEmpty) println(s"[${suite.name}] ${failed.size} quer${if (failed.size == 1) "y" else "ies"} failed: ${failed.mkString(", ")}")
+      if (failed.nonEmpty) println(
+        s"[${suite.name}] ${failed.size} quer${if (failed.size == 1) "y" else "ies"} failed: ${failed.mkString(", ")}"
+      )
       if (args.keepAlive) {
         // For inspecting the Spark UI (the Vector Acceleration tab) after the queries ran.
-        println(s"[${args.suite.name}] keeping the session open; Spark UI at ${spark.sparkContext.uiWebUrl.getOrElse("(disabled)")}. Ctrl-C to exit.")
+        println(
+          s"[${args.suite.name}] keeping the session open; Spark UI at ${spark.sparkContext.uiWebUrl.getOrElse("(disabled)")}. Ctrl-C to exit."
+        )
         Thread.currentThread().join()
       }
     } finally spark.stop()
@@ -363,8 +433,14 @@ object TpchRunner {
    * row/columnar transitions is neither): `PlanAcceleration.fromPlan`.
    */
   final case class Measurement(
-      query: String, timesMs: Seq[Double], rows: Int, checksum: String, operators: String, plan: String,
-      acceleratedOps: Int, operatorCount: Int,
+      query: String,
+      timesMs: Seq[Double],
+      rows: Int,
+      checksum: String,
+      operators: String,
+      plan: String,
+      acceleratedOps: Int,
+      operatorCount: Int,
       /** `Operator: reason` for every operator the planner rule tried to convert and could not. */
       fallbacks: Seq[String],
       /** Spark's stage-level metrics of the last measured run (cluster runs need them to explain a regression without a rerun). */
@@ -375,9 +451,11 @@ object TpchRunner {
        * Iceberg merge-on-read batches the adapter normalized during the last measured run, as rows read
        * (physical) and rows the deletes left (live) -- local mode only, the counters live in the executor JVM.
        */
-      morPhysicalRows: Long = 0, morLiveRows: Long = 0,
+      morPhysicalRows: Long = 0,
+      morLiveRows: Long = 0,
       /** Per-operator attribution of the last measured run (#279): ours and Comet's native operators, one entry per plan node. */
-      operatorTimes: Seq[OperatorTime] = Nil) {
+      operatorTimes: Seq[OperatorTime] = Nil
+  ) {
     private val sorted = timesMs.sorted
     def medianMs: Double = percentile(50)
     def p90Ms: Double = percentile(90)
@@ -386,13 +464,24 @@ object TpchRunner {
       val idx = math.min(sorted.size - 1, math.max(0, math.ceil(p / 100.0 * sorted.size).toInt - 1))
       math.round(sorted(idx) * 10) / 10.0
     }
-    def toJson(config: String, data: String, rowCount: Long, env: ClusterRunner.Environment = ClusterRunner.Environment.Unknown): String = {
+    def toJson(
+        config: String,
+        data: String,
+        rowCount: Long,
+        env: ClusterRunner.Environment = ClusterRunner.Environment.Unknown
+    ): String = {
       def esc(s: String) = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-      s"""{"timestamp":"${Instant.now()}","config":"$config","query":"$query","data":"${esc(data)}","anchorRows":$rowCount,""" +
-        s""""medianMs":$medianMs,"p90Ms":$p90Ms,"minMs":$minMs,"timesMs":[${timesMs.map(t => math.round(t * 10) / 10.0).mkString(",")}],""" +
+      s"""{"timestamp":"${Instant.now()}","config":"$config","query":"$query","data":"${esc(
+          data
+        )}","anchorRows":$rowCount,""" +
+        s""""medianMs":$medianMs,"p90Ms":$p90Ms,"minMs":$minMs,"timesMs":[${timesMs.map(t =>
+            math.round(t * 10) / 10.0
+          ).mkString(",")}],""" +
         s""""rows":$rows,"checksum":"$checksum","acceleratedOps":$acceleratedOps,"operatorCount":$operatorCount,""" +
         metrics.map(m => m.json + ",").getOrElse("") +
-        s""""sparkVersion":"${esc(env.sparkVersion)}","executors":"${esc(env.executors)}","engineConf":"${esc(env.engineConf)}",""" +
+        s""""sparkVersion":"${esc(env.sparkVersion)}","executors":"${esc(env.executors)}","engineConf":"${esc(
+            env.engineConf
+          )}",""" +
         s""""scan":"${esc(scan)}","morPhysicalRows":$morPhysicalRows,"morLiveRows":$morLiveRows,""" +
         s""""operatorTimes":"${esc(OperatorTime.encode(operatorTimes))}",""" +
         s""""fallbacks":"${esc(fallbacks.mkString("; "))}","operators":"${esc(operators)}","plan":"${esc(plan)}"}"""
@@ -407,6 +496,7 @@ object TpchRunner {
    * `output_rows`. Spark's own operators carry no per-operator time and are not listed.
    */
   final case class OperatorTime(operator: String, engine: String, rows: Long, ms: Double) {
+
     /** `Filter`, `HashAggregate`, `ShuffledHashJoin`: the operator kind without the engine's prefix and the `Exec` suffix. */
     def kind: String = OperatorTime.kindOf(operator)
   }
@@ -414,20 +504,32 @@ object TpchRunner {
   object OperatorTime {
     def kindOf(operator: String): String =
       operator.stripPrefix("Vector").stripPrefix("Comet").stripSuffix("Exec")
+
     /** `op|engine|rows|ms; op|engine|rows|ms` -- one string field, read back by [[decode]]. */
-    def encode(ts: Seq[OperatorTime]): String = ts.map(t => f"${t.operator}|${t.engine}|${t.rows}|${t.ms}%.3f").mkString("; ")
+    def encode(ts: Seq[OperatorTime]): String =
+      ts.map(t => f"${t.operator}|${t.engine}|${t.rows}|${t.ms}%.3f").mkString("; ")
     def decode(field: String): Seq[OperatorTime] = field.split("; ").map(_.trim).filter(_.nonEmpty).toSeq.flatMap { e =>
       e.split('|') match {
         case Array(op, engine, rows, ms) => scala.util.Try(OperatorTime(op, engine, rows.toLong, ms.toDouble)).toOption
         case _ => None
       }
     }
+
     /** Attribution from the executed plan: ours from `time`, Comet's native nodes from `elapsed_compute`. */
     def fromPlan(nodes: Seq[SparkPlan]): Seq[OperatorTime] = nodes.flatMap { n =>
       val name = n.getClass.getSimpleName
       if (name.startsWith("Vector") && n.metrics.contains("time")) {
-        Some(OperatorTime(name, "ours", n.metrics.get("numOutputRows").map(_.value).getOrElse(-1L), n.metrics("time").value / 1e6))
-      } else if (name.startsWith("Comet") && !name.contains("Scan") && !name.contains("ColumnarToRow") && !name.contains("Exchange")) {
+        Some(OperatorTime(
+          name,
+          "ours",
+          n.metrics.get("numOutputRows").map(_.value).getOrElse(-1L),
+          n.metrics("time").value / 1e6
+        ))
+      } else if (
+        name.startsWith("Comet") && !name.contains("Scan") && !name.contains("ColumnarToRow") && !name.contains(
+          "Exchange"
+        )
+      ) {
         // Measured: the values are nanoseconds (a 21 ms filter reads 21200470), whatever the metric's
         // description says. An operator without `elapsed_compute` (a join) has its phases as `*_time`.
         val ns = n.metrics.get("elapsed_compute").map(_.value).orElse {
@@ -435,9 +537,12 @@ object TpchRunner {
           if (phases.isEmpty) None else Some(phases.sum)
         }
         ns match {
-          case Some(v) => Some(OperatorTime(name, "comet", n.metrics.get("output_rows").map(_.value).getOrElse(-1L), v / 1e6))
+          case Some(v) =>
+            Some(OperatorTime(name, "comet", n.metrics.get("output_rows").map(_.value).getOrElse(-1L), v / 1e6))
           case None =>
-            if (unattributed.add(name)) println(s"[attribution] $name has no time metric; its metrics: ${n.metrics.keys.toSeq.sorted.mkString(", ")}")
+            if (unattributed.add(name)) println(
+              s"[attribution] $name has no time metric; its metrics: ${n.metrics.keys.toSeq.sorted.mkString(", ")}"
+            )
             None
         }
       } else None
@@ -445,7 +550,13 @@ object TpchRunner {
     private val unattributed = scala.collection.mutable.HashSet.empty[String]
   }
 
-  private def measure(spark: SparkSession, listener: ClusterRunner.StageMetricsListener, name: String, sql: String, args: Args): Measurement = {
+  private def measure(
+      spark: SparkSession,
+      listener: ClusterRunner.StageMetricsListener,
+      name: String,
+      sql: String,
+      args: Args
+  ): Measurement = {
     // Each run under its own job group, so the listener attributes its stages to it.
     def once(i: Int): (Double, Array[org.apache.spark.sql.Row], SparkPlan, ClusterRunner.StageMetrics) = {
       val df = spark.sql(sql)
@@ -459,7 +570,8 @@ object TpchRunner {
     (1 to args.warmup).foreach(i => once(-i))
     // The adapter's merge-on-read counters around the last measured run (a delta: the JVM is shared by every query).
     val runs = (1 to args.iterations - 1).map(once)
-    val (physicalBefore, liveBefore) = (IcebergVectorAdapter.normalizedPhysicalRows(), IcebergVectorAdapter.normalizedLiveRows())
+    val (physicalBefore, liveBefore) =
+      (IcebergVectorAdapter.normalizedPhysicalRows(), IcebergVectorAdapter.normalizedLiveRows())
     val last = once(args.iterations)
     val morPhysical = IcebergVectorAdapter.normalizedPhysicalRows() - physicalBefore
     val morLive = IcebergVectorAdapter.normalizedLiveRows() - liveBefore
@@ -478,21 +590,40 @@ object TpchRunner {
       println(s"[${args.suite.name}]   plan of $name:\n${plan.treeString}")
       nodes.collect { case e: org.apache.spark.sql.execution.exchange.ShuffleExchangeLike => e }.foreach { e =>
         val m = e.metrics.toSeq.sortBy(_._1).map { case (k, v) => s"$k=${v.value}" }.mkString(" ")
-        println(s"[${args.suite.name}]   exchange ${e.getClass.getSimpleName} columns=${e.output.map(a => s"${a.name}:${a.dataType.simpleString}").mkString(",")} $m")
+        println(s"[${args.suite.name}]   exchange ${e.getClass.getSimpleName} columns=${e.output.map(a =>
+            s"${a.name}:${a.dataType.simpleString}"
+          ).mkString(",")} $m")
       }
     }
     val ops = nodes.map(_.getClass.getSimpleName).filter(n => n.startsWith("Vector") || n.startsWith("Comet"))
       .groupBy(identity).view.mapValues(_.size).toSeq.sortBy(_._1).map { case (n, c) => s"$n x$c" }.mkString(", ")
     // Per-operator kernel time of the last run (summed over tasks, so it exceeds wall clock).
     val operatorTimes = OperatorTime.fromPlan(nodes)
-    operatorTimes.foreach(t => println(f"[${args.suite.name}]   ${t.operator} (${t.engine}): time ${t.ms}%.1f ms, output rows ${t.rows}"))
+    operatorTimes.foreach(t =>
+      println(f"[${args.suite.name}]   ${t.operator} (${t.engine}): time ${t.ms}%.1f ms, output rows ${t.rows}")
+    )
     val accelerated = PlanAcceleration.fromPlan(plan)
     val acceleratedOps = accelerated.nodes.count(n => !Engine.plumbing.contains(n.engine) && n.engine.isAccelerated)
     // One line per distinct (operator, reason): the same reason repeats across AQE stages.
-    val fallbacks = (accelerated.fallbacks.map { case (node, reason) => s"$node: $reason" } ++ cometFallbacks(plan)).distinct
+    val fallbacks =
+      (accelerated.fallbacks.map { case (node, reason) => s"$node: $reason" } ++ cometFallbacks(plan)).distinct
     val scan = nodes.map(_.getClass.getSimpleName).filter(_.endsWith("ScanExec")).distinct.sorted.mkString(", ")
-    Measurement(name, (runs :+ last).map(_._1), rows.length, checksum, if (ops.isEmpty) "spark only" else ops, plan.treeString.take(4000),
-      acceleratedOps, accelerated.operatorCount, fallbacks, Some(metrics), scan, morPhysical, morLive, operatorTimes)
+    Measurement(
+      name,
+      (runs :+ last).map(_._1),
+      rows.length,
+      checksum,
+      if (ops.isEmpty) "spark only" else ops,
+      plan.treeString.take(4000),
+      acceleratedOps,
+      accelerated.operatorCount,
+      fallbacks,
+      Some(metrics),
+      scan,
+      morPhysical,
+      morLive,
+      operatorTimes
+    )
   }
 
   /**
@@ -524,12 +655,25 @@ object TpchRunner {
    */
   private def clusterReport(suite: Suite, dir: String): Unit = {
     val builder = SparkSession.builder().appName(s"spark-vector-${suite.name}-report")
-    if (sys.props.get("spark.master").isEmpty) builder.master("local[1]").config("spark.driver.host", "localhost").config("spark.ui.enabled", "false")
+    if (sys.props.get("spark.master").isEmpty)
+      builder.master("local[1]").config("spark.driver.host", "localhost").config("spark.ui.enabled", "false")
     val spark = builder.getOrCreate()
     try {
       val rows = ClusterRunner.readRows(spark, dir).map(parseRow).sortBy(_.timestamp).map { r =>
-        ClusterRunner.ReportRow(r.config, r.query, r.dataset, r.medianMs, r.rows, r.checksum, r.accelerated, r.fallbacks,
-          r.metrics, r.sparkVersion, r.executors, r.engineConf)
+        ClusterRunner.ReportRow(
+          r.config,
+          r.query,
+          r.dataset,
+          r.medianMs,
+          r.rows,
+          r.checksum,
+          r.accelerated,
+          r.fallbacks,
+          r.metrics,
+          r.sparkVersion,
+          r.executors,
+          r.engineConf
+        )
       }
       val md = ClusterRunner.report(suite.title, suite.queryOrder, rows)
       ClusterRunner.write(spark, s"${dir.stripSuffix("/")}/cluster-results.md", md)
@@ -566,15 +710,23 @@ object TpchRunner {
       morPhysicalRows: Long = 0,
       morLiveRows: Long = 0,
       /** Per-operator attribution (#279); empty for older records. */
-      operatorTimes: Seq[OperatorTime] = Nil) {
+      operatorTimes: Seq[OperatorTime] = Nil
+  ) {
+
     /** Dataset label: the last path element (`sf1`, `sf10`). */
     def dataset: String = data.stripSuffix("/").split('/').last
+
     /** `5/7` -- operators executed by our kernels or Comet over operators that count. */
     def acceleratedCell: String = accelerated.map { case (a, t) => s"$a/$t" }.getOrElse("-")
     def fullyAccelerated: Boolean = accelerated.exists { case (a, t) => t > 0 && a == t }
+
     /** `scan=BatchScanExec, merge-on-read live/physical=...`, empty for records without the fields. */
     def scanCell: String =
-      if (scan.isEmpty) "" else s"scan=$scan" + (if (morPhysicalRows > 0) f", merge-on-read live/physical=$morLiveRows/$morPhysicalRows (${100.0 * morLiveRows / morPhysicalRows}%.1f%% live)" else "")
+      if (scan.isEmpty) ""
+      else
+        s"scan=$scan" + (if (morPhysicalRows > 0)
+                           f", merge-on-read live/physical=$morLiveRows/$morPhysicalRows (${100.0 * morLiveRows / morPhysicalRows}%.1f%% live)"
+                         else "")
   }
 
   /** The suite's order (`q1`..`q22`) rather than lexical, with anything else after. */
@@ -582,19 +734,32 @@ object TpchRunner {
     (suite.queryOrder.indexOf(q) match { case -1 => Int.MaxValue; case i => i }, q)
 
   /** Everything the report needs about one dataset. */
-  private final case class DatasetReport(name: String, anchorRows: Long, configs: Seq[String], queries: Seq[String], latest: Map[(String, String), Row]) {
+  private final case class DatasetReport(
+      name: String,
+      anchorRows: Long,
+      configs: Seq[String],
+      queries: Seq[String],
+      latest: Map[(String, String), Row]
+  ) {
     def speedup(c: String, q: String): Option[Double] =
       for (r <- latest.get((c, q)); base <- latest.get(("spark", q)) if r.medianMs > 0) yield base.medianMs / r.medianMs
-    def mismatches: Seq[String] = queries.filter(q => configs.flatMap(c => latest.get((c, q)).map(_.checksum)).distinct.size > 1)
+    def mismatches: Seq[String] =
+      queries.filter(q => configs.flatMap(c => latest.get((c, q)).map(_.checksum)).distinct.size > 1)
+
     /** Configurations other than plain Spark: the ones an acceleration column says something about. */
     def acceleratedConfigs: Seq[String] = configs.filter(_ != "spark")
+
     /** Queries every accelerated configuration runs entirely on our kernels or Comet. */
     def fullyAccelerated(c: String): Int = queries.count(q => latest.get((c, q)).exists(_.fullyAccelerated))
+
     /** Configurations whose latest rows carry per-operator times (#279). */
-    def attributedConfigs: Seq[String] = configs.filter(c => queries.exists(q => latest.get((c, q)).exists(_.operatorTimes.nonEmpty)))
+    def attributedConfigs: Seq[String] =
+      configs.filter(c => queries.exists(q => latest.get((c, q)).exists(_.operatorTimes.nonEmpty)))
+
     /** Milliseconds per operator kind in one query under one configuration, summed over the plan's nodes of that kind. */
     def kindMs(c: String, q: String): Map[String, Double] =
       latest.get((c, q)).map(_.operatorTimes.groupBy(_.kind).view.mapValues(_.map(_.ms).sum).toMap).getOrElse(Map.empty)
+
     /** Every operator kind any attributed configuration ran, ordered by its total time descending. */
     def kinds: Seq[String] = {
       val totals = for (c <- attributedConfigs; q <- queries; (k, ms) <- kindMs(c, q).toSeq) yield (k, ms)
@@ -611,7 +776,13 @@ object TpchRunner {
     val datasets = rows.groupBy(_.dataset).toSeq.sortBy(_._2.head.anchorRows).map { case (name, rs) =>
       val latest = rs.sortBy(_.timestamp).groupBy(r => (r.config, r.query)).view.mapValues(_.last).toMap
       val configs = ConfigOrder.filter(c => latest.keys.exists(_._1 == c))
-      DatasetReport(name, rs.head.anchorRows, configs, latest.keys.map(_._2).toSeq.distinct.sortBy(queryOrder(suite)), latest)
+      DatasetReport(
+        name,
+        rs.head.anchorRows,
+        configs,
+        latest.keys.map(_._2).toSeq.distinct.sortBy(queryOrder(suite)),
+        latest
+      )
     }
     val md = markdown(suite, datasets)
     Files.writeString(dir.resolve("results.md"), md)
@@ -640,7 +811,9 @@ object TpchRunner {
       if (d.configs.contains("hybrid") && HybridBaselines.exists(d.configs.contains)) {
         // #281's rule 2: a swap is shipped only if it regresses no query against the better pure configuration.
         val bases = HybridBaselines.filter(d.configs.contains)
-        sb.append(s"\n`hybrid` against the pure configurations (${bases.mkString(", ")}): the ratio of the better pure median to hybrid's; below 1.00 is a regression.\n\n")
+        sb.append(
+          s"\n`hybrid` against the pure configurations (${bases.mkString(", ")}): the ratio of the better pure median to hybrid's; below 1.00 is a regression.\n\n"
+        )
         sb.append("| query | hybrid ms | " + bases.map(b => s"$b ms").mkString(" | ") + " | vs better pure |\n")
         sb.append("|---|---:|" + bases.map(_ => "---:").mkString("|") + "|---:|\n")
         var regressions = 0
@@ -650,23 +823,33 @@ object TpchRunner {
             val ratio = if (pure.nonEmpty && h.medianMs > 0) Some(pure.min / h.medianMs) else None
             if (ratio.exists(_ < 0.95)) regressions += 1
             val cells = bases.map(b => d.latest.get((b, q)).map(r => f"${r.medianMs}%.1f").getOrElse("-"))
-            sb.append(f"| $q | ${h.medianMs}%.1f | " + cells.mkString(" | ") + " | " + ratio.map(x => f"$x%.2fx").getOrElse("-") + " |\n")
+            sb.append(f"| $q | ${h.medianMs}%.1f | " + cells.mkString(" | ") + " | " + ratio.map(x =>
+              f"$x%.2fx"
+            ).getOrElse("-") + " |\n")
           }
         }
         sb.append(s"\nQueries slower than the better pure configuration by more than 5%: $regressions.\n")
       }
       if (d.acceleratedConfigs.nonEmpty) {
-        sb.append("\nAccelerated operators per query (operators run by our kernels or Comet / operators that count; scans and row/columnar transitions are neither):\n\n")
+        sb.append(
+          "\nAccelerated operators per query (operators run by our kernels or Comet / operators that count; scans and row/columnar transitions are neither):\n\n"
+        )
         sb.append("| query | " + d.acceleratedConfigs.mkString(" | ") + " |\n")
         sb.append("|---|" + d.acceleratedConfigs.map(_ => "---:").mkString("|") + "|\n")
         d.queries.foreach { q =>
-          sb.append(s"| $q | " + d.acceleratedConfigs.map(c => d.latest.get((c, q)).map(_.acceleratedCell).getOrElse("-")).mkString(" | ") + " |\n")
+          sb.append(s"| $q | " + d.acceleratedConfigs.map(c =>
+            d.latest.get((c, q)).map(_.acceleratedCell).getOrElse("-")
+          ).mkString(" | ") + " |\n")
         }
-        sb.append("| fully accelerated | " + d.acceleratedConfigs.map(c => s"${d.fullyAccelerated(c)}/${d.queries.size}").mkString(" | ") + " |\n")
+        sb.append("| fully accelerated | " + d.acceleratedConfigs.map(c =>
+          s"${d.fullyAccelerated(c)}/${d.queries.size}"
+        ).mkString(" | ") + " |\n")
       }
       if (d.attributedConfigs.size >= 1 && d.kinds.nonEmpty) {
-        sb.append("\nOperator matrix (#279): milliseconds per operator kind, summed over the plan's nodes of that kind and over tasks, " +
-          "for the last measured run; a kind an engine did not run is `-` -- read it beside the fallbacks below, since a kind left to Spark has no time here.\n\n")
+        sb.append(
+          "\nOperator matrix (#279): milliseconds per operator kind, summed over the plan's nodes of that kind and over tasks, " +
+            "for the last measured run; a kind an engine did not run is `-` -- read it beside the fallbacks below, since a kind left to Spark has no time here.\n\n"
+        )
         sb.append("| operator kind | " + d.attributedConfigs.map(c => s"$c (all queries)").mkString(" | ") + " |\n")
         sb.append("|---|" + d.attributedConfigs.map(_ => "---:").mkString("|") + "|\n")
         d.kinds.foreach { k =>
@@ -683,7 +866,9 @@ object TpchRunner {
             d.queries.foreach { q =>
               val (ma, mb) = (d.kindMs(a, q), d.kindMs(b, q))
               val shared = d.kinds.filter(k => ma.contains(k) && mb.contains(k))
-              if (shared.nonEmpty) sb.append(s"- $q: " + shared.map(k => f"$k ${ma(k)}%.1f vs ${mb(k)}%.1f (${ma(k) - mb(k)}%+.1f)").mkString("; ") + "\n")
+              if (shared.nonEmpty) sb.append(s"- $q: " + shared.map(k =>
+                f"$k ${ma(k)}%.1f vs ${mb(k)}%.1f (${ma(k) - mb(k)}%+.1f)"
+              ).mkString("; ") + "\n")
             }
           }
         }
@@ -703,7 +888,9 @@ object TpchRunner {
       else s"WARNING: result checksums differ for ${d.mismatches.mkString(", ")}\n")
     }
     morSections(datasets).foreach { m =>
-      sb.append(s"\n## Iceberg merge-on-read: `${m.namespace}` (${suite.anchorTable} variants of `gen-iceberg-mor.sh`)\n\n")
+      sb.append(
+        s"\n## Iceberg merge-on-read: `${m.namespace}` (${suite.anchorTable} variants of `gen-iceberg-mor.sh`)\n\n"
+      )
       sb.append("Median milliseconds per variant and configuration; in parentheses the speedup versus `spark` on the same variant, " +
         "then versus the same configuration on the `plain` table (what the deletes cost that engine: below 1x is slower than plain). " +
         "Live/physical is the share of the rows read that the deletes left, as the adapter saw it.\n")
@@ -713,7 +900,9 @@ object TpchRunner {
         sb.append("|---|---:|" + m.configs.map(_ => "---:").mkString("|") + "|---:|\n")
         m.variants.foreach { v =>
           val cells = m.configs.map(c => m.cell(v, c, q).getOrElse("-"))
-          sb.append(s"| `$v` | ${m.liveRows(v)} | " + cells.mkString(" | ") + s" | ${m.liveRatio(v, q).getOrElse("-")} |\n")
+          sb.append(
+            s"| `$v` | ${m.liveRows(v)} | " + cells.mkString(" | ") + s" | ${m.liveRatio(v, q).getOrElse("-")} |\n"
+          )
         }
       }
     }
@@ -721,21 +910,34 @@ object TpchRunner {
   }
 
   /** One Iceberg merge-on-read namespace of the report: its variants (datasets `iceberg:<ns>.<variant>`), configurations and queries. */
-  private final case class MorSection(namespace: String, variants: Seq[String], configs: Seq[String], queries: Seq[String], byVariant: Map[String, DatasetReport]) {
+  private final case class MorSection(
+      namespace: String,
+      variants: Seq[String],
+      configs: Seq[String],
+      queries: Seq[String],
+      byVariant: Map[String, DatasetReport]
+  ) {
     def liveRows(v: String): Long = byVariant(v).anchorRows
     def cell(v: String, c: String, q: String): Option[String] = byVariant(v).latest.get((c, q)).map { r =>
       val vsSpark = byVariant(v).speedup(c, q).map(x => f" ($x%.2fx").getOrElse(" (-")
-      val vsPlain = byVariant.get("plain").flatMap(_.latest.get((c, q))).filter(_ => v != "plain" && r.medianMs > 0).map(p => f", ${p.medianMs / r.medianMs}%.2fx vs plain)").getOrElse(")")
+      val vsPlain = byVariant.get("plain").flatMap(_.latest.get((c, q))).filter(_ =>
+        v != "plain" && r.medianMs > 0
+      ).map(p => f", ${p.medianMs / r.medianMs}%.2fx vs plain)").getOrElse(")")
       f"${r.medianMs}%.1f" + vsSpark + vsPlain
     }
+
     /** The merge ratio of the first configuration that reports one (the adapter counts only under our plugin). */
     def liveRatio(v: String, q: String): Option[String] =
-      configs.flatMap(c => byVariant(v).latest.get((c, q))).find(_.morPhysicalRows > 0).map(r => f"${100.0 * r.morLiveRows / r.morPhysicalRows}%.1f%%")
+      configs.flatMap(c => byVariant(v).latest.get((c, q))).find(_.morPhysicalRows > 0).map(r =>
+        f"${100.0 * r.morLiveRows / r.morPhysicalRows}%.1f%%"
+      )
   }
 
   private def morSections(datasets: Seq[DatasetReport]): Seq[MorSection] = {
     val Named = """iceberg:([^.]+)\.(.+)""".r
-    datasets.collect { case d @ DatasetReport(Named(ns, v), _, _, _, _) => (ns, v, d) }.groupBy(_._1).toSeq.sortBy(_._1).map { case (ns, entries) =>
+    datasets.collect { case d @ DatasetReport(Named(ns, v), _, _, _, _) => (ns, v, d) }.groupBy(
+      _._1
+    ).toSeq.sortBy(_._1).map { case (ns, entries) =>
       val byVariant = entries.map { case (_, v, d) => v -> d }.toMap
       // plain first, then by name.
       val variants = byVariant.keys.toSeq.sortBy(v => (if (v == "plain") 0 else 1, v))
@@ -752,7 +954,8 @@ object TpchRunner {
     "comet-scan-vector" -> "#3b9e5a",
     "comet-scan-vector-shuffle" -> "#1f7a5c",
     "hybrid" -> "#7a4fb3",
-    "comet" -> "#b3452e")
+    "comet" -> "#b3452e"
+  )
 
   private def esc(s: String): String = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -778,22 +981,32 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
 """)
     sb.append("<p class=\"legend\">")
     ConfigOrder.filter(c => datasets.exists(_.configs.contains(c))).foreach { c =>
-      sb.append(s"""<span><i class="swatch" style="background:${ConfigColors.getOrElse(c, "#999")}"></i>${esc(c)}</span>""")
+      sb.append(s"""<span><i class="swatch" style="background:${ConfigColors.getOrElse(
+          c,
+          "#999"
+        )}"></i>${esc(c)}</span>""")
     }
     sb.append("</p>\n")
-    sb.append(s"<p class=\"muted\">Generated ${Instant.now()} from ${datasets.map(_.latest.size).sum} measurements.</p>\n")
+    sb.append(
+      s"<p class=\"muted\">Generated ${Instant.now()} from ${datasets.map(_.latest.size).sum} measurements.</p>\n"
+    )
 
     datasets.foreach { d =>
-      sb.append(s"<h2>${esc(d.name)} <span class=\"muted\">(${"%,d".format(d.anchorRows)} ${esc(suite.anchorTable)} rows)</span></h2>\n")
+      sb.append(
+        s"<h2>${esc(d.name)} <span class=\"muted\">(${"%,d".format(d.anchorRows)} ${esc(suite.anchorTable)} rows)</span></h2>\n"
+      )
       // Summary table
-      sb.append("<table><thead><tr><th>query</th>" + d.configs.map(c => s"<th>${esc(c)}</th>").mkString + "</tr></thead><tbody>\n")
+      sb.append("<table><thead><tr><th>query</th>" + d.configs.map(c =>
+        s"<th>${esc(c)}</th>"
+      ).mkString + "</tr></thead><tbody>\n")
       d.queries.foreach { q =>
         val best = d.configs.flatMap(c => d.latest.get((c, q))).map(_.medianMs).minOption
         sb.append(s"<tr><td>${esc(q)}</td>")
         d.configs.foreach { c =>
           d.latest.get((c, q)) match {
             case Some(r) =>
-              val cls = if (best.contains(r.medianMs)) " class=\"best\"" else if (d.speedup(c, q).exists(_ < 0.98)) " class=\"worse\"" else ""
+              val cls = if (best.contains(r.medianMs)) " class=\"best\""
+              else if (d.speedup(c, q).exists(_ < 0.98)) " class=\"worse\"" else ""
               val speed = d.speedup(c, q).map(x => f"<br><span class=\"speed\">$x%.2fx</span>").getOrElse("")
               sb.append(f"<td$cls>${r.medianMs}%.1f ms$speed</td>")
             case None => sb.append("<td>-</td>")
@@ -802,22 +1015,30 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
         sb.append("</tr>\n")
       }
       sb.append("</tbody></table>\n")
-      sb.append(if (d.mismatches.isEmpty) "<p class=\"ok\">All configurations returned identical results (to 10 significant digits).</p>\n"
+      sb.append(if (d.mismatches.isEmpty)
+        "<p class=\"ok\">All configurations returned identical results (to 10 significant digits).</p>\n"
       else s"<p class=\"warn\">Result checksums differ for ${esc(d.mismatches.mkString(", "))}.</p>\n")
       if (d.acceleratedConfigs.nonEmpty) {
-        sb.append("<h3>Accelerated operators</h3>\n<p class=\"muted\">Operators executed by our kernels or Comet over the operators that count (scans and row/columnar transitions are neither), from the final plan of the last run.</p>\n")
-        sb.append("<table><thead><tr><th>query</th>" + d.acceleratedConfigs.map(c => s"<th>${esc(c)}</th>").mkString + "</tr></thead><tbody>\n")
+        sb.append(
+          "<h3>Accelerated operators</h3>\n<p class=\"muted\">Operators executed by our kernels or Comet over the operators that count (scans and row/columnar transitions are neither), from the final plan of the last run.</p>\n"
+        )
+        sb.append("<table><thead><tr><th>query</th>" + d.acceleratedConfigs.map(c =>
+          s"<th>${esc(c)}</th>"
+        ).mkString + "</tr></thead><tbody>\n")
         d.queries.foreach { q =>
           sb.append(s"<tr><td>${esc(q)}</td>")
           d.acceleratedConfigs.foreach { c =>
             d.latest.get((c, q)) match {
-              case Some(r) => sb.append(s"<td${if (r.fullyAccelerated) " class=\"best\"" else ""}>${r.acceleratedCell}</td>")
+              case Some(r) =>
+                sb.append(s"<td${if (r.fullyAccelerated) " class=\"best\"" else ""}>${r.acceleratedCell}</td>")
               case None => sb.append("<td>-</td>")
             }
           }
           sb.append("</tr>\n")
         }
-        sb.append("<tr><td>fully accelerated</td>" + d.acceleratedConfigs.map(c => s"<td>${d.fullyAccelerated(c)}/${d.queries.size}</td>").mkString + "</tr>\n")
+        sb.append("<tr><td>fully accelerated</td>" + d.acceleratedConfigs.map(c =>
+          s"<td>${d.fullyAccelerated(c)}/${d.queries.size}</td>"
+        ).mkString + "</tr>\n")
         sb.append("</tbody></table>\n")
       }
 
@@ -830,7 +1051,9 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
         val chartW = 700
         val h = entries.size * rowH + 30
         sb.append(s"<h3>${esc(q)}</h3>\n")
-        sb.append(s"""<svg width="${labelW + chartW + 120}" height="$h" role="img" aria-label="Median time per configuration for ${esc(q)}">""")
+        sb.append(s"""<svg width="${labelW + chartW + 120}" height="$h" role="img" aria-label="Median time per configuration for ${esc(
+            q
+          )}">""")
         entries.zipWithIndex.foreach { case ((c, r), i) =>
           val y = i * rowH + 6
           val w = math.max(2.0, r.medianMs / maxMs * chartW)
@@ -838,7 +1061,9 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
           val color = ConfigColors.getOrElse(c, "#999")
           sb.append(s"""<text x="${labelW - 8}" y="${y + 15}" text-anchor="end">${esc(c)}</text>""")
           sb.append(f"""<rect x="$labelW" y="$y" width="$w%.1f" height="${rowH - 10}" fill="$color" rx="2"/>""")
-          sb.append(f"""<line x1="$p90x%.1f" x2="$p90x%.1f" y1="${y + 2}" y2="${y + rowH - 12}" stroke="#1d2430" stroke-width="1.5"/>""")
+          sb.append(
+            f"""<line x1="$p90x%.1f" x2="$p90x%.1f" y1="${y + 2}" y2="${y + rowH - 12}" stroke="#1d2430" stroke-width="1.5"/>"""
+          )
           val speed = d.speedup(c, q).map(x => f" ($x%.2fx)").getOrElse("")
           val labelX = math.max(labelW + w, p90x) + 8
           sb.append(f"""<text x="$labelX%.1f" y="${y + 15}">${r.medianMs}%.1f ms$speed</text>""")
@@ -848,29 +1073,42 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
         sb.append(s"""<line x1="$labelW" x2="${labelW + chartW}" y1="$axisY" y2="$axisY" stroke="#c7cdd6"/>""")
         Seq(0.0, 0.25, 0.5, 0.75, 1.0).foreach { f =>
           val x = labelW + f * chartW
-          sb.append(f"""<text x="$x%.1f" y="${axisY + 14}" text-anchor="middle" class="muted">${f * maxMs}%.0f</text>""")
+          sb.append(
+            f"""<text x="$x%.1f" y="${axisY + 14}" text-anchor="middle" class="muted">${f * maxMs}%.0f</text>"""
+          )
         }
         sb.append("</svg>\n")
         // per-run details
-        sb.append("<details><summary>runs, plans and checksums</summary>\n<table><thead><tr><th>config</th><th>min</th><th>median</th><th>p90</th><th>runs (ms)</th><th>rows</th><th>checksum</th></tr></thead><tbody>\n")
+        sb.append(
+          "<details><summary>runs, plans and checksums</summary>\n<table><thead><tr><th>config</th><th>min</th><th>median</th><th>p90</th><th>runs (ms)</th><th>rows</th><th>checksum</th></tr></thead><tbody>\n"
+        )
         entries.foreach { case (c, r) =>
-          sb.append(f"<tr><td>${esc(c)}</td><td>${r.minMs}%.1f</td><td>${r.medianMs}%.1f</td><td>${r.p90Ms}%.1f</td><td style=\"text-align:left\">${r.timesMs.map(t => f"$t%.0f").mkString(" ")}</td><td>${r.rows}</td><td>${r.checksum}</td></tr>\n")
+          sb.append(f"<tr><td>${esc(c)}</td><td>${r.minMs}%.1f</td><td>${r.medianMs}%.1f</td><td>${r.p90Ms}%.1f</td><td style=\"text-align:left\">${r.timesMs.map(
+              t => f"$t%.0f"
+            ).mkString(" ")}</td><td>${r.rows}</td><td>${r.checksum}</td></tr>\n")
         }
         sb.append("</tbody></table>\n")
         entries.foreach { case (c, r) =>
           sb.append(s"<p><b>${esc(c)}</b>: ${esc(r.operators)}</p>\n")
-          if (r.fallbacks.nonEmpty) sb.append("<ul>" + r.fallbacks.map(f => s"<li>not accelerated: ${esc(f)}</li>").mkString + "</ul>\n")
+          if (r.fallbacks.nonEmpty)
+            sb.append("<ul>" + r.fallbacks.map(f => s"<li>not accelerated: ${esc(f)}</li>").mkString + "</ul>\n")
         }
         sb.append("</details>\n")
       }
     }
     morSections(datasets).foreach { m =>
       sb.append(s"<h2>Iceberg merge-on-read: ${esc(m.namespace)}</h2>\n")
-      sb.append("<p>Median milliseconds per variant and configuration (speedup versus <code>spark</code> on the same variant, then versus the same configuration on the <code>plain</code> table); live/physical is the share of the rows read that the deletes left.</p>\n")
+      sb.append(
+        "<p>Median milliseconds per variant and configuration (speedup versus <code>spark</code> on the same variant, then versus the same configuration on the <code>plain</code> table); live/physical is the share of the rows read that the deletes left.</p>\n"
+      )
       m.queries.foreach { q =>
-        sb.append(s"<h3>${esc(q)}</h3>\n<table><thead><tr><th>variant</th><th>live rows</th>" + m.configs.map(c => s"<th>${esc(c)}</th>").mkString + "<th>live/physical</th></tr></thead><tbody>\n")
+        sb.append(s"<h3>${esc(q)}</h3>\n<table><thead><tr><th>variant</th><th>live rows</th>" + m.configs.map(c =>
+          s"<th>${esc(c)}</th>"
+        ).mkString + "<th>live/physical</th></tr></thead><tbody>\n")
         m.variants.foreach { v =>
-          sb.append(s"<tr><td><code>${esc(v)}</code></td><td>${m.liveRows(v)}</td>" + m.configs.map(c => s"<td>${esc(m.cell(v, c, q).getOrElse("-"))}</td>").mkString +
+          sb.append(s"<tr><td><code>${esc(v)}</code></td><td>${m.liveRows(v)}</td>" + m.configs.map(c =>
+            s"<td>${esc(m.cell(v, c, q).getOrElse("-"))}</td>"
+          ).mkString +
             s"<td>${esc(m.liveRatio(v, q).getOrElse("-"))}</td></tr>\n")
         }
         sb.append("</tbody></table>\n")
@@ -886,7 +1124,8 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
     // repeated over a long value, and a TPC-DS plan field (4000 characters) overflows the stack.
     def str(k: String): String = {
       val start = line.indexOf("\"" + k + "\":\"")
-      if (start < 0) "" else {
+      if (start < 0) ""
+      else {
         val sb = new StringBuilder
         var i = start + k.length + 4
         var done = false
@@ -905,25 +1144,51 @@ Bars are medians; the whisker marks p90. Speedups are relative to plain Spark on
         sb.toString
       }
     }
-    def num(k: String): Double = ("\"" + k + "\":([-0-9.E]+)").r.findFirstMatchIn(line).map(_.group(1).toDouble).getOrElse(0.0)
+    def num(k: String): Double =
+      ("\"" + k + "\":([-0-9.E]+)").r.findFirstMatchIn(line).map(_.group(1).toDouble).getOrElse(0.0)
     val times = ("\"timesMs\":\\[([^\\]]*)\\]").r.findFirstMatchIn(line).map(_.group(1)).getOrElse("")
       .split(",").map(_.trim).filter(_.nonEmpty).map(_.toDouble).toSeq
     def optNum(k: String): Option[Int] = ("\"" + k + "\":([0-9]+)").r.findFirstMatchIn(line).map(_.group(1).toInt)
     val accelerated = for (a <- optNum("acceleratedOps"); t <- optNum("operatorCount")) yield (a, t)
     val fallbacks = str("fallbacks").split("; ").map(_.trim).filter(_.nonEmpty).toSeq
     // `lineitemRows` is the name records written before the TPC-DS runner used for the anchor table.
-    val anchorRows = "\"anchorRows\":([0-9]+)".r.findFirstMatchIn(line).map(_.group(1).toLong).getOrElse(num("lineitemRows").toLong)
+    val anchorRows =
+      "\"anchorRows\":([0-9]+)".r.findFirstMatchIn(line).map(_.group(1).toLong).getOrElse(num("lineitemRows").toLong)
     def optLong(k: String): Option[Long] = ("\"" + k + "\":([0-9]+)").r.findFirstMatchIn(line).map(_.group(1).toLong)
     val metrics = optLong("stages").map { stages =>
-      ClusterRunner.StageMetrics(stages.toInt, optLong("executorRunTimeMs").getOrElse(0L), optLong("gcTimeMs").getOrElse(0L),
-        optLong("shuffleReadBytes").getOrElse(0L), optLong("shuffleWriteBytes").getOrElse(0L), optLong("spillBytes").getOrElse(0L),
-        optLong("peakExecutionMemory").getOrElse(0L))
+      ClusterRunner.StageMetrics(
+        stages.toInt,
+        optLong("executorRunTimeMs").getOrElse(0L),
+        optLong("gcTimeMs").getOrElse(0L),
+        optLong("shuffleReadBytes").getOrElse(0L),
+        optLong("shuffleWriteBytes").getOrElse(0L),
+        optLong("spillBytes").getOrElse(0L),
+        optLong("peakExecutionMemory").getOrElse(0L)
+      )
     }
-    Row(str("timestamp"), str("config"), str("query"), str("data"), num("medianMs"), num("p90Ms"), num("minMs"), times,
-      num("rows").toInt, str("checksum"), str("operators"), anchorRows, accelerated, fallbacks,
-      metrics, str("sparkVersion"), str("executors"), str("engineConf"),
-      str("scan"), optLong("morPhysicalRows").getOrElse(0L), optLong("morLiveRows").getOrElse(0L),
-      OperatorTime.decode(str("operatorTimes")))
+    Row(
+      str("timestamp"),
+      str("config"),
+      str("query"),
+      str("data"),
+      num("medianMs"),
+      num("p90Ms"),
+      num("minMs"),
+      times,
+      num("rows").toInt,
+      str("checksum"),
+      str("operators"),
+      anchorRows,
+      accelerated,
+      fallbacks,
+      metrics,
+      str("sparkVersion"),
+      str("executors"),
+      str("engineConf"),
+      str("scan"),
+      optLong("morPhysicalRows").getOrElse(0L),
+      optLong("morLiveRows").getOrElse(0L),
+      OperatorTime.decode(str("operatorTimes"))
+    )
   }
 }
-

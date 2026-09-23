@@ -37,7 +37,9 @@ object AotTraining {
     if (args.contains("--module-options")) {
       // What Spark's launcher prepends to every JVM it starts (driver and executors alike): the
       // training JVM must carry the same module options for the cache to be accepted.
-      org.apache.spark.launcher.JavaModuleOptions.defaultModuleOptions().split("\\s+").filter(_.nonEmpty).foreach(println)
+      org.apache.spark.launcher.JavaModuleOptions.defaultModuleOptions().split(
+        "\\s+"
+      ).filter(_.nonEmpty).foreach(println)
       return
     }
     val rounds = arg(args, "--rounds").map(_.toInt).getOrElse(3)
@@ -108,7 +110,8 @@ object AotTraining {
       "case when id % 11 = 0 then null else concat('promo_', cast(id % 20 as string)) end as promo",
       "concat('ticket-', cast(id as string)) as ticket",
       "date_add(date '2020-01-01', cast(id % 1826 as int)) as sold_date",
-      "timestamp_seconds(1577836800 + (id % 100000) * 37) as sold_ts")
+      "timestamp_seconds(1577836800 + (id % 100000) * 37) as sold_ts"
+    )
     write(spark, fact, dir, "fact")
     val customer = spark.range(0, 1000).selectExpr(
       "cast(id as int) as c_sk",
@@ -116,7 +119,8 @@ object AotTraining {
       "case when id % 17 = 0 then null else concat('state_', cast(id % 50 as string)) end as c_state",
       "cast(id % 7 as int) as c_segment",
       "cast(18 + id % 70 as int) as c_age",
-      "cast((id * 31) % 10000 as decimal(12,2)) as c_credit")
+      "cast((id * 31) % 10000 as decimal(12,2)) as c_credit"
+    )
     write(spark, customer, dir, "customer")
     val item = spark.range(0, 250).selectExpr(
       "cast(id as int) as i_sk",
@@ -124,14 +128,16 @@ object AotTraining {
       "concat('brand_', cast(id % 25 as string)) as i_brand",
       "concat('class_', cast(id % 10 as string)) as i_class",
       "concat('cat_', cast(id % 5 as string)) as i_category",
-      "cast((id * 13) % 50000 as decimal(12,2)) / 100 as i_price")
+      "cast((id * 13) % 50000 as decimal(12,2)) / 100 as i_price"
+    )
     write(spark, item, dir, "item")
     val dates = spark.range(1, 1827).selectExpr(
       "cast(id as int) as d_sk",
       "date_add(date '2020-01-01', cast(id - 1 as int)) as d_date",
       "cast(year(date_add(date '2020-01-01', cast(id - 1 as int))) as int) as d_year",
       "cast(month(date_add(date '2020-01-01', cast(id - 1 as int))) as int) as d_moy",
-      "cast(dayofweek(date_add(date '2020-01-01', cast(id - 1 as int))) as int) as d_dow")
+      "cast(dayofweek(date_add(date '2020-01-01', cast(id - 1 as int))) as int) as d_dow"
+    )
     write(spark, dates, dir, "dates")
   }
 

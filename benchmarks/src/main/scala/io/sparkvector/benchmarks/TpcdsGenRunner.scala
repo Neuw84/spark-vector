@@ -32,8 +32,23 @@ object TpcdsGenRunner {
   }
 
   /** Tables dsdgen only emits from child 1 (it does not split them): generated once, not per child. */
-  private val Unsplit = Set("call_center", "catalog_page", "customer_demographics", "date_dim", "household_demographics",
-    "income_band", "item", "promotion", "reason", "ship_mode", "store", "time_dim", "warehouse", "web_page", "web_site")
+  private val Unsplit = Set(
+    "call_center",
+    "catalog_page",
+    "customer_demographics",
+    "date_dim",
+    "household_demographics",
+    "income_band",
+    "item",
+    "promotion",
+    "reason",
+    "ship_mode",
+    "store",
+    "time_dim",
+    "warehouse",
+    "web_page",
+    "web_site"
+  )
 
   def main(args: Array[String]): Unit = {
     val opts = args.sliding(2, 2).collect { case Array(k, v) if k.startsWith("--") => k.stripPrefix("--") -> v }.toMap
@@ -64,19 +79,27 @@ object TpcdsGenRunner {
       val children = if (Unsplit(table)) 1 else parallel
       val ddl = Schema.columns(table)
       val schema = StructType.fromDDL(ddl)
-      val partitionColumns = Schema.partitions.getOrElse(table, Nil).map(_.stripPrefix("`").stripSuffix("`")) // TPCDSSchema quotes them
+      val partitionColumns =
+        Schema.partitions.getOrElse(table, Nil).map(_.stripPrefix("`").stripSuffix("`")) // TPCDSSchema quotes them
       def rowsOf(childRange: Range): DataFrame = {
         val lines: Dataset[String] = spark.createDataset(
           spark.sparkContext.parallelize(childRange, childRange.length).flatMap { child =>
             // An unsplit table is generated whole (no -PARALLEL): dsdgen splits some of them, customer_demographics
             // among them, across the children, and child 1 alone is one slice.
             generate(dsdgenDir, table, scale, if (children == 1) 1 else parallel, child)
-          })(org.apache.spark.sql.Encoders.STRING)
+          }
+        )(org.apache.spark.sql.Encoders.STRING)
         // dsdgen ends every row with a '|': one trailing empty field the schema does not have.
-        spark.read.schema(schema).option("sep", "|").option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
+        spark.read.schema(schema).option(
+          "sep",
+          "|"
+        ).option("nullValue", "").csv(lines.map(l => l.stripSuffix("|"))(org.apache.spark.sql.Encoders.STRING))
       }
       if (partitionColumns.isEmpty) {
-        rowsOf(1 to children).coalesce(1).write.mode(SaveMode.Overwrite).option("compression", "zstd").parquet(s"$out/$table")
+        rowsOf(1 to children).coalesce(1).write.mode(SaveMode.Overwrite).option(
+          "compression",
+          "zstd"
+        ).parquet(s"$out/$table")
       } else {
         // The repartition by the date key shuffles the whole table through the executors' local disks; in
         // rounds of `--children-per-round` children (append after the first) one round's shuffle is what
@@ -86,7 +109,9 @@ object TpcdsGenRunner {
           val mode = if (i == 0) SaveMode.Overwrite else SaveMode.Append
           rowsOf(range.head to range.last).repartition(partitionColumns.map(col): _*)
             .write.mode(mode).option("compression", "zstd").partitionBy(partitionColumns: _*).parquet(s"$out/$table")
-          if (rounds.length > 1) println(s"[tpcds-gen]   $table round ${i + 1}/${rounds.length} (children ${range.head}-${range.last}) written")
+          if (rounds.length > 1) println(
+            s"[tpcds-gen]   $table round ${i + 1}/${rounds.length} (children ${range.head}-${range.last}) written"
+          )
         }
       }
       val count = spark.read.parquet(s"$out/$table").count()
@@ -98,11 +123,27 @@ object TpcdsGenRunner {
 
   /** One dsdgen child's rows of one table, streamed from its stdout (a child's slice can be gigabytes of text). */
   private def generate(dsdgenDir: String, table: String, scale: Int, parallel: Int, child: Int): Iterator[String] = {
-    val cmd = Seq(s"$dsdgenDir/dsdgen", "-TABLE", table, "-SCALE", scale.toString, "-FILTER", "Y", "-QUIET", "Y",
-      "-RNGSEED", "100", "-DISTRIBUTIONS", s"$dsdgenDir/tpcds.idx") ++
+    val cmd = Seq(
+      s"$dsdgenDir/dsdgen",
+      "-TABLE",
+      table,
+      "-SCALE",
+      scale.toString,
+      "-FILTER",
+      "Y",
+      "-QUIET",
+      "Y",
+      "-RNGSEED",
+      "100",
+      "-DISTRIBUTIONS",
+      s"$dsdgenDir/tpcds.idx"
+    ) ++
       (if (parallel > 1) Seq("-PARALLEL", parallel.toString, "-CHILD", child.toString) else Nil)
     val errors = new StringBuilder
     // lazyLines throws at the end of the stream when dsdgen exits non-zero, with stderr collected here.
-    Process(cmd, new java.io.File(dsdgenDir)).lazyLines(ProcessLogger(_ => (), err => errors.synchronized { errors.append(err).append('\n') })).iterator
+    Process(
+      cmd,
+      new java.io.File(dsdgenDir)
+    ).lazyLines(ProcessLogger(_ => (), err => errors.synchronized { errors.append(err).append('\n') })).iterator
   }
 }
