@@ -138,7 +138,7 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     }
   }
 
-  test("auto: the hash rewrite where a side's statistics fit, the merge join where the order can show or statistics are missing") {
+  test("auto: the hash join unless the order can show, statistics or not (#416); the merge join where it does") {
     val auto = Seq("spark.sql.autoBroadcastJoinThreshold" -> "-1", "spark.sql.join.preferSortMergeJoin" -> "true", VectorConf.SortMergeJoinMode -> "auto")
     def why(df: org.apache.spark.sql.DataFrame): String =
       (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](df)).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
@@ -158,10 +158,12 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       // An aggregate above ends the visibility: the join's order cannot show through a GROUP BY.
       checkVectorized("SELECT a.ki, count(*) AS n FROM a JOIN b ON a.ki = b.ki GROUP BY a.ki ORDER BY a.ki", Seq(classOf[VectorShuffledHashJoinExec]))
     }
-    // No statistics (adaptive execution off): the hash rewrite needs them, our merge join does not
-    // (#416: the sort below it spills, so no input size is too large).
+    // No statistics (adaptive execution off): still the hash join, built from the right side -- past its
+    // budget it splits into buckets on disk (#416), so neither size nor statistics decide; the merge join
+    // is for the plans whose order shows.
     withConf((auto :+ ("spark.sql.adaptive.enabled" -> "false")): _*) {
-      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(SMJ))
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
+      checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki LIMIT 20", Seq(SMJ))
     }
     // A tiny sort budget: the merge join's inputs spill and the join still answers.
     withConf((auto :+ (VectorConf.SortSpillBytes -> "1") :+ (VectorConf.SortRunRows -> "64")): _*) {
