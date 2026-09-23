@@ -409,7 +409,12 @@ object TpchRunner {
                 if (root ne e) println(
                   s"[${suite.name}]   cause: ${root.getClass.getName}: ${Option(root.getMessage).getOrElse("").linesIterator.take(3).mkString(" ")}"
                 )
-                root.getStackTrace.take(6).foreach(f => println(s"[${suite.name}]     at $f"))
+                // Spark 4 splices the caller's frames after the Try/Utils ones, so six frames name only the
+                // thrower; keep the frames that say who called it, without the collection/runtime noise.
+                root.getStackTrace.iterator
+                  .filterNot(f => f.getClassName.startsWith("scala.") || f.getClassName.startsWith("java.base"))
+                  .take(40)
+                  .foreach(f => println(s"[${suite.name}]     at $f"))
             }
           }
         }
