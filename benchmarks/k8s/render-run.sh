@@ -5,7 +5,7 @@
 #
 #   benchmarks/k8s/render-run.sh <config> <tables> <dataset> <out> <image> [runner args...] | kubectl apply -f -
 #
-#   config   spark | vector | vector-shuffle | vector-shuffle-strict | comet-scan-vector-ourshuffle | hybrid | comet
+#   config   spark | vector | vector-shuffle | vector-shuffle-strict | comet-scan | comet-scan-vector-ourshuffle | hybrid | comet
 #   tables   s3a://bucket/tpcds/sf1000/parquet  or  catalog:<namespace>
 #   dataset  label the report groups by (sf1000-parquet)
 #   out      s3a://bucket/results/sf1000-parquet

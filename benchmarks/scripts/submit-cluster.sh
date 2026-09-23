@@ -71,6 +71,10 @@ case "$CONFIG" in
     ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
             --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
             "${COMET_SCAN_ONLY[@]}" --conf spark.comet.exec.shuffle.enabled=true) ;;
+  comet-scan)
+    # Comet's native scan alone, Spark's operators and shuffle: the discriminator for a result that
+    # differs only when the scan is Comet's (#248, q64 at 1 TB).
+    ENGINE=(--conf spark.plugins=org.apache.spark.CometPlugin "${COMET_SCAN_ONLY[@]}") ;;
   comet-scan-vector-ourshuffle)
     ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
             --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
@@ -85,7 +89,7 @@ case "$CONFIG" in
             --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
             --conf spark.comet.explainFallback.enabled=true --conf spark.comet.cast.allowIncompatible=true
             --conf spark.memory.offHeap.enabled=true --conf "spark.memory.offHeap.size=$OFFHEAP") ;;
-  *) echo "unknown config $CONFIG (spark, vector, vector-shuffle, vector-shuffle-strict, comet-scan-vector-shuffle, comet-scan-vector-ourshuffle, hybrid, comet)" >&2; exit 2 ;;
+  *) echo "unknown config $CONFIG (spark, vector, vector-shuffle, vector-shuffle-strict, comet-scan, comet-scan-vector-shuffle, comet-scan-vector-ourshuffle, hybrid, comet)" >&2; exit 2 ;;
 esac
 JARS=()
 # The Comet jar: on the cluster image (benchmarks/k8s/Dockerfile) it is already on the classpath; set COMET_JAR for a plain Spark image.
