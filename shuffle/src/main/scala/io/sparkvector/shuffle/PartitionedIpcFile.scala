@@ -390,6 +390,27 @@ object PartitionedIpcFile {
       private var refs = 1
       def retain(): VarCharVector = { refs += 1; vector }
       def release(): Unit = { refs -= 1; if (refs == 0) vector.close() }
+      /**
+       * The dictionary's offsets and bytes as heap arrays, built on first use (#416, item 6): the reader's
+       * decode of a small encoded block reads them per row, and a heap read is a plain load where a
+       * `MemorySegment` read carries a session and alignment check the JIT did not hoist -- a quarter of
+       * a 1000-partition reduce task's samples on q67 sat in those checks under `appendEncoded`.
+       */
+      var starts: Array[Int] = _
+      var bytes: Array[Byte] = _
+      def heap(): Unit = if (starts == null) {
+        val buffers = ArrowVectorBuffers.forRead(vector)
+        // Bounded by the offsets buffer present, not the value count alone: a dictionary buffer can be
+        // sized to the entries the stream references, and the original per-row reads never went past it.
+        val n = math.min(vector.getValueCount, (buffers.offsets().byteSize() >> 2).toInt - 1)
+        starts = new Array[Int](n + 1)
+        java.lang.foreign.MemorySegment.copy(buffers.offsets(), VectorBuffers.LE_INT, 0L, starts, 0, n + 1)
+        // Likewise the bytes: the data buffer carries the entries the stream references, which can end
+        // before the last offset (#345's slices); a referenced entry is always within it.
+        val dataLen = math.min(starts(n).toLong, buffers.data().byteSize()).toInt
+        bytes = new Array[Byte](dataLen)
+        if (dataLen > 0) java.lang.foreign.MemorySegment.copy(buffers.data(), java.lang.foreign.ValueLayout.JAVA_BYTE, 0L, bytes, 0, dataLen)
+      }
     }
     /** The shape of the record batch being read: bit `c` set = column `c` as ids over its dictionary. */
     private val encoded = new java.util.BitSet(fields.length)
@@ -407,6 +428,11 @@ object PartitionedIpcFile {
     /** Small plain batches accumulated until `CoalesceRows` (all-plain shape, so every string column is UTF8). */
     private val pending: Array[Pending] = Array.tabulate(fields.length)(c => new Pending(c))
     private var pendingRows = 0
+    /** Heap scratch for `Pending.appendEncoded` (one block at a time, so shared by the columns). */
+    private var ids = new Array[Int](CoalesceRows)
+    private var validBytes = new Array[Byte](CoalesceRows / 8 + 1)
+    private var outBytes = new Array[Byte](32 * CoalesceRows)
+    private var outOffsets = new Array[Int](CoalesceRows)
 
     /**
      * One accumulating column of the pending batch (#416): each small batch is appended as a bulk copy
@@ -476,43 +502,56 @@ object PartitionedIpcFile {
        * into the pending plain column: a block of a few hundred rows that the writer still encoded (#356's
        * ratio) joins the coalesced batch like a plain one instead of reaching the operators on its own.
        */
-      def appendEncoded(indices: IntVector, dictionary: VarCharVector, n: Int): Unit = {
+      def appendEncoded(indices: IntVector, dictionary: SharedDictionary, n: Int): Unit = {
+        dictionary.heap()
+        val dStarts = dictionary.starts
+        val dBytes = dictionary.bytes
         val idx = ArrowVectorBuffers.forRead(indices)
-        val dict = ArrowVectorBuffers.forRead(dictionary)
-        val dOff = dict.offsets()
-        val dData = dict.data()
-        val ids = idx.data()
+        // The block's ids and validity words on the heap: one bulk copy each, then plain array reads.
+        if (ids.length < n) ids = new Array[Int](math.max(n, ids.length * 2))
+        java.lang.foreign.MemorySegment.copy(idx.data(), VectorBuffers.LE_INT, 0L, ids, 0, n)
         val valid = idx.validity()
+        val validLen = (n + 7) >>> 3
+        if (valid != null) {
+          if (validBytes.length < validLen) validBytes = new Array[Byte](math.max(validLen, validBytes.length * 2))
+          java.lang.foreign.MemorySegment.copy(valid, java.lang.foreign.ValueLayout.JAVA_BYTE, 0L, validBytes, 0, math.min(validLen.toLong, valid.byteSize()).toInt)
+        }
         var bytes = 0L
         var i = 0
         while (i < n) {
-          if (valid == null || Bitmap.isSet(valid, i)) {
-            val e = ids.get(VectorBuffers.LE_INT, i.toLong << 2)
-            bytes += dOff.get(VectorBuffers.LE_INT, (e + 1).toLong << 2) - dOff.get(VectorBuffers.LE_INT, e.toLong << 2)
+          if (valid == null || ((validBytes(i >>> 3) >>> (i & 7)) & 1) != 0) {
+            val e = ids(i)
+            bytes += dStarts(e + 1) - dStarts(e)
           }
           i += 1
         }
         ensure(n, bytes)
-        val offsets = buffers.offsets()
-        var out = dataBytes
+        // The block's strings assembled in heap scratch, then written with one copy each for bytes and offsets.
+        if (outBytes.length < bytes) outBytes = new Array[Byte](math.max(bytes.toInt, outBytes.length * 2))
+        if (outOffsets.length < n) outOffsets = new Array[Int](math.max(n, outOffsets.length * 2))
+        var out = 0
+        val hasNulls = valid != null
         i = 0
         while (i < n) {
-          val row = rows + i
-          if (valid == null || Bitmap.isSet(valid, i)) {
-            val e = ids.get(VectorBuffers.LE_INT, i.toLong << 2)
-            val start = dOff.get(VectorBuffers.LE_INT, e.toLong << 2)
-            val len = dOff.get(VectorBuffers.LE_INT, (e + 1).toLong << 2) - start
-            java.lang.foreign.MemorySegment.copy(dData, start.toLong, buffers.data(), out, len.toLong)
+          if (!hasNulls || ((validBytes(i >>> 3) >>> (i & 7)) & 1) != 0) {
+            val e = ids(i)
+            val start = dStarts(e)
+            val len = dStarts(e + 1) - start
+            System.arraycopy(dBytes, start, outBytes, out, len)
             out += len
-            Bitmap.setTo(buffers.validity(), row, true)
-          } else {
-            Bitmap.setTo(buffers.validity(), row, false)
-          }
-          offsets.set(VectorBuffers.LE_INT, (row + 1).toLong << 2, out.toInt)
+          } else Bitmap.setTo(buffers.validity(), rows + i, false)
+          outOffsets(i) = dataBytes.toInt + out
           i += 1
         }
+        if (out > 0) java.lang.foreign.MemorySegment.copy(outBytes, 0, buffers.data(), java.lang.foreign.ValueLayout.JAVA_BYTE, dataBytes, out)
+        java.lang.foreign.MemorySegment.copy(outOffsets, 0, buffers.offsets(), VectorBuffers.LE_INT, (rows + 1).toLong << 2, n)
+        if (hasNulls) {
+          // Valid bits set per row only where the block has nulls; otherwise the range is filled at once.
+          i = 0
+          while (i < n) { if (((validBytes(i >>> 3) >>> (i & 7)) & 1) != 0) Bitmap.setTo(buffers.validity(), rows + i, true); i += 1 }
+        } else Bitmap.fillRange(buffers.validity(), rows, n, true)
         rows += n
-        dataBytes = out
+        dataBytes += out
       }
 
       /** The accumulated vector (value count set), the column emptied for the next accumulation. */
@@ -533,7 +572,7 @@ object PartitionedIpcFile {
       val n = root.getRowCount
       var c = 0
       while (c < fields.length) {
-        if (encoded.get(c)) pending(c).appendEncoded(root.getVector(c).asInstanceOf[IntVector], dictionary(c).vector, n)
+        if (encoded.get(c)) pending(c).appendEncoded(root.getVector(c).asInstanceOf[IntVector], dictionary(c), n)
         else pending(c).append(root.getVector(c), n)
         c += 1
       }
