@@ -1,27 +1,30 @@
 # spark-vector
 
-A Spark SQL plugin that executes Filter, Project, HashAggregate (all four modes), Sort and
-hash joins on Arrow-layout batches with the Java Vector API (`jdk.incubator.vector`). It follows the
-architecture of [Apache DataFusion Comet](https://github.com/apache/datafusion-comet), but stays
-entirely on the JVM: no native library, no JNI, no serialization boundary. Unsupported operators,
-expressions or types fall back to Spark with a recorded reason. With Comet installed it can sit
-between Comet's native Parquet scan and Comet's native shuffle, both reached zero copy.
+**A JVM-native vectorized execution engine for Apache Spark SQL.**
 
-- Spark 4.1.x, Scala 2.13, JDK 25 (the Vector API is still an incubator module)
-- Input: Spark's vectorized Parquet reader (copied into Arrow layout once per batch, keeping
-  dictionary-encoded strings as dictionary indices), Comet's native Parquet and Iceberg readers in
-  scan-only mode (read zero-copy), or Iceberg's own JVM vectorized reader (read zero-copy, with
-  merge-on-read deletes turned into a selection). See [docs/comet.md](docs/comet.md) and
-  [docs/iceberg.md](docs/iceberg.md). Which operators convert, under what conditions and with
-  which fallback reasons: [docs/operators.md](docs/operators.md); which expressions compile, on which
-  types, and why the others fall back: [docs/expressions.md](docs/expressions.md); how the columnar
-  shuffle moves Arrow batches between executors over Arrow Flight: [docs/flight-shuffle.md](docs/flight-shuffle.md).
-- Output: unshaded Arrow 18.3.0 vectors (the version Spark bundles) wrapped in Spark's
-  `ArrowColumnVector`, so Spark's own `ColumnarToRowExec` consumes them unchanged.
+spark-vector accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
+
+Inspired by the execution architecture of Apache DataFusion Comet, spark-vector provides a native-style execution path for **Filter, Project, HashAggregate, Sort, and hash joins**, while preserving Spark as the execution fallback for unsupported operators, expressions, and data types.
+
+The result is a **fully JVM-based execution engine** that combines the performance potential of vectorized execution with the portability and simplicity of the Java ecosystem.
+
+spark-vector can also integrate with native accelerators such as **Apache DataFusion Comet**: Comet can provide native Parquet decoding and shuffle, while spark-vector performs the intermediate SQL execution directly over the same columnar representation, enabling a **zero-copy execution pipeline** across the stack.
+
+### Key characteristics
+
+* **JVM-native:** no native runtime, JNI, or external execution engine.
+* **SIMD-accelerated:** uses the Java Vector API (`jdk.incubator.vector`) for hardware-vectorized execution.
+* **Columnar by design:** operators consume and produce Arrow-layout batches.
+* **Spark-compatible:** unsupported operators, expressions, and types transparently fall back to Spark.
+* **Vectorized operators:** Filter, Project, HashAggregate, Sort, and hash joins.
+* **Zero-copy integration:** designed to interoperate with columnar native components such as Comet without serialization between execution stages.
+* **Incremental adoption:** operators can be accelerated individually while the rest of the Spark plan continues to execute normally.
+
+In essence, **spark-vector brings a DataFusion-Comet/Velox-style vectorized execution model to the JVM, using the Java Vector API instead of native code.**
 
 ## Status
 
-Version 0.1.0, a preview release under the Apache License 2.0 (see `LICENSE` and `NOTICE`). The
+Version 0.0.1, a preview release under the Apache License 2.0 (see `LICENSE` and `NOTICE`). The
 plugin runs the whole of TPC-DS (103 queries) and TPC-H (22) with every operator accelerated and
 returns Spark's results; what it does not convert falls back to Spark, always with a recorded reason.
 Measured on the 1 TB TPC-DS Parquet dataset on EKS, eight 13-core executors with 50 GB each, one
@@ -68,6 +71,43 @@ mvn -Pcomet,iceberg verify                          # everything, including Come
 The plugin jar is `spark/target/spark-vector-spark_2.13-<version>.jar` (kernels shaded in, nothing
 else). Spark and Arrow are `provided`.
 
+## Getting the jars
+
+Every release is on the [releases page](https://github.com/Neuw84/spark-vector/releases): the plugin
+jar (`spark-vector-spark_2.13-<version>.jar`), the columnar shuffle jar
+(`spark-vector-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
+POMs, are published to a Maven repository served from this repository's `maven-repo` branch -- no
+account or token needed:
+
+```xml
+<repositories>
+  <repository>
+    <id>spark-vector</id>
+    <url>https://raw.githubusercontent.com/Neuw84/spark-vector/maven-repo/</url>
+  </repository>
+</repositories>
+
+<dependencies>
+  <dependency>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-spark_2.13</artifactId>
+    <version>0.0.1</version>
+  </dependency>
+  <!-- the columnar shuffle, if you run with spark.shuffle.manager=...VectorShuffleManager -->
+  <dependency>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-shuffle_2.13</artifactId>
+    <version>0.0.1</version>
+  </dependency>
+</dependencies>
+```
+
+The same coordinates work with `--packages` on `spark-submit` together with
+`--repositories https://raw.githubusercontent.com/Neuw84/spark-vector/maven-repo/`. A release is cut
+by pushing a `v<version>` tag: the release workflow builds the jars on JDK 25, attaches them to the
+GitHub release with their checksums, and publishes them to the `maven-repo` branch
+(`.github/workflows/release.yml`). `CHANGELOG.md` has what each release carries.
+
 ## Running with spark-submit
 
 ```bash
@@ -75,7 +115,7 @@ spark-submit \
   --conf spark.plugins=io.sparkvector.spark.VectorPlugin \
   --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
   --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
-  --jars spark-vector-spark_2.13-0.1.0-SNAPSHOT.jar \
+  --jars spark-vector-spark_2.13-0.0.1.jar \
   ...
 ```
 

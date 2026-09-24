@@ -4,16 +4,12 @@
   <parent>
     <groupId>io.sparkvector</groupId>
     <artifactId>spark-vector-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.0.1</version>
   </parent>
   <artifactId>spark-vector-shuffle_2.13</artifactId>
   <name>spark-vector-shuffle</name>
   <description>Columnar shuffle over Arrow IPC and Arrow Flight (#288); kept apart from the plugin so the core never carries gRPC</description>
   <dependencies>
-    <dependency>
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-kernels</artifactId>
-    </dependency>
     <dependency>
       <groupId>io.sparkvector</groupId>
       <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
@@ -53,6 +49,14 @@
           <artifactId>arrow-vector</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <!-- Compiled against here; at run time the classes come from the plugin jar below, which shades the
+           kernels in. `provided` keeps them out of this artifact's transitive dependencies, so a Maven
+           consumer of the shuffle gets the kernel classes once, not from two jars. -->
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-kernels</artifactId>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.arrow</groupId>

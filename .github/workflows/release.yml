@@ -1,0 +1,96 @@
+# Cut a release from a version tag (`git tag v0.0.1 && git push origin v0.0.1`):
+#   1. build kernels, spark and shuffle on JDK 25 (tests already ran on the commit in CI);
+#   2. deploy them, with their POMs, into a Maven-layout directory and publish that directory on the
+#      `maven-repo` branch, which raw.githubusercontent.com serves as a Maven repository (README,
+#      "Getting the jars");
+#   3. create the GitHub release for the tag with the two jars, SHA256SUMS and the CHANGELOG section.
+# The tag must equal `v<project.version>`; the workflow refuses otherwise so a release never carries a
+# jar whose version string differs from its tag.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build, publish to maven-repo and GitHub Releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Check the tag against the POM version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(mvn -q -ntp help:evaluate -Dexpression=project.version -DforceStdout)"
+          echo "tag=$TAG pom=$VERSION"
+          [ "$TAG" = "v$VERSION" ] || { echo "tag $TAG does not match POM version $VERSION"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build and deploy into a Maven-layout directory
+        # -am adds the parent POM the module POMs inherit from; -Pcomet,iceberg only affects which
+        # test sources compile (skipped); the shade plugin's dependency-reduced POM is what is deployed
+        # for the spark module, so consumers do not pull the kernels twice.
+        run: |
+          mvn -B -ntp -DskipTests -Pcomet,iceberg -pl kernels,spark,shuffle -am deploy \
+            -DaltDeploymentRepository="staging::file://$GITHUB_WORKSPACE/target/maven-repo"
+          find target/maven-repo -type f | sort
+
+      - name: Checksums
+        run: |
+          mkdir -p target/release
+          cp spark/target/spark-vector-spark_2.13-${VERSION}.jar shuffle/target/spark-vector-shuffle_2.13-${VERSION}.jar target/release/
+          (cd target/release && sha256sum *.jar > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="## ${VERSION}" '
+            index($0, v) == 1 { on = 1; next }
+            on && /^## / { exit }
+            on { print }' CHANGELOG.md > target/release/notes.md
+          [ -s target/release/notes.md ] || echo "Release ${VERSION}." > target/release/notes.md
+          printf '\n---\nMaven: repository `https://raw.githubusercontent.com/%s/maven-repo/`, artifacts `io.sparkvector:spark-vector-spark_2.13:%s` and `io.sparkvector:spark-vector-shuffle_2.13:%s`.\n' \
+            "$GITHUB_REPOSITORY" "$VERSION" "$VERSION" >> target/release/notes.md
+
+      - name: Publish to the maven-repo branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin maven-repo 2>/dev/null; then
+            git worktree add target/maven-repo-branch origin/maven-repo
+            git -C target/maven-repo-branch checkout -B maven-repo
+          else
+            git worktree add --detach target/maven-repo-branch
+            git -C target/maven-repo-branch checkout --orphan maven-repo
+            git -C target/maven-repo-branch rm -rfq .
+            printf '# spark-vector Maven repository\n\nServed by raw.githubusercontent.com; see the README of the main branch.\n' > target/maven-repo-branch/README.md
+          fi
+          cp -R target/maven-repo/. target/maven-repo-branch/
+          git -C target/maven-repo-branch add -A
+          git -C target/maven-repo-branch commit -m "release ${VERSION}" || echo "nothing new to publish"
+          git -C target/maven-repo-branch push origin maven-repo
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "spark-vector ${VERSION}" \
+            --notes-file target/release/notes.md \
+            --verify-tag \
+            target/release/*.jar target/release/SHA256SUMS
