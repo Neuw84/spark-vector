@@ -62,6 +62,7 @@ import org.apache.spark.sql.catalyst.expressions.{
   Cast,
   Cbrt,
   CheckOverflow,
+  CheckOverflowInTableInsert,
   Ceil,
   Chr,
   Coalesce,
@@ -539,6 +540,11 @@ object ExpressionCompiler {
 
     // Casts to the operand's own type (Spark's Average emits `sum.cast(double)` on a double sum).
     case c: Cast if c.child.dataType == c.dataType => compile(c.child, input)
+
+    // A table write's per-column ANSI cast (MERGE/UPDATE/INSERT into a narrower column): the cast
+    // compiles as usual and only its overflow error is renamed to the table-insert one.
+    case CheckOverflowInTableInsert(cast: Cast, columnName) =>
+      compile(cast, input).map(ce => TableInsertOverflowExpr(ce, cast.child.dataType, cast.dataType, columnName))
 
     case c: Cast if TypeMapping.isDecimal(c.child.dataType) || TypeMapping.isDecimal(c.dataType) =>
       decimalCast(c, input)

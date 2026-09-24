@@ -366,9 +366,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             // 4-byte unscaled values, while the lane for every decimal up to 18 digits is INT64: widen
             // into the scratch arena. Wrapping the 4-byte buffer as 8-byte lanes read past its end.
             MemorySegment wide = scratch.allocate((long) numRows << 3, 8);
-            for (int i = 0; i < numRows; i++) {
-                wide.setAtIndex(VectorBuffers.LE_LONG, i, data.getAtIndex(VectorBuffers.LE_INT, i));
-            }
+            io.sparkvector.kernels.CastKernels.widenInt32(data, numRows, wide);
             WIDENED_INT_COLUMNS.increment();
             return SegmentVectorBuffers.fixedWidth(type, numRows, validity, wide);
         }

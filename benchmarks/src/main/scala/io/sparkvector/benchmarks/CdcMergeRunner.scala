@@ -219,9 +219,15 @@ object CdcMergeRunner {
         val maxKey = spark.table(table).selectExpr(s"max(${p.reKey})").collect()(0).getAs[Number](0).longValue()
         spark.table(table).createOrReplaceTempView("cdc_base")
         // Every branch projects the identical column list in table order: UNION ALL matches by position.
-        val columns = spark.table(table).schema.fieldNames.toSeq
+        // Each column is cast back to the table's own type, as a CDC feed carries the table's schema:
+        // otherwise a re-keyed insert widens the key (int + long) and a tweaked price widens its
+        // decimal, and the merge then joins on a cast and casts every written column.
+        val schema = spark.table(table).schema
+        val columns = schema.fieldNames.toSeq
         def branch(op: String, tweaks: Map[String, String]) =
-          s"SELECT '$op' AS op, ${columns.map(c => tweaks.getOrElse(c, c) + s" AS $c").mkString(", ")} FROM cdc_base"
+          s"SELECT '$op' AS op, ${schema.fields.map { f =>
+              s"CAST(${tweaks.getOrElse(f.name, f.name)} AS ${f.dataType.sql}) AS ${f.name}"
+            }.mkString(", ")} FROM cdc_base"
         val grainCols = p.grain.mkString(", ")
         val (updR, delR, insR) = changeRanges(args.table, args.changePct)
         println(s"[cdc] change buckets: U=$updR D=$delR I=$insR (of 1000)")

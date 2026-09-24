@@ -238,6 +238,75 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     assertRowsEqual(expected, actual, 1e-9, "table contents after MERGE INTO")
   }
 
+  /**
+   * A CDC source whose columns are wider than the target's (a decimal(12,2) price into decimal(7,2)):
+   * Spark wraps each written column in the ANSI cast `CheckOverflowInTableInsert`, which kept
+   * MergeRows on Spark's row path. The cast now compiles, the merge stays columnar, the table ends
+   * up identical to Spark's, and an out-of-range value raises Spark's own table-insert error.
+   */
+  icebergTest("MERGE INTO with a table-insert cast stays on the columnar MergeRows") {
+    val Db = IcebergTables.Db
+    def create(name: String): Unit = {
+      spark.sql(s"DROP TABLE IF EXISTS $name")
+      spark.sql(
+        s"""CREATE TABLE $name (k INT, p DECIMAL(7,2), q INT) USING iceberg
+           |TBLPROPERTIES ('format-version'='2', 'write.delete.mode'='merge-on-read',
+           |  'write.update.mode'='merge-on-read', 'write.merge.mode'='merge-on-read')""".stripMargin
+      )
+      spark.sql(
+        s"INSERT INTO $name SELECT CAST(id AS INT), CAST(id % 1000 AS DECIMAL(7,2)), CAST(id % 7 AS INT) FROM range(20000)"
+      )
+      spark.sql(s"DELETE FROM $name WHERE k % 5 = 0")
+    }
+    val on = s"$Db.m_cast_on"
+    val off = s"$Db.m_cast_off"
+    create(on)
+    create(off)
+    spark.sql(
+      s"""CREATE OR REPLACE TABLE $Db.m_cast_src USING parquet AS
+         |SELECT CAST(id AS INT) AS k, CAST(id % 1000 AS DECIMAL(12,2)) * 1.01 AS p, CAST(id % 3 AS INT) AS q,
+         |  CASE WHEN id % 11 = 0 THEN 'D' ELSE 'U' END AS op
+         |FROM range(15000, 25000)""".stripMargin
+    )
+    def mergeSql(t: String, src: String) =
+      s"""MERGE INTO $t t USING $src s ON t.k = s.k
+         |WHEN MATCHED AND s.op = 'D' THEN DELETE
+         |WHEN MATCHED THEN UPDATE SET t.p = s.p, t.q = s.q
+         |WHEN NOT MATCHED THEN INSERT (k, p, q) VALUES (s.k, s.p, s.q)""".stripMargin
+    withPlugin(enabled = false)(spark.sql(mergeSql(off, s"$Db.m_cast_src")).collect())
+    withConf(
+      VectorConf.SortMergeJoinEnabled -> "true",
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      VectorConf.ExplainFallbackEnabled -> "true"
+    ) {
+      val merge = withPlugin(enabled = true) {
+        val d = spark.sql(mergeSql(on, s"$Db.m_cast_src")); d.collect(); d
+      }
+      assert(
+        PlanUtils.allNodes(finalPlan(merge)).exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorMergeRowsExec]),
+        finalPlan(merge).treeString
+      )
+    }
+    val readAll = "SELECT k, p, q FROM %s ORDER BY k"
+    val expected = withPlugin(enabled = false)(spark.sql(readAll.format(off)).collect())
+    val actual = withPlugin(enabled = false)(spark.sql(readAll.format(on)).collect())
+    assertRowsEqual(expected, actual, 0.0, "table contents after MERGE INTO with a table-insert cast")
+
+    // A value past decimal(7,2) raises the same error class as Spark's row path.
+    spark.sql(
+      s"CREATE OR REPLACE TABLE $Db.m_cast_big USING parquet AS SELECT 1 AS k, CAST(123456789.00 AS DECIMAL(12,2)) AS p, 1 AS q, 'U' AS op"
+    )
+    def errorClass(enabled: Boolean): String = {
+      val e = intercept[Exception](withPlugin(enabled)(spark.sql(mergeSql(on, s"$Db.m_cast_big")).collect()))
+      Iterator.iterate[Throwable](e)(_.getCause).takeWhile(_ != null).collect {
+        case s: org.apache.spark.SparkThrowable if s.getCondition != null => s.getCondition
+      }.toSeq.headOption.getOrElse(e.toString)
+    }
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1") {
+      assert(errorClass(enabled = true) === errorClass(enabled = false))
+    }
+  }
+
   icebergTest("plugin disabled leaves the same scan feeding Spark operators") {
     useTable("t_pos")
     withConf(VectorConf.Enabled -> "false") {
