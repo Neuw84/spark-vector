@@ -1438,6 +1438,21 @@ show. The default stays `spark.vector.scan.prefetch=0`; the operator remains as 
 with its three wait metrics. The scan-side cost is the reader, which is also what `csvo`'s wins on
 q88, q95 and q28 measure -- Comet's DataFusion reader, not the Arrow boundary.
 
+**The read path itself: the S3A Analytics Accelerator stream, tuned against its defaults.** Every
+Parquet leg reads through the accelerator: Hadoop 3.4.3's S3A defaults `fs.s3a.input.stream.type` to
+`analytics` (the executor profiles show `AnalyticsStream` in the read path, the library at 1.3.1),
+and the image pins the jar explicitly. One Spark leg on the same window configuration with the stream
+tuned -- read-ahead 4 MB (default 64 KB), 16 MB blocks, ranges and parts (default 8 MB), whole-object
+prefetch up to 16 MB (default 8), `prefetching.mode=ALL` (default `ROW_GROUP`), a 500-connection pool
+(200), 256 threads -- was slower on 61 of 93 queries, 2534 s against 2440 (+3.8%, the median per-query
+change the same), most on the scan-heavy ones: q9 96.1 against 92.8, q23a 219.9 against 210.6, q28
+123.8 against 114.0, q67 133.1 against 126.5, q88 133.0 against 125.5. The files are 7-15 MB, so the
+default already fetched most of them whole and the row-group prefetch already brought in exactly the
+columns in flight; larger units and `ALL` fetch more bytes per file than the query uses, thirteen
+tasks at a time. The library's defaults stay the configuration. With the converter result above, the
+scan cost is the reader's per-file request latency, and neither overlapping the conversion nor
+fetching bigger units moves it.
+
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
