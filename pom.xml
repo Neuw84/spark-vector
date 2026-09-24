@@ -8,7 +8,7 @@
   <packaging>pom</packaging>
   <name>spark-vector</name>
   <description>JVM SIMD (Java Vector API) execution layer for Spark SQL</description>
-  <url>https://github.com/Neuw84/spark-vector</url>
+  <url>https://github.com/spark-vector/spark-vector</url>
   <licenses>
     <license>
       <name>Apache License, Version 2.0</name>
@@ -23,10 +23,10 @@
     <module>benchmarks</module>
   </modules>
   <scm>
-    <connection>scm:git:https://github.com/Neuw84/spark-vector.git</connection>
-    <developerConnection>scm:git:git@github.com:Neuw84/spark-vector.git</developerConnection>
+    <connection>scm:git:https://github.com/spark-vector/spark-vector.git</connection>
+    <developerConnection>scm:git:git@github.com:spark-vector/spark-vector.git</developerConnection>
     <tag>HEAD</tag>
-    <url>https://github.com/Neuw84/spark-vector</url>
+    <url>https://github.com/spark-vector/spark-vector</url>
   </scm>
 
   <properties>
