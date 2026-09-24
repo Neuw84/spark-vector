@@ -4,7 +4,7 @@
 
   <groupId>io.sparkvector</groupId>
   <artifactId>spark-vector-parent</artifactId>
-  <version>0.0.1</version>
+  <version>0.0.2-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>spark-vector</name>
   <description>JVM SIMD (Java Vector API) execution layer for Spark SQL</description>
@@ -25,7 +25,7 @@
   <scm>
     <connection>scm:git:https://github.com/Neuw84/spark-vector.git</connection>
     <developerConnection>scm:git:git@github.com:Neuw84/spark-vector.git</developerConnection>
-    <tag>v0.0.1</tag>
+    <tag>HEAD</tag>
     <url>https://github.com/Neuw84/spark-vector</url>
   </scm>
 

@@ -4,6 +4,8 @@ All notable changes to spark-vector. The format follows [Keep a Changelog](https
 the project uses [semantic versioning](https://semver.org/) once it reaches 1.0 -- until then a minor
 version may change configuration keys or defaults, always noted here.
 
+## Unreleased
+
 ## 0.0.1 -- 2026-09-24
 
 The first preview release: the plugin as measured on the 1 TB TPC-DS campaign
