@@ -1,0 +1,63 @@
+# Generate an Iceberg merge-on-read warehouse ON THE CLUSTER, to S3, from lineitem Parquet already on
+# S3 (s3a://S3_BUCKET/DATA_PREFIX/lineitem). Distributed generation — the single-JVM IcebergMorGenerator
+# path does not scale to 100 GB. The catalog uses S3FileIO with the Analytics Accelerator stream
+# (IcebergMorGenerator.catalogConf detects the s3a warehouse). Rendered by run-iceberg-mor.sh.
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: spark-vector-mor-gen-NAMESPACE
+  namespace: bench
+spec:
+  type: Scala
+  mode: cluster
+  image: IMAGE
+  imagePullPolicy: IfNotPresent
+  mainClass: io.sparkvector.benchmarks.IcebergMorGenerator
+  mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
+  arguments:
+    - "--data"
+    - "s3a://S3_BUCKET/DATA_PREFIX"                 # the directory holding lineitem/
+    - "--warehouse"
+    - "s3a://S3_BUCKET/iceberg-mor/NAMESPACE"    # the S3 warehouse to create
+    - "--namespace"
+    - "NAMESPACE"                                # v2 or v3 (which variant set)
+    - "--base-table"
+    - "BASE_TABLE"
+    - "--variants"
+    - "VARIANTS"
+    - "--files"
+    - "FILES"
+  sparkVersion: "4.1.3"
+  sparkConf:
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.shuffle.partitions: "300"
+    spark.hadoop.fs.s3a.connection.maximum: "200"
+    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+    spark.driver.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true
+    spark.executor.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -Dio.netty.tryReflectionSetAccessible=true
+  restartPolicy:
+    type: Never
+  driver:
+    cores: 4
+    memory: "16g"
+    serviceAccount: sfi-engine
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
+  executor:
+    instances: 8
+    cores: 13
+    memory: "30g"
+    memoryOverhead: "20g"
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

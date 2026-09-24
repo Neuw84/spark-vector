@@ -74,3 +74,20 @@ configurations are excluded from the totals and listed as correctness bugs.
 `spark-application.yaml` is a spark-operator `SparkApplication` for one configuration; substitute the
 placeholders (`IMAGE`, `S3_BUCKET`, `DATASET`, `CONFIG`) and add the engine `sparkConf` entries from
 `submit-cluster.sh`'s dry run.
+
+## Iceberg merge-on-read on the cluster (v2 deletes, v3 deletion vectors)
+
+The `CdcMergeRunner` and `IcebergMorGenerator` accept an `s3a://` warehouse: a schemeless `--warehouse`
+is resolved to a local absolute path as before, but a `s3a://…` warehouse is passed through and the
+catalog is configured with `S3FileIO` and the Analytics Accelerator stream
+(`IcebergMorGenerator.catalogConf`, #249). Neither forces `local[N]` when spark-submit sets a master,
+so both run distributed on the cluster.
+
+`run-iceberg-mor.sh <bucket> <tpch_sf_prefix> <image> [v2|v3|both] [variants]` does the whole thing:
+it renders `iceberg-mor-gen.yaml` to generate the v2 and v3 warehouses from `s3a://<bucket>/<sf>/lineitem`
+to `s3a://<bucket>/iceberg-mor/<v2|v3>`, then renders `iceberg-mor-cdc.yaml` once per (config, variant)
+— `spark` and `vector` over each `pos_*`/`dv_*`/`eq_*` shape — applying one SparkApplication at a time.
+The generated warehouse and each run's change batch live on S3; the per-run JSONL is written to the
+driver's local disk (`cdc-results/`) and copied to `s3://<bucket>/results/iceberg-mor-cdc/`. `lineitem`
+at the requested scale must already exist on S3 (100 GB ≈ SF480). Comet reads v2/v3 through Iceberg's
+JVM reader, so the comparison is `spark` vs `vector`.

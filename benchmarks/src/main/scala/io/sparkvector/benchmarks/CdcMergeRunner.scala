@@ -27,6 +27,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
 import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
 import io.sparkvector.spark.iceberg.IcebergVectorAdapter
+import io.sparkvector.benchmarks.IcebergMorGenerator.TableProfile
 
 /**
  * The CDC shape over an Iceberg v2 merge-on-read table (#260's read harness measures the reads;
@@ -61,6 +62,7 @@ object CdcMergeRunner {
       config: String = "vector",
       warehouse: String = "benchmarks/data/iceberg",
       table: String = "sf25.pos_20",
+      baseTable: String = "lineitem",
       out: String = "benchmarks/results",
       /** Timed MERGE runs (each followed by a rollback). */
       iterations: Int = 3,
@@ -82,6 +84,7 @@ object CdcMergeRunner {
       case "--config" :: v :: t => parse(t, a.copy(config = v))
       case "--iceberg" :: v :: t => parse(t, a.copy(warehouse = v))
       case "--table" :: v :: t => parse(t, a.copy(table = v))
+      case "--base-table" :: v :: t => parse(t, a.copy(baseTable = v))
       case "--out" :: v :: t => parse(t, a.copy(out = v))
       case "--iterations" :: v :: t => parse(t, a.copy(iterations = v.toInt))
       case "--warmup" :: v :: t => parse(t, a.copy(warmup = v.toInt))
@@ -106,58 +109,59 @@ object CdcMergeRunner {
   // ------------------------------------------------------------------ the change batch
 
   /**
-   * The change batch, as buckets of `pmod(xxhash64(l_orderkey), 1000)`. The `pos_<pct>` generator
-   * variants deleted buckets `[0, 10 * pct)`, so over `pos_20` these ranges touch live rows only:
-   * updates are ~18.75 % of the live rows and deletes ~5 % -- together about a quarter of the live
-   * data, the "1 GB of a 5 GB table" CDC batch -- and inserts re-key another ~2 % above every
-   * existing order.
+   * The change batch, as buckets of `pmod(xxhash64(<hashKey>), 1000)`. The `pos_<pct>` generator
+   * variants deleted buckets `[0, 10 * pct)`, so over a `pos_20`-style table these ranges touch live
+   * rows only: updates ~18.75 % of the live rows, deletes ~5 % -- about a quarter of the live data --
+   * and inserts re-key another ~2 % above every existing key.
    */
   private val UpdateBuckets = (200, 350)
   private val DeleteBuckets = (350, 390)
   private val InsertBuckets = (390, 406)
 
-  private def buckets(range: (Int, Int)): String =
-    s"pmod(xxhash64(l_orderkey), 1000) >= ${range._1} AND pmod(xxhash64(l_orderkey), 1000) < ${range._2}"
+  private def buckets(p: TableProfile, range: (Int, Int)): String =
+    s"pmod(xxhash64(${p.hashKey}), 1000) >= ${range._1} AND pmod(xxhash64(${p.hashKey}), 1000) < ${range._2}"
 
-  private val MergeSql =
-    """MERGE INTO %s t USING cdc_changes s
-      |ON t.l_orderkey = s.l_orderkey AND t.l_linenumber = s.l_linenumber
-      |WHEN MATCHED AND s.op = 'D' THEN DELETE
-      |WHEN MATCHED THEN UPDATE SET t.l_quantity = s.l_quantity, t.l_extendedprice = s.l_extendedprice,
-      |  t.l_discount = s.l_discount, t.l_comment = s.l_comment
-      |WHEN NOT MATCHED THEN INSERT *""".stripMargin
+  private def mergeSql(p: TableProfile): String = {
+    val on = p.grain.map(g => s"t.$g = s.$g").mkString(" AND ")
+    s"""MERGE INTO %s t USING cdc_changes s
+       |ON $on
+       |WHEN MATCHED AND s.op = 'D' THEN DELETE
+       |WHEN MATCHED THEN UPDATE SET ${p.cdcMergeSet}
+       |WHEN NOT MATCHED THEN INSERT *""".stripMargin
+  }
 
   /** Reads a CDC consumer runs; `checksum` compares configurations, `agg-after-merge` also pins the merged state. */
-  private val ReadQueries: Seq[(String, String)] = Seq(
+  private def readQueries(p: TableProfile): Seq[(String, String)] = Seq(
     "count" -> "SELECT count(*) FROM %s",
-    "scan-agg" ->
-      """SELECT l_returnflag, l_linestatus, sum(l_quantity), sum(l_extendedprice),
-        |  sum(l_extendedprice * (1 - l_discount)), avg(l_discount), count(*)
-        |FROM %s GROUP BY l_returnflag, l_linestatus ORDER BY l_returnflag, l_linestatus""".stripMargin,
-    "filter-agg" ->
-      """SELECT sum(l_extendedprice * l_discount) FROM %s
-        |WHERE l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01'
-        |  AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24""".stripMargin
+    "scan-agg" -> p.scanAggSql,
+    "filter-agg" -> p.filterAggSql
   )
 
   // ------------------------------------------------------------------ run
 
   private def run(args: Args): Unit = {
+    val p = IcebergMorGenerator.Profiles.getOrElse(
+      args.baseTable,
+      throw new IllegalArgumentException(
+        s"unknown base table ${args.baseTable}; known: ${IcebergMorGenerator.Profiles.keys.mkString(", ")}"
+      )
+    )
     val conf = TpchRunner.Configs.getOrElse(
       args.config,
       throw new IllegalArgumentException(
         s"unknown config ${args.config}; known: ${TpchRunner.ConfigOrder.mkString(", ")}"
       )
     )
-    val warehouse = new File(args.warehouse).getAbsolutePath
+    val warehouse = IcebergMorGenerator.resolveWarehouse(args.warehouse)
+    // On the cluster spark-submit sets --master; locally default to local[threads].
     val builder = SparkSession.builder()
-      .master(s"local[${args.threads}]")
       .appName(s"spark-vector-cdc-${args.config}")
       .config("spark.ui.enabled", "false")
       .config("spark.sql.shuffle.partitions", args.shufflePartitions.toString)
       .config("spark.sql.adaptive.enabled", "true")
-      .config("spark.driver.host", "localhost")
-    (conf ++ IcebergMorGenerator.catalogConf(warehouse) ++ args.extraConf).foreach { case (k, v) =>
+    if (Option(System.getProperty("spark.master")).isEmpty && sys.env.get("SPARK_MASTER").isEmpty)
+      builder.master(s"local[${args.threads}]").config("spark.driver.host", "localhost")
+    (conf ++ IcebergMorGenerator.catalogConf(args.warehouse) ++ args.extraConf).foreach { case (k, v) =>
       builder.config(k, v)
     }
     val spark = builder.getOrCreate()
@@ -173,11 +177,20 @@ object CdcMergeRunner {
         s"dataFiles=${stats.dataFiles} (${stats.dataBytes / (1 << 20)} MiB) deleteFiles=${stats.deleteFiles} deleteRows=${stats.deleteRows}")
 
       // The change batch, materialised once (outside every timing) so each merge reads identical
-      // files. Deterministic in the table's rows, so every configuration builds the same batch.
-      val changesDir = new File(new File(args.out), s"cdc-changes-${args.table.replace('.', '_')}").getAbsolutePath
-      if (!new File(changesDir, "_SUCCESS").exists()) {
+      // files. On the cluster it must live where the executors can read it: an object-store prefix
+      // when `out` has a scheme, a driver-local dir otherwise.
+      val outScheme = args.out.contains("://")
+      val changesDir =
+        if (outScheme) s"${args.out.stripSuffix("/")}/cdc-changes-${args.table.replace('.', '_')}"
+        else new File(new File(args.out), s"cdc-changes-${args.table.replace('.', '_')}").getAbsolutePath
+      val changeExists =
+        if (outScheme) {
+          try { spark.read.parquet(changesDir).limit(1).count() > 0 }
+          catch { case _: Exception => false }
+        } else new File(changesDir, "_SUCCESS").exists()
+      if (!changeExists) {
         println(s"[cdc] materialising the change batch under $changesDir")
-        val maxKey = spark.table(table).selectExpr("max(l_orderkey)").collect()(0).getAs[Number](0).longValue()
+        val maxKey = spark.table(table).selectExpr(s"max(${p.reKey})").collect()(0).getAs[Number](0).longValue()
         spark.table(table).createOrReplaceTempView("cdc_base")
         // Every branch projects the identical column list in table order: UNION ALL matches by position.
         val columns = spark.table(table).schema.fieldNames.toSeq
@@ -186,17 +199,13 @@ object CdcMergeRunner {
         spark.sql(
           branch(
             "U",
-            Map(
-              "l_quantity" -> "l_quantity + 1",
-              "l_extendedprice" -> "round(l_extendedprice * 1.01, 2)",
-              "l_comment" -> "concat(l_comment, ' u')"
-            )
-          ) + s" WHERE ${buckets(UpdateBuckets)}" +
-            " UNION ALL " + branch("D", Map.empty) + s" WHERE ${buckets(DeleteBuckets)}" +
+            p.cdcUpdateTweaks
+          ) + s" WHERE ${buckets(p, UpdateBuckets)}" +
+            " UNION ALL " + branch("D", Map.empty) + s" WHERE ${buckets(p, DeleteBuckets)}" +
             " UNION ALL " + branch(
               "I",
-              Map("l_orderkey" -> s"l_orderkey + ${maxKey}L")
-            ) + s" WHERE ${buckets(InsertBuckets)}"
+              Map(p.reKey -> s"${p.reKey} + ${maxKey}L")
+            ) + s" WHERE ${buckets(p, InsertBuckets)}"
         )
           .repartition(args.threads)
           .write.mode("overwrite").parquet(changesDir)
@@ -204,12 +213,21 @@ object CdcMergeRunner {
       val changes = spark.read.parquet(changesDir)
       changes.createOrReplaceTempView("cdc_changes")
       val changeCounts = changes.groupBy("op").count().collect().map(r => r.getString(0) -> r.getLong(1)).toMap
-      val changeBytes = new File(changesDir).listFiles().filter(_.getName.endsWith(".parquet")).map(_.length()).sum
+      val changeBytes =
+        if (outScheme) {
+          // The parquet files' total size, from Hadoop's FileSystem (executors wrote them to S3).
+          val path = new org.apache.hadoop.fs.Path(changesDir)
+          val fs = path.getFileSystem(spark.sparkContext.hadoopConfiguration)
+          fs.listStatus(path).filter(_.getPath.getName.endsWith(".parquet")).map(_.getLen).sum
+        } else new File(changesDir).listFiles().filter(_.getName.endsWith(".parquet")).map(_.length()).sum
       println(s"[cdc] change batch: U=${changeCounts.getOrElse("U", 0L)} D=${changeCounts.getOrElse("D", 0L)} " +
         s"I=${changeCounts.getOrElse("I", 0L)} (${changeBytes / (1 << 20)} MiB parquet)")
 
-      Files.createDirectories(Paths.get(args.out))
-      val outFile = Paths.get(args.out, s"cdc-${args.config}.jsonl")
+      // The JSONL result always lands on the driver's local disk (the cluster script uploads it);
+      // `out` may itself be an object-store prefix, which is not a local Path.
+      val localOut = if (outScheme) "cdc-results" else args.out
+      Files.createDirectories(Paths.get(localOut))
+      val outFile = Paths.get(localOut, s"cdc-${args.config}.jsonl")
       val writer = new PrintWriter(Files.newBufferedWriter(
         outFile,
         StandardCharsets.UTF_8,
@@ -254,14 +272,18 @@ object CdcMergeRunner {
           // Shuffle files live until the ContextCleaner sees their dependencies collected, which is
           // asynchronous: wait for the disk to actually recover (a merge writes 15+ GiB of scratch,
           // and unreclaimed runs stack up to a full disk -- measured). Untimed, like the rollback.
-          val target = freeAtStart - (4L << 30)
-          val deadline = System.nanoTime() + 180L * 1000 * 1000 * 1000
-          System.gc()
-          while (new File("/").getUsableSpace < target && System.nanoTime() < deadline) {
-            Thread.sleep(3000)
+          // Only meaningful for a local run, where the scratch is on this same disk; on the cluster
+          // the executors hold it, so the driver's free space is not the signal.
+          if (!outScheme && Option(System.getProperty("spark.master")).isEmpty && sys.env.get("SPARK_MASTER").isEmpty) {
+            val target = freeAtStart - (4L << 30)
+            val deadline = System.nanoTime() + 180L * 1000 * 1000 * 1000
             System.gc()
+            while (new File("/").getUsableSpace < target && System.nanoTime() < deadline) {
+              Thread.sleep(3000)
+              System.gc()
+            }
+            println(s"[cdc]   disk free: ${new File("/").getUsableSpace / (1L << 30)} GiB")
           }
-          println(s"[cdc]   disk free: ${new File("/").getUsableSpace / (1L << 30)} GiB")
         }
         def rollback(): Unit = {
           spark.sql(s"CALL ${IcebergMorGenerator.Catalog}.system.rollback_to_snapshot('${args.table}', ${baseline}L)")
@@ -278,7 +300,7 @@ object CdcMergeRunner {
         @volatile var mergeAccel: Option[MergeAccel] = None
         def mergeOnce(): Double = {
           val start = System.nanoTime()
-          val df = spark.sql(MergeSql.format(table))
+          val df = spark.sql(mergeSql(p).format(table))
           val ms = (System.nanoTime() - start) / 1e6
           val plan = df.queryExecution.executedPlan match {
             case c: org.apache.spark.sql.execution.CommandResultExec => c.commandPhysicalPlan
@@ -295,7 +317,7 @@ object CdcMergeRunner {
         }
 
         // 1. Reads over the baseline state.
-        if (!args.mergeOnly) ReadQueries.foreach { case (name, sql) =>
+        if (!args.mergeOnly) readQueries(p).foreach { case (name, sql) =>
           emit(measureRead(spark, "read", name, sql.format(table), args.readWarmup, args.readIterations))
         }
 
@@ -317,7 +339,7 @@ object CdcMergeRunner {
           "merge",
           times.map(_._1),
           mergedRows.toInt,
-          checksumOf(spark, table),
+          checksumOf(spark, table, p),
           plan = accel.plan,
           acceleratedOps = accel.acceleratedOps,
           operatorCount = accel.operatorCount,
@@ -326,7 +348,7 @@ object CdcMergeRunner {
         ))
 
         // 3. Reads over the merged state (the last timed merge's), then leave the table as we found it.
-        if (!args.mergeOnly) ReadQueries.foreach { case (name, sql) =>
+        if (!args.mergeOnly) readQueries(p).foreach { case (name, sql) =>
           emit(measureRead(spark, "read-after-merge", name, sql.format(table), args.readWarmup, args.readIterations))
         }
       } finally { restore(); writer.close() }
@@ -349,10 +371,8 @@ object CdcMergeRunner {
   }
 
   /** A cheap whole-table checksum: global aggregates to 10 significant digits, like TpchRunner's row checksums. */
-  private def checksumOf(spark: SparkSession, table: String): String = {
-    val r = spark.sql(
-      s"SELECT count(*), sum(l_quantity), sum(l_extendedprice), sum(l_orderkey % 1000003) FROM $table"
-    ).collect()(0)
+  private def checksumOf(spark: SparkSession, table: String, p: TableProfile): String = {
+    val r = spark.sql(p.checksumSql.format(table)).collect()(0)
     (0 until r.length).map { i =>
       r.get(i) match { case d: java.lang.Double => f"${d.doubleValue()}%.10g"; case v => String.valueOf(v) }
     }.mkString("|").hashCode.toHexString
@@ -563,7 +583,7 @@ object CdcMergeRunner {
         }
         html.append("</tbody></table>\n")
       }
-      val readNames = ReadQueries.map(_._1)
+      val readNames = Seq("count", "scan-agg", "filter-agg")
       if (ofTable.keys.exists(_._3 == "read")) section("Reads over the baseline table", "read", readNames)
       if (merged.nonEmpty) {
         section("The CDC merge (median of the timed runs, table rolled back in between)", "merge", Seq("merge"))
