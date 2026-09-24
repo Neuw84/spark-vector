@@ -12,10 +12,6 @@
   <dependencies>
     <dependency>
       <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-kernels</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.sparkvector</groupId>
       <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -53,6 +49,14 @@
           <artifactId>arrow-vector</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <!-- Compiled against here; at run time the classes come from the plugin jar below, which shades the
+           kernels in. `provided` keeps them out of this artifact's transitive dependencies, so a Maven
+           consumer of the shuffle gets the kernel classes once, not from two jars. -->
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-kernels</artifactId>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.arrow</groupId>
