@@ -6,7 +6,8 @@
 #
 #   benchmarks/scripts/submit-cluster.sh <config> <tables> <dataset> <out> [runner args...]
 #
-#   config    spark | vector | comet-scan-vector-shuffle | comet   (TpchRunner.Configs; comet* need COMET_JAR)
+#   config    spark | vector | vector-shuffle | vector-shuffle-strict | comet-scan-vector-shuffle |
+#             comet-scan-vector-ourshuffle | hybrid | comet   (TpchRunner.Configs)
 #   tables    s3://bucket/tpcds/sf1000/parquet  (a directory per table)  or  catalog:<namespace>  (Iceberg)
 #   dataset   label the report groups by, e.g. sf1000-parquet, sf1000-iceberg, sf1000-iceberg-mor
 #   out       s3://bucket/results/sf1000-parquet  (one <config>-<timestamp>.jsonl per run)
@@ -60,20 +61,39 @@ COMET_SCAN_ONLY=(--conf spark.comet.enabled=true --conf spark.comet.scan.enabled
 case "$CONFIG" in
   spark) ENGINE=() ;;
   vector) ENGINE=("${VECTOR[@]}") ;;
+  vector-shuffle)
+    ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
+            --conf spark.vector.shuffle.enabled=true) ;;
+  vector-shuffle-strict)
+    ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
+            --conf spark.vector.shuffle.enabled=true --conf spark.vector.exec.strictFloatingPoint=true) ;;
   comet-scan-vector-shuffle)
     ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
             --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
             "${COMET_SCAN_ONLY[@]}" --conf spark.comet.exec.shuffle.enabled=true) ;;
+  comet-scan)
+    # Comet's native scan alone, Spark's operators and shuffle: the discriminator for a result that
+    # differs only when the scan is Comet's (#248, q64 at 1 TB).
+    ENGINE=(--conf spark.plugins=org.apache.spark.CometPlugin "${COMET_SCAN_ONLY[@]}") ;;
+  comet-scan-vector-ourshuffle)
+    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
+            --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
+            --conf spark.vector.shuffle.enabled=true "${COMET_SCAN_ONLY[@]}") ;;
+  hybrid)
+    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
+            --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
+            "${COMET_SCAN_ONLY[@]}" --conf spark.comet.exec.shuffle.enabled=true --conf spark.vector.comet.mixed.enabled=true) ;;
   comet)
     ENGINE=(--conf spark.plugins=org.apache.spark.CometPlugin --conf spark.comet.enabled=true --conf spark.comet.scan.enabled=true
             --conf spark.comet.exec.enabled=true --conf spark.comet.exec.shuffle.enabled=true --conf spark.comet.exec.shuffle.mode=auto
             --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
             --conf spark.comet.explainFallback.enabled=true --conf spark.comet.cast.allowIncompatible=true
             --conf spark.memory.offHeap.enabled=true --conf "spark.memory.offHeap.size=$OFFHEAP") ;;
-  *) echo "unknown config $CONFIG (spark, vector, comet-scan-vector-shuffle, comet)" >&2; exit 2 ;;
+  *) echo "unknown config $CONFIG (spark, vector, vector-shuffle, vector-shuffle-strict, comet-scan, comet-scan-vector-shuffle, comet-scan-vector-ourshuffle, hybrid, comet)" >&2; exit 2 ;;
 esac
 JARS=()
-case "$CONFIG" in comet*) JARS=(--jars "${COMET_JAR:?set COMET_JAR for the comet configurations}") ;; esac
+# The Comet jar: on the cluster image (benchmarks/k8s/Dockerfile) it is already on the classpath; set COMET_JAR for a plain Spark image.
+case "$CONFIG" in comet*|hybrid) if [ -n "${COMET_JAR:-}" ]; then JARS=(--jars "$COMET_JAR"); fi ;; esac
 
 # The JVM flags the local harness uses, for driver and executors alike.
 JVM_FLAGS="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow \

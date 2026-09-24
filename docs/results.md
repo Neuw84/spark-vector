@@ -789,6 +789,671 @@ The priorities the two suites agree on: the hash join's residual condition (#332
 fixed cost (#331), the columnar broadcast exchange (#325); then q19's string filter and the merge join
 at scale (#329).
 
+### On the cluster (#247, #248): TPC-DS SF100 Parquet on S3, eight executors
+
+TPC-DS SF100 (27 GB ZSTD Parquet on S3, generated on the cluster), `sfi-iceberg-bench` EKS, node group
+`bench-xl` (m5.4xlarge), **eight executors of 13 cores and ~50 GiB each**, the memory placed where each
+engine uses it (Spark and our shuffle: 20 GiB heap + 30 GiB overhead, the overhead less 2 GiB as the
+JVM's direct-memory limit; Comet: 20 GiB heap + 24 GiB off-heap; the Comet-scan mix over our shuffle:
+20 + 14 + 16), driver 4 GiB, one iteration per query, no warm-up. Image `benchmarks/k8s/Dockerfile`,
+manifests from `render-run.sh`, report `TpcdsRunner --cluster-report` over the rows on S3.
+
+**The first run (v2) found four defects; the fifth run has our shuffle at zero failures and every checksum
+but one equal to Spark's.** The four, each with its own issue and fix:
+
+1. **The Flight shuffle lost dictionary replacements (#338).** `FlightShuffle.Producer` started a stream
+   with the block's first dictionaries and Arrow Flight writes dictionaries only at a stream's start,
+   while our blocks carry one replacement dictionary per record batch: a remote block of several
+   batches decoded against the first batch's dictionary -- `IndexOutOfBoundsException` in every string
+   consumer (q4, q11, q23b, q24b, q38, q74, q87), and **silently wrong strings** where the index fit
+   (the checksums of q1, q6, q23b, q24a, q24b, q38, q39a, q39b, q74, q87 disagreed with Spark's). The
+   data plane now sends the block's IPC bytes as they are. Local reads never showed it.
+2. **The shuffle writer's memory was not what it accounted (#340).** q67 took every executor down in
+   four seconds: an Arrow `OutOfMemoryException` from the writer (one task's allocator at 1.14 GB
+   against a 64 MB budget: the estimate ignored `setSafe`-grown capacity and the per-slice
+   dictionaries; `ArrowStreamWriter` kept a copy of every dictionary it ever wrote), which Spark could
+   not serialize, and on JDK 25 `SerializationDebugger`'s initializer then dies (SPARK-55679, fixed in
+   4.2.0 only) -- exit 50. Now: flushes by the allocator's real allocation, one IPC stream per record
+   batch, a limited writer allocator, and Arrow's OOM rethrown as a serializable `SparkException`.
+   The new test also caught **arrow-java 18.3.0's zstd codec writing 8 bytes past its buffer**
+   (GH-1116, fixed upstream for 20.0.0): the shuffle uses its own correctly-sized codec.
+3. **The partitioner's hash loop deoptimized a hundred times per JVM (#343).** JFR on q79 at SF1: 37%
+   of CPU in `PartitionKernels.mixColumn`, 101 `profile_predicate` traps on its null-row branch. One
+   loop per key kind and validity shape, null rows blended by a mask: q79 at SF1 1984 -> 857 ms.
+4. **Every partition slice of a dictionary-encoded string column carried the whole dictionary (#345).**
+   The runner's `--explain` at SF100 showed q79's `customer` exchange at 1,623 MB against Spark's
+   52 MB with identical plans and record counts: at 200 partitions a slice holds ~41 rows and copied a
+   dictionary of thousands of names, and the flush concatenated hundreds of such copies per batch.
+   That was the 15-25x shuffle-read gap and the whole 20x on q73/q79/q34/q68/q46/q30 (q79: 55.6 s ->
+   6.3 s). A slice now carries only the entries it uses.
+5. **The Flight reader fetched one block per round trip, in sequence (#347).** With the four above
+   in, most queries were still 1.5-2x -- the small ones included -- at the *same* executor time as
+   Spark's (q3: 62 s of executor time to Spark's 64, 2.75 s of wall to 1.39). Wall without CPU is
+   waiting: a reduce task's input is a block per map task, and the backend opened a `DoGet` per block,
+   one after another -- ~100 sequential gRPC stream setups per reduce task at SF100. Now one call per
+   (executor, reducer) carrying all of that executor's blocks, the calls to every executor opened
+   together: 0.58x -> 0.73x on the suite.
+
+Two more things the cluster taught: a node's 20 GB root disk fills with the shuffle files of finished
+queries (the driver's `ContextCleaner` removes them after a GC, every 30 min by default; the kubelet
+evicted an executor at query 95 -- `spark.cleaner.periodicGC.interval=2min` in the manifests), and
+hadoop-aws 3.4's default credential chain has no IRSA (`WebIdentityTokenFileCredentialsProvider` set).
+
+**v8 (the five fixes and the writer rework: #349 plain slices encoded once, #351 per-partition
+builders, #353 index-list gathers), all six configurations, 101 of 103 queries comparable, no failures
+in any configuration:**
+
+| configuration | suite wall (s) | failed | comparable total (s, 101 queries) | vs Spark |
+|---|---:|---:|---:|---:|
+| spark | 705 | 0 | 556.1 | 1.00x |
+| vector-shuffle | 736 | 0 | 639.1 | 0.87x |
+| vector-shuffle-strict | 736 | 0 | 639.3 | 0.87x |
+| comet-scan-vector-ourshuffle | 674 | 0 | 575.5 | 0.97x |
+| hybrid | 552 | 0 | 471.2 | 1.18x |
+| comet | 520 | 0 | 441.6 | 1.26x |
+
+`vector-shuffle-strict` -- bit-identical floating point against the benchmarks' fast default -- costs
+**0.03%** (639.3 s against 639.1), noise. 
+`comet-scan-vector-ourshuffle` is Comet's native Parquet scan feeding our operators over our shuffle
+(its v2 reading: 0.78x with 3 failures; v7: 0.93x). The runs before: v2 (the first, 87 comparable) vector-shuffle
+0.45x with 9 failures; v3 after #338: 0.33x, 2 failures; v4 after #340: 0.35x, 5 failures all one
+evicted executor; v5 after #343 and #345: 0.58x, none; v6 after #347: 0.73x; v7 after #349 and #351: 0.87x, the mix
+0.93x. hybrid and comet in v2 read 1.20x and 1.29x on the unfixed engine.
+
+Where the numbers now live (v7/v8): under `vector-shuffle` 30 queries are faster than Spark (q97 1.96x,
+q94 1.77x, q52, q82, q51, q42 1.5-1.6x, q29, q93 1.44x), 27 within 10%, 32 more than 20% slower --
+q30 (4.35 -> 9.88 s) and q8 (2.71 -> 6.06) at the top, then q1, q39a/b, q46, q67, q72, q4 around 1.5-2x.
+Under the Comet-scan mix 35 are faster (q97 2.25x, q94 1.90x, q82 1.86x, q42, q52, q41 1.75-1.84x),
+27 within 10%, 26 more than 20% slower -- q22 (5.1 -> 14.3 s, the inventory rollup), q8, q39b, q46,
+q30, q1. A JFR of q30 at SF10 after these changes has the shuffle write at a third of the query's CPU
+(from 63% before #349) with the Parquet-to-Arrow adapter and the joins the rest; #353 (index-list
+gathers, in main after this run: q30 at SF10 2377 -> 1963 ms) is not in this image. q65's checksum
+differs from Spark's in every configuration but Spark (100 rows each: a tie in its `LIMIT` order, to
+be confirmed); q64 returns 0 rows under Comet's scan (a Comet 1.0 issue). Per-query tables:
+`results/sf100-parquet-v7/cluster-results.md` on the results bucket.
+**1 TB (#248, `results/sf1000-parquet`, the same eight executors, 200 reduce partitions).** The
+baselines ran first: spark, hybrid, comet, no failures. Our two configurations took three attempts:
+the first filled the 20 GB node disks within minutes because our shuffle never deleted its map outputs
+(#358); the second lost five executors to q78's aggregate over (item, customer), which our hash
+aggregate kept entirely in memory (#363, the hash-partitioned spill; #364, a remote fetch error is
+now Spark's `FetchFailedException`, so the scheduler recomputes the lost map outputs instead of
+failing the query -- the cascade after q78 shrank from 17 queries to 7 while executors were replaced);
+the third, with the spill's budget counting the accumulators at their interleaved, doubled capacity
+and arbitrated by Spark's task memory manager (#367), ran all 103 with no failure and no executor
+lost:
+
+| 1 TB, 100 comparable queries | total (s) | vs Spark | failed |
+|---|---:|---:|---:|
+| spark | 3029.9 | 1.00x | 0 |
+| vector-shuffle | 2809.4 | **1.08x** | 0 |
+| comet-scan-vector-ourshuffle | 2541.7 | **1.19x** | 0 |
+| hybrid | 2246.3 | 1.35x | 0 |
+| comet | 2091.3 | 1.45x | 0 |
+
+Excluded: q64, where Comet's scan returns no rows (Spark 12,185), and q65, where every accelerated
+configuration -- pure Comet included -- returns 100 rows with a checksum different from Spark's
+(the query orders by store name and item description with ties at this scale; not yet confirmed).
+Our shuffle is faster than Spark at 1 TB on the whole suite, with the wins where the shuffle is the
+work (q23b 286 -> 132 s, q5 47 -> 22, q29 23 -> 11, q97 33 -> 16, q23a 207 -> 124; q78 spills and
+completes in 99 s against Spark's 114) and the losses where it is not: q8 6.8 -> 41 s (the widest,
+a broadcast-side plan under study), q67 126 -> 178 (the rollup window), q72 27 -> 42, and a band of
+small queries at 0.5-0.65x (q18, q19, q22, q99, q39b, q47, q57) whose exchanges are a few MB and
+whose time is our per-stage overhead. The mix of Comet's scan with our operators and shuffle is
+1.19x with its own regressions at q14b 95 -> 144 s and q72 27 -> 36.
+
+**The losses, one root cause at a time (targeted 1 TB runs, each with a Spark baseline in the same
+run, heap 30 g / overhead 20 g / direct 30 g, single iteration).** Each fix was measured at SF10
+first and then on the cluster; the executor profiles that ranked the work came from JFR on all
+eight executors, and one lesson of the series is that a recording's window must cover the stage
+under study -- the first profiles covered the executors' first 150 s and could not see q67's sort
+stage at all.
+
+| query | Spark | before | after | fixes |
+|---|---:|---:|---:|---|
+| q8 | 6.9 s | 40.8 | 18.5 | string `IN` lists through a hash set (#371); the remaining broadcast join on a 2-character zip prefix is #378 |
+| q67 | 114.4 | 178 | **100.2** | rollup as one chain (#383), writer dictionary without `ByteBuffer`s (#387), limb-based wide sum merge and geometric state growth (#388), group keys as one record per group (#377), and the sort's input materialised as one copy per column instead of one per value (#394) -- the last was 4470 s of task time |
+| q22 | 8.7 | 14.6 | **6.4** | the rollup chain (#383) |
+| q18 | 9.5-11.3 | 26.8 | 11-20 | memory split (#376); the rest varies run to run and is scan-side (#384) |
+| q47 | 14.4-16.3 | 22.7 | 19.9-22.7 | scan-side (#384) |
+| q57 | 7.5-8.1 | 11.5 | 10.2-11.3 | scan-side (#384) |
+| q72 | 26-27 | 41-42 | 38-40 | the fused residual (#332) removes under 0.1% of the pairs at this scale; the remaining gap is six ~1.58 B-row joins each materialising its output, an architecture question |
+
+q67 is faster than Spark for the first time. The small-query band is not the operators: with our
+operators on Spark's own shuffle the gap is already there (q47 20.6 s, q57 10.8, q18 16.7), the
+executors' task time is 30-60% above Spark's for the same scans, and their profile shows the task
+threads parked in the S3 reader's `awaitData` for more than half of that time with a dozen samples
+in our kernels -- a reader-side question, recorded on #384.
+
+**Two full runs after the fixes, and what they taught about the measurement.** The suite again,
+vector-shuffle only, on the code through #400 (v4, on-heap reader batches) and through #404 (v5,
+`spark.sql.columnVector.offheap.enabled=true`), against the clean run's Spark results; 102
+queries ran in all three:
+
+| | Spark (run 3) | vector-shuffle, run 3 | vector-shuffle, v4 | vector-shuffle, v5 (off-heap) |
+|---|---:|---:|---:|---:|
+| total, 102 queries (s) | 3146.0 | 2925.4 | 2898.0 | 2931.2 |
+
+The fixes show where they were aimed (q67 178 -> 103, q8 40.8 -> 6.6, q22 14.6 -> 6.5), but the
+totals barely move, because a second set of queries went the other way: q9 85.6 -> 110, q88 133 ->
+147, q94 44 -> 60, q90 28 -> 38, q51 19 -> 30, q2 39 -> 50. Those are not in the code. At SF10 the
+code through #400 is equal or faster than the code before it on all six; on the cluster, the two
+images run in adjacent windows each with its own Spark leg put the *older* code behind on every
+one (q9 148 vs 109 s, q88 190 vs 149), while Spark itself moved 20-40% between the two windows
+(q88 153 -> 128 s in ten minutes). The scan-bound queries at 1 TB are read-bound, and a single
+iteration's time is the cluster's read throughput of that window as much as it is the engine's.
+The rule that follows, applied to every targeted run since: **a loss at 1 TB is only a loss
+against a Spark leg in the same window**; comparing with another day's baseline finds weather.
+
+Off-heap reader batches were expected to help (SF10: q8 1.46 -> 1.14 s) and cost 1.1% instead,
+the scan-heavy `store_sales` queries 5-10%. The reason was ours: the adapter's bulk validity and
+dictionary paths (#398) read the reader's arrays only from `OnHeapColumnVector`, so off-heap
+batches fell back to their per-row forms on every nullable or dictionary-encoded column (#407
+fixed it: the native arrays are copied out once and take the same paths; SF10 q88 4.42 -> 3.79 s,
+q28 4.08 -> 3.30). Paired 1 TB runs after it: q88 125.9 s against Spark's 125.6 in the same window
+(1.40x behind in v5), q28 1.17x, q13 1.16x. The merge join under a top-N that q47 and q57 left to
+Spark (#402: the second self-join's input is the first join, which has no stage of its own, and
+the logical product read as 10^16 bytes) converts now -- SF10 q47 17.96 -> 8.68 s -- and did not
+move the 1 TB time (22.3 vs 16.0), which places those two in the read-bound band with q18. The
+join probe now compares plain integer keys from heap arrays mirrored once per batch instead of
+through per-row segment reads (#409; q88 -9% at SF10); a per-column-chunk cache of the decoded
+dictionary was tried on the same profile and measured slower twice (#408) -- the cost there is the
+gather through the decoded table, not the decode.
+
+**1000 shuffle partitions (v6).** The suite once more, both engines in one window, with
+`spark.sql.shuffle.partitions=1000` and a 128 MB advisory partition size (the setting planned for
+3 TB at 2000). Over the 100 comparable queries Spark took 2864.6 s and we took 3011.9 -- 1.05x
+slower, where at 200 partitions we were 1.04x faster over the same queries. The partition count cost
+Spark 4.6% and us 14.8%, and the difference is entirely the shuffle-heavy queries (q67 103 -> 142 s,
+q18 10.8 -> 30.5, q95 93 -> 114, q75 70 -> 91, q4 106 -> 122, q84 20 -> 32, q35 20 -> 26); the
+scan-bound ones moved with the window for both engines. Two notes on AQE first: it *does* coalesce,
+but with `coalescePartitions.parallelismFirst=true` (Spark's default) only down to the core count,
+using the advisory size as a cap -- the driver log reads `advisory 134217728, actual target 4317642`
+-- and coalescing groups reducers, not the blocks the mappers wrote: every map task still writes
+1000 blocks, and a coalesced task reads ten of them per map instead of two.
+
+Why our shuffle pays for that and Spark's does not, in the order it was found (#411): a reduce task
+opened one Flight stream per (executor, reduce partition) -- 70 streams per coalesced task instead
+of 7 -- and the server served each (map, partition) block with its own index lookup and file open;
+range tickets (#412: one stream per executor per task, one lookup per map for the task's whole
+range) returned q84 to parity (31.7 -> 22.5 s, Spark 22.8) and changed nothing else. The rest
+reproduces on one machine with no network at all (SF10, 1000 partitions: q35 7.6 s against Spark's
+1.8, near parity at 200), and the profiles show not a hot frame but the per-record-batch machinery
+paid five times as often at a fifth the bytes: on the writer a schema message, a dictionary batch
+per string column, a record batch and an end marker per batch, three FlatBuffers builds and a
+dozen Arrow allocations with their accounting; on the reader an `ArrowStreamReader` per block.
+Writing the messages directly with the schema cached, and caching the Spark type parsed from each
+field's metadata (#413), took single digits off. Spark's sort shuffle pays none of this per block:
+its blocks are byte spans with no framing. The step that makes the partition count as irrelevant
+for us as it is for Spark is one IPC stream per map output with the per-batch shape carried as a
+flag rather than a schema per batch -- a file-layout change, put to the owner on #411. Until it
+lands, 200-400 partitions is the right setting for 1 TB with this shuffle.
+
+**The partition count, taken apart on q18 (#416).** With the per-block machinery reduced, q18 at
+1000 partitions was still 26 s against Spark's 9.5, and each fix below was measured as a paired 1 TB
+leg in one cluster window plus an SF10 A/B at 200 partitions (the local baseline moves 15% between
+runs; anything smaller was confirmed twice). Staging the map output once and partitioning it at the
+flush instead of holding builders per partition (#425: 21.8 -> 19.2 s); strings plain under 256 rows
+and the reader coalescing small plain batches to 1024 rows (#426, -4%); the root cause of the
+partition count itself (#427): our filter kept `IsNotNull`-guarded attributes nullable where Spark's
+`FilterExec` does not, so the AQE-replanned broadcast join's required hash-relation mode differed
+from the exchange's, `ValidateRequirements` failed, and `CoalesceShufflePartitions` was silently
+dropped for the whole stage plan -- the two shuffled joins ran 1000 tasks over 1000-partition inputs
+(18.4 -> 15.2 s, executor time -19%, shuffle bytes -34%). Then the map side: the wide-decimal average
+merge state as two 64-bit limbs (#428), the parquet dictionary decoded once per column chunk instead
+of once per 4096-row batch (#429, SF10 executor -13%), wide decimal sum/avg buffers written as lanes
+instead of boxed values (#430, -13%, GC -37%), dictionary decimals of up to 18 digits through the bulk
+path (#431). Dropped after measuring flat: bulk-copy coalescing in the reader, hoisting the merge
+loop's lookups, and a flush that gathers once per column and cuts small partitions as slices.
+
+What was left -- the reduce stages at 1000 partitions 7x slower per task than the same tasks at the
+tail of the stage, Spark's 2.6x -- turned out to be warm-up. q18 run five times in one application:
+the first iteration's rollup partial-aggregate stage takes 310 s of task run time and the final
+aggregate 240, iterations two to five 52-68 and 38-57; Spark's own first iteration is 145 and 110, its
+warm ones 48-58 and 35-45. Cold, we spend 1100 s of executor time against Spark's 690; warm, 330-400
+against 270-340, and the wall clock is the same 5.6-5.8 s. A JFR over the first iteration's reduce
+stages shows why: 1650 deoptimisations, and 14-38% of the samples with an interpreted top frame in a
+handful of generic kernels (`gatherFixed`, `decodeDictionaryInto`, the string sort passes, the
+wide-decimal average) as each stage brought a new combination of buffer type, lane type and call
+shape. Every single-query 1 TB figure in this series is a cold first iteration (`run-matrix.sh`
+runs one iteration, no warm-up); the campaign's single application amortises the warm-up unevenly
+across its query list. None of the JVM's levers moved it at first: the JDK 25 AOT cache mapped but carried no
+AOT-linked classes and no method profiles (the incubator module in the graph -- see the v7 passage
+below), and compile thresholds and speculation knobs were flat across six legs. Making the
+two hottest kernels branchless, each shape its own method (#432), halved their deoptimisations and
+took 4-6% off the cold stage at no warm cost; the rest is first execution itself, and whether the
+per-query legs should warm up first is a measurement decision, not an engine one.
+
+The same profiles put q67's remaining cost (#377) in its rollup stage's shuffle write -- 2400 of
+5100 s of task run time writing four string keys per grouping level, gathered per partition and
+dictionary-encoded per block from scratch -- and not in the group table's compares: binding the
+batch's key columns once per assign (#433, the build-side twin of #409's `ProbeKeys`) removed the
+per-row interface calls and their segment checks, 3.5x on a gather microbenchmark, and moved q67 2%.
+The strings the aggregate emits are the table's own distinct values; carrying them through the
+writer as dictionary ids is the change that fits.
+
+**v7: the suite at 1000 and at 300 partitions, both engines in one window each.** The image is
+main after the #416 series and #433; the methodology is v5/v6's (one application per engine, one
+iteration per query, no warm-up). At 1000 partitions, over 98 comparable queries, Spark took 3128.9 s
+and we took 2578.0 -- 1.21x -- where v6 had us 1.05x behind at the same setting; query by query
+against v6 (84 queries with a median in both) we improved 11.3% (2606.7 -> 2313.0 s) while Spark's
+leg regressed 12.1%, so the honest reading of that pass is "we improved 11% and Spark had a bad
+hour". At 300 partitions, over 102 comparable queries with both legs healthy, Spark took 3537.3 s
+and we took 2936.3 -- 1.20x, 17% less time, 49 queries at least 10% faster (38 of them 20%), 45
+within 10%, 8 slower. The partition count now moves us less than it moves Spark (ours 2606 -> 2562 s
+from 1000 to 300 over the 99 queries in both passes, Spark 3161 -> 3039), the reverse of v6; Spark
+itself is 8.6% slower at 300 than at 200 because 300 is above `spark.shuffle.sort.bypassMergeThreshold`
+and its map side changes writer. The v6 losers moved as intended -- q67 142 -> 97 s (1.25x over Spark
+at 1000 partitions, level at 300), q4 122 -> 77, q18 30.5 -> 9.2 (within 6% at 300), q84 32 -> 20,
+q35 26 -> 13, q19 7.1 -> 3.4 -- and the ones that survive both settings are a short list: q99 (73%
+behind at both), q36, q72, q47/q57 (the Sort fallback after `AQEShuffleRead`), q88, q30.
+
+Spark's "bad hour" had a cause worth recording because it will return at 3 TB. In its 1000-partition
+leg it lost q23b, q24a, q24b and q25: the kubelet evicted three executors for **ephemeral storage** --
+the bench nodes have a 20 GB root volume, Spark's shuffle directory is an `emptyDir` on it, q23a and
+q23b each write 83 GB of shuffle (10.4 GB per node) and the finished query's files stay two minutes,
+so the two overlap and cross the kubelet's 10%-free threshold; the node sits under `DiskPressure` for
+the five-minute transition period, every replacement executor is refused at admission, the next three
+queries fail within a second on the dying executors, and q26-q28 run on five executors (q28 287 s
+against 165 in v6). The same eviction happened in v6's Spark leg (q23b, q24a) and reproduced on demand
+with the free-space curve sampled: all eight nodes within 0.2-1.0 GB of the threshold sixteen seconds
+into q23b's map stage. Our leg never gets there because our shuffle for the same two queries is 38 GB
+each, 46% of Spark's bytes. The fix is a larger root volume for the node group, not code.
+
+**The AOT cache, second attempt (#416).** The earlier conclusion -- that `--add-modules` disables the
+archived boot layer -- was wrong in its cause: JEP 483 allows `--add-modules`; what `ModuleBootstrap`
+refuses is a configuration containing an *incubator* module, and `jdk.incubator.vector` is one until it
+leaves incubation. A runtime linked from Corretto 25's jmods (Temurin stopped shipping jmods at 24)
+with `jdk.incubator.vector` rebuilt without its `ModuleResolution` attribute and `java.base` without
+its `ModuleHashes` attribute -- same JDK build, same JIT, only module metadata -- archives the boot
+layer: the executor cache holds 18,970 AOT-linked classes (14,396 of them ours and Spark's) and the
+JEP 515 method profiles, 190 MB. q18 at 1000 partitions, cold, alternating with the plain image in one
+window: 15.9/16.2 s wall and 1155/1167 s of executor time without the cache, 10.7/11.0 s and 702/707 s
+with it (-39%); the two reduce stages that carried the deoptimisation storm halve (296 -> 123 s,
+238 -> 109 s), about halfway to their warm figures, and the gap to Spark's cold q18 goes from 2.3x to
+1.6x with no kernel change. That cache was trained on q18 itself; a cache trained on q67, q22 and q4 and measured on q18, which it never saw, still gives
+12.0/12.3 s and 828/816 s against 15.1 s and 1120 s in the same window (-27% executor time), the
+class linking being shared by every query and the query-specific profiles adding the rest. The
+cache is therefore worth baking into the image at build time from a synthetic training workload
+over every operator; it is the cheap half of the cold-start cost, the branchless kernels the other.
+
+**The AOT cache, productized: trained on the cluster, not at build (#416).** The build-time cache was
+built, accepted by the executors, and did nothing at 1 TB (q18 16.0/15.9 s against 15.3/15.2 without
+it): a local training run in the Dockerfile links the driver's and local-mode paths, while an
+executor's cold minutes go to the S3A/Parquet client, the Flight transport over the network and the
+executor backend, none of which a local run can reach. The cache now comes from the cluster.
+`benchmarks/k8s/aot/train-cluster.sh` runs the vector-shuffle configuration over a training set
+(q18, q67, q22, q4 by default) with the executors in `-XX:AOTMode=record`, each writing its
+configuration to a per-node directory under the image tag; a DaemonSet then assembles the cache on
+every node holding a recording (`assemble.sh`, the executor's exact option set from `aot-env.sh`,
+which the executor's JVM checks against its own) and uploads it under the image tag; `render-run.sh`
+fetches that object in an init container at every executor start and points the JVM at it, and an
+image without a trained cache simply runs without one. Seven minutes of cluster time per image; the
+cache is 188 MB with 19,277 AOT-linked classes. Measured cold at 1000 partitions, alternating legs
+in one window: q18 **11.2 / 10.9 s** with the fetched cache against 15.9 / 15.1 without (-29% / -27%),
+q67 unchanged (112.2 / 107.2 against 109.6 / 109.7; not warm-up bound). The build-time run stays in
+the Dockerfile as the smoke test of the runtime -- the build fails when no class links -- and its
+cache is discarded. One lesson that cost a run: the kubelet creates the hostPath directory root-owned
+and the executor runs as the image's user; a JVM in record mode that cannot open its configuration
+file dies at start, and every executor did until a root init container opened the directory first.
+
+**The AOT cache, measured on the heavy queries and switched off for the runs (#248, #416).** The
+q18 gain above is a cold-start gain, and the heavy queries pay for it. Once every full run had the
+trained cache and every diagnostic window ran without it, the two disagreed on the same image and the
+same plans by 10--30 % on q9, q28, q23a, q24a and q67, always in the cache's disfavour. Measured
+directly, alone on the cluster, back to back at 300 partitions (v23, main at #462): cache on / off --
+q9 **122.4 / 110.7 s** (+11 %), q28 **152.4 / 133.5** (+14 %), q23a **149.4 / 121.7** (+23 %), q14a
+**146.2 / 92.6** (+58 %), q4 **85.4 / 78.2** (+9 %); 655.8 against 536.7 s over the five, **+22 %
+with the cache**. The cache's profiles come from a four-query training run and drive the JIT's early
+decisions for the operators' hot loops; on a query that runs for minutes those decisions are worse
+than the ones the JIT makes on its own from the query's own profile, and the start-up seconds saved
+are a rounding error against it. The decision rule, fixed before the leg ran: the cache stays on for
+the benchmark runs only if the five queries' total with it is within 5 % of without; it was not, so
+every benchmark run from here (and every number in the tables that follow) is measured **without the
+AOT cache**; the pipeline stays in the tree for what it is good at -- a short-query, cold-start
+deployment -- and `AOT_CACHE=0` is the run scripts' default. The `ours` full runs earlier in this
+section that carried the cache (v18, v19, v23 at 300 partitions) read 3--10 % over what the same image
+reads without it on the heavy half of the suite, and are not to be compared with cache-off numbers
+query by query.
+
+**The per-block cost of the shuffle at 1000 partitions, taken apart (#416, items 1-6).** With a
+thousand reduce partitions a map task's output to one reducer is a few hundred rows, so everything
+that is paid once per block -- a dictionary per string column per block, a 64 KB chunk buffer, a
+record batch's header, a kernel's set-up on the reduce side -- is paid a thousand times per map. The
+series: one dictionary per string column per map file with a 12-byte unit header per IPC message
+(#439; the map's dictionary section is prepended to every partition fetch by the Flight producer), a
+producer chunk buffer that starts at the chunk size (#441), a column frozen before its first flush
+decoding its pending ids in place instead of carrying a dictionary it will not use (#442), the
+reader's decode of a small encoded block through heap arrays instead of per-element `MemorySegment`
+accesses (#443), and an encoded block of 128 rows or more handed to the operators as ids rather than
+decoded into a coalesced plain batch (#444). The transport benchmark
+(`FlightShuffleBenchmark`, two loopback Flight servers over real map files) is the ruler for each
+step: the reduce task at 1000 partitions over mixed strings went 8.39 -> 2.00 ms across the series,
+eight concurrent reducers 17.98 -> 3.59 ms. On the cluster the rollup stage of q67 writes 16% fewer
+bytes and 25% less shuffle-write time (1968 -> 1445-1748 s at 300 partitions). The wall clock was a
+longer road: the first image with the series (v13) was 12-32% *slower* on q67 at 1000 partitions
+because #438's coalescing decoded every small encoded block into plain strings and the aggregate
+then hashed UTF8 bytes where it had consumed ids -- a JFR of the final stage put a quarter of the
+samples there -- and two attempts were needed to take it back (#443 removed the decode's segment
+checks, #444 restored the id path for blocks above a floor). Where it ended, in one window each:
+1000 partitions q67 v15 111.2 / 110.7 s against 106.1 s before the series (about 5% behind, and the
+16% smaller shuffle makes AQE coalesce the final stage into 125 tasks instead of 143 -- a worse tail
+on 104 cores, a consequence of the smaller shuffle rather than a cost in it); 300 partitions q67
+95.8 s against 108.1 / 102.8 (ahead), q18 within the window's drift at both. Two findings for the
+record: coalescing encoded blocks *as ids* is not available at 1000 partitions because consecutive
+blocks come from different maps with different dictionaries, and the transport benchmark's short
+strings did not show the decode cost that the 1 TB profile did, so the benchmark is the ruler for
+the transport and the profile for the operators.
+
+**The dictionary-id design, closed (#377).** After the three-step design (#436: string group keys by
+id through the group table, the aggregate's output and the shuffle writer) the final aggregate at
+1 TB read slower on ids at 1000 partitions, and #437 put the result modes on contiguous byte records;
+then a 300-partition reading in another window pointed the other way, and #445 put every mode back
+on ids. The decision was taken in one quiet window (the untouched rollup stage within 2-3% across
+four legs), q67 at 300 partitions, records / ids / records / ids: the final stage on ids uses 6.5% and
+11.5% more executor CPU than on records (3777 / 3932 s against 3546 / 3525) and *less* run time and
+wall (4026 / 4183 against 4195 / 4232; 51.1 / 49.0 s against 53.6 / 50.3), because the record layout's
+GC is twice the id layout's (32-37 s against 19-22) and GC pauses are run time that is not CPU. Ids
+stay everywhere; the record layout is kept in the kernel behind a flag. The two earlier readings
+that disagreed were both two-window comparisons; the rule that came out of it is the one this
+document already uses for engines: a design decision at 1 TB needs both sides in one window with a
+control stage that the change does not touch.
+
+**q64 at 1 TB: a Comet native-execution issue, filed (#248).** The one result that differed from
+Spark's in the full runs -- q64 returning 0 rows in the two configurations with Comet's scan, 12,185
+in ours and Spark's -- was taken apart to the last discriminator: a new `comet-scan` configuration
+(Comet's scan alone, Spark's operators and shuffle) returns 12,185, with the event log confirming it
+is the same `CometNativeScan` (48 instances in the plan) that feeds the two failing configurations.
+So the scan's values are right when read through Spark's `ColumnarToRow`, and the rows are lost only
+when the batches are consumed by a native operator pipeline -- Comet's own or ours -- through the
+Arrow C data export; the loss sits in the second `cs_ui` instance's join against the broadcast of
+`store_sales(2000) ⋈ store_returns`, and SF10 never reproduces it. Reported upstream as
+apache/datafusion-comet#6133 (intermittent -- see the four-configuration table below); q64 stays marked as a Comet issue in the tables and our own row is right.
+
+**Comet's scan against ours, per query (v10, 300 partitions, one window).** Over 101 queries our
+scan totals 2752 s and Comet's native scan over the same operators and shuffle 2730 s -- a wash that
+is two large effects cancelling: 22 queries are more than 10% faster with Comet's scan (the wide
+`store_sales` aggregates: q28 134 -> 96 s, q67 116 -> 93, q9 105 -> 86, q44 -24%, q59 -16%), 21 are
+more than 10% slower (join-heavy plans over the smaller fact tables: q10 6.7 -> 16.2 s, q36 +70%,
+q94 +48%, q90 +26%, q95 +23%). The best of both per query would be 2581 s, 6% under either. The wins
+say Comet's reader decodes wide Parquet scans about 20% faster than ours; the losses say the boundary
+gives it back -- Comet's vectors cross into our operators through the Arrow C export and lose our
+reader's dictionary encoding of strings and our batch sizing, so joins and aggregates on string keys
+run on plain strings, the input-side twin of the #416 finding above. The converter is the cheaper
+lever; the reader the larger project.
+
+**The four configurations on one day (v19 image, 300 partitions, 2026-09-23).** The v19 image is main
+at #451: the 32 MB spilling sort (#448/#451), the merge join under `auto`, the cluster-trained AOT
+cache; Spark's leg ran in the morning, the other three in the afternoon on the same cluster, one run
+per query. `comet` is Comet 1.0.0 end to end (scan, native operators, native shuffle); `csvo` is
+Comet's scan under our shuffle and operators; `ours` is our reader, shuffle and operators. Seconds.
+
+| query | Spark | Comet | csvo | ours |
+|---|---|---|---|---|
+| q2 | 42.8 | 46.9 | 39.5 | 52.3 |
+| q4 | 93.2 | 58.8 | 77.6 | 96.8 |
+| q9 | 95.5 | 79.8 | 76.4 | 142.1 |
+| q11 | 43.0 | 35.2 | 42.1 | 53.1 |
+| q14a | 100.8 | 76.4 | 96.6 | 123.7 |
+| q14b | 97.7 | 66.6 | 80.3 | 93.6 |
+| q16 | 36.6 | 20.7 | 21.9 | 27.1 |
+| q23a | 210.9 | 137.0 | 125.5 | 148.5 |
+| q23b | 293.9 | 163.8 | 134.2 | 172.8 |
+| q24a | 113.2 | 101.1 | 116.0 | 134.6 |
+| q24b | 110.6 | 98.8 | 110.0 | 130.8 |
+| q28 | 116.6 | 107.7 | 101.0 | 169.8 |
+| q38 | 32.6 | 19.8 | 18.1 | 21.6 |
+| q44 | 38.8 | 38.9 | 32.2 | 40.8 |
+| q49 | 43.7 | 51.9 | 37.1 | 41.4 |
+| q50 | 69.6 | 58.2 | 38.8 | 41.6 |
+| q51 | 32.8 | 14.0 | 15.7 | 23.4 |
+| q59 | 37.6 | 38.5 | 36.7 | 42.8 |
+| q64 | 95.6 | 68.0 | 60.7 | 62.2 |
+| q65 | 30.1 | 16.8 | 22.7 | 27.9 |
+| q67 | 127.6 | 60.6 | 98.3 | 114.6 |
+| q72 | 33.1 | 38.2 | 34.4 | 39.9 |
+| q74 | 43.9 | 30.5 | 43.3 | 42.2 |
+| q75 | 75.4 | 80.5 | 76.8 | 76.5 |
+| q76 | 42.5 | 49.9 | 47.0 | 46.2 |
+| q78 | 123.3 | 80.7 | 103.5 | 111.0 |
+| q80 | 54.1 | 48.2 | 46.5 | 43.2 |
+| q87 | 33.8 | 19.2 | 17.0 | 23.4 |
+| q88 | 140.6 | 141.3 | 131.8 | 142.2 |
+| q90 | 41.5 | 32.0 | 37.4 | 28.1 |
+| q93 | 143.8 | 90.9 | 69.9 | 67.9 |
+| q94 | 68.3 | 53.0 | 61.5 | 56.6 |
+| q95 | 144.1 | 68.3 | 61.3 | 82.4 |
+| q97 | 37.4 | 20.4 | 17.6 | 23.3 |
+| 68 queries under 30 s | 563 | 442 | 452 | 515 |
+| **all 102** | **3408** | **2555** | **2581** | **3059** |
+
+`csvo` is faster than Spark on 85 of 102 queries (24% less total time) and
+faster than Comet on 52 of 102, its total within 1% of Comet's: ahead on the join-heavy
+shapes (q23a/q23b, q50, q64, q93, q95 -- our shuffle, hash joins and the spilling merge join under
+Comet's scan), behind on the scan-and-aggregate ones where Comet's native aggregate follows its own
+scan with no boundary (q4, q67, q74, q78). `ours` is faster than Spark on 64 of 102 but its
+leg ran degraded -- right after a node-group stall, with the join window pulling from S3 on the other
+node group -- and shows it on scan-bound queries the image did not touch (q9 142 s where the same
+image reads 76 under Comet's scan and its own v18 leg read 106; q28 170 versus 137); its figure is the
+reader gap plus that noise and is re-measured on a quiet cluster before it is read as one. Comet's own
+leg is 4% faster today than its run of the day before on the same image (2555 versus 2660 s) -- the
+run-to-run band on this cluster, and the reason every comparison here is drawn within one day.
+
+Two rows are read with care. **q5** fails under `csvo` on this image
+(`SubqueryAdaptiveBroadcastExec does not support the execute() code path`: the dynamic-partition-pruning
+subquery on `ws_sold_date_sk` evaluated before adaptive execution rewrote it; it passes under `ours`
+and passed under `csvo` on v10) and is missing from the table. **q65**'s checksum differs in every
+configuration, Spark against Comet included: its `ORDER BY s_store_name, i_item_desc LIMIT 100` has
+ties, so the hundred rows follow the physical order. Every other query's checksum agrees across the
+four. And the q64 zero-row result reported above is intermittent: the two configurations that lost
+the rows in the morning returned the correct 12,185 in the afternoon on the same image and data --
+q64 too reads `store_sales` through a dynamic-partition-pruning filter, so one timing-dependent
+evaluation of the Comet scan's pruning subquery would account for both it and q5.
+
+**The four configurations in one window, cache off, AQE bounded to 208 (v23 image, 300 partitions,
+2026-09-23/24).** The run the campaign was for: the v23 image is main at #462 (the threshold planner,
+both grace-join memory fixes, the 1 GiB sort budget), the AOT cache is off for every leg after the
+measurement above, and the run configuration adds `spark.sql.adaptive.coalescePartitions.minPartitionNum=208`
+to the 300 shuffle partitions and the 128 MB advisory size. Spark, `ours`, `csvo` and `comet` ran back to
+back on the same nine nodes with nothing else on the cluster (22:28 to 01:40), one run per query, 103
+queries each. `csvo` pins Comet's scan to `spark.comet.scan.impl=native_datafusion`. Seconds.
+
+| query | Spark | Comet | csvo | ours |
+|---|---|---|---|---|
+| q1 | 13.1 | **12.3** | 15.3 | 13.2 |
+| q2 | 51.4 | 42.8 | 50.6 | **42.2** |
+| q3 | 3.9 | **3.8** | 4.5 | 4.1 |
+| q4 | 91.2 | **60.1** | 97.6 | 90.1 |
+| q5 | 46.0 | 31.2 | 27.6 | **24.4** |
+| q6 | 9.8 | 5.0 | 4.6 | **2.8** |
+| q7 | 6.2 | **6.2** | 7.4 | 6.9 |
+| q8 | 7.6 | **3.7** | 4.9 | 4.6 |
+| q9 | 92.8 | **78.1** | 93.3 | 90.3 |
+| q10 | 7.5 | **6.7** | 6.8 | 7.0 |
+| q11 | 44.1 | **35.6** | 46.3 | 47.6 |
+| q12 | 2.3 | **1.8** | 2.6 | 2.9 |
+| q13 | 7.9 | **7.7** | 8.6 | 8.0 |
+| q14a | 102.5 | **76.1** | 96.2 | 88.6 |
+| q14b | 94.6 | **69.7** | 92.3 | 82.8 |
+| q15 | 8.8 | **4.4** | 4.8 | 5.6 |
+| q16 | 30.8 | **20.9** | 23.3 | 20.9 |
+| q17 | 12.1 | 9.3 | 8.8 | **7.2** |
+| q18 | 8.7 | **6.7** | 11.7 | 8.1 |
+| q19 | 5.3 | **2.8** | 3.4 | 3.1 |
+| q20 | 2.2 | **1.6** | 2.6 | 2.3 |
+| q21 | 1.8 | **1.2** | 1.7 | 1.6 |
+| q22 | 8.5 | **3.7** | 6.4 | 7.6 |
+| q23a | 210.6 | 131.7 | 131.3 | **117.6** |
+| q23b | 291.1 | 153.4 | 137.0 | **124.8** |
+| q24a | 110.0 | **101.1** | 120.8 | 110.9 |
+| q24b | 102.7 | **97.7** | 111.0 | 108.2 |
+| q25 | 9.4 | **6.5** | 11.4 | 10.9 |
+| q26 | 3.8 | **3.0** | 3.5 | 3.2 |
+| q27 | 6.2 | 6.6 | 6.8 | **6.2** |
+| q28 | 114.0 | **102.5** | 110.1 | 113.7 |
+| q29 | 25.1 | 14.8 | 11.4 | **9.8** |
+| q30 | 18.7 | **12.7** | 16.1 | 14.4 |
+| q31 | 14.0 | 13.9 | 14.9 | **12.5** |
+| q32 | 1.5 | 1.7 | 1.4 | **0.9** |
+| q33 | 4.4 | **2.4** | 4.4 | 3.8 |
+| q34 | 5.8 | **4.0** | 5.2 | 4.5 |
+| q35 | 18.5 | 13.9 | 12.8 | **11.4** |
+| q36 | **5.6** | 6.5 | 8.0 | 7.8 |
+| q37 | 7.4 | **6.4** | 7.9 | 6.9 |
+| q38 | 33.5 | 22.3 | 22.3 | **21.2** |
+| q39a | 5.8 | **3.7** | 5.3 | 5.1 |
+| q39b | 6.0 | **2.9** | 4.9 | 4.4 |
+| q40 | 8.3 | 13.9 | 12.1 | **6.2** |
+| q41 | 0.8 | **0.5** | 0.6 | 0.6 |
+| q42 | 1.6 | 1.4 | 1.4 | **1.2** |
+| q43 | 5.6 | **4.6** | 5.2 | 5.5 |
+| q44 | 36.8 | **34.0** | 35.8 | 35.1 |
+| q45 | 7.8 | 5.1 | 5.8 | **4.0** |
+| q46 | 8.9 | 8.1 | 7.2 | **7.1** |
+| q47 | 12.9 | **10.3** | 13.6 | 14.3 |
+| q48 | 8.8 | 6.3 | **6.0** | 7.0 |
+| q49 | 44.4 | 47.4 | 49.8 | **38.9** |
+| q50 | 68.2 | 54.4 | 38.4 | **37.8** |
+| q51 | 24.5 | **13.6** | 15.1 | 14.6 |
+| q52 | 1.5 | 1.1 | 1.2 | **1.1** |
+| q53 | 4.8 | 4.7 | 4.4 | **4.3** |
+| q54 | 7.2 | 6.3 | 4.1 | **4.1** |
+| q55 | 1.7 | 1.7 | 1.8 | **1.4** |
+| q56 | 3.8 | **1.8** | 3.9 | 3.4 |
+| q57 | 7.1 | **5.2** | 8.1 | 8.5 |
+| q58 | 3.0 | 3.4 | 2.8 | **2.7** |
+| q59 | 35.8 | 35.7 | 37.3 | **33.0** |
+| q60 | 3.5 | **2.4** | 4.3 | 3.9 |
+| q61 | 5.1 | **2.8** | 3.6 | 3.7 |
+| q62 | 23.0 | 25.1 | 26.5 | **22.9** |
+| q63 | 5.1 | **4.3** | 5.1 | 4.5 |
+| q64 | 92.7 | 56.3 | 53.9 | **51.4** |
+| q65 | 29.7 | **15.5** | 24.0 | 23.4 |
+| q66 | 9.5 | **9.5** | 11.1 | 9.9 |
+| q67 | 126.5 | **60.7** | 71.2 | 72.9 |
+| q68 | 6.7 | **3.3** | 4.2 | 3.7 |
+| q69 | 7.2 | 5.1 | 5.2 | **4.5** |
+| q70 | 11.1 | 12.1 | 10.4 | **9.8** |
+| q71 | 3.2 | 3.4 | **2.9** | 3.0 |
+| q72 | **29.6** | 34.1 | 33.3 | 32.3 |
+| q73 | 5.3 | 2.7 | **2.6** | 2.8 |
+| q74 | 43.7 | **31.0** | 40.8 | 39.5 |
+| q75 | 76.8 | 73.3 | 80.2 | **69.3** |
+| q76 | 46.3 | 43.4 | 46.9 | **38.7** |
+| q77 | 2.8 | 2.6 | 2.6 | **1.9** |
+| q78 | 123.3 | **74.6** | 92.8 | 79.3 |
+| q79 | 5.7 | **4.5** | 5.7 | 5.4 |
+| q80 | 48.3 | 40.4 | 43.6 | **39.1** |
+| q81 | 18.0 | **12.0** | 13.0 | 14.4 |
+| q82 | 20.6 | **17.9** | 19.3 | 19.3 |
+| q83 | 1.7 | **1.2** | 1.7 | 1.6 |
+| q84 | 19.4 | **17.2** | 19.1 | 18.0 |
+| q85 | 22.7 | **18.4** | 20.9 | 21.9 |
+| q86 | 5.8 | **5.1** | 5.6 | 5.7 |
+| q87 | 31.2 | **19.0** | 27.9 | 20.3 |
+| q88 | **125.5** | 158.1 | 126.6 | 141.7 |
+| q89 | 5.7 | 20.2 | **5.6** | 6.0 |
+| q90 | 35.1 | **34.0** | 35.8 | 36.9 |
+| q91 | 4.2 | **1.8** | 2.9 | 2.5 |
+| q92 | 2.4 | **1.8** | 1.9 | 2.1 |
+| q93 | 136.6 | 85.4 | 67.9 | **65.9** |
+| q94 | 59.7 | 57.9 | 59.5 | **57.3** |
+| q95 | 106.4 | **57.5** | 58.3 | 69.3 |
+| q96 | 18.5 | 16.9 | **16.7** | 19.8 |
+| q97 | 31.1 | **13.6** | 13.8 | 14.3 |
+| q98 | 3.7 | **2.3** | 2.8 | 2.7 |
+| q99 | 8.5 | **8.4** | 13.3 | 14.4 |
+| **total** | **3309** | **2514** | **2706** | **2557** |
+
+`ours` totals **2557 s** against Spark's 3309 (23% less), faster than Spark on 82 of 103
+queries, faster than `csvo` on 77 and than Comet on 38; Comet totals 2514, `csvo` 2706. On the
+heavy joins `ours` leads every engine -- q23a 118 against Comet's 132 and Spark's 211, q23b 125 against
+153 and 291, q93 66, q64 51, q50 38 -- and trails Comet where the scan and the
+aggregate dominate: q4 90 against 60, q67 73 against 61, q95 69 against 58, q14a/b by 12 s each. Against Spark
+the one heavy loss is q88 (142 against 126; Comet 158), the #409 thread's query.
+
+Read against the cache-on `ours` legs above (2856 on v18 in the morning, 3059 on v19 beside the
+windows, 3097 on v23 alone), this leg is the same code path on the same data 10-17% faster, all of it
+the AOT cache's cost on the heavy half of the suite. The 208 minimum on its own, from the paired test
+and the plain-300 legs of the same engines: Spark 3408 to 3263 (-4%), Comet 2555 to 2483 (-3%), `csvo`
+2581 to 2678 (+4%), `ours` q67 -12% and the rest inside the band -- it keeps the sort stages of the
+window queries wide enough and costs the Comet-scan configurations a little on the small ones.
+
+Correctness: every checksum equals Spark's except q65 (ties, in every engine) and q64 under `csvo`
+(0 rows against 12,185; the stale pruning value of comet#6133). q5, which failed under `csvo` on every
+earlier run, completes with the scan implementation pinned and matches Spark's 100 rows.
+
+**The Spark reference at three memory splits, and the prefetching converter (same window
+configuration, the legs after the table).** Every engine above has 50 GB per executor; they differ in
+where the engine puts it. Spark ran at 20 g heap / 30 g overhead, `ours` at 30 / 20, `csvo` at 18 / 16
+with 16 g off-heap, Comet at 20 / 6 with 24 g off-heap -- each engine's split follows where it
+allocates, and a plain-Spark leg at 30 g of heap is the check that the reference column is not
+handicapped by its own. Two more Spark legs, 40 / 10 and 30 / 20, and one `ours` leg with the
+prefetching scan converter (#465, `spark.vector.scan.prefetch=2`), all on the v24/v25 images of the
+same tree:
+
+| set | Spark 20/30 | Spark 30/20 | Spark 40/10 | Comet | `csvo` | `ours` | `ours` prefetch 2 |
+|---|---|---|---|---|---|---|---|
+| all 103 | **3309** | -- | -- | 2514 | 2706 | **2557** | 2615 |
+| the 99 every split completed | 2796 | 2863 | 2860 | 2155 | 2326 | 2202 | 2253 |
+
+| query | Spark 20/30 | 30/20 | 40/10 | Comet | `csvo` | `ours` | `ours` prefetch 2 |
+|---|---|---|---|---|---|---|---|
+| q23b | 291.1 | evicted | evicted | 153.4 | 137.0 | **124.8** | 135.0 |
+| q23a | 210.6 | 188.1 | 185.5 | 131.7 | 131.3 | **117.6** | 121.7 |
+| q93 | 136.6 | 146.1 | 164.8 | 85.4 | 67.9 | **65.9** | 66.1 |
+| q67 | 126.5 | 118.9 | 124.9 | **60.7** | 71.2 | 72.9 | 85.4 |
+| q88 | 125.5 | 125.3 | **124.4** | 158.1 | 126.6 | 141.7 | 129.7 |
+| q78 | 123.3 | 119.0 | 123.4 | **74.6** | 92.8 | 79.3 | 92.8 |
+| q28 | 114.0 | 235.1 | 183.3 | **102.5** | 110.1 | 113.7 | 119.0 |
+| q95 | 106.4 | 96.4 | 92.8 | **57.5** | 58.3 | 69.3 | 60.4 |
+| q14a | 102.5 | 93.8 | 97.5 | **76.1** | 96.2 | 88.6 | 91.4 |
+| q14b | 94.6 | 90.3 | 88.3 | **69.7** | 92.3 | 82.8 | 87.7 |
+| q9 | 92.8 | 83.3 | 83.7 | **78.1** | 93.3 | 90.3 | 90.8 |
+| q64 | 92.7 | 91.5 | 91.2 | 56.3 | 53.9 | **51.4** | 52.3 |
+| q4 | 91.2 | 90.9 | 88.6 | **60.1** | 97.6 | 90.1 | 90.4 |
+| q50 | 68.2 | 72.7 | 80.2 | 54.4 | 38.4 | **37.8** | 37.8 |
+
+The heap does move Spark: at 30 / 20 it is faster than at 20 / 30 on 62 of the 99 shared queries -- q9
+92.8 to 83.3, q14a 102.5 to 93.8, q23a 210.6 to 188.1, q67 126.5 to 118.9, q95 106.4 to 96.4 -- and
+without the two damaged queries below the 99 total is 2482 against 2545 (-2.5%). But both heavier-heap
+legs lose q23b, q24a and q24b, and the loss is the node's disk, not memory: the executors are evicted
+for ephemeral storage during q23b (`The node was low on resource: ephemeral-storage`, then
+`DiskPressure`). Spark's q23b writes 83 GB of shuffle (`ours` 37) and spills 503 GB across nine nodes
+with 20 GB volumes; a larger heap spills larger files, and the 20 / 30 split survives on the margin. A
+repeat of the 30 / 20 leg with `spark.cleaner.periodicGC.interval=1min`, so the previous query's
+shuffle files could not be the difference, evicted the same three -- the footprint is q23b's own. The
+executors replaced after the eviction then cost q28 (235 and 183 against 114) and q93 (146 and 165
+against 137) their cached inputs, which is why the 30 / 20 total is *higher* on paper. The reference
+column stays the complete 20 / 30 run; against the best of the three splits per query (3165 s) `ours`
+is 19% faster and ahead on 75 of 103, against the complete run 23% and 82. A 30 / 20 reference that
+completes needs a larger node volume.
+
+The prefetching converter changes 44 queries for the better and 59 for the worse, +2.3% in total:
+gains q88 141.7 to 129.7, q95 69.3 to 60.4, q94 57.3 to 53.6; losses q78 79.3 to 92.8, q67 72.9 to
+85.4, q23b 124.8 to 135.0. The node's own metrics say why. On q9 (six scans wrapped, 710 k batches
+each) the task thread waited 28.1 min per scan for converted batches, the helper thread waited
+27.7 min *on the Parquet reader*, and converting took 1.2 min: the conversion this operator overlaps is
+4% of the read, and the queue hand-off plus one batch copy per 710 k batches is the tax the losses
+show. The default stays `spark.vector.scan.prefetch=0`; the operator remains as an opt-in instrument
+with its three wait metrics. The scan-side cost is the reader, which is also what `csvo`'s wins on
+q88, q95 and q28 measure -- Comet's DataFusion reader, not the Arrow boundary.
+
+**The read path itself: the S3A Analytics Accelerator stream, tuned against its defaults.** Every
+Parquet leg reads through the accelerator: Hadoop 3.4.3's S3A defaults `fs.s3a.input.stream.type` to
+`analytics` (the executor profiles show `AnalyticsStream` in the read path, the library at 1.3.1),
+and the image pins the jar explicitly. One Spark leg on the same window configuration with the stream
+tuned -- read-ahead 4 MB (default 64 KB), 16 MB blocks, ranges and parts (default 8 MB), whole-object
+prefetch up to 16 MB (default 8), `prefetching.mode=ALL` (default `ROW_GROUP`), a 500-connection pool
+(200), 256 threads -- was slower on 61 of 93 queries, 2534 s against 2440 (+3.8%, the median per-query
+change the same), most on the scan-heavy ones: q9 96.1 against 92.8, q23a 219.9 against 210.6, q28
+123.8 against 114.0, q67 133.1 against 126.5, q88 133.0 against 125.5. The files are 7-15 MB, so the
+default already fetched most of them whole and the row-group prefetch already brought in exactly the
+columns in flight; larger units and `ALL` fetch more bytes per file than the query uses, thirteen
+tasks at a time. The library's defaults stay the configuration. With the converter result above, the
+scan cost is the reader's per-file request latency, and neither overlapping the conversion nor
+fetching bigger units moves it.
+
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 

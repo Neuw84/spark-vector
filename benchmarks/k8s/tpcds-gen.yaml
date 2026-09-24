@@ -1,0 +1,94 @@
+# TPC-DS data generation on the cluster (#247): TpcdsGenRunner runs dsdgen on the executors and writes
+# ZSTD Parquet in Spark's TPC-DS schema to S3. Sized for the sfi-iceberg-bench `bench` node group
+# (4 x m5.2xlarge: 7.9 cores / 30 GiB allocatable each) -- one executor per node; SF1000 wants the
+# bench-xl group scaled up and more executors (see benchmarks/k8s/README.md).
+#
+#   sed -e 's|SCALE|100|g' -e 's|IMAGE_TAG|<tag>|' -e 's|PARALLEL|64|' benchmarks/k8s/tpcds-gen.yaml | kubectl apply -f -
+#   kubectl -n bench get sparkapplication tpcds-gen-sfSCALE -w
+#   kubectl -n bench logs -f tpcds-gen-sfSCALE-driver | grep tpcds-gen
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: tpcds-gen-sfSCALE
+  namespace: bench
+spec:
+  type: Scala
+  mode: cluster
+  image: 378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:IMAGE_TAG
+  imagePullPolicy: IfNotPresent
+  mainClass: io.sparkvector.benchmarks.TpcdsGenRunner
+  mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
+  arguments:
+    - "--scale"
+    - "SCALE"
+    - "--out"
+    - "s3a://sfi-iceberg-wh-378683551918/tpcds/sfSCALE/parquet"
+    - "--parallel"
+    - "PARALLEL"
+    - "--dsdgen"
+    - "/opt/tpcds-kit/tools"
+  sparkVersion: "4.1.3"
+  sparkConf:
+    spark.sql.adaptive.enabled: "true"
+    # TPCDSSchema declares char/varchar columns; written as STRING, like the local generator's tables.
+    spark.sql.legacy.charVarcharAsString: "true"
+    spark.sql.parquet.compression.codec: "zstd"
+    spark.sql.files.maxRecordsPerFile: "0"
+    spark.hadoop.fs.s3a.committer.name: "magic"
+    spark.hadoop.fs.s3a.committer.magic.enabled: "true"
+    spark.sql.sources.commitProtocolClass: "org.apache.spark.internal.io.cloud.PathOutputCommitProtocol"
+    spark.sql.parquet.output.committer.class: "org.apache.spark.internal.io.cloud.BindingParquetOutputCommitter"
+    # IRSA: hadoop-aws 3.4's default chain has no web-identity provider (the SF100 run passed on the
+    # node role). Not the SDK's DefaultCredentialsProvider: it is a shared singleton that S3A closes with
+    # the first file system ("Connection pool shut down" on every later access); the web-identity
+    # provider is a fresh instance per file system.
+    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+    spark.hadoop.fs.s3a.fast.upload: "true"
+    spark.hadoop.fs.s3a.connection.maximum: "200"
+    spark.kubernetes.executor.deleteOnTermination: "true"
+    spark.kubernetes.authenticate.executor.serviceAccountName: "sfi-engine"
+    spark.driver.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
+    spark.executor.extraJavaOptions: >-
+      --add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true
+  restartPolicy:
+    type: Never
+  driver:
+    cores: 1
+    memory: "3g"
+    serviceAccount: sfi-engine
+    labels:
+      app: tpcds-gen
+  # The bench nodes also carry the kafka and flink operators (~2.5 cores, ~9 GiB each): what is left
+  # per node is about 5 cores and 21 GiB, hence one executor of 4 cores / 17 GiB per node.
+  executor:
+    instances: 4
+    cores: 4
+    memory: "14g"
+    memoryOverhead: "3g"
+    labels:
+      app: tpcds-gen
+    # The executors need the IRSA role too: without this they run as the namespace's default account.
+    serviceAccount: sfi-engine
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
