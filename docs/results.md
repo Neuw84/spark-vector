@@ -1249,6 +1249,140 @@ the rows in the morning returned the correct 12,185 in the afternoon on the same
 q64 too reads `store_sales` through a dynamic-partition-pruning filter, so one timing-dependent
 evaluation of the Comet scan's pruning subquery would account for both it and q5.
 
+**The four configurations in one window, cache off, AQE bounded to 208 (v23 image, 300 partitions,
+2026-09-23/24).** The run the campaign was for: the v23 image is main at #462 (the threshold planner,
+both grace-join memory fixes, the 1 GiB sort budget), the AOT cache is off for every leg after the
+measurement above, and the run configuration adds `spark.sql.adaptive.coalescePartitions.minPartitionNum=208`
+to the 300 shuffle partitions and the 128 MB advisory size. Spark, `ours`, `csvo` and `comet` ran back to
+back on the same nine nodes with nothing else on the cluster (22:28 to 01:40), one run per query, 103
+queries each. `csvo` pins Comet's scan to `spark.comet.scan.impl=native_datafusion`. Seconds.
+
+| query | Spark | Comet | csvo | ours |
+|---|---|---|---|---|
+| q1 | 13.1 | **12.3** | 15.3 | 13.2 |
+| q2 | 51.4 | 42.8 | 50.6 | **42.2** |
+| q3 | 3.9 | **3.8** | 4.5 | 4.1 |
+| q4 | 91.2 | **60.1** | 97.6 | 90.1 |
+| q5 | 46.0 | 31.2 | 27.6 | **24.4** |
+| q6 | 9.8 | 5.0 | 4.6 | **2.8** |
+| q7 | 6.2 | **6.2** | 7.4 | 6.9 |
+| q8 | 7.6 | **3.7** | 4.9 | 4.6 |
+| q9 | 92.8 | **78.1** | 93.3 | 90.3 |
+| q10 | 7.5 | **6.7** | 6.8 | 7.0 |
+| q11 | 44.1 | **35.6** | 46.3 | 47.6 |
+| q12 | 2.3 | **1.8** | 2.6 | 2.9 |
+| q13 | 7.9 | **7.7** | 8.6 | 8.0 |
+| q14a | 102.5 | **76.1** | 96.2 | 88.6 |
+| q14b | 94.6 | **69.7** | 92.3 | 82.8 |
+| q15 | 8.8 | **4.4** | 4.8 | 5.6 |
+| q16 | 30.8 | **20.9** | 23.3 | 20.9 |
+| q17 | 12.1 | 9.3 | 8.8 | **7.2** |
+| q18 | 8.7 | **6.7** | 11.7 | 8.1 |
+| q19 | 5.3 | **2.8** | 3.4 | 3.1 |
+| q20 | 2.2 | **1.6** | 2.6 | 2.3 |
+| q21 | 1.8 | **1.2** | 1.7 | 1.6 |
+| q22 | 8.5 | **3.7** | 6.4 | 7.6 |
+| q23a | 210.6 | 131.7 | 131.3 | **117.6** |
+| q23b | 291.1 | 153.4 | 137.0 | **124.8** |
+| q24a | 110.0 | **101.1** | 120.8 | 110.9 |
+| q24b | 102.7 | **97.7** | 111.0 | 108.2 |
+| q25 | 9.4 | **6.5** | 11.4 | 10.9 |
+| q26 | 3.8 | **3.0** | 3.5 | 3.2 |
+| q27 | 6.2 | 6.6 | 6.8 | **6.2** |
+| q28 | 114.0 | **102.5** | 110.1 | 113.7 |
+| q29 | 25.1 | 14.8 | 11.4 | **9.8** |
+| q30 | 18.7 | **12.7** | 16.1 | 14.4 |
+| q31 | 14.0 | 13.9 | 14.9 | **12.5** |
+| q32 | 1.5 | 1.7 | 1.4 | **0.9** |
+| q33 | 4.4 | **2.4** | 4.4 | 3.8 |
+| q34 | 5.8 | **4.0** | 5.2 | 4.5 |
+| q35 | 18.5 | 13.9 | 12.8 | **11.4** |
+| q36 | **5.6** | 6.5 | 8.0 | 7.8 |
+| q37 | 7.4 | **6.4** | 7.9 | 6.9 |
+| q38 | 33.5 | 22.3 | 22.3 | **21.2** |
+| q39a | 5.8 | **3.7** | 5.3 | 5.1 |
+| q39b | 6.0 | **2.9** | 4.9 | 4.4 |
+| q40 | 8.3 | 13.9 | 12.1 | **6.2** |
+| q41 | 0.8 | **0.5** | 0.6 | 0.6 |
+| q42 | 1.6 | 1.4 | 1.4 | **1.2** |
+| q43 | 5.6 | **4.6** | 5.2 | 5.5 |
+| q44 | 36.8 | **34.0** | 35.8 | 35.1 |
+| q45 | 7.8 | 5.1 | 5.8 | **4.0** |
+| q46 | 8.9 | 8.1 | 7.2 | **7.1** |
+| q47 | 12.9 | **10.3** | 13.6 | 14.3 |
+| q48 | 8.8 | 6.3 | **6.0** | 7.0 |
+| q49 | 44.4 | 47.4 | 49.8 | **38.9** |
+| q50 | 68.2 | 54.4 | 38.4 | **37.8** |
+| q51 | 24.5 | **13.6** | 15.1 | 14.6 |
+| q52 | 1.5 | 1.1 | 1.2 | **1.1** |
+| q53 | 4.8 | 4.7 | 4.4 | **4.3** |
+| q54 | 7.2 | 6.3 | 4.1 | **4.1** |
+| q55 | 1.7 | 1.7 | 1.8 | **1.4** |
+| q56 | 3.8 | **1.8** | 3.9 | 3.4 |
+| q57 | 7.1 | **5.2** | 8.1 | 8.5 |
+| q58 | 3.0 | 3.4 | 2.8 | **2.7** |
+| q59 | 35.8 | 35.7 | 37.3 | **33.0** |
+| q60 | 3.5 | **2.4** | 4.3 | 3.9 |
+| q61 | 5.1 | **2.8** | 3.6 | 3.7 |
+| q62 | 23.0 | 25.1 | 26.5 | **22.9** |
+| q63 | 5.1 | **4.3** | 5.1 | 4.5 |
+| q64 | 92.7 | 56.3 | 53.9 | **51.4** |
+| q65 | 29.7 | **15.5** | 24.0 | 23.4 |
+| q66 | 9.5 | **9.5** | 11.1 | 9.9 |
+| q67 | 126.5 | **60.7** | 71.2 | 72.9 |
+| q68 | 6.7 | **3.3** | 4.2 | 3.7 |
+| q69 | 7.2 | 5.1 | 5.2 | **4.5** |
+| q70 | 11.1 | 12.1 | 10.4 | **9.8** |
+| q71 | 3.2 | 3.4 | **2.9** | 3.0 |
+| q72 | **29.6** | 34.1 | 33.3 | 32.3 |
+| q73 | 5.3 | 2.7 | **2.6** | 2.8 |
+| q74 | 43.7 | **31.0** | 40.8 | 39.5 |
+| q75 | 76.8 | 73.3 | 80.2 | **69.3** |
+| q76 | 46.3 | 43.4 | 46.9 | **38.7** |
+| q77 | 2.8 | 2.6 | 2.6 | **1.9** |
+| q78 | 123.3 | **74.6** | 92.8 | 79.3 |
+| q79 | 5.7 | **4.5** | 5.7 | 5.4 |
+| q80 | 48.3 | 40.4 | 43.6 | **39.1** |
+| q81 | 18.0 | **12.0** | 13.0 | 14.4 |
+| q82 | 20.6 | **17.9** | 19.3 | 19.3 |
+| q83 | 1.7 | **1.2** | 1.7 | 1.6 |
+| q84 | 19.4 | **17.2** | 19.1 | 18.0 |
+| q85 | 22.7 | **18.4** | 20.9 | 21.9 |
+| q86 | 5.8 | **5.1** | 5.6 | 5.7 |
+| q87 | 31.2 | **19.0** | 27.9 | 20.3 |
+| q88 | **125.5** | 158.1 | 126.6 | 141.7 |
+| q89 | 5.7 | 20.2 | **5.6** | 6.0 |
+| q90 | 35.1 | **34.0** | 35.8 | 36.9 |
+| q91 | 4.2 | **1.8** | 2.9 | 2.5 |
+| q92 | 2.4 | **1.8** | 1.9 | 2.1 |
+| q93 | 136.6 | 85.4 | 67.9 | **65.9** |
+| q94 | 59.7 | 57.9 | 59.5 | **57.3** |
+| q95 | 106.4 | **57.5** | 58.3 | 69.3 |
+| q96 | 18.5 | 16.9 | **16.7** | 19.8 |
+| q97 | 31.1 | **13.6** | 13.8 | 14.3 |
+| q98 | 3.7 | **2.3** | 2.8 | 2.7 |
+| q99 | 8.5 | **8.4** | 13.3 | 14.4 |
+| **total** | **3309** | **2514** | **2706** | **2557** |
+
+`ours` totals **2557 s** against Spark's 3309 (23% less), faster than Spark on 82 of 103
+queries, faster than `csvo` on 77 and than Comet on 38; Comet totals 2514, `csvo` 2706. On the
+heavy joins `ours` leads every engine -- q23a 118 against Comet's 132 and Spark's 211, q23b 125 against
+153 and 291, q93 66, q64 51, q50 38 -- and trails Comet where the scan and the
+aggregate dominate: q4 90 against 60, q67 73 against 61, q95 69 against 58, q14a/b by 12 s each. Against Spark
+the one heavy loss is q88 (142 against 126; Comet 158), the #409 thread's query.
+
+Read against the cache-on `ours` legs above (2856 on v18 in the morning, 3059 on v19 beside the
+windows, 3097 on v23 alone), this leg is the same code path on the same data 10-17% faster, all of it
+the AOT cache's cost on the heavy half of the suite. The 208 minimum on its own, from the paired test
+and the plain-300 legs of the same engines: Spark 3408 to 3263 (-4%), Comet 2555 to 2483 (-3%), `csvo`
+2581 to 2678 (+4%), `ours` q67 -12% and the rest inside the band -- it keeps the sort stages of the
+window queries wide enough and costs the Comet-scan configurations a little on the small ones.
+
+Correctness: every checksum equals Spark's except q65 (ties, in every engine) and q64 under `csvo`
+(0 rows against 12,185; the stale pruning value of comet#6133). q5, which failed under `csvo` on every
+earlier run, completes with the scan implementation pinned and matches Spark's 100 rows.
+
+
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
 
