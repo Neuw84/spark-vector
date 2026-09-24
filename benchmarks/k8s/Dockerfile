@@ -16,6 +16,9 @@
 ARG SPARK_VERSION=4.1.3
 ARG HADOOP_VERSION=3.4.3
 ARG AWS_SDK_V2_VERSION=2.35.4
+# The S3A Analytics Accelerator stream (Hadoop 3.4.3 reads through it by default); the version hadoop-aws is
+# built against, and the one the Iceberg AWS bundle carries -- pinned here so S3A does not depend on that bundle.
+ARG AAL_VERSION=1.3.1
 ARG COMET_VERSION=1.0.0
 ARG ICEBERG_VERSION=1.11.0
 
@@ -76,6 +79,7 @@ FROM eclipse-temurin:25-jre
 ARG SPARK_VERSION
 ARG HADOOP_VERSION
 ARG AWS_SDK_V2_VERSION
+ARG AAL_VERSION
 ARG COMET_VERSION
 ARG ICEBERG_VERSION
 
@@ -112,11 +116,12 @@ RUN (curl -fsSL -o /tmp/spark.tgz "https://downloads.apache.org/spark/spark-${SP
 # removal cannot be lost to a snapshot that misses deletions.)
 
 # The jars the runners need beyond the distribution: S3A (hadoop-aws + the AWS SDK v2 bundle it is
-# built against), the S3A magic committer binding (spark-hadoop-cloud), Comet, the Iceberg runtime,
+# built against + the Analytics Accelerator its default input stream needs), the S3A magic committer binding (spark-hadoop-cloud), Comet, the Iceberg runtime,
 # and Spark's spark-sql tests jar.
 RUN cd /opt/spark/jars \
     && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_VERSION}/hadoop-aws-${HADOOP_VERSION}.jar" \
     && curl -fsSLO "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_V2_VERSION}/bundle-${AWS_SDK_V2_VERSION}.jar" \
+    && curl -fsSLO "https://repo1.maven.org/maven2/software/amazon/s3/analyticsaccelerator/analyticsaccelerator-s3/${AAL_VERSION}/analyticsaccelerator-s3-${AAL_VERSION}.jar" \
     && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/datafusion/comet-spark-spark4.1_2.13/${COMET_VERSION}/comet-spark-spark4.1_2.13-${COMET_VERSION}.jar" \
     && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.1_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.1_2.13-${ICEBERG_VERSION}.jar" \
     && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar" \
