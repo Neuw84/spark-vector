@@ -1,3 +1,5 @@
 # Commits to skip in git blame (git config blame.ignoreRevsFile .git-blame-ignore-revs).
 # The one-time Spotless reformat of every Java and Scala source with jfmt and scalafmt (#423, PR #450).
 b746eea882c2177d094ed0d5f86688c6ec988cf4
+# The Apache-2.0 license header added to every Scala and Java source (release hygiene).
+c84745cce99c0c5320acfbae8ae61f6db4f187c2

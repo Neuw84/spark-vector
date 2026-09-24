@@ -19,6 +19,32 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 - Output: unshaded Arrow 18.3.0 vectors (the version Spark bundles) wrapped in Spark's
   `ArrowColumnVector`, so Spark's own `ColumnarToRowExec` consumes them unchanged.
 
+## Status
+
+Version 0.1.0, a preview release under the Apache License 2.0 (see `LICENSE` and `NOTICE`). The
+plugin runs the whole of TPC-DS (103 queries) and TPC-H (22) with every operator accelerated and
+returns Spark's results; what it does not convert falls back to Spark, always with a recorded reason.
+Measured on the 1 TB TPC-DS Parquet dataset on EKS, eight 13-core executors with 50 GB each, one
+window per engine, all queries once, the median of the measured iteration
+(`docs/results.md` has the per-query tables, the configurations and every study behind them):
+
+| engine | total, 103 queries | faster than Spark on | notes |
+|---|---:|---:|---|
+| Spark 4.1.3 | 3309 s | -- | 20 GB heap / 30 GB overhead; the reference |
+| Apache DataFusion Comet 1.0 | 2514 s | 90 | native scan, operators and shuffle |
+| Comet's scan + our operators and shuffle | 2706 s | 67 | `spark.comet.scan.impl=native_datafusion` |
+| **spark-vector** (Spark's scan, our operators, our Flight shuffle) | **2557 s** | **82** | 30 GB heap / 20 GB overhead; 23% under Spark, 2% over Comet |
+
+Where the plugin wins it is the joins and aggregates (q23a 118 s against Spark's 211 and Comet's
+132; q23b 125 against 291 and 153; q93 66 against 137 and 85; q64 51 against 93 and 56). Where it
+loses it is the scan-bound queries (q88 142 against Spark's 126) and a handful of small ones
+(q99, q36, q12, q57), each with its cause named in `docs/results.md`. Every checksum equals Spark's
+except q65, whose result has ties that every engine orders differently.
+
+Requirements and the things it does not do yet are listed under
+[Requirements and known limitations](#requirements-and-known-limitations); every configuration key
+with its default is in [docs/configuration.md](docs/configuration.md).
+
 ## Layout
 
 | Module | Language | Contents |
@@ -56,7 +82,8 @@ spark-submit \
 `spark.plugins` registers the session extension automatically; alternatively set
 `spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions`.
 
-Configuration keys (all default to `true` except the last):
+Configuration keys (all default to `true` except the last; the complete reference, every
+`spark.vector.*` key with its default and unit, is [docs/configuration.md](docs/configuration.md)):
 
 | Key | Meaning |
 |---|---|
@@ -166,9 +193,11 @@ their footprint by the same factor -- strict mode is the cheapest in memory as w
 | `spark.vector.shuffle.bufferBytes`, `spark.vector.shuffle.flushBytes`, `spark.vector.shuffle.batchBytes` | what a map task holds before writing (direct memory): across all partitions, per partition before its temporary file, per record batch |
 | `spark.sql.shuffle.partitions` | the size of a reduce task's input, hence of every table built from it: at 1 TB with 200 partitions a wide exchange hands a reducer several hundred MB of compressed input, and the final aggregate over it is the one that spills (#368 measures 1000 partitions with a 128 MB advisory size) |
 
-The sort and the window hold their whole partition (Arrow memory, plus an `int` permutation per row on
-the heap) and do not spill; a partition that cannot fit should keep Spark's sort
-(`spark.vector.exec.sort.enabled=false`).
+The sort holds runs of `spark.vector.sort.runRows` rows and spills them as Arrow IPC once their bytes
+pass `spark.vector.sort.spillBytes` (default 1 GiB, measured in #416; the runs are merged on the way
+out), and the shuffled hash join spills its build side into buckets past `spark.vector.join.spillBytes`
+(default 256 MB, the grace join). The window still holds its whole partition (Arrow memory, plus an
+`int` permutation per row on the heap); a partition that cannot fit should keep Spark's window.
 
 **Disk.** Everything we write lands under `spark.local.dir`, through Spark's own block manager, so it
 is sized and cleaned like Spark's shuffle files -- and on Kubernetes that is the node's disk or the
@@ -203,6 +232,66 @@ Spark 4.1 officially supports JDK 17 and 21. Running it on 25 needs two things b
   jars; this project's tests do the same through Maven).
 - `--sun-misc-unsafe-memory-access=allow` silences the deprecation warnings from Spark's and Arrow's
   use of `Unsafe`.
+
+## Requirements and known limitations
+
+What a deployment needs, and what the plugin does not do yet -- the short list; the reasons and the
+measurements behind each item are in the linked docs and issues.
+
+**Requirements**
+
+- **JDK 25** on the driver and the executors, with `--add-modules=jdk.incubator.vector
+  --enable-native-access=ALL-UNNAMED` in both `extraJavaOptions`. The Vector API is an incubator
+  module: its shape can change between JDK releases, so a JDK upgrade may need a rebuild of the
+  kernels.
+- **Spark 4.1.x, Scala 2.13** only. Spark 4.1 on JDK 25 additionally needs Hadoop 3.4.3's client
+  jars in place of the bundled 3.4.2 (the section above).
+- **Memory:** a heap-heavy split. The operators keep their tables (aggregate keys, join builds, sort
+  runs) on the heap and their batches in Arrow direct memory, so give the heap more than Spark's
+  defaults would and bound direct memory explicitly: at 50 GB per 13-core executor the 1 TB runs
+  use a 30 GB heap and 20 GB of overhead, with `-XX:MaxDirectMemorySize` set to the overhead less
+  what the JVM itself needs (about 2 GB). Plain Spark on the same nodes prefers 20 / 30. The
+  [Memory tuning](#memory-tuning) section has the rules.
+- **The columnar shuffle** (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`)
+  serves reducers over Arrow Flight from each executor on an ephemeral port
+  (`spark.vector.shuffle.flight.bindHost` chooses the interface): executors must reach each other
+  directly. With `spark.authenticate` on, every call carries Spark's shuffle secret; TLS is not
+  implemented, and under `spark.ssl.rpc.enabled` the server refuses to start -- use
+  `spark.vector.shuffle.backend=block` (Spark's own block transfer carrying our batches) there
+  (`docs/flight-shuffle.md`). Without the manager the plugin runs over Spark's row shuffle,
+  converting at the boundary.
+- **Platforms measured:** x86-64 with AVX-512 (the 1 TB campaign) and AVX2, and Apple silicon
+  (NEON, 128-bit lanes) for the local suites. Graviton (SVE) is untested (#253); the kernels choose
+  the lane width at start-up, so it should run, but the thresholds were set on x86.
+- **Comet and Iceberg are optional.** Comet 1.0 gives a native Parquet scan and a native shuffle the
+  plugin can sit between; Iceberg 1.11 gives the vectorized reader and merge-on-read tables. Neither
+  is needed for Parquet through Spark's own reader.
+
+**Not converted yet (falls back to Spark, with the reason recorded)**
+
+- `ObjectHashAggregateExec` functions (`collect_*`, `percentile_*`) and `SortAggregateExec` over
+  non-string buffers (#57); cached tables, `InMemoryTableScanExec` (#55).
+- Nested-type accessors and constructors: `arr[i]`, `map[key]`, struct/array/map construction, the
+  lambda function families (#50); struct fields and pass-through nested columns work.
+- Python UDFs (#65) and the Parquet write path, `DataWritingCommandExec` (#64).
+- `RANGE` window frames with value offsets, decimal window aggregates (#28), `IGNORE NULLS` (#58).
+- The window operator holds its whole partition in memory (the sort and the joins spill; the window
+  does not yet).
+- Regular expressions, collated strings, binary and Float columns as computed values or keys (they
+  pass through untouched); the full lists are the "Falls back" column of
+  [Supported today](#supported-today) and `docs/expressions.md`.
+
+**Known behaviour to be aware of**
+
+- Results equal Spark's on every TPC-DS and TPC-H query; a query whose result contains ties
+  (TPC-DS q65) may order them differently, as any engine may.
+- The AOT class-data cache (`benchmarks/k8s/aot/`) is off by default: it speeds start-up and
+  costs the heavy queries 20% at 1 TB (`docs/results.md`).
+- The scan is Spark's own vectorized Parquet reader; a query bound by the scan (q88, q9) runs at
+  Spark's speed. `spark.vector.scan.prefetch` converts on a helper thread and is off by default
+  because the reader, not the conversion, is the cost (#403).
+- Spark's SQL golden-file suite runs with the plugin (`spark-sql-tests` profile); coverage, not a
+  pass rate, is tracked in `spark-sql-tests/src/test/resources/vector-sql-coverage.tsv` (#17).
 
 ## How it works
 
@@ -744,6 +833,6 @@ own operators, not ours).
 
 - A Parquet-to-Arrow reader of our own; Comet's reader covers the zero-copy case.
 - A columnar broadcast exchange of our own (the build side of a broadcast join is read from Spark's
-  `HashedRelation` once per executor, #325), a spilling sort or join (#380: an external merge sort
-  under Spark's memory arbitration is designed), TLS for the Flight shuffle server, and a push-based
-  shuffle service for disposable executors (the `VectorShuffleBackend` seam is where it plugs in).
+  `HashedRelation` once per executor, #325), a spilling window, TLS for the Flight shuffle server,
+  and a push-based shuffle service for disposable executors (the `VectorShuffleBackend` seam is
+  where it plugs in).

@@ -1,0 +1,65 @@
+# Spark's own SQL golden-file suite (SQLQueryTestSuite from the spark-sql tests jar) run with the
+# spark-vector plugin enabled, through benchmarks/scripts/run-spark-sql-tests.sh. Triggered by hand:
+# the whole suite takes about 15 minutes, and a full run compares the per-case acceleration counts
+# with the checked-in floor (spark-sql-tests/src/test/resources/vector-sql-coverage.tsv, #17) and
+# fails when a case lost acceleration. A filtered run skips the floor comparison.
+name: Spark SQL tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: 'Regex over test-case names (empty = the whole suite)'
+        required: false
+        default: ''
+      include_excluded:
+        description: 'Also run the files excluded by default (explain*, DataSketches, udtf)'
+        type: boolean
+        required: false
+        default: false
+      jvm_args:
+        description: 'Extra JVM args for a non-default configuration, e.g. -Dspark.vector.exec.sortMergeJoin.mode=merge'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  sql-tests:
+    name: golden suite (JDK 25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Run the suite
+        env:
+          FILTER: ${{ inputs.filter }}
+          SQL_TESTS_JVM_ARGS: ${{ inputs.jvm_args }}
+          SQL_TESTS_EXCLUDE: ${{ inputs.include_excluded && '^$' || '' }}
+          MAVEN_OPTS: -Xmx2g
+        run: |
+          if [ -n "$FILTER" ]; then
+            benchmarks/scripts/run-spark-sql-tests.sh "$FILTER"
+          else
+            benchmarks/scripts/run-spark-sql-tests.sh
+          fi
+
+      - name: Reports and coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-sql-tests
+          if-no-files-found: ignore
+          retention-days: 30
+          path: |
+            spark-sql-tests/target/scalatest-reports/
+            spark-sql-tests/target/vector-sql-coverage*.tsv

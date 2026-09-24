@@ -1,0 +1,20 @@
+spark-vector
+Copyright 2025-2026 Angel Conde and the spark-vector contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product depends on, but does not bundle, the following software, each under its own license:
+
+- Apache Spark (Apache License 2.0)
+- Apache Arrow (Apache License 2.0)
+- Apache DataFusion Comet (Apache License 2.0) -- optional; used for its native Parquet scan and
+  native shuffle when installed
+- Apache Iceberg (Apache License 2.0) -- optional; used for its vectorized reader and table format
+- Apache Hadoop (Apache License 2.0)
+- zstd-jni (BSD 2-Clause)
+
+The `upstream/` directory carries a standalone reproduction and issue write-up for an Apache Spark
+bug (SPARK-55679); it contains no Apache Spark source.
+
+The benchmarks use the TPC-H and TPC-DS specifications and dsdgen/dbgen from the TPC (Transaction
+Processing Performance Council); results are not audited TPC results and are labeled as such.
