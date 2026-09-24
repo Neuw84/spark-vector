@@ -272,6 +272,20 @@ object CdcMergeRunner {
       val localOut = if (outScheme) "cdc-results" else args.out
       Files.createDirectories(Paths.get(localOut))
       val outFile = Paths.get(localOut, s"cdc-${args.config}.jsonl")
+      // With an object-store `out`, copy the local JSONL to `<out>/cdc-<config>-<ns>-<variant>.jsonl` after every
+      // measurement: the driver's disk is gone once its pod exits, so a copy taken from outside after the run
+      // finds nothing, and a copy per measurement keeps the partial results of a run that dies midway.
+      val uploadTarget =
+        if (outScheme) Some(new org.apache.hadoop.fs.Path(
+          s"${args.out.stripSuffix("/")}/cdc-${args.config}-${args.table.replace('.', '-')}.jsonl"
+        ))
+        else None
+      def uploadResults(): Unit = uploadTarget.foreach { target =>
+        try {
+          val fs = target.getFileSystem(spark.sparkContext.hadoopConfiguration)
+          fs.copyFromLocalFile(false, true, new org.apache.hadoop.fs.Path(outFile.toAbsolutePath.toUri), target)
+        } catch { case e: java.io.IOException => println(s"[cdc] WARNING: could not upload results to $target: $e") }
+      }
       val writer = new PrintWriter(Files.newBufferedWriter(
         outFile,
         StandardCharsets.UTF_8,
@@ -280,6 +294,7 @@ object CdcMergeRunner {
       ))
       def emit(m: Measurement): Unit = {
         writer.println(m.toJson(args.config, args.table, live, changeCounts, changeBytes)); writer.flush()
+        uploadResults()
         println(
           f"[cdc] ${args.config} ${m.phase}/${m.name} median=${m.medianMs}%.1fms p90=${m.p90Ms}%.1fms rows=${m.rows} " +
             s"accelerated=${m.acceleratedOps}/${m.operatorCount}" +
