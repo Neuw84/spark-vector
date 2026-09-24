@@ -54,7 +54,8 @@ gen() { # <namespace> <variants>
 }
 
 cdc() { # <config> <namespace> <variant>
-  local config="$1" ns="$2" variant="$3" table="${ns}.${variant}"
+  local config="$1" ns="$2" variant="$3"
+  local table="${ns}.${variant}"
   local name="spark-vector-mor-cdc-${config}-${ns}-${variant//_/-}" f
   f="$(mktemp)"
   # The manifest name pattern is CONFIG-TABLE; render TABLE as ns.variant and give the SparkApplication a k8s-safe name.
