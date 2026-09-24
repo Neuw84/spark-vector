@@ -196,7 +196,8 @@ object CdcMergeRunner {
         val columns = spark.table(table).schema.fieldNames.toSeq
         def branch(op: String, tweaks: Map[String, String]) =
           s"SELECT '$op' AS op, ${columns.map(c => tweaks.getOrElse(c, c) + s" AS $c").mkString(", ")} FROM cdc_base"
-        spark.sql(
+        val grainCols = p.grain.mkString(", ")
+        val batch = spark.sql(
           branch(
             "U",
             p.cdcUpdateTweaks
@@ -207,6 +208,11 @@ object CdcMergeRunner {
               Map(p.reKey -> s"${p.reKey} + ${maxKey}L")
             ) + s" WHERE ${buckets(p, InsertBuckets)}"
         )
+        // At most one change row per grain: the timed MERGE rejects a target matched more than once
+        // (SQLSTATE 23K01). lineitem's grain is a true key (no-op); store_sales is not, so dedupe.
+        batch.createOrReplaceTempView("cdc_raw")
+        spark.sql(s"SELECT ${batch.columns.mkString(", ")} FROM (SELECT *, " +
+          s"row_number() OVER (PARTITION BY $grainCols ORDER BY $grainCols) AS _rn FROM cdc_raw) WHERE _rn = 1")
           .repartition(args.threads)
           .write.mode("overwrite").parquet(changesDir)
       }

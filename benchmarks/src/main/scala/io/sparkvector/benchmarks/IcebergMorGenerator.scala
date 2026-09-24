@@ -208,7 +208,11 @@ object IcebergMorGenerator {
       variants: Seq[String] = DefaultVariants,
       threads: Int = Runtime.getRuntime.availableProcessors(),
       /** Data files the base table is written as; deletes then span all of them. */
-      files: Int = 16
+      files: Int = 16,
+      /** Fraction of the source to keep (1.0 = whole table); scope a large base down, e.g. ~20 GB. */
+      sampleFrac: Double = 1.0,
+      /** Drop this namespace's variant tables (PURGE) before rebuilding, so a re-run starts clean. */
+      clean: Boolean = false
   )
 
   private val Pattern = """^(plain|(pos|dv)_(\d+)(_clustered)?|(pos|dv)_upd_(\d+)|eq_(\d+))$""".r
@@ -223,6 +227,8 @@ object IcebergMorGenerator {
       case "--variants" :: v :: t => parse(t, a.copy(variants = v.split(",").map(_.trim).filter(_.nonEmpty).toSeq))
       case "--threads" :: v :: t => parse(t, a.copy(threads = v.toInt))
       case "--files" :: v :: t => parse(t, a.copy(files = v.toInt))
+      case "--sample-frac" :: v :: t => parse(t, a.copy(sampleFrac = v.toDouble))
+      case "--clean" :: t => parse(t, a.copy(clean = true))
       case other :: _ => throw new IllegalArgumentException(s"unknown argument $other")
     }
     val args = parse(argv.toList, Args())
@@ -257,9 +263,22 @@ object IcebergMorGenerator {
     try {
       val ns = s"$Catalog.${args.namespace}"
       spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $ns")
-      val source = spark.read.parquet(sourcePath)
+      if (args.clean) {
+        // Purge any tables a prior run left in this namespace, through Iceberg's catalog (PURGE removes
+        // the data + delete + metadata files), so a re-run starts from a clean table rather than mixing
+        // old and new data. Scoped to this namespace's variant tables only.
+        args.variants.foreach { v =>
+          spark.sql(s"DROP TABLE IF EXISTS $ns.$v PURGE")
+          println(s"[mor] cleaned $ns.$v")
+        }
+      }
+      val rawSource = spark.read.parquet(sourcePath)
+      val source =
+        if (args.sampleFrac < 1.0) rawSource.sample(withReplacement = false, args.sampleFrac).cache()
+        else rawSource
       val sourceRows = source.count()
-      println(s"[mor] source $sourcePath (${profile.name}): $sourceRows rows, ${source.schema.fields.length} columns")
+      println(s"[mor] source $sourcePath (${profile.name}): $sourceRows rows, ${source.schema.fields.length} columns" +
+        (if (args.sampleFrac < 1.0) f" (sampled ${args.sampleFrac}%.3f)" else ""))
       val summaries = args.variants.map { v =>
         val start = System.nanoTime()
         val s = build(spark, source, s"$ns.$v", v, args.files, profile)
@@ -333,8 +352,17 @@ object IcebergMorGenerator {
         // rows re-keyed above every existing row of the re-key column.
         val maxKey = spark.table(name).selectExpr(s"max(${p.reKey})").collect()(0).getAs[Number](0).longValue()
         spark.table(name).createOrReplaceTempView("mor_base")
-        spark.sql(s"SELECT * FROM mor_base WHERE ${p.scattered(1, offset = 90)} " +
-          s"UNION ALL SELECT ${p.reKey} + ${maxKey}L AS ${p.reKey}, * EXCEPT (${p.reKey}) FROM mor_base WHERE ${p.scattered(1, offset = 80)}")
+        // The merge requires at most one source row per grain (Spark rejects a target matched more
+        // than once, SQLSTATE 23K01). lineitem's grain is a true key so this is a no-op there; TPC-DS
+        // store_sales is NOT unique on (ticket, item), so dedupe the source on the grain first.
+        val grainCols = p.grain.mkString(", ")
+        spark.sql(
+          s"SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY $grainCols ORDER BY $grainCols) AS _rn FROM (" +
+            s"SELECT * FROM mor_base WHERE ${p.scattered(1, offset = 90)} " +
+            s"UNION ALL SELECT ${p.reKey} + ${maxKey}L AS ${p.reKey}, * EXCEPT (${p.reKey}) FROM mor_base WHERE ${p.scattered(1, offset = 80)}" +
+            s")) WHERE _rn = 1 -- one source row per grain (23K01 guard)"
+        )
+          .drop("_rn")
           .createOrReplaceTempView("mor_src")
         val on = p.grain.map(g => s"t.$g = s.$g").mkString(" AND ")
         // Delete the rows the merge names (a stable slice of the matched rows, by the last grain col's parity).
