@@ -1382,6 +1382,62 @@ Correctness: every checksum equals Spark's except q65 (ties, in every engine) an
 (0 rows against 12,185; the stale pruning value of comet#6133). q5, which failed under `csvo` on every
 earlier run, completes with the scan implementation pinned and matches Spark's 100 rows.
 
+**The Spark reference at three memory splits, and the prefetching converter (same window
+configuration, the legs after the table).** Every engine above has 50 GB per executor; they differ in
+where the engine puts it. Spark ran at 20 g heap / 30 g overhead, `ours` at 30 / 20, `csvo` at 18 / 16
+with 16 g off-heap, Comet at 20 / 6 with 24 g off-heap -- each engine's split follows where it
+allocates, and a plain-Spark leg at 30 g of heap is the check that the reference column is not
+handicapped by its own. Two more Spark legs, 40 / 10 and 30 / 20, and one `ours` leg with the
+prefetching scan converter (#465, `spark.vector.scan.prefetch=2`), all on the v24/v25 images of the
+same tree:
+
+| set | Spark 20/30 | Spark 30/20 | Spark 40/10 | Comet | `csvo` | `ours` | `ours` prefetch 2 |
+|---|---|---|---|---|---|---|---|
+| all 103 | **3309** | -- | -- | 2514 | 2706 | **2557** | 2615 |
+| the 99 every split completed | 2796 | 2863 | 2860 | 2155 | 2326 | 2202 | 2253 |
+
+| query | Spark 20/30 | 30/20 | 40/10 | Comet | `csvo` | `ours` | `ours` prefetch 2 |
+|---|---|---|---|---|---|---|---|
+| q23b | 291.1 | evicted | evicted | 153.4 | 137.0 | **124.8** | 135.0 |
+| q23a | 210.6 | 188.1 | 185.5 | 131.7 | 131.3 | **117.6** | 121.7 |
+| q93 | 136.6 | 146.1 | 164.8 | 85.4 | 67.9 | **65.9** | 66.1 |
+| q67 | 126.5 | 118.9 | 124.9 | **60.7** | 71.2 | 72.9 | 85.4 |
+| q88 | 125.5 | 125.3 | **124.4** | 158.1 | 126.6 | 141.7 | 129.7 |
+| q78 | 123.3 | 119.0 | 123.4 | **74.6** | 92.8 | 79.3 | 92.8 |
+| q28 | 114.0 | 235.1 | 183.3 | **102.5** | 110.1 | 113.7 | 119.0 |
+| q95 | 106.4 | 96.4 | 92.8 | **57.5** | 58.3 | 69.3 | 60.4 |
+| q14a | 102.5 | 93.8 | 97.5 | **76.1** | 96.2 | 88.6 | 91.4 |
+| q14b | 94.6 | 90.3 | 88.3 | **69.7** | 92.3 | 82.8 | 87.7 |
+| q9 | 92.8 | 83.3 | 83.7 | **78.1** | 93.3 | 90.3 | 90.8 |
+| q64 | 92.7 | 91.5 | 91.2 | 56.3 | 53.9 | **51.4** | 52.3 |
+| q4 | 91.2 | 90.9 | 88.6 | **60.1** | 97.6 | 90.1 | 90.4 |
+| q50 | 68.2 | 72.7 | 80.2 | 54.4 | 38.4 | **37.8** | 37.8 |
+
+The heap does move Spark: at 30 / 20 it is faster than at 20 / 30 on 62 of the 99 shared queries -- q9
+92.8 to 83.3, q14a 102.5 to 93.8, q23a 210.6 to 188.1, q67 126.5 to 118.9, q95 106.4 to 96.4 -- and
+without the two damaged queries below the 99 total is 2482 against 2545 (-2.5%). But both heavier-heap
+legs lose q23b, q24a and q24b, and the loss is the node's disk, not memory: the executors are evicted
+for ephemeral storage during q23b (`The node was low on resource: ephemeral-storage`, then
+`DiskPressure`). Spark's q23b writes 83 GB of shuffle (`ours` 37) and spills 503 GB across nine nodes
+with 20 GB volumes; a larger heap spills larger files, and the 20 / 30 split survives on the margin. A
+repeat of the 30 / 20 leg with `spark.cleaner.periodicGC.interval=1min`, so the previous query's
+shuffle files could not be the difference, evicted the same three -- the footprint is q23b's own. The
+executors replaced after the eviction then cost q28 (235 and 183 against 114) and q93 (146 and 165
+against 137) their cached inputs, which is why the 30 / 20 total is *higher* on paper. The reference
+column stays the complete 20 / 30 run; against the best of the three splits per query (3165 s) `ours`
+is 19% faster and ahead on 75 of 103, against the complete run 23% and 82. A 30 / 20 reference that
+completes needs a larger node volume.
+
+The prefetching converter changes 44 queries for the better and 59 for the worse, +2.3% in total:
+gains q88 141.7 to 129.7, q95 69.3 to 60.4, q94 57.3 to 53.6; losses q78 79.3 to 92.8, q67 72.9 to
+85.4, q23b 124.8 to 135.0. The node's own metrics say why. On q9 (six scans wrapped, 710 k batches
+each) the task thread waited 28.1 min per scan for converted batches, the helper thread waited
+27.7 min *on the Parquet reader*, and converting took 1.2 min: the conversion this operator overlaps is
+4% of the read, and the queue hand-off plus one batch copy per 710 k batches is the tax the losses
+show. The default stays `spark.vector.scan.prefetch=0`; the operator remains as an opt-in instrument
+with its three wait metrics. The scan-side cost is the reader, which is also what `csvo`'s wins on
+q88, q95 and q28 measure -- Comet's DataFusion reader, not the Arrow boundary.
+
 
 ## TPC-H Q1 and Q6, scale factors 1 and 10
 
