@@ -208,7 +208,9 @@ object IcebergMorGenerator {
       variants: Seq[String] = DefaultVariants,
       threads: Int = Runtime.getRuntime.availableProcessors(),
       /** Data files the base table is written as; deletes then span all of them. */
-      files: Int = 16
+      files: Int = 16,
+      /** Fraction of the source to keep (1.0 = whole table); scope a large base down, e.g. ~20 GB. */
+      sampleFrac: Double = 1.0
   )
 
   private val Pattern = """^(plain|(pos|dv)_(\d+)(_clustered)?|(pos|dv)_upd_(\d+)|eq_(\d+))$""".r
@@ -223,6 +225,7 @@ object IcebergMorGenerator {
       case "--variants" :: v :: t => parse(t, a.copy(variants = v.split(",").map(_.trim).filter(_.nonEmpty).toSeq))
       case "--threads" :: v :: t => parse(t, a.copy(threads = v.toInt))
       case "--files" :: v :: t => parse(t, a.copy(files = v.toInt))
+      case "--sample-frac" :: v :: t => parse(t, a.copy(sampleFrac = v.toDouble))
       case other :: _ => throw new IllegalArgumentException(s"unknown argument $other")
     }
     val args = parse(argv.toList, Args())
@@ -257,9 +260,13 @@ object IcebergMorGenerator {
     try {
       val ns = s"$Catalog.${args.namespace}"
       spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $ns")
-      val source = spark.read.parquet(sourcePath)
+      val rawSource = spark.read.parquet(sourcePath)
+      val source =
+        if (args.sampleFrac < 1.0) rawSource.sample(withReplacement = false, args.sampleFrac).cache()
+        else rawSource
       val sourceRows = source.count()
-      println(s"[mor] source $sourcePath (${profile.name}): $sourceRows rows, ${source.schema.fields.length} columns")
+      println(s"[mor] source $sourcePath (${profile.name}): $sourceRows rows, ${source.schema.fields.length} columns" +
+        (if (args.sampleFrac < 1.0) f" (sampled ${args.sampleFrac}%.3f)" else ""))
       val summaries = args.variants.map { v =>
         val start = System.nanoTime()
         val s = build(spark, source, s"$ns.$v", v, args.files, profile)

@@ -19,7 +19,8 @@ BUCKET="${1:?s3 bucket}"; DATA_PREFIX="${2:?data prefix holding <base-table>/, e
 WHICH="${4:-both}"
 BASE_TABLE="${BASE_TABLE:-lineitem}"  # the base table under s3a://<bucket>/<data_prefix>/<base_table>/
 NS_BENCH=bench
-FILES="${FILES:-300}"                 # data files the base table is written as (deletes span all)
+FILES="${FILES:-64}"                  # data files the base table is written as (deletes span all)
+SAMPLE_FRAC="${SAMPLE_FRAC:-1.0}"     # fraction of the source to keep (1.0 = whole table)
 V2_VARIANTS="${5:-plain,pos_2,pos_10,pos_30,pos_10_clustered,pos_30_clustered,pos_upd_1,pos_upd_5,eq_2,eq_10}"
 V3_VARIANTS="${5:-plain,dv_2,dv_10,dv_30,dv_10_clustered,dv_30_clustered,dv_upd_1,dv_upd_5}"
 
@@ -44,7 +45,7 @@ gen() { # <namespace> <variants>
   local ns="$1" variants="$2" name="spark-vector-mor-gen-$1" f
   f="$(mktemp)"
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|DATA_PREFIX|${DATA_PREFIX}|g" \
-      -e "s|NAMESPACE|${ns}|g" -e "s|VARIANTS|${variants}|g" -e "s|FILES|${FILES}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
+      -e "s|NAMESPACE|${ns}|g" -e "s|VARIANTS|${variants}|g" -e "s|FILES|${FILES}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" -e "s|SAMPLE_FRAC|${SAMPLE_FRAC}|g" \
       "$HERE/../k8s/iceberg-mor-gen.yaml" > "$f"
   apply_and_wait "$name" "$f"; rm -f "$f"
 }
