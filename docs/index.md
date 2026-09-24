@@ -6,7 +6,7 @@ title: spark-vector
 
 A Spark SQL plugin that runs Filter, Project, HashAggregate, Sort, Window and the hash joins on
 Arrow-layout batches with the Java Vector API -- on the JVM, no native code -- with its own columnar
-shuffle over Arrow Flight. Source, releases and the README: [github.com/Neuw84/spark-vector](https://github.com/Neuw84/spark-vector).
+shuffle over Arrow Flight. Source, releases and the README: [github.com/spark-vector/spark-vector](https://github.com/spark-vector/spark-vector).
 
 ## Benchmarks
 
