@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-parent</artifactId>
+    <version>0.0.1</version>
+  </parent>
+  <artifactId>spark-vector-shuffle_2.13</artifactId>
+  <name>spark-vector-shuffle</name>
+  <description>Columnar shuffle over Arrow IPC and Arrow Flight (#288); kept apart from the plugin so the core never carries gRPC</description>
+  <dependencies>
+    <dependency>
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <!-- LZ4 / ZSTD body compression of the shuffle's record batches; lz4-java and zstd-jni come from Spark at runtime. -->
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-compression</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+    <!--
+      Arrow Flight at exactly Spark's Arrow version (it shares VectorSchemaRoot/ArrowBuf with
+      arrow-vector). It brings gRPC's unshaded Netty transport, which Flight configures directly, so
+      the Netty classes are Spark's: the netty-* artifacts flight-core declares are excluded here and
+      resolved from spark-sql (provided). No shading, no relocation, as for Arrow itself.
+    -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>flight-core</artifactId>
+      <version>${arrow.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>io.netty</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.arrow</groupId>
+          <artifactId>arrow-memory-core</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.arrow</groupId>
+          <artifactId>arrow-memory-netty</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.arrow</groupId>
+          <artifactId>arrow-vector</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <!-- Compiled against here; at run time the classes come from the plugin jar below, which shades the
+           kernels in. `provided` keeps them out of this artifact's transitive dependencies, so a Maven
+           consumer of the shuffle gets the kernel classes once, not from two jars. -->
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-kernels</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-netty</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Spark bundles Arrow 18.3.0 and Netty 4.2; we compile against those and never ship them. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>scala-compile-first</id>
+            <goals>
+              <goal>add-source</goal>
+              <goal>compile</goal>
+            </goals>
+            <phase>process-resources</phase>
+          </execution>
+          <execution>
+            <id>scala-test-compile-first</id>
+            <goals>
+              <goal>testCompile</goal>
+            </goals>
+            <phase>process-test-resources</phase>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+      <!-- No JUnit tests in this module; ScalaTest runs the suites. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest-maven-plugin</artifactId>
+        <configuration>
+          <reportsDirectory>${project.build.directory}/scalatest-reports</reportsDirectory>
+          <junitxml>.</junitxml>
+          <filereports>SparkVectorShuffleTestSuite.txt</filereports>
+          <stdout>W</stdout>
+          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx3g -Dspark.ui.enabled=false -Dspark.driver.host=localhost</argLine>
+        </configuration>
+        <executions>
+          <execution>
+            <id>test</id>
+            <goals>
+              <goal>test</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
