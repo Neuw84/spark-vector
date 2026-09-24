@@ -55,7 +55,7 @@ gen() { # <namespace> <variants>
 
 cdc() { # <config> <namespace> <variant>
   local config="$1" ns="$2" variant="$3" table="${ns}.${variant}"
-  local name="spark-vector-mor-cdc-${config}-${ns}-${variant}" f
+  local name="spark-vector-mor-cdc-${config}-${ns}-${variant//_/-}" f
   f="$(mktemp)"
   # The manifest name pattern is CONFIG-TABLE; render TABLE as ns.variant and give the SparkApplication a k8s-safe name.
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|NAMESPACE|${ns}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
@@ -75,8 +75,10 @@ run_ns() { # <namespace> <variants>
   gen "$ns" "$variants"
   local IFS=,
   for v in $variants; do
-    cdc spark  "$ns" "$v"
-    cdc vector "$ns" "$v"
+    # CDC_CONFIGS (comma-separated, default "spark,vector"): e.g. spark,vector-shuffle for our columnar shuffle.
+    for cfg in ${CDC_CONFIGS:-spark,vector}; do
+      cdc "$cfg" "$ns" "$v"
+    done
   done
 }
 
