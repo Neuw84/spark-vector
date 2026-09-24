@@ -59,6 +59,10 @@ public final class GatherKernels {
      */
     public static void gatherFixedPlain(VecType type, MemorySegment data, int[] idx,
             int from, int to, MemorySegment outData) {
+        if (!data.isNative()) {
+            gatherFixedPlainHeap(type, data, idx, from, to, outData);
+            return;
+        }
         int count = to - from;
         switch (type) {
             case INT32 -> {
@@ -94,12 +98,87 @@ public final class GatherKernels {
      */
     public static void gatherFixed(VecType type, MemorySegment data, int[] idx,
             int from, int to, MemorySegment outData) {
+        if (!data.isNative()) {
+            gatherFixedHeap(type, data, idx, from, to, outData);
+            return;
+        }
         int count = to - from;
         switch (type) {
             case INT32 -> {
                 for (int o = 0; o < count; o++) {
                     int i = idx[from + o];
                     int keep = ~(i >> 31); // all ones for a real index, zero for -1
+                    outData.set(VectorBuffers.LE_INT, (long) o << 2,
+                            data.get(VectorBuffers.LE_INT, (long) (i & keep) << 2) & keep);
+                }
+            }
+            case INT64, FLOAT64 -> {
+                for (int o = 0; o < count; o++) {
+                    int i = idx[from + o];
+                    long keep = ~(long) (i >> 31);
+                    outData.set(VectorBuffers.LE_LONG, (long) o << 3,
+                            data.get(VectorBuffers.LE_LONG, (long) (i & (int) keep) << 3) & keep);
+                }
+            }
+            case BOOL -> gatherBits(data, idx, from, to, outData, false);
+            case DECIMAL128 -> {
+                for (int o = 0; o < count; o++) {
+                    int i = idx[from + o];
+                    long keep = ~(long) (i >> 31);
+                    long src = (long) (i & (int) keep) << 4;
+                    long dst = (long) o << 4;
+                    outData.set(VectorBuffers.LE_LONG, dst, data.get(VectorBuffers.LE_LONG, src) & keep);
+                    outData.set(VectorBuffers.LE_LONG, dst + 8, data.get(VectorBuffers.LE_LONG, src + 8) & keep);
+                }
+            }
+            default -> throw new IllegalArgumentException("not fixed width: " + type);
+        }
+    }
+
+    /**
+     * {@link #gatherFixedPlain} over a heap segment (a group table's records, a
+     * dictionary's ids). A copy of the same loops on purpose: one call site that
+     * sees both native and heap receivers stops binding the segment accessors
+     * statically, and every element read then takes the checked slow path
+     * ({@code isAlignedForElement}): the shuffle writer's gathers on a MERGE
+     * spent 1129 of 5499 samples there, 25 with the heap loops split out.
+     */
+    private static void gatherFixedPlainHeap(VecType type, MemorySegment data, int[] idx,
+            int from, int to, MemorySegment outData) {
+        int count = to - from;
+        switch (type) {
+            case INT32 -> {
+                for (int o = 0; o < count; o++) {
+                    outData.set(VectorBuffers.LE_INT, (long) o << 2, data.get(VectorBuffers.LE_INT, (long) idx[from + o] << 2));
+                }
+            }
+            case INT64, FLOAT64 -> {
+                for (int o = 0; o < count; o++) {
+                    outData.set(VectorBuffers.LE_LONG, (long) o << 3, data.get(VectorBuffers.LE_LONG, (long) idx[from + o] << 3));
+                }
+            }
+            case BOOL -> gatherBits(data, idx, from, to, outData, false);
+            case DECIMAL128 -> {
+                for (int o = 0; o < count; o++) {
+                    Decimal128.copy(data, idx[from + o], outData, o);
+                }
+            }
+            default -> throw new IllegalArgumentException("not fixed width: " + type);
+        }
+    }
+
+    /**
+     * {@link #gatherFixed} over a heap segment; see {@link
+     * #gatherFixedPlainHeap}.
+     */
+    private static void gatherFixedHeap(VecType type, MemorySegment data, int[] idx,
+            int from, int to, MemorySegment outData) {
+        int count = to - from;
+        switch (type) {
+            case INT32 -> {
+                for (int o = 0; o < count; o++) {
+                    int i = idx[from + o];
+                    int keep = ~(i >> 31);
                     outData.set(VectorBuffers.LE_INT, (long) o << 2,
                             data.get(VectorBuffers.LE_INT, (long) (i & keep) << 2) & keep);
                 }
