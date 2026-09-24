@@ -17,6 +17,13 @@ tables, 12,096 objects, 27 GB, exact row counts, in about 30 minutes on four 4-c
 `render-run.sh` renders the `SparkApplication` of one benchmark configuration from
 `submit-cluster.sh`'s own settings.
 
+**Iceberg legs (#249), decided 2026-09-24:** read S3 through Iceberg's `S3FileIO` with the S3 Analytics
+Accelerator's prefetching stream -- `spark.sql.catalog.<catalog>.io-impl=org.apache.iceberg.aws.s3.S3FileIO`
+and `spark.sql.catalog.<catalog>.s3.analytics-accelerator.enabled=true` (Iceberg 1.11; the `iceberg-aws-bundle`
+is on the image) -- on every engine alike; the `ours`/`csvo` legs add `spark.vector.scan.prefetch=2` (#465) once
+its measurement is in. The runner's `--iceberg <warehouse>` resolves a local path today and must take an
+`s3a://` warehouse before these legs run.
+
 Cluster facts the manifests assume: the spark-operator watches namespace `bench` only; service account
 `sfi-engine` there carries the IRSA role with S3 read/write on `sfi-iceberg-wh-378683551918`; the
 `bench` node group (4 x m5.2xlarge) is shared with the kafka and flink operators, so about 5 cores and
