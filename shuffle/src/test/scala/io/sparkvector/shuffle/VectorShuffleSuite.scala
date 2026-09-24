@@ -121,6 +121,43 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
     checkAgainstSpark(sql)
   }
 
+  /**
+   * Struct columns (Iceberg's `_partition` on a MERGE) cross our exchange flattened into lanes and come
+   * back as structs: nested structs, nulls at the struct and at the field level, and
+   * a struct as a hash key -- every row lands in the partition Spark's exchange puts it in.
+   */
+  test("struct columns and struct hash keys cross our exchange as lanes") {
+    val path = tempDir.resolve("structs").toString
+    spark.range(0, 5000).selectExpr(
+      "cast(id as int) as k",
+      "case when id % 17 = 0 then null else named_struct(" +
+        "'a', cast(id % 11 as int), " +
+        "'b', case when id % 5 = 0 then null else cast(id % 23 as string) end, " +
+        "'c', named_struct('x', cast(id % 3 as bigint), 'y', cast(id % 7 as decimal(9,2)))) end as st"
+    ).write.mode("overwrite").parquet(path)
+    spark.read.parquet(path).createOrReplaceTempView("st")
+    val df = spark.table("st").repartition(
+      5,
+      org.apache.spark.sql.functions.col("st"),
+      org.apache.spark.sql.functions.col("k")
+    )
+    val plan = collectPlan(df)
+    assert(exchanges(plan).exists(_.isInstanceOf[VectorShuffleExchangeExec]), s"expected our exchange in\n$plan")
+    assert(exchanges(plan).forall(_.isInstanceOf[VectorShuffleExchangeExec]), s"Spark's exchange survived in\n$plan")
+    def rows(enabled: Boolean): Seq[String] = {
+      spark.sessionState.conf.setConfString("spark.vector.enabled", enabled.toString)
+      try
+        spark.table("st").repartition(
+          5,
+          org.apache.spark.sql.functions.col("st"),
+          org.apache.spark.sql.functions.col("k")
+        )
+          .selectExpr("spark_partition_id() as p", "k", "st").collect().map(_.toString).toSeq.sorted
+      finally spark.sessionState.conf.setConfString("spark.vector.enabled", "true")
+    }
+    assert(rows(enabled = true) === rows(enabled = false))
+  }
+
   test("hash keys that are expressions (q47's self-join on rn + 1) are materialised under our exchange") {
     // A sort-merge self-join whose one side partitions on `k + 1`: without the materialised key the
     // exchange stayed Spark's, with a row Sort and a RowToColumnar over it.

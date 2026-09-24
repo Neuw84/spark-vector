@@ -88,7 +88,12 @@ final class VectorShuffleDependency(
     val partitioning: VectorPartitioning,
     writeProcessor: ShuffleWriteProcessor,
     /** The exchange's `dataSize` metric -- AQE's runtime statistic for the stage; every map task adds its uncompressed Arrow bytes. */
-    val dataSize: org.apache.spark.sql.execution.metric.SQLMetric
+    val dataSize: org.apache.spark.sql.execution.metric.SQLMetric,
+    /**
+     * Struct columns flattened into lanes ([[io.sparkvector.shuffle.StructFlattening]]): `schema` is
+     * then the flat schema the IPC streams carry, and the reader rebuilds the written columns.
+     */
+    val layout: Option[io.sparkvector.shuffle.StructFlattening.Layout] = None
 ) extends ShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
       rdd,
       partitioner,
@@ -258,11 +263,23 @@ final class VectorShuffleWriter(
           val start = System.nanoTime()
           val arena = java.lang.foreign.Arena.ofConfined()
           try {
-            val buffers = Array.tabulate(batch.numCols())(c => ColumnVectorAdapters.adapt(batch.column(c), n, arena))
-            val ids = partitionIds(batch, buffers, n)
-            // Trailing columns beyond the schema hold materialised hash keys: partitioned on, not written.
+            val buffers = Array.tabulate(batch.numCols()) { c =>
+              val cv = batch.column(c)
+              // A struct has no lane of its own: StructFlattening writes its validity and leaves.
+              if (cv.dataType().isInstanceOf[org.apache.spark.sql.types.StructType]) null
+              else ColumnVectorAdapters.adapt(cv, n, arena)
+            }
+            // Trailing columns beyond the written ones hold materialised hash keys: partitioned on, not written.
+            val flat = dep.layout match {
+              case Some(l) =>
+                val w = l.writtenWidth
+                val written = l.flatten(Array.tabulate(w)(batch.column), buffers.take(w), n, arena)
+                written ++ buffers.drop(w)
+              case None => buffers
+            }
+            val ids = partitionIds(batch, flat, n)
             writer.write(
-              if (buffers.length > dep.schema.fields.length) buffers.take(dep.schema.fields.length) else buffers,
+              if (flat.length > dep.schema.fields.length) flat.take(dep.schema.fields.length) else flat,
               n,
               ids,
               arena
@@ -452,7 +469,7 @@ final class VectorShuffleReader(
                 throw VectorShuffleWriter.serializable("read", allocator, e)
             }
           metrics.incRecordsRead(b.numRows())
-          (0, b)
+          (0, handle.dependency.layout.fold(b)(_.unflatten(b)))
         }
       }
     }
