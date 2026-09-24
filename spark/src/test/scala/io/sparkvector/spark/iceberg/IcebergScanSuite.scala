@@ -103,6 +103,30 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
     checkVectorized("SELECT w27, w38 FROM t SORT BY w27", Seq(Sort))
   }
 
+  icebergTest("decimals of up to 9 digits (an IntVector in Iceberg's reader) are widened into INT64 lanes") {
+    // Iceberg reads a DECIMAL(p <= 9) as an IntVector of 4-byte unscaled values; the lane for every
+    // decimal up to 18 digits is INT64. Wrapping the 4-byte buffer as 8-byte lanes read past its
+    // end (TPC-DS store_sales' DECIMAL(7,2) prices crashed the compact and grouped-sum kernels).
+    spark.sql(
+      s"""CREATE OR REPLACE TABLE ${IcebergTables.Db}.t_small_dec USING iceberg AS
+         |SELECT i, s,
+         |  CASE WHEN i % 11 = 0 THEN NULL ELSE CAST((i % 20000) - 10000 AS DECIMAL(7,2)) END AS d7,
+         |  CAST(i AS DECIMAL(15,2)) AS d15
+         |FROM ${IcebergTables.Db}.t_pos""".stripMargin
+    )
+    IcebergTables.useAsT(spark, s"${IcebergTables.Db}.t_small_dec")
+    val columnsBefore = IcebergVectorAdapter.adaptedColumns()
+    val widenedBefore = IcebergVectorAdapter.widenedIntColumns()
+    checkVectorized("SELECT i, d7, d15 FROM t WHERE i % 3 = 0", Seq(Filter))
+    checkVectorized("SELECT s, sum(d7), sum(d15), count(d7) FROM t GROUP BY s", Seq(Agg))
+    assert(IcebergVectorAdapter.adaptedColumns() > columnsBefore, "expected the decimal columns to be adapted")
+    assert(IcebergVectorAdapter.widenedIntColumns() > widenedBefore, "expected the DECIMAL(7,2) lane to be widened")
+    // Under positional deletes the widened lane is built over the physical rows.
+    spark.sql(s"DELETE FROM ${IcebergTables.Db}.t_small_dec WHERE i % 7 = 0")
+    checkVectorized("SELECT i, d7 FROM t WHERE i % 2 = 0", Seq(Filter))
+    checkVectorized("SELECT s, sum(d7), max(d7) FROM t GROUP BY s", Seq(Agg))
+  }
+
   icebergTest("the prefetching converter wraps Iceberg's scan and converts its batches on the helper (#403)") {
     val Prefetch = classOf[VectorPrefetchScanExec]
     def prefetched(sql: String, ops: Class[_ <: SparkPlan]*): Unit = {
