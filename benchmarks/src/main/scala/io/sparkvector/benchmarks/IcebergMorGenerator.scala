@@ -333,8 +333,17 @@ object IcebergMorGenerator {
         // rows re-keyed above every existing row of the re-key column.
         val maxKey = spark.table(name).selectExpr(s"max(${p.reKey})").collect()(0).getAs[Number](0).longValue()
         spark.table(name).createOrReplaceTempView("mor_base")
-        spark.sql(s"SELECT * FROM mor_base WHERE ${p.scattered(1, offset = 90)} " +
-          s"UNION ALL SELECT ${p.reKey} + ${maxKey}L AS ${p.reKey}, * EXCEPT (${p.reKey}) FROM mor_base WHERE ${p.scattered(1, offset = 80)}")
+        // The merge requires at most one source row per grain (Spark rejects a target matched more
+        // than once, SQLSTATE 23K01). lineitem's grain is a true key so this is a no-op there; TPC-DS
+        // store_sales is NOT unique on (ticket, item), so dedupe the source on the grain first.
+        val grainCols = p.grain.mkString(", ")
+        spark.sql(
+          s"SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY $grainCols ORDER BY $grainCols) AS _rn FROM (" +
+            s"SELECT * FROM mor_base WHERE ${p.scattered(1, offset = 90)} " +
+            s"UNION ALL SELECT ${p.reKey} + ${maxKey}L AS ${p.reKey}, * EXCEPT (${p.reKey}) FROM mor_base WHERE ${p.scattered(1, offset = 80)}" +
+            s")) WHERE _rn = 1 -- one source row per grain (23K01 guard)"
+        )
+          .drop("_rn")
           .createOrReplaceTempView("mor_src")
         val on = p.grain.map(g => s"t.$g = s.$g").mkString(" AND ")
         // Delete the rows the merge names (a stable slice of the matched rows, by the last grain col's parity).
