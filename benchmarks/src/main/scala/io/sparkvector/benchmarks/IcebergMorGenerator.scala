@@ -210,7 +210,9 @@ object IcebergMorGenerator {
       /** Data files the base table is written as; deletes then span all of them. */
       files: Int = 16,
       /** Fraction of the source to keep (1.0 = whole table); scope a large base down, e.g. ~20 GB. */
-      sampleFrac: Double = 1.0
+      sampleFrac: Double = 1.0,
+      /** Drop this namespace's variant tables (PURGE) before rebuilding, so a re-run starts clean. */
+      clean: Boolean = false
   )
 
   private val Pattern = """^(plain|(pos|dv)_(\d+)(_clustered)?|(pos|dv)_upd_(\d+)|eq_(\d+))$""".r
@@ -226,6 +228,7 @@ object IcebergMorGenerator {
       case "--threads" :: v :: t => parse(t, a.copy(threads = v.toInt))
       case "--files" :: v :: t => parse(t, a.copy(files = v.toInt))
       case "--sample-frac" :: v :: t => parse(t, a.copy(sampleFrac = v.toDouble))
+      case "--clean" :: t => parse(t, a.copy(clean = true))
       case other :: _ => throw new IllegalArgumentException(s"unknown argument $other")
     }
     val args = parse(argv.toList, Args())
@@ -260,6 +263,15 @@ object IcebergMorGenerator {
     try {
       val ns = s"$Catalog.${args.namespace}"
       spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $ns")
+      if (args.clean) {
+        // Purge any tables a prior run left in this namespace, through Iceberg's catalog (PURGE removes
+        // the data + delete + metadata files), so a re-run starts from a clean table rather than mixing
+        // old and new data. Scoped to this namespace's variant tables only.
+        args.variants.foreach { v =>
+          spark.sql(s"DROP TABLE IF EXISTS $ns.$v PURGE")
+          println(s"[mor] cleaned $ns.$v")
+        }
+      }
       val rawSource = spark.read.parquet(sourcePath)
       val source =
         if (args.sampleFrac < 1.0) rawSource.sample(withReplacement = false, args.sampleFrac).cache()
