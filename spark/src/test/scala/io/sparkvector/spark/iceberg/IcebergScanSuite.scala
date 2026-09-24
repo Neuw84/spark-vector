@@ -1,7 +1,9 @@
 package io.sparkvector.spark.iceberg
 
-import io.sparkvector.spark.VectorPlugin
+import io.sparkvector.spark.{VectorConf, VectorPlugin}
 import io.sparkvector.spark.test.IcebergTest
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.vector.{PlanUtils, VectorPlan, VectorPrefetchScanExec}
 import org.scalatest.Tag
 
 /**
@@ -84,5 +86,41 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
     spark.sql(s"DELETE FROM ${IcebergTables.Db}.t_wide WHERE i % 7 = 0")
     checkVectorized("SELECT i, w38 FROM t WHERE i % 2 = 0", Seq(Filter))
     checkVectorized("SELECT w27, w38 FROM t SORT BY w27", Seq(Sort))
+  }
+
+  icebergTest("the prefetching converter wraps Iceberg's scan and converts its batches on the helper (#403)") {
+    val Prefetch = classOf[VectorPrefetchScanExec]
+    def prefetched(sql: String, ops: Class[_ <: SparkPlan]*): Unit = {
+      val off = withConf(VectorConf.ScanPrefetch -> "0")(spark.sql(sql).collect())
+      withConf(VectorConf.ScanPrefetch -> "2") {
+        val df = checkVectorized(sql, ops :+ Prefetch)
+        assertRowsEqual(off, df.collect(), 1e-9, s"prefetch on vs off: $sql")
+        val nodes = nodesOf[VectorPrefetchScanExec](df)
+        assert(nodes.size === 1, s"expected one prefetch node:\n${finalPlan(df).treeString}")
+        assert(nodes.head.child.getClass.getSimpleName === expectedScanClass, nodes.head.child.getClass.getName)
+        val parents =
+          PlanUtils.allNodes(finalPlan(df)).filter(_.children.exists(_.isInstanceOf[VectorPrefetchScanExec]))
+        assert(parents.size === 1 && parents.head.isInstanceOf[VectorPlan])
+      }
+    }
+    // Row-id-mapped batches (positional deletes): normalized on the helper, the live rows compacted.
+    useTable("t_pos")
+    val normalizedBefore = IcebergVectorAdapter.normalizedBatches()
+    val adaptedBefore = IcebergVectorAdapter.adaptedColumns()
+    prefetched("SELECT i, l, d, dt, b, s FROM t WHERE i > 100 AND d IS NOT NULL", Filter)
+    prefetched("SELECT s, count(*), sum(d2), min(i), max(l) FROM t WHERE i > 5 GROUP BY s", Filter, Agg)
+    assert(IcebergVectorAdapter.normalizedBatches() > normalizedBefore, "expected the helper to normalize the batches")
+    assert(
+      IcebergVectorAdapter.adaptedColumns() > adaptedBefore,
+      "expected the helper to adapt Iceberg's vectors in place"
+    )
+    // Deletion vectors (v3) and a plain table (no normalization) through the same node.
+    useTable("t_dv")
+    prefetched("SELECT count(*), sum(d2), max(d), min(dt) FROM t WHERE i > 10", Filter, Agg)
+    spark.sql(
+      s"CREATE OR REPLACE TABLE ${IcebergTables.Db}.t_plain2 USING iceberg AS SELECT * FROM ${IcebergTables.Db}.t_pos"
+    )
+    IcebergTables.useAsT(spark, s"${IcebergTables.Db}.t_plain2")
+    prefetched("SELECT i, s, d2 FROM t WHERE b OR i < 15000", Filter)
   }
 }

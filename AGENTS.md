@@ -170,7 +170,19 @@ that pin it.
   no dictionary) -- `SparkColumnVectorBuffers.wrappedOffHeapColumns()` counts them; strings and
   dictionaries still take the copy. The benchmark configurations set that flag since #403 (SF10:
   q8 1.46 -> 1.14 s, q47 6.28 -> 5.30); the copying path's validity and dictionary loops were made
-  bulk in #398 (one segment call per row was 25% of q8's executor time). `docs/operators.md` "Scan compatibility" is the matrix. A cached
+  bulk in #398 (one segment call per row was 25% of q8's executor time). Lever 2 of #403 is
+  `VectorPrefetchScanExec` (`spark.vector.scan.prefetch=1|2`, default 0): inserted by the rule
+  (`prefetchScans`, after the conversions) between a Spark vectorized file scan -- `FileSourceScanExec`
+  or Iceberg's `BatchScanExec`, every column a lane, never a Comet scan -- and the first operator of
+  ours above it, a per-task helper thread (`PrefetchingBatchConverter`) pulls the reader's next batch,
+  normalizes it, converts every column with `ColumnVectorAdapters.adapt` + `ArrowOutput.copy`/`compact`
+  into the task's allocator and hands the finished batch of `VectorArrowColumnVector`s through a
+  bounded queue, so the adapters above are zero-copy and the reader's waits overlap the kernels. Batch
+  N is converted whole before the helper asks the reader for N+1 (the reader recycles its vectors);
+  `TaskContext` is installed on the helper; a task kill, a child failure (rethrown on the task thread)
+  or the completion listener stops it and closes every queued batch; the node is not a `VectorPlan`
+  and the UI counts it as a transition. Metrics `prefetchWaitMs` / `readWaitMs` / `convertMs` /
+  `batches` say which side waited. `docs/operators.md` "Scan compatibility" is the matrix. A cached
   table is a columnar input only when Spark's `DefaultCachedBatchSerializer` says so, and it decides on
   the cached relation's *whole* schema: boolean/byte/short/int/long/float/double only, so a string or
   date column anywhere in the cache makes `InMemoryTableScanExec` a row scan whatever is projected

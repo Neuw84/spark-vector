@@ -51,6 +51,15 @@ class CometScanSuite extends VectorQuerySuite {
     checkVectorized("SELECT s FROM t WHERE i < 100", Seq(Filter))
   }
 
+  test("the prefetching converter never wraps a Comet scan (#403)", CometTest) {
+    withConf(VectorConf.ScanPrefetch -> "2") {
+      val df = checkVectorized("SELECT s, count(*), max(d) FROM t WHERE i > 100 GROUP BY s", Seq(Filter, Agg))
+      assert(nodesOf[org.apache.spark.sql.vector.VectorPrefetchScanExec](df).isEmpty, finalPlan(df).treeString)
+      val filter = nodesOf[VectorFilterExec](df).head
+      assert(cometScans(df).contains(filter.child), filter.child.nodeName)
+    }
+  }
+
   test("TPC-H Q1 and Q6 over Comet scan", CometTest) {
     val q6 = checkVectorized(TestTables.TpchQ6, Seq(Filter, Agg))
     assert(cometScans(q6).nonEmpty)
