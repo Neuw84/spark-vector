@@ -21,7 +21,7 @@ between Comet's native Parquet scan and Comet's native shuffle, both reached zer
 
 ## Status
 
-Version 0.1.0, a preview release under the Apache License 2.0 (see `LICENSE` and `NOTICE`). The
+Version 0.0.1, a preview release under the Apache License 2.0 (see `LICENSE` and `NOTICE`). The
 plugin runs the whole of TPC-DS (103 queries) and TPC-H (22) with every operator accelerated and
 returns Spark's results; what it does not convert falls back to Spark, always with a recorded reason.
 Measured on the 1 TB TPC-DS Parquet dataset on EKS, eight 13-core executors with 50 GB each, one
@@ -68,6 +68,43 @@ mvn -Pcomet,iceberg verify                          # everything, including Come
 The plugin jar is `spark/target/spark-vector-spark_2.13-<version>.jar` (kernels shaded in, nothing
 else). Spark and Arrow are `provided`.
 
+## Getting the jars
+
+Every release is on the [releases page](https://github.com/Neuw84/spark-vector/releases): the plugin
+jar (`spark-vector-spark_2.13-<version>.jar`), the columnar shuffle jar
+(`spark-vector-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
+POMs, are published to a Maven repository served from this repository's `maven-repo` branch -- no
+account or token needed:
+
+```xml
+<repositories>
+  <repository>
+    <id>spark-vector</id>
+    <url>https://raw.githubusercontent.com/Neuw84/spark-vector/maven-repo/</url>
+  </repository>
+</repositories>
+
+<dependencies>
+  <dependency>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-spark_2.13</artifactId>
+    <version>0.0.1</version>
+  </dependency>
+  <!-- the columnar shuffle, if you run with spark.shuffle.manager=...VectorShuffleManager -->
+  <dependency>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-shuffle_2.13</artifactId>
+    <version>0.0.1</version>
+  </dependency>
+</dependencies>
+```
+
+The same coordinates work with `--packages` on `spark-submit` together with
+`--repositories https://raw.githubusercontent.com/Neuw84/spark-vector/maven-repo/`. A release is cut
+by pushing a `v<version>` tag: the release workflow builds the jars on JDK 25, attaches them to the
+GitHub release with their checksums, and publishes them to the `maven-repo` branch
+(`.github/workflows/release.yml`). `CHANGELOG.md` has what each release carries.
+
 ## Running with spark-submit
 
 ```bash
@@ -75,7 +112,7 @@ spark-submit \
   --conf spark.plugins=io.sparkvector.spark.VectorPlugin \
   --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
   --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
-  --jars spark-vector-spark_2.13-0.1.0-SNAPSHOT.jar \
+  --jars spark-vector-spark_2.13-0.0.1.jar \
   ...
 ```
 
