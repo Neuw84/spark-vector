@@ -13,6 +13,8 @@
 # The variant list defaults to the eight positional/deletion-vector shapes plus the two equality
 # shapes (v2 only); v3 has no equality variant. lineitem at the requested scale must already exist
 # under s3a://<bucket>/<tpch_sf_prefix>/lineitem (generate it with the TPC-H generator first).
+# The CDC shape on a table carrying both delete layers:
+#   V2_VARIANTS=mix_20_5 V3_VARIANTS=dvmix_20_5 CHANGE_PCT=10 run-iceberg-mor.sh ... both
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUCKET="${1:?s3 bucket}"; DATA_PREFIX="${2:?data prefix holding <base-table>/, e.g. tpcds/sf1000/parquet}"; IMAGE="${3:?image}"
@@ -21,8 +23,9 @@ BASE_TABLE="${BASE_TABLE:-lineitem}"  # the base table under s3a://<bucket>/<dat
 NS_BENCH=bench
 FILES="${FILES:-64}"                  # data files the base table is written as (deletes span all)
 SAMPLE_FRAC="${SAMPLE_FRAC:-1.0}"     # fraction of the source to keep (1.0 = whole table)
-V2_VARIANTS="${5:-plain,pos_2,pos_10,pos_30,pos_10_clustered,pos_30_clustered,pos_upd_1,pos_upd_5,eq_2,eq_10}"
-V3_VARIANTS="${5:-plain,dv_2,dv_10,dv_30,dv_10_clustered,dv_30_clustered,dv_upd_1,dv_upd_5}"
+V2_VARIANTS="${V2_VARIANTS:-${5:-plain,pos_2,pos_10,pos_30,pos_10_clustered,pos_30_clustered,pos_upd_1,pos_upd_5,eq_2,eq_10}}"
+V3_VARIANTS="${V3_VARIANTS:-${5:-plain,dv_2,dv_10,dv_30,dv_10_clustered,dv_30_clustered,dv_upd_1,dv_upd_5}}"
+CHANGE_PCT="${CHANGE_PCT:-default}"   # CDC change batch as % of rows (e.g. 10), or the runner's default batch
 
 apply_and_wait() { # <name> <rendered-yaml-file>
   local name="$1" file="$2"
@@ -56,7 +59,7 @@ cdc() { # <config> <namespace> <variant>
   f="$(mktemp)"
   # The manifest name pattern is CONFIG-TABLE; render TABLE as ns.variant and give the SparkApplication a k8s-safe name.
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|NAMESPACE|${ns}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
-      -e "s|spark-vector-mor-cdc-CONFIG-TABLE|${name}|" -e "s|\"CONFIG\"|\"${config}\"|" -e "s|\"TABLE\"|\"${table}\"|" \
+      -e "s|spark-vector-mor-cdc-CONFIG-TABLE|${name}|" -e "s|\"CONFIG\"|\"${config}\"|" -e "s|\"TABLE\"|\"${table}\"|" -e "s|CHANGE_PCT|${CHANGE_PCT}|" \
       "$HERE/../k8s/iceberg-mor-cdc.yaml" > "$f"
   apply_and_wait "$name" "$f" || { rm -f "$f"; return 1; }
   # Copy the driver's local JSONL to S3 (one file per config, appended across variants in-JVM; here per run).

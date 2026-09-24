@@ -35,6 +35,8 @@ spec:
     - "2"
     - "--shuffle-partitions"
     - "300"
+    - "--change-pct"
+    - "CHANGE_PCT"                                # % of rows in the change batch, or "default"
   sparkVersion: "4.1.3"
   sparkConf:
     spark.sql.adaptive.enabled: "true"

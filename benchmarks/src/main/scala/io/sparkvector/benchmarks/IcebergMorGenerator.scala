@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
 import scala.collection.mutable.ArrayBuffer
+import scala.jdk.CollectionConverters._
 
 import org.apache.iceberg.{FileFormat, Table}
 import org.apache.iceberg.data.{GenericAppenderFactory, GenericRecord}
@@ -48,6 +49,11 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
  *   - `dv_<pct>`, `dv_<pct>_clustered`, `dv_upd_<pct>`
  *                              v3 (`format-version=3`): the `pos_*` mutations encoded as deletion
  *                              vectors in Puffin files.
+ *   - `mix_<pos>_<eq>`, `dvmix_<pos>_<eq>`
+ *                              v2 / v3 with BOTH layers: scattered positional deletes (deletion
+ *                              vectors on v3) of `<pos>` % of the rows, then equality delete files
+ *                              on the eq-key for a further `<eq>` % -- the mixed state a CDC table
+ *                              reaches between compactions.
  *
  * Run through `gen-iceberg-mor.sh`; Spark alone (no plugin) writes the tables, so the counts in the
  * README come from Spark's row path -- the oracle the harness compares every configuration to.
@@ -215,7 +221,19 @@ object IcebergMorGenerator {
       clean: Boolean = false
   )
 
-  private val Pattern = """^(plain|(pos|dv)_(\d+)(_clustered)?|(pos|dv)_upd_(\d+)|eq_(\d+))$""".r
+  private val Pattern =
+    """^(plain|(pos|dv)_(\d+)(_clustered)?|(pos|dv)_upd_(\d+)|eq_(\d+)|(mix|dvmix)_(\d+)_(\d+))$""".r
+
+  /**
+   * The first bucket (of `pmod(xxhash64(hashKey), 1000)`) no generator delete touched in `variant`,
+   * so a CDC change batch starting there updates and deletes live rows only. `mix_<pos>_<eq>` and
+   * `dvmix_<pos>_<eq>` delete buckets `[0, 10 * (pos + eq))`; other variants keep the runner's
+   * historical start of 200.
+   */
+  def firstLiveBucket(variant: String): Int = variant match {
+    case Pattern(_, _, _, _, _, _, _, mixKind, pos, eq) if mixKind != null => (pos.toInt + eq.toInt) * 10
+    case _ => 200
+  }
 
   def main(argv: Array[String]): Unit = {
     def parse(rest: List[String], a: Args): Args = rest match {
@@ -324,8 +342,18 @@ object IcebergMorGenerator {
   ): Summary = {
     val statements = ArrayBuffer.empty[String]
     def sql(s: String): Unit = { statements += s; spark.sql(s) }
-    val Pattern(_, kind, pct, clusteredFlag, updKind, updPct, eqPct) = variant
-    val formatVersion = if (kind == "dv" || updKind == "dv") 3 else 2
+    val Pattern(_, kind, pct, clusteredFlag, updKind, updPct, eqPct, mixKind, mixPos, mixEq) = variant
+    val formatVersion = if (kind == "dv" || updKind == "dv" || mixKind == "dvmix") 3 else 2
+    // Equality delete files on eqKey through the Java API for every key value whose hash falls in
+    // `pct` % of the buckets starting at `offset` %, in files of 20000 keys. The keys are streamed to
+    // the driver one partition at a time rather than collected: store_sales has tens of millions of
+    // them, which does not fit a small driver heap.
+    def equalityDeletes(pct: Int, offset: Int): Unit = {
+      val keys = spark.table(name).where(p.scattered(pct, offset)).select(p.eqKey).distinct().orderBy(p.eqKey)
+        .toLocalIterator().asScala.map(_.getAs[Number](0).longValue())
+      val n = addEqualityDeletes(spark, name, p.eqKey, keys, 20000)
+      statements += s"-- equality delete files on ${p.eqKey} for the $n keys WHERE ${p.scattered(pct, offset)} (Java API, ${(n + 19999) / 20000} files of <= 20000 keys)"
+    }
     // The base table: the Parquet rows as `files` data files, merge-on-read for every mutation kind.
     val props = Seq(
       "format-version" -> formatVersion.toString,
@@ -371,13 +399,14 @@ object IcebergMorGenerator {
                |WHEN MATCHED AND $delPred THEN DELETE
                |WHEN MATCHED THEN UPDATE SET ${p.mergeUpdateSet}
                |WHEN NOT MATCHED THEN INSERT *""".stripMargin)
+      case _ if mixKind != null =>
+        // The table a CDC sink has been writing into between compactions: scattered positional
+        // deletes (deletion vectors on v3) over the first mixPos % of the buckets, then equality
+        // deletes over the next mixEq %. Both layers apply to every data file.
+        sql(s"DELETE FROM $name WHERE ${p.scattered(mixPos.toInt)}")
+        equalityDeletes(mixEq.toInt, offset = mixPos.toInt)
       case _ =>
-        // Equality deletes on the eq-key through the Java API: every key value whose hash falls in
-        // the first pct %, in files of 20000 keys.
-        val keys = spark.table(name).where(p.scattered(eqPct.toInt)).select(p.eqKey).distinct().orderBy(p.eqKey)
-          .collect().map(_.getAs[Number](0).longValue())
-        addEqualityDeletes(spark, name, p.eqKey, keys.toSeq, 20000)
-        statements += s"-- equality delete files on ${p.eqKey} for the ${keys.length} keys WHERE ${p.scattered(eqPct.toInt)} (Java API, ${(keys.length + 19999) / 20000} files of <= 20000 keys)"
+        equalityDeletes(eqPct.toInt, offset = 0)
     }
     summarize(spark, name, variant, formatVersion, statements.toSeq)
   }
@@ -387,7 +416,7 @@ object IcebergMorGenerator {
    * one row delta, the way a streaming CDC writer does. The deletes get a sequence number above
    * every existing data file, so they apply to all of them.
    */
-  def addEqualityDeletes(spark: SparkSession, name: String, eqKey: String, keys: Seq[Long], perFile: Int): Unit = {
+  def addEqualityDeletes(spark: SparkSession, name: String, eqKey: String, keys: Iterator[Long], perFile: Int): Long = {
     val table: Table = Spark3Util.loadIcebergTable(spark, name)
     val schema = table.schema()
     val keyField = schema.findField(eqKey)
@@ -395,7 +424,9 @@ object IcebergMorGenerator {
     val isLong = keyField.`type`().typeId() == org.apache.iceberg.types.Type.TypeID.LONG
     val factory = new GenericAppenderFactory(schema, table.spec(), Array(keyField.fieldId()), deleteSchema, null)
     val delta = table.newRowDelta()
+    var written = 0L
     keys.grouped(perFile).zipWithIndex.foreach { case (chunk, i) =>
+      written += chunk.size
       val outputFile = OutputFileFactory.builderFor(table, 1, i + 1).format(FileFormat.PARQUET).build().newOutputFile()
       val writer = factory.newEqDeleteWriter(outputFile, FileFormat.PARQUET, null)
       try {
@@ -408,6 +439,7 @@ object IcebergMorGenerator {
       delta.addDeletes(writer.toDeleteFile())
     }
     delta.commit()
+    written
   }
 
   private def summarize(
