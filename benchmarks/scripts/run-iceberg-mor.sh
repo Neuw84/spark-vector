@@ -45,7 +45,7 @@ gen() { # <namespace> <variants>
   f="$(mktemp)"
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|DATA_PREFIX|${DATA_PREFIX}|g" \
       -e "s|NAMESPACE|${ns}|g" -e "s|VARIANTS|${variants}|g" -e "s|FILES|${FILES}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
-      "$HERE/iceberg-mor-gen.yaml" > "$f"
+      "$HERE/../k8s/iceberg-mor-gen.yaml" > "$f"
   apply_and_wait "$name" "$f"; rm -f "$f"
 }
 
@@ -56,7 +56,7 @@ cdc() { # <config> <namespace> <variant>
   # The manifest name pattern is CONFIG-TABLE; render TABLE as ns.variant and give the SparkApplication a k8s-safe name.
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|NAMESPACE|${ns}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
       -e "s|spark-vector-mor-cdc-CONFIG-TABLE|${name}|" -e "s|\"CONFIG\"|\"${config}\"|" -e "s|\"TABLE\"|\"${table}\"|" \
-      "$HERE/iceberg-mor-cdc.yaml" > "$f"
+      "$HERE/../k8s/iceberg-mor-cdc.yaml" > "$f"
   apply_and_wait "$name" "$f" || { rm -f "$f"; return 1; }
   # Copy the driver's local JSONL to S3 (one file per config, appended across variants in-JVM; here per run).
   kubectl -n "$NS_BENCH" cp "${name}-driver:/opt/spark/work-dir/cdc-results/cdc-${config}.jsonl" "/tmp/cdc-${config}-${ns}-${variant}.jsonl" 2>/dev/null \

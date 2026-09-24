@@ -44,17 +44,22 @@ spec:
   restartPolicy:
     type: Never
   driver:
-    cores: 4
-    memory: "16g"
+    cores: 1
+    memory: "3g"
     serviceAccount: sfi-engine
+    nodeSelector:
+      workload: "spark-xl"
     volumeMounts:
       - name: tmp
         mountPath: /tmp
   executor:
     instances: 8
-    cores: 13
-    memory: "30g"
-    memoryOverhead: "20g"
+    cores: 14
+    memory: "40g"
+    memoryOverhead: "12g"
+    serviceAccount: sfi-engine
+    nodeSelector:
+      workload: "spark-xl"
     volumeMounts:
       - name: tmp
         mountPath: /tmp
