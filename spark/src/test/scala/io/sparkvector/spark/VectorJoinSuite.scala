@@ -464,6 +464,14 @@ class VectorJoinSuite extends VectorQuerySuite {
       "true"
     ).set("spark.memory.offHeap.size", "4g").set("spark.executor.cores", "4")
     assert(VectorConf.joinMaxBuildSize(spark.sessionState.conf, offHeap) === (1L << 30))
+    // The shuffled join's in-memory budget is its own default, 256 MB, whatever the broadcast budget is.
+    assert(VectorConf.joinSpillBytes(spark.sessionState.conf, offHeap) === (256L << 20))
+    withConf(VectorConf.JoinSpillBytes -> "1g") {
+      assert(VectorConf.joinSpillBytes(spark.sessionState.conf, offHeap) === (1L << 30))
+    }
+    withConf(VectorConf.JoinSpillBytes -> "0") {
+      assert(VectorConf.joinSpillBytes(spark.sessionState.conf, offHeap) === Long.MaxValue)
+    }
     // No logical link, no statistics: unknown, which converts rather than refuses.
     val orphan = org.apache.spark.sql.execution.LocalTableScanExec(Nil, Nil, None)
     assert(VectorJoinPlanner.estimatedBuildSize(orphan).isEmpty)

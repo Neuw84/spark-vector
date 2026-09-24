@@ -175,14 +175,21 @@ object VectorConf {
    * bucket at a time. `1` or less turns the split off (the build side is always held in memory).
    */
   /**
-   * The build bytes a shuffled hash join holds in memory before it splits (#416); default the build
-   * budget [[joinMaxBuildSize]], which the planner applies to the statistics where this applies to the
-   * rows that arrive. `0` or negative: never split.
+   * The build bytes a shuffled hash join holds in memory before it splits (#416): 256 MB per task.
+   * Measured at 1 TB on the eight join-heaviest TPC-DS queries, back to back and alone on the cluster,
+   * 256 MB and 1 GiB are the same within the band (748 against 758 s over the eight) and route every
+   * join identically -- with the planner in front (`hashMaxBuildSize`), the sides the 1 GiB budget would
+   * have held in memory go to the merge join under 256 MB at no cost, and neither budget spilled a byte.
+   * 256 MB is then the one that leaves three quarters of the earlier headroom to the sort and the
+   * operators beside the join; the broadcast budget [[joinMaxBuildSize]] is a different question (a
+   * relation held once per task for the whole query) and keeps its own default. `0` or negative:
+   * never split.
    */
+  val DefaultJoinSpillBytes: Long = 256L << 20
   def joinSpillBytes(conf: SQLConf, sparkConf: org.apache.spark.SparkConf): Long = {
     val explicit = conf.getConfString(JoinSpillBytes, "").trim
     val v = if (explicit.nonEmpty) org.apache.spark.network.util.JavaUtils.byteStringAsBytes(explicit)
-    else joinMaxBuildSize(conf, sparkConf)
+    else DefaultJoinSpillBytes
     if (v <= 0) Long.MaxValue else v
   }
   def joinSpillBuckets(conf: SQLConf): Int =
