@@ -44,6 +44,10 @@ loses it is the scan-bound queries (q88 142 against Spark's 126) and a handful o
 (q99, q36, q12, q57), each with its cause named in `docs/results.md`. Every checksum equals Spark's
 except q65, whose result has ties that every engine orders differently.
 
+The same comparison as a page with per-query charts: [Apache Spark vs spark-vector vs DataFusion Comet on
+TPC-DS 1 TB](https://neuw84.github.io/spark-vector/benchmarks/tpcds-1tb.html) (rendered from the result
+files by `benchmarks/scripts/render-benchmark-page.py`; the source is `docs/benchmarks/tpcds-1tb.html`).
+
 Requirements and the things it does not do yet are listed under
 [Requirements and known limitations](#requirements-and-known-limitations); every configuration key
 with its default is in [docs/configuration.md](docs/configuration.md).
