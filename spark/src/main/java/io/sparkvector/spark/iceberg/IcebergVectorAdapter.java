@@ -92,6 +92,16 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     private static final LongAdder ADAPTED_COLUMNS = new LongAdder();
     private static final LongAdder ADAPTED_DICTIONARY_COLUMNS = new LongAdder();
 
+    /**
+     * Columns whose 4-byte IntVector was widened into an INT64 lane (small
+     * decimals).
+     */
+    private static final LongAdder WIDENED_INT_COLUMNS = new LongAdder();
+
+    public static long widenedIntColumns() {
+        return WIDENED_INT_COLUMNS.sum();
+    }
+
     private final Class<?> arrowColumnVector;
     private final Class<?> columnVectorWithFilter;
     private final Class<?> largeVarChar;
@@ -321,7 +331,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             } else if (type == VecType.DECIMAL128) {
                 result = adaptWideDecimal(vector, numRows, validity, scratch);
             } else {
-                result = wrap(vector, numRows, type, validity);
+                result = wrap(vector, numRows, type, validity, scratch);
             }
             if (result != null) {
                 ADAPTED_COLUMNS.increment();
@@ -344,12 +354,30 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     }
 
     private VectorBuffers wrap(Object vector, int numRows, VecType type,
-            MemorySegment validity)
+            MemorySegment validity, Arena scratch)
             throws ReflectiveOperationException {
         if (type == VecType.UTF8 && largeVarChar.isInstance(vector)) {
             return null; // 64-bit offsets: let the copy path handle it
         }
         MemorySegment data = segment(getDataBuffer.invoke(vector));
+        String vectorClass = vector.getClass().getSimpleName();
+        if (type == VecType.INT64 && vectorClass.equals("IntVector")) {
+            // Iceberg keeps a decimal of up to 9 digits (e.g. TPC-DS DECIMAL(7,2)) as an IntVector of
+            // 4-byte unscaled values, while the lane for every decimal up to 18 digits is INT64: widen
+            // into the scratch arena. Wrapping the 4-byte buffer as 8-byte lanes read past its end.
+            MemorySegment wide = scratch.allocate((long) numRows << 3, 8);
+            for (int i = 0; i < numRows; i++) {
+                wide.setAtIndex(VectorBuffers.LE_LONG, i, data.getAtIndex(VectorBuffers.LE_INT, i));
+            }
+            WIDENED_INT_COLUMNS.increment();
+            return SegmentVectorBuffers.fixedWidth(type, numRows, validity, wide);
+        }
+        if (type == VecType.INT64 && !(vectorClass.equals("BigIntVector") || vectorClass.startsWith("TimeStamp"))) {
+            return null; // not 8-byte values (e.g. a 16-byte DecimalVector): the copy path is always correct
+        }
+        if (type.isFixedWidth() && type != VecType.BOOL && data.byteSize() < (long) numRows * type.byteWidth()) {
+            return null; // a buffer shorter than the rows it claims: decline rather than read past it
+        }
         if (type == VecType.UTF8) {
             MemorySegment offsets = segment(getOffsetBuffer.invoke(vector));
             return SegmentVectorBuffers.utf8(numRows, validity, offsets, data);
@@ -374,7 +402,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         if (vector.getClass()
                   .getSimpleName()
                   .equals("DecimalVector")) {
-            return wrap(vector, numRows, VecType.DECIMAL128, validity); // already Arrow Decimal128
+            return wrap(vector, numRows, VecType.DECIMAL128, validity, scratch); // already Arrow Decimal128
         }
         if (!vector.getClass()
                    .getSimpleName()

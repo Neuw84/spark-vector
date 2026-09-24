@@ -75,7 +75,13 @@ object CdcMergeRunner {
       extraConf: Map[String, String] = Map.empty,
       report: Option[String] = None,
       /** Skip the read phases (merge only). */
-      mergeOnly: Boolean = false
+      mergeOnly: Boolean = false,
+      /**
+       * Size of the change batch as a % of the table's rows (before deletes), split like the default
+       * batch -- ~73 % updates, ~19 % deletes, ~8 % inserts -- and placed on buckets no generator
+       * delete touched (see [[IcebergMorGenerator.firstLiveBucket]]). None = the historical batch.
+       */
+      changePct: Option[Double] = None
   )
 
   def main(argv: Array[String]): Unit = {
@@ -93,6 +99,8 @@ object CdcMergeRunner {
       case "--threads" :: v :: t => parse(t, a.copy(threads = v.toInt))
       case "--shuffle-partitions" :: v :: t => parse(t, a.copy(shufflePartitions = v.toInt))
       case "--merge-only" :: t => parse(t, a.copy(mergeOnly = true))
+      case "--change-pct" :: v :: t =>
+        parse(t, a.copy(changePct = if (v == "default") None else Some(v.toDouble)))
       case "--report" :: v :: t => parse(t, a.copy(report = Some(v)))
       case "--conf" :: kv :: t =>
         val Array(k, v) = kv.split("=", 2)
@@ -117,6 +125,24 @@ object CdcMergeRunner {
   private val UpdateBuckets = (200, 350)
   private val DeleteBuckets = (350, 390)
   private val InsertBuckets = (390, 406)
+
+  /**
+   * (updates, deletes, inserts) bucket ranges. Without `changePct` the historical batch above; with
+   * it, `changePct * 10` buckets starting at the table's first untouched bucket, split 73/19/8 like
+   * the historical 150/40/16. The buckets hash the ticket/order key, which is spread over every data
+   * file, so the batch touches all of them.
+   */
+  private[benchmarks] def changeRanges(table: String, changePct: Option[Double]): ((Int, Int), (Int, Int), (Int, Int)) =
+    changePct match {
+      case None => (UpdateBuckets, DeleteBuckets, InsertBuckets)
+      case Some(pct) =>
+        val from = IcebergMorGenerator.firstLiveBucket(table.substring(table.lastIndexOf('.') + 1))
+        val total = math.round(pct * 10).toInt
+        require(total > 0 && from + total <= 1000, s"--change-pct $pct does not fit buckets [$from, 1000)")
+        val u = math.round(total * 0.73).toInt
+        val d = math.round(total * 0.19).toInt
+        ((from, from + u), (from + u, from + u + d), (from + u + d, from + total))
+    }
 
   private def buckets(p: TableProfile, range: (Int, Int)): String =
     s"pmod(xxhash64(${p.hashKey}), 1000) >= ${range._1} AND pmod(xxhash64(${p.hashKey}), 1000) < ${range._2}"
@@ -197,16 +223,22 @@ object CdcMergeRunner {
         def branch(op: String, tweaks: Map[String, String]) =
           s"SELECT '$op' AS op, ${columns.map(c => tweaks.getOrElse(c, c) + s" AS $c").mkString(", ")} FROM cdc_base"
         val grainCols = p.grain.mkString(", ")
+        val (updR, delR, insR) = changeRanges(args.table, args.changePct)
+        println(s"[cdc] change buckets: U=$updR D=$delR I=$insR (of 1000)")
+        val touched = spark.sql(s"SELECT count(DISTINCT _file) FROM $table WHERE " +
+          s"pmod(xxhash64(${p.hashKey}), 1000) >= ${updR._1} AND pmod(xxhash64(${p.hashKey}), 1000) < ${delR._2}")
+          .collect()(0).getLong(0)
+        println(s"[cdc] change batch updates/deletes rows in $touched of ${stats.dataFiles} data files")
         val batch = spark.sql(
           branch(
             "U",
             p.cdcUpdateTweaks
-          ) + s" WHERE ${buckets(p, UpdateBuckets)}" +
-            " UNION ALL " + branch("D", Map.empty) + s" WHERE ${buckets(p, DeleteBuckets)}" +
+          ) + s" WHERE ${buckets(p, updR)}" +
+            " UNION ALL " + branch("D", Map.empty) + s" WHERE ${buckets(p, delR)}" +
             " UNION ALL " + branch(
               "I",
               Map(p.reKey -> s"${p.reKey} + ${maxKey}L")
-            ) + s" WHERE ${buckets(p, InsertBuckets)}"
+            ) + s" WHERE ${buckets(p, insR)}"
         )
         // At most one change row per grain: the timed MERGE rejects a target matched more than once
         // (SQLSTATE 23K01). lineitem's grain is a true key (no-op); store_sales is not, so dedupe.
@@ -378,7 +410,8 @@ object CdcMergeRunner {
 
   /** A cheap whole-table checksum: global aggregates to 10 significant digits, like TpchRunner's row checksums. */
   private def checksumOf(spark: SparkSession, table: String, p: TableProfile): String = {
-    val r = spark.sql(p.checksumSql.format(table)).collect()(0)
+    // replace, not format: the checksum SQL uses the `%` modulo operator, which String.format rejects.
+    val r = spark.sql(p.checksumSql.replace("%s", table)).collect()(0)
     (0 until r.length).map { i =>
       r.get(i) match { case d: java.lang.Double => f"${d.doubleValue()}%.10g"; case v => String.valueOf(v) }
     }.mkString("|").hashCode.toHexString
