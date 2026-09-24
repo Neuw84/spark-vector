@@ -43,6 +43,9 @@ object VectorConf {
   val JoinSpillBytes = "spark.vector.join.spillBytes"
   val CometRangeShuffleEnabled = "spark.vector.comet.shuffle.range.enabled"
 
+  /** The scan-side prefetching converter (#403, lever 2): the queue depth, `0` off. */
+  val ScanPrefetch = "spark.vector.scan.prefetch"
+
   /** Mixed chains (#280): Comet's native operators above ours through the sink leaf. Off until #281 decides an allowlist. */
   val CometMixedEnabled = "spark.vector.comet.mixed.enabled"
 
@@ -225,6 +228,20 @@ object VectorConf {
 
   /** Also hand range-partitioned exchanges (global sorts) to Comet's native shuffle. */
   def cometRangeShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometRangeShuffleEnabled, default = true)
+
+  /**
+   * Depth of the prefetching converter's queue under the first operator of ours above a Spark file
+   * scan (#403, lever 2): `0` (the default) leaves the scan's batches to be converted lazily on the
+   * task thread; `1` or `2` inserts [[org.apache.spark.sql.vector.VectorPrefetchScanExec]], whose
+   * helper thread pulls the reader's next batch and converts every column into our Arrow vectors
+   * while the task thread works on the previous one. Memory grows by that many converted batches
+   * per task. Larger values are accepted and capped at 8.
+   */
+  def scanPrefetchDepth(conf: SQLConf): Int =
+    scala.util.Try(conf.getConfString(ScanPrefetch, "0").trim.toInt).toOption.filter(_ > 0).map(math.min(
+      _,
+      8
+    )).getOrElse(0)
   def cometMixedEnabled(conf: SQLConf): Boolean = bool(conf, CometMixedEnabled, default = false)
   def cometPreferComet(conf: SQLConf): String = conf.getConfString(CometPreferComet, "")
 

@@ -406,7 +406,9 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
           }
       }
       val converted = plan.transformUp(delegation.orElse(conversions))
-      val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(converted) else converted
+      val prefetchDepth = VectorConf.scanPrefetchDepth(conf)
+      val withPrefetch = if (prefetchDepth > 0) prefetchScans(converted, prefetchDepth) else converted
+      val withSelections = if (VectorConf.selectionEnabled(conf)) markSelectionProducers(withPrefetch) else withPrefetch
       val withMixed = if (bridge != null) mixedChains(withSelections, bridge, prefer, conversions) else withSelections
       val withShuffles =
         if (
@@ -603,6 +605,46 @@ case class VectorExecRule(session: SparkSession) extends Rule[SparkPlan] with Lo
   private def fallback(plan: SparkPlan, reason: String): SparkPlan = {
     plan.setTagValue(VectorFallback.Tag, reason)
     plan
+  }
+
+  /**
+   * The prefetching scan converter (#403, lever 2): under `spark.vector.scan.prefetch > 0`, every
+   * Spark vectorized file scan that feeds one of our operators directly is wrapped in a
+   * [[VectorPrefetchScanExec]], so the first operator of ours above a scan -- a filter, a projection,
+   * an aggregate, a join side, a sort, an expand -- reads batches of our own vectors converted on a
+   * helper thread. Applied once the operators are built, which is the same as wrapping the child
+   * before each conversion (the conversions only judge the scan's columnar contract and types, which
+   * the wrapper reports unchanged) without touching every case. A scan whose parent stayed Spark's is
+   * not wrapped: nothing of ours would read the converted batches. Idempotent under adaptive
+   * re-planning: a wrapper is never a scan, so a stage plan that already carries one is left alone.
+   */
+  private def prefetchScans(plan: SparkPlan, depth: Int): SparkPlan = plan.transformUp {
+    case parent: VectorPlan if parent.children.exists(prefetchableScan) =>
+      parent.withNewChildren(parent.children.map(c => if (prefetchableScan(c)) VectorPrefetchScanExec(c, depth) else c))
+  }
+
+  /**
+   * A Spark file scan the converter can take: Spark's own vectorized Parquet / ORC scan
+   * (`FileSourceScanExec`) or a DSv2 batch scan (`BatchScanExec`: Iceberg's JVM vectorized reader,
+   * whose `scan` is an `org.apache.iceberg.spark.source.*` class; any other columnar DSv2 source is
+   * converted through the copying adapter just as it is today), columnar, every column with a lane --
+   * a column without one (struct, array, map) is passed through by a filter or projection as Spark's
+   * vector, which the reader recycles, so such a scan keeps the lazy per-column adaptation. Comet's
+   * scans (`CometScanExec`, `CometBatchScanExec`, the native Iceberg scan) are their own classes in
+   * Comet's packages and are read zero-copy already; our operators and a local table scan are not
+   * scans.
+   */
+  private def prefetchableScan(plan: SparkPlan): Boolean = {
+    def lanes: Boolean = plan.supportsColumnar && plan.output.forall(a => TypeMapping.hasLane(a.dataType))
+    def cometClass: Boolean = {
+      val name = plan.getClass.getName
+      name.startsWith("org.apache.spark.sql.comet.") || name.startsWith("org.apache.comet.")
+    }
+    plan match {
+      case _: org.apache.spark.sql.execution.FileSourceScanExec => lanes && !cometClass
+      case _: org.apache.spark.sql.execution.datasources.v2.BatchScanExec => lanes && !cometClass
+      case _ => false
+    }
   }
 
   /**

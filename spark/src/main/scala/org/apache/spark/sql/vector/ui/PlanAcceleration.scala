@@ -168,8 +168,12 @@ object PlanAcceleration {
   /**
    * Row/columnar transitions: the only nodes that convert between rows and batches. Neither is an
    * operator we either did or did not convert, so they are shown but do not count as a fallback.
+   * The prefetching scan converter (#403) is a format conversion too -- Spark's scan vectors into
+   * ours, on a helper thread -- and computes nothing, so it is plumbing like them rather than an
+   * accelerated operator: a plan's operator count is the same with `spark.vector.scan.prefetch` on
+   * or off.
    */
-  private val TransitionNames = Set("ColumnarToRow", "RowToColumnar")
+  private val TransitionNames = Set("ColumnarToRow", "RowToColumnar", "VectorPrefetchScan")
 
   /** AQE's shuffle reader and reuse markers: plumbing that changes nothing about the format. */
   private val ShuffleReadNames = Set("AQEShuffleRead", "ReusedExchange", "ReusedSubquery")
@@ -205,7 +209,7 @@ object PlanAcceleration {
   private def isCometName(nodeName: String): Boolean = nodeName.startsWith("Comet")
 
   private def isVectorName(nodeName: String): Boolean =
-    nodeName.startsWith("Vector") && nodeName != "VectorToComet"
+    nodeName.startsWith("Vector") && nodeName != "VectorToComet" && !isTransition(nodeName)
 
   // ---------------------------------------------------------------- from real operators
 
