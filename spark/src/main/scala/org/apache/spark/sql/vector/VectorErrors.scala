@@ -23,6 +23,12 @@ import org.apache.spark.unsafe.types.UTF8String
 
 /** Spark's error factories are `private[sql]`; this bridge lives inside that package tree. */
 object VectorErrors {
+
+  /** Spark's `SparkArithmeticException` is `private[spark]`: the overflow a table-insert cast re-raises. */
+  def isArithmeticOverflow(t: Throwable): Boolean = t.isInstanceOf[org.apache.spark.SparkArithmeticException]
+
+  def castOverflowInTableInsert(from: DataType, to: DataType, columnName: String): ArithmeticException =
+    QueryExecutionErrors.castingCauseOverflowErrorInTableInsert(from, to, columnName)
   def divideByZero(context: QueryContext): ArithmeticException =
     QueryExecutionErrors.divideByZeroError(context)
 

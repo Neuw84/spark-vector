@@ -197,6 +197,15 @@ public final class CastKernels {
         return new IllegalArgumentException("unsupported cast " + from + " -> " + to);
     }
 
+    /**
+     * Widens {@code n} little-endian int32 values of {@code in} into int64
+     * lanes of {@code out} (Vector API {@code I2L}): the Iceberg adapter's lane
+     * for a small decimal kept as an IntVector.
+     */
+    public static void widenInt32(MemorySegment in, int n, MemorySegment out) {
+        i32ToI64(in, n, out);
+    }
+
     static void i32ToI64(MemorySegment a, int n, MemorySegment out) {
         int lanes = L.length(), i = 0;
         for (; i + lanes <= n; i += lanes) {

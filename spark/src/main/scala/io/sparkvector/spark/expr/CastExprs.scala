@@ -377,3 +377,20 @@ final case class RetypeExpr(child: VectorExpr, dataType: DataType) extends Vecto
   override def children: Seq[VectorExpr] = Seq(child)
   override def eval(ctx: EvalContext): VectorBuffers = child.eval(ctx)
 }
+
+/**
+ * Spark's `CheckOverflowInTableInsert`: the ANSI cast a table write (INSERT, UPDATE, MERGE) puts on
+ * each column whose type differs from the target's. The values are the cast's own; only the error
+ * changes -- an arithmetic overflow in the cast is re-raised as `CAST_OVERFLOW_IN_TABLE_INSERT`
+ * naming the target column, exactly as Spark's `eval` does.
+ */
+final case class TableInsertOverflowExpr(child: VectorExpr, from: DataType, dataType: DataType, columnName: String)
+    extends VectorExpr {
+  override def children: Seq[VectorExpr] = Seq(child)
+  override def eval(ctx: EvalContext): VectorBuffers =
+    try child.eval(ctx)
+    catch {
+      case e: ArithmeticException if org.apache.spark.sql.vector.VectorErrors.isArithmeticOverflow(e) =>
+        throw org.apache.spark.sql.vector.VectorErrors.castOverflowInTableInsert(from, dataType, columnName)
+    }
+}
