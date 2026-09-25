@@ -74,10 +74,10 @@ public final class AggKernels {
     }
 
     /**
-     * Lane mask from the low {@code lanes} bits of {@code bits}. With predicate
-     * registers ({@link Platform#MASK_REGISTERS}) {@code VectorMask.fromLong}
-     * is one {@code kmov}; elsewhere it has no fast path and the
-     * broadcast-AND-compare form is used (#283, decision 1).
+     * Lane mask from the low {@code lanes} bits of {@code bits}. Where {@code
+     * VectorMask.fromLong} is native ({@link Platform#MASK_REGISTERS}: one
+     * {@code kmov} on AVX-512) it is used; elsewhere, SVE included (#253), the
+     * broadcast-AND-compare form is (#283, decision 1).
      */
     static VectorMask<Long> maskL(long bits) {
         if (Platform.MASK_REGISTERS) {

@@ -34,8 +34,11 @@ class PlatformTest {
         Set<String> known = Set.of(Platform.NEON, Platform.SVE, Platform.AVX2, Platform.AVX512, "unknown");
         assertTrue(known.contains(Platform.NAME), Platform.NAME);
         boolean predicated = Platform.NAME.equals(Platform.AVX512) || Platform.NAME.equals(Platform.SVE);
-        assertEquals(predicated, Platform.MASK_REGISTERS);
         assertEquals(predicated, Platform.NATIVE_COMPRESS);
+        // #253: fromLong masks only on AVX-512 (not intrinsified at 128-bit SVE on JDK 25), unless overridden.
+        String maskOverride = System.getProperty("sparkvector.maskRegisters");
+        boolean expectedMasks = maskOverride == null ? Platform.NAME.equals(Platform.AVX512) : Boolean.parseBoolean(maskOverride);
+        assertEquals(expectedMasks, Platform.MASK_REGISTERS);
         String arch = System.getProperty("os.arch", "");
         if (System.getProperty("sparkvector.platform") == null && (arch.equals("amd64") || arch.equals("x86_64"))) {
             // HotSpot on x86-64 always has some AVX level; the probe must not fall through to "unknown".
