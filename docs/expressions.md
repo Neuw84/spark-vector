@@ -1,9 +1,14 @@
+---
+layout: default
+title: Supported expressions
+---
+
 # Spark expression support
 
 One row per Spark expression: whether spark-vector compiles it, which lane types it accepts, and the
 incompatibility that still makes it fall back where one exists. Modelled on Comet's
 [Spark Expression Support](https://datafusion.apache.org/comet/user-guide/latest/expressions.html)
-page; the companion for operators is [docs/operators.md](operators.md).
+page; the companion for operators is [docs/operators.md](operators.html).
 
 **How to read it.** `ExpressionCompiler.compile` (`spark/src/main/scala/io/sparkvector/spark/expr/`)
 is one `match` over Catalyst expressions. Every case either produces a `VectorExpr` node with a kernel
@@ -28,7 +33,7 @@ Anything else -- `float`, `short`, `byte`, `binary`, `array`, `map`, `struct`,
 intervals -- has no lane: a column of such a type records `unsupported type <type> for <name>`, a
 result of such a type `unsupported output type <type> for <name>`, whatever the expression. A wide
 decimal *expression* (arithmetic, a cast) is still refused with its own reason until the rest of #258
-lands (see the TPC-H decimal measurement in [docs/results.md](results.md) and #26 / #27 / #28).
+lands (see the TPC-H decimal measurement in [docs/results.md](results.html) and #26 / #27 / #28).
 
 **Literals** are compiled as operands of a supported type: `int`, `bigint`, `double`, `date`,
 `timestamp`, `decimal(p <= 18)`, `string`. A typed `NULL` literal (`CAST(NULL AS INT)`, the `NULL AS col`
@@ -139,7 +144,7 @@ matching Spark's short-circuit behaviour.
 ### Aggregate functions
 
 Compiled by `VectorAggregates` for `HashAggregateExec` in every mode (see
-[docs/operators.md](operators.md) for the operator's own conditions).
+[docs/operators.md](operators.html) for the operator's own conditions).
 
 | Function | Types | Notes / fallback reasons |
 |---|---|---|

@@ -1,3 +1,8 @@
+---
+layout: default
+title: Benchmark results
+---
+
 # Benchmark results
 
 Measured on an Apple M3 Pro (11 cores: 5 performance + 6 efficiency, 18 GB), macOS 27, OpenJDK

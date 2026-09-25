@@ -1,3 +1,8 @@
+---
+layout: default
+title: Flight shuffle
+---
+
 # The columnar shuffle over Arrow Flight
 
 How a shuffle stage's map outputs get from one executor to another without leaving Arrow memory:

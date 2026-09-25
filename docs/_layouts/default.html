@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title and page.title != site.title %}{{ page.title }} &middot; {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+  <link rel="stylesheet" href="{{ '/assets/css/site.css' | relative_url }}">
+  <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+
+  {% include header.html %}
+
+  <div class="layout">
+    {% include sidebar.html %}
+
+    <main id="main-content" class="content">
+      <article class="doc">
+        {{ content }}
+      </article>
+      {% include footer.html %}
+    </main>
+
+    <aside class="toc" aria-label="On this page">
+      <div class="toc-inner">
+        <p class="toc-title">On this page</p>
+        <nav id="toc-nav"></nav>
+      </div>
+    </aside>
+  </div>
+
+  <script src="{{ '/assets/js/site.js' | relative_url }}"></script>
+</body>
+</html>

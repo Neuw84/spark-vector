@@ -1,3 +1,8 @@
+---
+layout: default
+title: Apache Iceberg
+---
+
 # Apache Iceberg merge-on-read tables
 
 spark-vector operators run over Iceberg tables through either of the two columnar readers Spark

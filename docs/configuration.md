@@ -1,3 +1,8 @@
+---
+layout: default
+title: Configuration reference
+---
+
 # Configuration reference
 
 Every `spark.vector.*` key is a session-level Spark SQL configuration: set it with `--conf` on
