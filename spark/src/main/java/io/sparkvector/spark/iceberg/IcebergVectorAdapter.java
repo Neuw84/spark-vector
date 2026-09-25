@@ -124,6 +124,15 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     private final Method dictionaryMaxId;
     private final Method dictionaryDecodeToBinary;
     private final Method binaryGetBytes;
+    private final Method dictionaryDecodeToInt; // Dictionary.decodeToInt (shaded parquet), or null
+    private final Method dictionaryDecodeToLong; // Dictionary.decodeToLong (shaded parquet), or null
+    // A dictionary-encoded decimal of up to 18 digits, decoded once per Parquet dictionary (#20): the
+    // copy path read it through getDecimal, a Spark Decimal per row plus its unscaled long, ~6% of the
+    // CDC MERGE's target scan. Per thread, keyed weakly by the dictionary (Parquet's Dictionary keeps
+    // Object's identity equals), so a table does not outlive its row group; cleared when it grows.
+    private static final ThreadLocal<java.util.WeakHashMap<Object, long[]>> SMALL_DECIMAL_LUTS = ThreadLocal.withInitial(java.util.WeakHashMap::new);
+    private static final int SMALL_DECIMAL_LUT_ENTRIES = 16;
+    private static final java.util.concurrent.atomic.LongAdder ADAPTED_DICTIONARY_DECIMAL_COLUMNS = new java.util.concurrent.atomic.LongAdder();
 
     private IcebergVectorAdapter(ClassLoader loader) throws ReflectiveOperationException {
         arrowColumnVector = Class.forName(ARROW_COLUMN_VECTOR, false, loader);
@@ -151,6 +160,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         Method maxId = null;
         Method decode = null;
         Method getBytes = null;
+        Method decodeInt = null;
+        Method decodeLong = null;
         try {
             dsa = Class.forName(DICTIONARY_STRING_ACCESSOR, false, loader);
             dictField = accessible(dsa.getDeclaredField("dictionary"));
@@ -159,6 +170,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             maxId = dictionary.getMethod("getMaxId");
             decode = dictionary.getMethod("decodeToBinary", int.class);
             getBytes = binary.getMethod("getBytes");
+            decodeInt = dictionary.getMethod("decodeToInt", int.class);
+            decodeLong = dictionary.getMethod("decodeToLong", int.class);
         } catch (ReflectiveOperationException e) {
             LOG.debug("spark-vector: Iceberg dictionary accessor not resolvable, dictionary strings will be copied", e);
             dsa = null;
@@ -176,6 +189,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         dictionaryMaxId = maxId;
         dictionaryDecodeToBinary = decode;
         binaryGetBytes = getBytes;
+        dictionaryDecodeToInt = decodeInt;
+        dictionaryDecodeToLong = decodeLong;
     }
 
     private static <T extends java.lang.reflect.AccessibleObject> T accessible(T member) {
@@ -324,6 +339,16 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
                     .getSimpleName()
                     .equals("DictionaryDecimalBinaryAccessor")) {
                 result = adaptDictionaryWideDecimal(acc, vector, numRows, validity, scratch);
+            } else if (type == VecType.INT64 && (acc.getClass()
+                    .getSimpleName()
+                    .equals("DictionaryDecimalIntAccessor")
+                    || acc.getClass()
+                          .getSimpleName()
+                          .equals("DictionaryDecimalLongAccessor"))) {
+                result = adaptDictionarySmallDecimal(acc, vector, numRows, validity, scratch);
+                if (result != null) {
+                    ADAPTED_DICTIONARY_DECIMAL_COLUMNS.increment();
+                }
             } else if (acc.getClass()
                           .getSimpleName()
                           .startsWith("Dictionary")) {
@@ -509,6 +534,65 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             Decimal128.set(data, i, hi[id], lo[id]);
         }
         return SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, numRows, validity, data);
+    }
+
+    /**
+     * Dictionary-encoded decimal columns of up to 18 digits adapted through a
+     * lookup table (#20).
+     */
+    public static long adaptedDictionaryDecimalColumns() {
+        return ADAPTED_DICTIONARY_DECIMAL_COLUMNS.sum();
+    }
+
+    /**
+     * A dictionary-encoded decimal of up to 18 digits (Iceberg's
+     * DictionaryDecimalInt/LongAccessor over an IntVector of dictionary ids):
+     * the INT64 lane of unscaled values, from a table decoding each Parquet
+     * dictionary entry once, instead of a Spark Decimal per row through
+     * getDecimal (#20).
+     */
+    private VectorBuffers adaptDictionarySmallDecimal(Object acc, Object indexVector, int numRows,
+            MemorySegment validity, Arena scratch)
+            throws ReflectiveOperationException {
+        if (dictionaryParquetField == null || dictionaryDecodeToInt == null || dictionaryDecodeToLong == null) {
+            return null;
+        }
+        boolean ints = acc.getClass()
+                          .getSimpleName()
+                          .equals("DictionaryDecimalIntAccessor");
+        Object dictionary = dictionaryParquetField.get(acc);
+        java.util.WeakHashMap<Object, long[]> luts = SMALL_DECIMAL_LUTS.get();
+        long[] lut = luts.get(dictionary);
+        if (lut == null) {
+            int size = (Integer) dictionaryMaxId.invoke(dictionary) + 1;
+            lut = new long[size];
+            for (int i = 0; i < size; i++) {
+                lut[i] = ints
+                        ? (Integer) dictionaryDecodeToInt.invoke(dictionary, i)
+                        : (Long) dictionaryDecodeToLong.invoke(dictionary, i);
+            }
+            if (luts.size() >= SMALL_DECIMAL_LUT_ENTRIES) {
+                luts.clear();
+            }
+            luts.put(dictionary, lut);
+        }
+        MemorySegment indices = segment(getDataBuffer.invoke(indexVector));
+        if (indices.byteSize() < (long) numRows << 2) {
+            return null;
+        }
+        MemorySegment data = ArrowLayout.allocateData(scratch, VecType.INT64, numRows);
+        int size = lut.length;
+        for (int i = 0; i < numRows; i++) {
+            if (validity != null && !io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+                continue;
+            }
+            int id = indices.getAtIndex(VectorBuffers.LE_INT, i);
+            if (id < 0 || id >= size) {
+                return null;
+            }
+            data.setAtIndex(VectorBuffers.LE_LONG, i, lut[id]);
+        }
+        return SegmentVectorBuffers.fixedWidth(VecType.INT64, numRows, validity, data);
     }
 
     private MemorySegment segment(Object arrowBuf) throws ReflectiveOperationException {
