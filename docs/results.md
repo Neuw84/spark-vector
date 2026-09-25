@@ -1253,7 +1253,8 @@ evaluation of the Comet scan's pruning subquery would account for both it and q5
 2026-09-23/24).** The run the campaign was for: the v23 image is main at #462 (the threshold planner,
 both grace-join memory fixes, the 1 GiB sort budget), the AOT cache is off for every leg after the
 measurement above, and the run configuration adds `spark.sql.adaptive.coalescePartitions.minPartitionNum=208`
-to the 300 shuffle partitions and the 128 MB advisory size. Spark, `ours`, `csvo` and `comet` ran back to
+to the 300 shuffle partitions and the 128 MB advisory size (deprecated in Spark 3.2+; later TPC-DS runs
+leave it unset, #253). Spark, `ours`, `csvo` and `comet` ran back to
 back on the same nine nodes with nothing else on the cluster (22:28 to 01:40), one run per query, 103
 queries each. `csvo` pins Comet's scan to `spark.comet.scan.impl=native_datafusion`. Seconds.
 
@@ -2650,7 +2651,7 @@ Decision (#484): `Platform.MASK_REGISTERS` is AVX-512 only, while `NATIVE_COMPRE
 
 The published x86 setup, moved to 9 × `m8g.4xlarge`:
 
-- **Settings:** 8 executors × 13 cores × 50 GB, Spark 20/30 and ours 30/20; 300 shuffle partitions, advisory 128m, `minPartitionNum=208`; event logs on, AOT cache off.
+- **Settings:** 8 executors × 13 cores × 50 GB, Spark 20/30 and ours 30/20; 300 shuffle partitions, advisory 128m, `minPartitionNum=208` (as the x86 run, for comparability; later runs leave it unset); event logs on, AOT cache off.
 - **Data and runs:** the same S3 Parquet data, one measured iteration.
 - **Image:** arm64, built from main + #481 + #484.
 - **Engines:** OSS Spark against `vector-shuffle`. Comet was not run.
