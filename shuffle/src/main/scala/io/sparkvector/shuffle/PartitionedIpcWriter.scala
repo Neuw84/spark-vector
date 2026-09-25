@@ -27,6 +27,7 @@ import io.sparkvector.kernels.{
   CompactKernels,
   GatherKernels,
   PartitionKernels,
+  ScatterKernels,
   SegmentVectorBuffers,
   StringDictionary,
   VecType,
@@ -106,7 +107,13 @@ final class PartitionedIpcWriter(
      * dictionary, no per-block remap. `false` keeps a dictionary per record batch (the used entries,
      * #345), for a transport that delivers a block's bytes alone (Spark's block transfer).
      */
-    fileDictionary: Boolean = true
+    fileDictionary: Boolean = true,
+    /**
+     * The staged flush partitions fixed-width, BOOL and id columns by scatter rather than by a
+     * gather through the partition order (#20). `false` is the gather, kept for measuring one
+     * against the other.
+     */
+    scatterFlush: Boolean = true
 ) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
@@ -259,11 +266,38 @@ final class PartitionedIpcWriter(
       } else {
         MemorySegment.copy(in.data(), 0L, buffers.data(), rows.toLong * width, n.toLong * width)
       }
-      if (in.validity() != null) Bitmap.copyBits(in.validity(), buffers.validity(), rows, n)
-      else Bitmap.fillRange(buffers.validity(), rows, n, true)
+      if (in.validity() != null) {
+        Bitmap.copyBits(in.validity(), buffers.validity(), rows, n)
+        if (!mayHaveNulls && !Bitmap.allSet(in.validity(), n)) mayHaveNulls = true
+      } else Bitmap.fillRange(buffers.validity(), rows, n, true)
       rows += n
       dataBytes += bytes
       if (isString) bytes + (n.toLong << 2) else n.toLong * math.max(width, 1)
+    }
+
+    /**
+     * Whether any row appended since the last reset may be null (the staging, #20): a flush scatters
+     * the validity of such a column and fills it for every other.
+     */
+    var mayHaveNulls = false
+
+    /** A column the staged flush partitions by scatter (#20): fixed width, BOOL, or a string column's ids; not plain strings. */
+    def scatters: Boolean = !isString
+
+    /**
+     * Appends rows `from until from + count` of `in`, a fixed-width, BOOL or id column laid out as
+     * this builder's (the scattered staging, #20): contiguous copies. `allValid` skips the validity
+     * copy for a column with no nulls.
+     */
+    def appendRange(in: VectorBuffers, from: Int, count: Int, allValid: Boolean): Long = {
+      settle(in)
+      ensure(count, 0L)
+      if (isBool) Bitmap.copyBitsFrom(in.data(), from, buffers.data(), rows, count)
+      else MemorySegment.copy(in.data(), from.toLong * width, buffers.data(), rows.toLong * width, count.toLong * width)
+      if (allValid || in.validity() == null) Bitmap.fillRange(buffers.validity(), rows, count, true)
+      else Bitmap.copyBitsFrom(in.validity(), from, buffers.validity(), rows, count)
+      rows += count
+      count.toLong * math.max(width, 1)
     }
 
     /** Appends rows `idx(from until to)` of `in` (the index-list path, #353). */
@@ -336,6 +370,7 @@ final class PartitionedIpcWriter(
      * bytes, 2x the time on q67 at 200 partitions).
      */
     def recycle(): Unit = {
+      mayHaveNulls = false
       if (vector == null) return
       if (shared) { vector.reset(); rows = 0; dataBytes = 0L; return }
       val cap = capacityBytes
@@ -350,7 +385,7 @@ final class PartitionedIpcWriter(
     def close(): Unit = {
       if (retained) { retainedBytes -= capacityBytes; retained = false }
       if (vector != null) vector.close()
-      vector = null; buffers = null; rows = 0; dataBytes = 0L
+      vector = null; buffers = null; rows = 0; dataBytes = 0L; mayHaveNulls = false
     }
 
     /** After a column's mode changed (#416: its dictionary froze): the vector dropped so the next rows settle the builder anew. */
@@ -823,6 +858,7 @@ final class PartitionedIpcWriter(
 
   private val starts = new Array[Int](numPartitions + 1)
   private var order = new Array[Int](0)
+  private var dest = new Array[Int](0)
 
   private def appendIndexed(
       seg: Segment,
@@ -872,26 +908,62 @@ final class PartitionedIpcWriter(
    */
   private def flushStaging(): Unit = if (stagedRows > 0) {
     val scratch = Arena.ofConfined()
+    // #20: the columns that scatter are partitioned by one sequential pass each into a partition-
+    // ordered copy, and each record batch copies a contiguous run of it; only plain string columns
+    // still gather through the order (their bytes vary per row).
+    val scattered = new Array[org.apache.arrow.vector.FieldVector](schema.fields.length)
     try {
-      if (order.length < stagedRows) order = new Array[Int](stagedRows)
-      PartitionKernels.partitionOrder(stagedIds, stagedRows, numPartitions, starts, order)
+      val n = stagedRows
       val source: Array[VectorBuffers] = Array.tabulate(schema.fields.length)(c => staging(c).finished())
+      val scatter = Array.tabulate(schema.fields.length)(c => scatterFlush && staging(c).scatters)
+      val gather = scatter.exists(!_)
+      if (scatter.exists(identity)) {
+        if (dest.length < n) dest = new Array[Int](n)
+        PartitionKernels.partitionDestinations(stagedIds, n, numPartitions, starts, dest)
+      }
+      if (gather) {
+        if (order.length < n) order = new Array[Int](n)
+        PartitionKernels.partitionOrder(stagedIds, n, numPartitions, starts, order)
+      }
+      val scatteredBuffers = new Array[VectorBuffers](schema.fields.length)
+      val allValid = new Array[Boolean](schema.fields.length)
+      var c = 0
+      while (c < schema.fields.length) {
+        if (scatter(c)) {
+          val src = source(c)
+          val dt = if (src.`type`() == VecType.INT32 && schema.fields(c).dataType == StringType) IntegerType
+          else schema.fields(c).dataType
+          val out =
+            ArrowOutput.allocateFixed(schema.fields(c).name, dt, n, allocator) // zeroed: the bit scatters need it
+          scattered(c) = out.vector().asInstanceOf[org.apache.arrow.vector.FieldVector]
+          ScatterKernels.scatterFixed(src.`type`(), src.data(), n, dest, out.data())
+          allValid(c) = !staging(c).mayHaveNulls || src.validity() == null
+          if (!allValid(c)) ScatterKernels.scatterBits(src.validity(), n, dest, out.validity())
+          scatteredBuffers(c) = out
+        }
+        c += 1
+      }
       var p = 0
       while (p < numPartitions) {
         var from = starts(p)
         val end = starts(p + 1)
         while (from < end) {
           val to = math.min(end, from + batchRows)
-          var c = 0
+          c = 0
           while (c < schema.fields.length) {
-            batchBuilders(c).appendIndexed(source(c), order, from, to, scratch); c += 1
+            if (scatter(c)) batchBuilders(c).appendRange(scatteredBuffers(c), from, to - from, allValid(c))
+            else batchBuilders(c).appendIndexed(source(c), order, from, to, scratch)
+            c += 1
           }
           flush(segments(p), to - from, batchBuilders)
           from = to
         }
         p += 1
       }
-    } finally scratch.close()
+    } finally {
+      scratch.close()
+      scattered.foreach(v => if (v != null) v.close())
+    }
     var c = 0
     while (c < schema.fields.length) { staging(c).recycle(); c += 1 }
     stagedRows = 0

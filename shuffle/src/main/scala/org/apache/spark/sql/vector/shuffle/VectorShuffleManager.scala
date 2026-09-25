@@ -243,7 +243,8 @@ final class VectorShuffleWriter(
       // One dictionary per map file (#416) needs the reader to see the file: the Flight producer and the
       // local reader prepend it; Spark's block transfer delivers a block's bytes alone, so it keeps the
       // per-block dictionaries.
-      fileDictionary = VectorShuffleBackend.backendName(conf).equalsIgnoreCase("flight")
+      fileDictionary = VectorShuffleBackend.backendName(conf).equalsIgnoreCase("flight"),
+      scatterFlush = conf.getBoolean(VectorShuffleWriter.ScatterFlushKey, true)
     )
   }
   private var lengths: Array[Long] = _
@@ -370,6 +371,9 @@ object VectorShuffleWriter {
 
   /** A record batch's string column is dictionary-encoded only when distinct/rows is at most this (#356); 0 never, 1 always. */
   val DictionaryMaxRatioKey = "spark.vector.shuffle.writer.dictionaryMaxRatio"
+
+  /** `false`: the staged flush gathers every column through the partition order instead of scattering (#20); for A/B. */
+  val ScatterFlushKey = "spark.vector.shuffle.writer.scatterFlush"
 
   /**
    * Arrow's `OutOfMemoryException` is not `Serializable` (it carries an `Optional`); a task failing with

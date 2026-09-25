@@ -131,6 +131,34 @@ public final class Bitmap {
         }
     }
 
+    /**
+     * Copies bits {@code srcFrom .. srcFrom + count} of {@code src} to bits
+     * {@code dstFrom ..} of {@code dst}: whole bytes when both offsets are byte
+     * aligned, a word at a time from the source otherwise.
+     */
+    public static void copyBitsFrom(MemorySegment src, int srcFrom, MemorySegment dst,
+            int dstFrom, int count) {
+        if ((srcFrom & 7) == 0) {
+            if (srcFrom == 0) {
+                copyBits(src, dst, dstFrom, count);
+            } else {
+                copyBits(src.asSlice(srcFrom >>> 3), dst, dstFrom, count);
+            }
+            return;
+        }
+        int end = srcFrom + count;
+        for (int o = 0; o < count; ) {
+            int s = srcFrom + o;
+            int shift = s & 63;
+            long word = wordAt(src, s >>> 6, end) >>> shift;
+            int take = Math.min(64 - shift, count - o);
+            for (int j = 0; j < take; j++) {
+                setTo(dst, dstFrom + o + j, ((word >>> j) & 1L) != 0);
+            }
+            o += take;
+        }
+    }
+
     public static void fill(MemorySegment bm, int numBits, boolean value) {
         long bytes = bytesFor(numBits);
         if (bytes == 0) {
