@@ -39,8 +39,12 @@ spec:
     - "CHANGE_PCT"                                # % of rows in the change batch, or "default"
   sparkVersion: "4.1.3"
   sparkConf:
+    # No spark.sql.adaptive.coalescePartitions.minPartitionNum (deprecated since Spark 3.2; it was
+    # 208 here, #20). AQE coalescing uses its defaults: with parallelismFirst (true) the minimum
+    # partition count is the cluster's default parallelism, and minPartitionSize (1 MB) bounds the
+    # target size from below. The write's advisory partition size is only honoured as the upper
+    # bound; set parallelismFirst=false to coalesce to it.
     spark.sql.adaptive.enabled: "true"
-    spark.sql.adaptive.coalescePartitions.minPartitionNum: "208"
     spark.hadoop.fs.s3a.connection.maximum: "200"
     spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
     spark.driver.extraJavaOptions: >-
