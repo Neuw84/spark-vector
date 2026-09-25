@@ -37,7 +37,14 @@ import org.apache.spark.sql.catalyst.expressions.codegen.LazilyGeneratedOrdering
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
-import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec, ShuffleExchangeLike, ShuffleOrigin}
+import org.apache.spark.sql.execution.exchange.{
+  Exchange,
+  REBALANCE_PARTITIONS_BY_COL,
+  REBALANCE_PARTITIONS_BY_NONE,
+  ShuffleExchangeExec,
+  ShuffleExchangeLike,
+  ShuffleOrigin
+}
 import org.apache.spark.sql.execution.metric.{
   SQLMetric,
   SQLMetrics,
@@ -46,7 +53,12 @@ import org.apache.spark.sql.execution.metric.{
 }
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vector.shuffle.{VectorPartitioning, VectorShuffleDependency}
+import org.apache.spark.sql.vector.shuffle.{
+  RecordsByPartitionAccumulator,
+  RowProportionalSizes,
+  VectorPartitioning,
+  VectorShuffleDependency
+}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.MutablePair
 
@@ -97,9 +109,24 @@ case class VectorShuffleExchangeExec(
 
   @transient private lazy val inputRDD: RDD[ColumnarBatch] = child.executeColumnar()
 
+  /**
+   * Rebalance exchanges only (#20; `spark.vector.shuffle.rebalance.rowSizing`, default on): the map
+   * tasks' per-partition record counts, from which AQE gets row-proportional partition sizes. Every
+   * other origin -- the joins' and aggregates' exchanges -- keeps the real bytes.
+   */
+  @transient lazy val recordsByPartition: Option[RecordsByPartitionAccumulator] =
+    if (VectorShuffleExchangeExec.rowSized(shuffleOrigin, conf)) {
+      val acc = new RecordsByPartitionAccumulator
+      sparkContext.register(acc)
+      Some(acc)
+    } else None
+
   @transient override lazy val mapOutputStatisticsFuture: Future[MapOutputStatistics] =
     if (inputRDD.getNumPartitions == 0) Future.successful(null)
-    else sparkContext.submitMapStage(shuffleDependency)
+    else recordsByPartition match {
+      case Some(acc) => VectorShuffleExchangeExec.submitRowSizedMapStage(sparkContext, shuffleDependency, acc)
+      case None => sparkContext.submitMapStage(shuffleDependency)
+    }
 
   override def numMappers: Int = shuffleDependency.rdd.getNumPartitions
   override def numPartitions: Int = shuffleDependency.partitioner.numPartitions
@@ -121,7 +148,8 @@ case class VectorShuffleExchangeExec(
       output,
       VectorShuffleExchangeExec.keysAsColumns(outputPartitioning, child),
       writeMetrics,
-      metrics("dataSize")
+      metrics("dataSize"),
+      recordsByPartition
     )
     metrics("numPartitions").set(dep.partitioner.numPartitions)
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
@@ -142,6 +170,43 @@ case class VectorShuffleExchangeExec(
 }
 
 object VectorShuffleExchangeExec {
+
+  /** `false` turns the row-proportional sizing of rebalance exchanges off (#20). */
+  val RebalanceRowSizingKey = "spark.vector.shuffle.rebalance.rowSizing"
+
+  /** Only the origins whose partition sizes AQE uses to pack and split rebalanced output (#20). */
+  def rowSized(origin: ShuffleOrigin, conf: SQLConf): Boolean = origin match {
+    case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE =>
+      conf.getConfString(RebalanceRowSizingKey, "true").toBoolean
+    case _ => false
+  }
+
+  /**
+   * `SparkContext.submitMapStage`, with the statistics' sizes made row-proportional
+   * ([[RowProportionalSizes.reweight]]) once the stage has finished -- the DAG scheduler applies a
+   * task's accumulator updates before it completes the map-stage job, so every map's counts are in by
+   * then. Still a `SimpleFutureAction` over the job's waiter, so AQE can cancel the stage as before;
+   * the map output tracker and the reducers' fetch sizes keep the real bytes.
+   */
+  private[vector] def submitRowSizedMapStage(
+      sc: org.apache.spark.SparkContext,
+      dependency: VectorShuffleDependency,
+      records: RecordsByPartitionAccumulator
+  ): FutureAction[MapOutputStatistics] = {
+    sc.assertNotStopped()
+    var result: MapOutputStatistics = null
+    val waiter = sc.dagScheduler.submitMapStage(
+      dependency,
+      (r: MapOutputStatistics) => { result = r },
+      sc.getCallSite(),
+      sc.localProperties.get
+    )
+    lazy val sized: MapOutputStatistics =
+      if (result == null) null
+      else RowProportionalSizes.reweight(result.bytesByPartitionId, records.value, dependency.rdd.getNumPartitions)
+        .fold(result)(new MapOutputStatistics(result.shuffleId, _))
+    new org.apache.spark.SimpleFutureAction[MapOutputStatistics](waiter, sized)
+  }
 
   /**
    * The partitionings this exchange takes: hash over lane keys (a struct of lanes hashes its leaves),
@@ -188,7 +253,8 @@ object VectorShuffleExchangeExec {
       written: Seq[Attribute],
       partitioning: Partitioning,
       writeMetrics: Map[String, SQLMetric],
-      dataSize: SQLMetric
+      dataSize: SQLMetric,
+      recordsByPartition: Option[RecordsByPartitionAccumulator] = None
   ): VectorShuffleDependency = {
     // `output` is the child's (keys are resolved against it); `written` is what the shuffle carries --
     // the same, less the trailing materialised key columns.
@@ -247,7 +313,8 @@ object VectorShuffleExchangeExec {
       spec,
       ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics),
       dataSize,
-      layout
+      layout,
+      recordsByPartition
     )
   }
 }
