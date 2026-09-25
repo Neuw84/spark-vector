@@ -124,8 +124,11 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     private final Method dictionaryMaxId;
     private final Method dictionaryDecodeToBinary;
     private final Method binaryGetBytes;
-    private final Method dictionaryDecodeToInt; // Dictionary.decodeToInt (shaded parquet), or null
-    private final Method dictionaryDecodeToLong; // Dictionary.decodeToLong (shaded parquet), or null
+    // Dictionary.decodeToInt / decodeToLong (shaded parquet) as (Object, int)int / (Object, int)long, or
+    // null. Handles, not Methods: the lookup table is filled with one call per dictionary entry, and
+    // Method.invoke's boxing and argument array were most of the table build on the cluster (#20).
+    private final java.lang.invoke.MethodHandle dictionaryDecodeToInt;
+    private final java.lang.invoke.MethodHandle dictionaryDecodeToLong;
     // A dictionary-encoded decimal of up to 18 digits, decoded once per Parquet dictionary (#20): the
     // copy path read it through getDecimal, a Spark Decimal per row plus its unscaled long, ~6% of the
     // CDC MERGE's target scan. Per thread, keyed weakly by the dictionary (Parquet's Dictionary keeps
@@ -189,8 +192,21 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         dictionaryMaxId = maxId;
         dictionaryDecodeToBinary = decode;
         binaryGetBytes = getBytes;
-        dictionaryDecodeToInt = decodeInt;
-        dictionaryDecodeToLong = decodeLong;
+        java.lang.invoke.MethodHandle intHandle = null;
+        java.lang.invoke.MethodHandle longHandle = null;
+        if (decodeInt != null && decodeLong != null) {
+            try {
+                java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.publicLookup();
+                intHandle = lookup.unreflect(decodeInt).asType(java.lang.invoke.MethodType.methodType(int.class, Object.class, int.class));
+                longHandle = lookup.unreflect(decodeLong).asType(java.lang.invoke.MethodType.methodType(long.class, Object.class, int.class));
+            } catch (IllegalAccessException e) {
+                LOG.debug("spark-vector: Iceberg dictionary decoders not accessible, dictionary decimals will be copied", e);
+                intHandle = null;
+                longHandle = null;
+            }
+        }
+        dictionaryDecodeToInt = intHandle;
+        dictionaryDecodeToLong = longHandle;
     }
 
     private static <T extends java.lang.reflect.AccessibleObject> T accessible(T member) {
@@ -566,10 +582,20 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         if (lut == null) {
             int size = (Integer) dictionaryMaxId.invoke(dictionary) + 1;
             lut = new long[size];
-            for (int i = 0; i < size; i++) {
-                lut[i] = ints
-                        ? (Integer) dictionaryDecodeToInt.invoke(dictionary, i)
-                        : (Long) dictionaryDecodeToLong.invoke(dictionary, i);
+            try {
+                if (ints) {
+                    for (int i = 0; i < size; i++) {
+                        lut[i] = (int) dictionaryDecodeToInt.invokeExact(dictionary, i);
+                    }
+                } else {
+                    for (int i = 0; i < size; i++) {
+                        lut[i] = (long) dictionaryDecodeToLong.invokeExact(dictionary, i);
+                    }
+                }
+            } catch (RuntimeException | Error e) {
+                throw e;
+            } catch (Throwable e) {
+                throw new IllegalStateException("cannot decode an Iceberg decimal dictionary", e);
             }
             if (luts.size() >= SMALL_DECIMAL_LUT_ENTRIES) {
                 luts.clear();
@@ -581,18 +607,53 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             return null;
         }
         MemorySegment data = ArrowLayout.allocateData(scratch, VecType.INT64, numRows);
+        // Decode on heap arrays with one bulk copy in and one out: element-wise segment accesses (and a
+        // validity test per row) paid a segment liveness check per access on the cluster (#20). A null
+        // row's id is whatever the index vector holds there, so an out-of-range id is an error only on
+        // a valid row; a null row's lane is left 0.
+        int[] ids = scratchIds(numRows);
+        long[] out = scratchLongs(numRows);
+        MemorySegment.copy(indices, VectorBuffers.LE_INT, 0, ids, 0, numRows);
         int size = lut.length;
         for (int i = 0; i < numRows; i++) {
-            if (validity != null && !io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
-                continue;
-            }
-            int id = indices.getAtIndex(VectorBuffers.LE_INT, i);
-            if (id < 0 || id >= size) {
+            int id = ids[i];
+            if (Integer.compareUnsigned(id, size) < 0) {
+                out[i] = lut[id];
+            } else if (validity == null || io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
                 return null;
+            } else {
+                out[i] = 0L;
             }
-            data.setAtIndex(VectorBuffers.LE_LONG, i, lut[id]);
         }
+        MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
         return SegmentVectorBuffers.fixedWidth(VecType.INT64, numRows, validity, data);
+    }
+
+    private static final ThreadLocal<int[][]> SCRATCH_IDS = ThreadLocal.withInitial(() -> new int[1][0]);
+    private static final ThreadLocal<long[][]> SCRATCH_LONGS = ThreadLocal.withInitial(() -> new long[1][0]);
+
+    /**
+     * A per-thread int array of at least {@code n} elements (contents
+     * unspecified).
+     */
+    private static int[] scratchIds(int n) {
+        int[][] holder = SCRATCH_IDS.get();
+        if (holder[0].length < n) {
+            holder[0] = new int[n];
+        }
+        return holder[0];
+    }
+
+    /**
+     * A per-thread long array of at least {@code n} elements (contents
+     * unspecified).
+     */
+    private static long[] scratchLongs(int n) {
+        long[][] holder = SCRATCH_LONGS.get();
+        if (holder[0].length < n) {
+            holder[0] = new long[n];
+        }
+        return holder[0];
     }
 
     private MemorySegment segment(Object arrowBuf) throws ReflectiveOperationException {
