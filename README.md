@@ -47,6 +47,8 @@ except q65, whose result has ties that every engine orders differently.
 The same comparison as a page with per-query charts: [Apache Spark vs spark-vector vs DataFusion Comet on
 TPC-DS 1 TB](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb.html) (rendered from the result
 files by `benchmarks/scripts/render-benchmark-page.py`; the source is `docs/benchmarks/tpcds-1tb.html`).
+On AWS Graviton4 (arm64) the same TPC-DS 1 TB comparison against Spark is 1.25x (x86: 1.29x):
+[Apache Spark vs spark-vector on TPC-DS 1 TB, AWS Graviton4](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb-graviton.html).
 
 Requirements and the things it does not do yet are listed under
 [Requirements and known limitations](#requirements-and-known-limitations); every configuration key
