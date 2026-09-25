@@ -2620,3 +2620,50 @@ frequency and double-pumping questions, `vpcompress` latency, whether decision 5
 (#253: SVE, where `MASK_REGISTERS` and `NATIVE_COMPRESS` are true by construction and unmeasured).
 Every switch above reads `Platform`, so those pools are a measurement away, not a code change.
 
+
+## Graviton4 (#253): the kernels on SVE, and TPC-DS 1 TB against Spark
+
+Nodes: `m8g.4xlarge` (AWS Graviton4, Neoverse V2, `sve sve2 svebitperm`). Corretto 25.0.4.1 runs there with `UseSVE = 2` and `MaxVectorSize = 16`, so the Vector API's species are 128 bits wide, as on NEON.
+
+### The kernels
+
+Each JMH benchmark ran three ways on one node:
+
+- **`sve`:** SVE codegen, with the platform switch on `sve`.
+- **`sve-neon`:** SVE codegen, with the switch forced to `neon`.
+- **`neon`:** `UseSVE=0`.
+
+The first two isolate our SVE paths on the same machine code. The findings:
+
+- **Native `compress`:** `compress` (SVE `COMPACT`) beats the shuffle table: 1.37x / 1.36x at 50 % selectivity on INT32, without and with nulls, and neutral elsewhere.
+- **`fromLong` masks:** the `fromLong` lane masks lose to broadcast-AND-compare on the same SVE code. Double-checked with 2 forks × 5 iterations:
+  - `minDouble_simd`: 0.77x / 0.50x (1 % / 30 % nulls)
+  - `sumLong_simd`: 0.78x / 0.62x
+  - `sumDouble_simd`: 0.76x / 0.93x
+  - `sumMaskPath` with 4 groups: 0.72x
+- **Cause:** with `-XX:+PrintIntrinsics`, the SVE run inlines `jdk.incubator.vector.VectorMask::lambda$fromLong$0`, the Vector API's Java fallback. So `fromLong` is not intrinsified at 128-bit SVE on this JDK.
+- **Everything else:** SVE codegen against NEON codegen is up to 3.1x on compaction with nulls. The sort and group-key table are neutral.
+
+Decision (#484): `Platform.MASK_REGISTERS` is AVX-512 only, while `NATIVE_COMPRESS` stays on for AVX-512 and SVE. `-Dsparkvector.maskRegisters=true` re-measures SVE after a JDK update.
+
+### TPC-DS 1 TB
+
+The published x86 setup, moved to 9 × `m8g.4xlarge`:
+
+- **Settings:** 8 executors × 13 cores × 50 GB, Spark 20/30 and ours 30/20; 300 shuffle partitions, advisory 128m, `minPartitionNum=208`; event logs on, AOT cache off.
+- **Data and runs:** the same S3 Parquet data, one measured iteration.
+- **Image:** arm64, built from main + #481 + #484.
+- **Engines:** OSS Spark against `vector-shuffle`. Comet was not run.
+
+The page is [benchmarks/tpcds-1tb-graviton.html](benchmarks/tpcds-1tb-graviton.html).
+
+| | Spark (s) | ours (s) | speedup | geomean |
+|---|---|---|---|---|
+| Graviton4 (m8g.4xlarge) | 2,695.5 | 2,158.5 | 1.25x | 1.22x |
+| x86 (m5.4xlarge, AVX-512) | 3,308.7 | 2,556.5 | 1.29x | 1.24x |
+| Graviton4 / x86 per query (geomean) | 0.81 | 0.82 | | |
+
+- **Correctness:** all 103 queries ran under both engines, with equal row counts. Checksums are equal except q65, whose result has ties.
+- **Speed:** we are faster than Spark on 86 of 103 queries. Executor time is 53.7 h against 67.3 h, and shuffle read 0.52 TB against 0.94 TB.
+- **Where the lead shrinks:** mostly queries where Spark itself gains more on Graviton4 (q45, q6, q29, q77, q78, q93).
+- **Where it grows:** queries at parity or behind on x86 (q7 0.90x → 1.71x, q25 0.86x → 1.39x, q11 0.93x → 1.22x, q9 1.03x → 1.45x).
