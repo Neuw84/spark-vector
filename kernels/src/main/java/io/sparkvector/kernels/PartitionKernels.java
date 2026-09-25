@@ -429,6 +429,34 @@ public final class PartitionKernels {
         starts[0] = 0;
     }
 
+    /**
+     * The inverse of {@link #partitionOrder}: {@code dest[i]} is the slot row
+     * {@code i} takes when the rows are grouped by partition, stably (a
+     * partition's rows keep their order), and {@code starts} is filled as there
+     * ({@code starts[p]} the first slot of {@code p}, {@code starts[numPartitions]
+     * = n}). With it a column is partitioned by one sequential pass over its
+     * values ({@link ScatterKernels}) instead of a gather through the order,
+     * whose loads land anywhere in the column (#20).
+     */
+    public static void partitionDestinations(int[] ids, int n, int numPartitions,
+            int[] starts, int[] dest) {
+        java.util.Arrays.fill(starts, 0, numPartitions + 1, 0);
+        for (int i = 0; i < n; i++) {
+            starts[ids[i] + 1]++;
+        }
+        for (int p = 0; p < numPartitions; p++) {
+            starts[p + 1] += starts[p];
+        }
+        // starts[p] is now the first slot of p; hand out slots and advance, then restore.
+        for (int i = 0; i < n; i++) {
+            dest[i] = starts[ids[i]]++;
+        }
+        for (int p = numPartitions; p > 0; p--) {
+            starts[p] = starts[p - 1];
+        }
+        starts[0] = 0;
+    }
+
     public static void partitionMasks(int[] ids, int n, MemorySegment[] masks,
             int[] counts) {
         java.util.Arrays.fill(counts, 0);

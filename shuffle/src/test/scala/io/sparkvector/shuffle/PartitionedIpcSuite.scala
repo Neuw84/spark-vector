@@ -139,7 +139,9 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       bufferBytes: Long = 64L << 20,
       writerAllocator: org.apache.arrow.memory.BufferAllocator = allocator,
       compression: Option[org.apache.arrow.vector.compression.CompressionUtil.CodecType] =
-        Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD)
+        Some(org.apache.arrow.vector.compression.CompressionUtil.CodecType.ZSTD),
+      scatterFlush: Boolean = true,
+      keep: Option[java.nio.file.Path] = None
   ): Long = {
     val dir = Files.createTempDirectory("svipc")
     val path = dir.resolve("map.ipc")
@@ -153,7 +155,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       compression,
       batchRows,
       1L << 20,
-      bufferBytes
+      bufferBytes,
+      scatterFlush = scatterFlush
     )
     try {
       batches.foreach { case (n, dictStrings) =>
@@ -188,6 +191,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           assert(got === expected(p), s"partition $p")
         } finally reader.close()
       }
+      keep.foreach(k => Files.copy(path, k, java.nio.file.StandardCopyOption.REPLACE_EXISTING))
       fileBytes
     } finally {
       writer.close()
@@ -324,6 +328,36 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
 
   test("every lane type round-trips per partition, in order, dictionary strings staying encoded") {
     roundTrip(numPartitions = 5, batches = Seq((300, true), (200, true), (0, true), (257, true)), flushBytes = 1L << 20)
+  }
+
+  test("#20: the staged flush's scatter writes the gather's bytes, every lane type, nulls and both string forms") {
+    // 300 partitions take the staged path; a 256 KB buffer forces several flushes per task.
+    val dir = Files.createTempDirectory("svscatter")
+    val scattered = dir.resolve("scatter.ipc"); val gathered = dir.resolve("gather.ipc")
+    val batches = Seq((3000, true), (2500, false), (0, true), (4097, true), (1, false))
+    val seed = 2020L
+    rnd.setSeed(seed)
+    roundTrip(
+      numPartitions = 300,
+      batches = batches,
+      flushBytes = 1L << 20,
+      bufferBytes = 256L << 10,
+      keep = Some(scattered)
+    )
+    rnd.setSeed(seed)
+    roundTrip(
+      numPartitions = 300,
+      batches = batches,
+      flushBytes = 1L << 20,
+      bufferBytes = 256L << 10,
+      scatterFlush = false,
+      keep = Some(gathered)
+    )
+    try assert(
+        java.util.Arrays.equals(Files.readAllBytes(scattered), Files.readAllBytes(gathered)),
+        "scatter and gather files differ"
+      )
+    finally { Files.deleteIfExists(scattered); Files.deleteIfExists(gathered); Files.deleteIfExists(dir) }
   }
 
   test("a column that is dictionary encoded in one batch and plain in the next shares one stream") {
