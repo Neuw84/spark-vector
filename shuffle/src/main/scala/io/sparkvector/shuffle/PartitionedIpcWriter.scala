@@ -110,14 +110,20 @@ final class PartitionedIpcWriter(
     fileDictionary: Boolean = true,
     /**
      * The staged flush partitions fixed-width, BOOL and id columns by scatter rather than by a
-     * gather through the partition order (#20). Off by default: on the cluster CDC MERGE the
-     * scatter kernel deoptimized ~110 times per executor and the MERGE ran 127.5 s against the
-     * gather's 115.6 s (#487); `true` turns it on for measuring it until that is fixed.
+     * gather through the partition order (#20), when the flush's rows change partition often
+     * enough (see `ScatterMaxAverageRun`). Off by default until TPC-DS is measured with it: on the
+     * cluster CDC MERGE the first version lost on cold executors (#487, #488), which the kernel
+     * warm-up and 64K-row chunks address.
      */
     scatterFlush: Boolean = false
 ) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
+
+  // #20: compile the scatter loops before this task's first flush (once per JVM, ~70-100 ms on the
+  // cluster; writers created meanwhile wait for it). Cold, a task's first flush ran them uncompiled:
+  // 3-5 s against ~250 ms warm.
+  if (scatterFlush) ScatterKernels.warmUp()
 
   /**
    * A builder's first capacity in rows (#416): an input batch's rows spread over the partitions, so
@@ -916,7 +922,12 @@ final class PartitionedIpcWriter(
     try {
       val n = stagedRows
       val source: Array[VectorBuffers] = Array.tabulate(schema.fields.length)(c => staging(c).finished())
-      val scatter = Array.tabulate(schema.fields.length)(c => scatterFlush && staging(c).scatters)
+      // #20: scatter only when the rows' partitions are spread out. Rows that arrive grouped (runs of
+      // one partition, as on the reduce side of a join) make the gather read nearly sequentially,
+      // and a scatter would only add its own pass and copy.
+      val spread = scatterFlush &&
+        ScatterKernels.idRuns(stagedIds, n).toLong * PartitionedIpcWriter.ScatterMaxAverageRun > n
+      val scatter = Array.tabulate(schema.fields.length)(c => spread && staging(c).scatters)
       val gather = scatter.exists(!_)
       if (scatter.exists(identity)) {
         if (dest.length < n) dest = new Array[Int](n)
@@ -937,9 +948,9 @@ final class PartitionedIpcWriter(
           val out =
             ArrowOutput.allocateFixed(schema.fields(c).name, dt, n, allocator) // zeroed: the bit scatters need it
           scattered(c) = out.vector().asInstanceOf[org.apache.arrow.vector.FieldVector]
-          ScatterKernels.scatterFixed(src.`type`(), src.data(), n, dest, out.data())
+          ScatterKernels.scatterFixedChunked(src.`type`(), src.data(), n, dest, out.data())
           allValid(c) = !staging(c).mayHaveNulls || src.validity() == null
-          if (!allValid(c)) ScatterKernels.scatterBits(src.validity(), n, dest, out.validity())
+          if (!allValid(c)) ScatterKernels.scatterBitsChunked(src.validity(), n, dest, out.validity())
           scatteredBuffers(c) = out
         }
         c += 1
@@ -1197,6 +1208,14 @@ final class PartitionedIpcWriter(
 }
 
 object PartitionedIpcWriter {
+
+  /**
+   * The staged flush scatters only when the rows change partition at least once per this many rows
+   * on average (#20); with longer runs the gather through the order already reads nearly
+   * sequentially. On the CDC MERGE the target scan's exchange averages 1 row per run and the
+   * join's reduce-side exchange ~144.
+   */
+  val ScatterMaxAverageRun: Int = 4
 
   /** A builder's first capacity in rows, doubled as a partition fills (#351). */
   val InitialRows: Int = 256
