@@ -1,10 +1,15 @@
+---
+layout: default
+title: Supported operators
+---
+
 # Spark operator support
 
 One row per Spark physical operator: whether spark-vector converts it, what has to hold for the
 conversion to happen, the `spark.vector.*` key that turns it off, and the exact fallback reason the
 planner records when it does not convert. Modelled on Comet's
 [Spark Operator Support](https://datafusion.apache.org/comet/user-guide/latest/operators.html) page;
-the companion for expressions is [docs/expressions.md](expressions.md).
+the companion for expressions is [docs/expressions.md](expressions.html).
 
 **How to read a plan.** `VectorExecRule` (`VectorColumnarRule.scala`) walks the physical plan bottom-up
 and replaces an operator only when (a) its input already produces columnar batches of supported types
@@ -33,7 +38,7 @@ or `unsupported output type <type> for <name>` (a projection or aggregate result
 true of it. The two exceptions are the operators that forward columns without reading them: a filter
 and a projection pass such a column through as Spark's own vector (borrowed, or viewed through a row-id
 mapping when a selection is applied), so only an expression that *reads* it is refused (#19). This is the single most common reason in real plans (see the decimal measurement in
-[docs/results.md](results.md)).
+[docs/results.md](results.html)).
 
 `spark.vector.enabled=false` turns the whole rule off. Every converted operator has its own key,
 listed below; all default to `true`.

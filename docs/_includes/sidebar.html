@@ -1,0 +1,27 @@
+<nav class="sidebar" id="sidebar" aria-label="Documentation sections">
+  <div class="sidebar-inner">
+    {% for group in site.nav %}
+      <div class="nav-group">
+        <p class="nav-section">{{ group.section }}</p>
+        <ul>
+          {% for item in group.items %}
+            {% assign target = item.url | relative_url %}
+            {% assign here = page.url | relative_url %}
+            {% comment %} Compare the page path (ignoring baseurl differences) for active state. {% endcomment %}
+            {% if page.url == item.url or here == target %}
+              {% assign is_active = true %}
+            {% else %}
+              {% assign is_active = false %}
+            {% endif %}
+            <li>
+              <a href="{{ target }}"{% if is_active %} class="active" aria-current="page"{% endif %}{% if item.external %} rel="noopener"{% endif %}>
+                {{ item.title }}{% if item.external %} <span class="ext" aria-hidden="true">&#8599;</span>{% endif %}
+              </a>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endfor %}
+  </div>
+</nav>
+<div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
