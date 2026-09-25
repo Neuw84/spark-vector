@@ -103,6 +103,59 @@ class ScatterKernelsTest {
     }
 
     @Test
+    void chunkedScatterEqualsOneCall() {
+        Random r = new Random(23);
+        int partitions = 300;
+        // over two chunks and a partial one, so every chunk boundary is crossed
+        int n = 2 * ScatterKernels.CHUNK_ROWS + 1234;
+        int[] ids = ids(r, n, partitions);
+        int[] starts = new int[partitions + 1];
+        int[] dest = new int[n];
+        PartitionKernels.partitionDestinations(ids, n, partitions, starts, dest);
+        try (Arena arena = Arena.ofConfined()) {
+            for (VecType type : new VecType[] {VecType.INT32, VecType.INT64, VecType.DECIMAL128}) {
+                int width = type == VecType.INT32
+                        ? 4
+                        : type == VecType.INT64 ? 8 : 16;
+                MemorySegment in = arena.allocate((long) n * width);
+                for (long b = 0; b < in.byteSize(); b++) {
+                    in.set(java.lang.foreign.ValueLayout.JAVA_BYTE,
+                            b, (byte) r.nextInt());
+                }
+                MemorySegment whole = arena.allocate((long) n * width);
+                MemorySegment chunked = arena.allocate((long) n * width);
+                ScatterKernels.scatterFixed(type, in, n, dest, whole);
+                ScatterKernels.scatterFixedChunked(type, in, n, dest, chunked);
+                assertEquals(-1L, whole.mismatch(chunked), type.toString());
+            }
+            MemorySegment bits = Bitmap.allocate(arena, n);
+            for (int i = 0; i < n; i++) {
+                Bitmap.setTo(bits, i, r.nextInt(3) != 0);
+            }
+            MemorySegment whole = Bitmap.allocate(arena, n);
+            MemorySegment chunked = Bitmap.allocate(arena, n);
+            ScatterKernels.scatterBits(bits, n, dest, whole);
+            ScatterKernels.scatterBitsChunked(bits, n, dest, chunked);
+            assertEquals(-1L, whole.mismatch(chunked), "bits");
+        }
+    }
+
+    @Test
+    void idRunsCountsChangesOfPartition() {
+        assertEquals(0, ScatterKernels.idRuns(new int[0], 0));
+        assertEquals(1, ScatterKernels.idRuns(new int[] {5}, 1));
+        assertEquals(1, ScatterKernels.idRuns(new int[] {2, 2, 2, 2}, 4));
+        assertEquals(4, ScatterKernels.idRuns(new int[] {1, 2, 1, 2}, 4));
+        // only the first n ids count: 7 7 | 3 3 3
+        assertEquals(
+                2,
+                ScatterKernels.idRuns(
+                        new int[] {7, 7, 3, 3, 3, 7,
+                                9},
+                        5));
+    }
+
+    @Test
     void copyBitsFromAnyOffset() {
         Random r = new Random(22);
         try (Arena arena = Arena.ofConfined()) {
