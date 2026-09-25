@@ -745,15 +745,6 @@ public final class SortKernels {
         int ea = off.get(VectorBuffers.LE_INT, (long) (a + 1) << 2);
         int sb = off.get(VectorBuffers.LE_INT, (long) b << 2);
         int eb = off.get(VectorBuffers.LE_INT, (long) (b + 1) << 2);
-        int la = ea - sa;
-        int lb = eb - sb;
-        long mismatch = MemorySegment.mismatch(data, sa, ea, data, sb, eb);
-        if (mismatch == -1) {
-            return 0;
-        }
-        if (mismatch >= Math.min(la, lb)) {
-            return Integer.compare(la, lb);
-        }
-        return Integer.compare(data.get(ValueLayout.JAVA_BYTE, sa + mismatch) & 0xFF, data.get(ValueLayout.JAVA_BYTE, sb + mismatch) & 0xFF);
+        return Integer.signum(StringCompareKernels.compareBytes(data, sa, ea, data, sb, eb));
     }
 }

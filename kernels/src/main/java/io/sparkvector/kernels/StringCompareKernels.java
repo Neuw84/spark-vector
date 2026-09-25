@@ -166,13 +166,29 @@ public final class StringCompareKernels {
             MemorySegment y, long ys, long ye) {
         long lx = xe - xs, ly = ye - ys;
         long common = Math.min(lx, ly);
-        long at = MemorySegment.mismatch(x, xs, xs + common, y, ys,
-                ys + common);
-        if (at >= 0) {
-            return Byte.toUnsignedInt(x.get(ValueLayout.JAVA_BYTE, xs + at)) - Byte.toUnsignedInt(y.get(ValueLayout.JAVA_BYTE, ys + at));
+        // Eight bytes at a time, read big-endian so an unsigned long compare is the byte order. Not
+        // MemorySegment.mismatch: its small-length loop, inlined into a sort's comparator, put some
+        // executors into a deoptimization storm on the cluster (#20, q67: ~6.6 million `unstable_if`
+        // traps with action `none` at one bytecode in 37 s, the stage's tasks 4x slower on that JVM).
+        long k = 0;
+        for (; k + Long.BYTES <= common; k += Long.BYTES) {
+            long a = x.get(BE_LONG_UNALIGNED, xs + k);
+            long b = y.get(BE_LONG_UNALIGNED, ys + k);
+            if (a != b) {
+                return Long.compareUnsigned(a, b);
+            }
+        }
+        for (; k < common; k++) {
+            int a = Byte.toUnsignedInt(x.get(ValueLayout.JAVA_BYTE, xs + k));
+            int b = Byte.toUnsignedInt(y.get(ValueLayout.JAVA_BYTE, ys + k));
+            if (a != b) {
+                return a - b;
+            }
         }
         return Long.compare(lx, ly);
     }
+
+    private static final ValueLayout.OfLong BE_LONG_UNALIGNED = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(java.nio.ByteOrder.BIG_ENDIAN);
 
     /**
      * Per-row byte range of one operand, resolved through its dictionary when
