@@ -143,11 +143,15 @@ case class VectorShuffleExchangeExec(
 
 object VectorShuffleExchangeExec {
 
-  /** The partitionings this exchange takes: hash over lane keys, round robin, single, range over lane keys. */
+  /**
+   * The partitionings this exchange takes: hash over lane keys (a struct of lanes hashes its leaves),
+   * round robin, single, range over lane keys. Columns are lanes or structs of lanes (flattened).
+   */
   def supports(partitioning: Partitioning, output: Seq[Attribute]): Boolean = {
     def laneKey(dt: org.apache.spark.sql.types.DataType) = io.sparkvector.spark.adapter.TypeMapping.hasLane(dt)
-    output.forall(a => laneKey(a.dataType)) && (partitioning match {
-      case h: HashPartitioning => h.expressions.forall(e => e.isInstanceOf[Attribute] && laneKey(e.dataType))
+    def column(dt: org.apache.spark.sql.types.DataType) = io.sparkvector.shuffle.StructFlattening.supported(dt)
+    output.forall(a => column(a.dataType)) && (partitioning match {
+      case h: HashPartitioning => h.expressions.forall(e => e.isInstanceOf[Attribute] && column(e.dataType))
       case _: RoundRobinPartitioning => true
       case SinglePartition => true
       case r: RangePartitioning => r.ordering.forall(o => laneKey(o.dataType))
@@ -189,11 +193,23 @@ object VectorShuffleExchangeExec {
     // `output` is the child's (keys are resolved against it); `written` is what the shuffle carries --
     // the same, less the trailing materialised key columns.
     val schema = org.apache.spark.sql.catalyst.types.DataTypeUtils.fromAttributes(written)
+    // Structs cross as lanes (StructFlattening): the streams carry the flat schema, and a hash key on
+    // a struct hashes its leaves. Ordinals past the written columns are materialised keys, which the
+    // writer appends after the flat lanes.
+    val layout = io.sparkvector.shuffle.StructFlattening.plan(schema)
+    val flatSchema = layout.fold(schema)(_.flatSchema)
+    def flatOrdinals(o: Int): Seq[Int] =
+      if (o >= written.length) Seq(flatSchema.fields.length + (o - written.length))
+      else layout.fold(Seq(o))(_.hashOrdinals(o))
+    def flatType(f: Int): org.apache.spark.sql.types.DataType =
+      if (f < flatSchema.fields.length) flatSchema.fields(f).dataType
+      else output(written.length + (f - flatSchema.fields.length)).dataType
     val spec: VectorPartitioning = partitioning match {
       case HashPartitioning(expressions, n) =>
         val ordinals = expressions.map { case a: Attribute => output.indexWhere(_.exprId == a.exprId) }.toArray
         require(ordinals.forall(_ >= 0), s"hash key not in the child's output: $expressions")
-        VectorPartitioning.Hash(ordinals, ordinals.map(o => VectorPartitioning.keyKind(output(o).dataType)), n)
+        val flat = ordinals.flatMap(flatOrdinals)
+        VectorPartitioning.Hash(flat, flat.map(f => VectorPartitioning.keyKind(flatType(f))), n)
       case RoundRobinPartitioning(n) => VectorPartitioning.RoundRobin(n)
       case SinglePartition => VectorPartitioning.Single
       case RangePartitioning(sortingExpressions, numPartitions) =>
@@ -227,10 +243,11 @@ object VectorShuffleExchangeExec {
     new VectorShuffleDependency(
       keyed,
       partitioner,
-      schema,
+      flatSchema,
       spec,
       ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics),
-      dataSize
+      dataSize,
+      layout
     )
   }
 }

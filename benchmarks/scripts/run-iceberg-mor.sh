@@ -54,19 +54,21 @@ gen() { # <namespace> <variants>
 }
 
 cdc() { # <config> <namespace> <variant>
-  local config="$1" ns="$2" variant="$3" table="${ns}.${variant}"
-  local name="spark-vector-mor-cdc-${config}-${ns}-${variant}" f
+  local config="$1" ns="$2" variant="$3"
+  local table="${ns}.${variant}"
+  local name="spark-vector-mor-cdc-${config}-${ns}-${variant//_/-}" f
   f="$(mktemp)"
   # The manifest name pattern is CONFIG-TABLE; render TABLE as ns.variant and give the SparkApplication a k8s-safe name.
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|NAMESPACE|${ns}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
       -e "s|spark-vector-mor-cdc-CONFIG-TABLE|${name}|" -e "s|\"CONFIG\"|\"${config}\"|" -e "s|\"TABLE\"|\"${table}\"|" -e "s|CHANGE_PCT|${CHANGE_PCT}|" \
       "$HERE/../k8s/iceberg-mor-cdc.yaml" > "$f"
   apply_and_wait "$name" "$f" || { rm -f "$f"; return 1; }
-  # Copy the driver's local JSONL to S3 (one file per config, appended across variants in-JVM; here per run).
-  kubectl -n "$NS_BENCH" cp "${name}-driver:/opt/spark/work-dir/cdc-results/cdc-${config}.jsonl" "/tmp/cdc-${config}-${ns}-${variant}.jsonl" 2>/dev/null \
-    && aws s3 cp "/tmp/cdc-${config}-${ns}-${variant}.jsonl" "s3://${BUCKET}/results/iceberg-mor-cdc/cdc-${config}-${ns}-${variant}.jsonl" >/dev/null \
-    && echo "    results -> s3://${BUCKET}/results/iceberg-mor-cdc/cdc-${config}-${ns}-${variant}.jsonl" \
-    || echo "    WARNING: could not copy results JSONL for ${name}"
+  # The runner uploads its JSONL to s3://<bucket>/results/iceberg-mor-cdc/cdc-<config>-<ns>-<variant>.jsonl after
+  # every measurement (the driver's local disk is gone once the pod exits); check it landed.
+  local key="results/iceberg-mor-cdc/cdc-${config}-${ns}-${variant}.jsonl"
+  aws s3 ls "s3://${BUCKET}/${key}" >/dev/null 2>&1 \
+    && echo "    results -> s3://${BUCKET}/${key}" \
+    || echo "    WARNING: no results JSONL at s3://${BUCKET}/${key}"
   rm -f "$f"
 }
 
@@ -75,8 +77,10 @@ run_ns() { # <namespace> <variants>
   gen "$ns" "$variants"
   local IFS=,
   for v in $variants; do
-    cdc spark  "$ns" "$v"
-    cdc vector "$ns" "$v"
+    # CDC_CONFIGS (comma-separated, default "spark,vector"): e.g. spark,vector-shuffle for our columnar shuffle.
+    for cfg in ${CDC_CONFIGS:-spark,vector}; do
+      cdc "$cfg" "$ns" "$v"
+    done
   done
 }
 
