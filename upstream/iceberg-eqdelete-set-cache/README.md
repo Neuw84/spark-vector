@@ -92,4 +92,4 @@ spark-vector gains less because the change exposes costs of its own that the equ
 used to hide (#20): its scan-side stages take 62 / 47 s against Spark's 10 / 32 s, and AQE coalesces
 its write stage to 20 tasks where Spark's has 44 (47 s against 18 s).
 
-`ICEBERG-ISSUE.md` is the text for the upstream issue and PR description.
+`ICEBERG-ISSUE.md` is the text for the upstream issue and PR description, filed as apache/iceberg#18257 (https://github.com/apache/iceberg/issues/18257).
