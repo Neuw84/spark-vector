@@ -93,7 +93,12 @@ final class VectorShuffleDependency(
      * Struct columns flattened into lanes ([[io.sparkvector.shuffle.StructFlattening]]): `schema` is
      * then the flat schema the IPC streams carry, and the reader rebuilds the written columns.
      */
-    val layout: Option[io.sparkvector.shuffle.StructFlattening.Layout] = None
+    val layout: Option[io.sparkvector.shuffle.StructFlattening.Layout] = None,
+    /**
+     * Rebalance exchanges only (#20): every map task reports its record count per reduce partition,
+     * so AQE can size the partitions by rows ([[RowProportionalSizes]]).
+     */
+    val recordsByPartition: Option[RecordsByPartitionAccumulator] = None
 ) extends ShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
       rdd,
       partitioner,
@@ -244,6 +249,8 @@ final class VectorShuffleWriter(
   private var lengths: Array[Long] = _
   private var stopped = false
   private var rows = 0L
+  private val recordCounts: Array[Long] =
+    if (dep.recordsByPartition.isDefined) new Array[Long](numPartitions) else null
   private var roundRobinNext = VectorShuffleWriter.roundRobinStart(context, numPartitions)
   private lazy val rangeProjection: UnsafeProjection = dep.partitioning match {
     case r: VectorPartitioning.Range => UnsafeProjection.create(r.sortKeys, r.output)
@@ -278,6 +285,10 @@ final class VectorShuffleWriter(
               case None => buffers
             }
             val ids = partitionIds(batch, flat, n)
+            if (recordCounts != null) {
+              var i = 0
+              while (i < n) { recordCounts(ids(i)) += 1; i += 1 }
+            }
             writer.write(
               if (flat.length > dep.schema.fields.length) flat.take(dep.schema.fields.length) else flat,
               n,
@@ -339,6 +350,7 @@ final class VectorShuffleWriter(
         // Pre-compression size, as Spark's dataSize is; never below the file (IPC framing dominates tiny outputs).
         dep.dataSize.add(math.max(rawBytes, lengths.sum))
         metrics.incRecordsWritten(rows)
+        dep.recordsByPartition.foreach(_.add((context.partitionId(), recordCounts)))
         Some(MapStatus(blockManager.shuffleServerId, lengths, mapId))
       }
     } finally {
