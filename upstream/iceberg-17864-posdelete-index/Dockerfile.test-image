@@ -1,0 +1,32 @@
+# Measurement image for #20: the cluster image, with Iceberg's 1.11.0 runtime jar carrying both of
+# our upstream patches -- the merged equality-delete set cache (upstream/iceberg-eqdelete-set-cache,
+# BaseDeleteLoader) and apache/iceberg#17864, backported here (position-delete indexes without a path
+# lookup per row, Deletes). Both speed up OSS Spark and spark-vector alike: an image for measuring them, or for both
+# engines at once, never for a Spark-vs-spark-vector comparison against stock Iceberg.
+#
+# Built on the cluster with Kaniko, this repository as the context (benchmarks/k8s/kaniko-build.yaml
+# with --dockerfile=upstream/iceberg-17864-posdelete-index/Dockerfile.test-image, a tag naming both
+# patches, --build-arg=BASE_IMAGE=... and a nodeSelector for the architecture of BASE_IMAGE).
+ARG BASE_IMAGE=378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:shuffle-struct-6e3b0d9
+ARG ICEBERG_VERSION=1.11.0
+
+FROM eclipse-temurin:25-jdk AS build
+ARG ICEBERG_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends curl zip unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /b
+COPY upstream/iceberg-eqdelete-set-cache/data/src/main/java/org/apache/iceberg/data/BaseDeleteLoader.java src/
+COPY upstream/iceberg-17864-posdelete-index/core/src/main/java/org/apache/iceberg/deletes/Deletes.java src/
+# The runtime jar ships the relocated Guava and every Iceberg module the classes compile against; the
+# jar tool refuses its duplicate LICENSE entries, so the classes are swapped in with zip. Deletes has
+# nested classes: every Deletes*.class goes in.
+RUN set -e; J="iceberg-spark-runtime-4.1_2.13-${ICEBERG_VERSION}.jar" \
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.1_2.13/${ICEBERG_VERSION}/${J}" \
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.17/slf4j-api-2.0.17.jar" \
+    && javac --release 17 -Xlint:none -d classes -cp "${J}:slf4j-api-2.0.17.jar" src/BaseDeleteLoader.java src/Deletes.java \
+    && (cd classes && zip -q "../${J}" org/apache/iceberg/data/BaseDeleteLoader*.class org/apache/iceberg/deletes/Deletes*.class) \
+    && unzip -p "${J}" org/apache/iceberg/data/BaseDeleteLoader.class | grep -a -q 'eq-delete-set|' \
+    && unzip -p "${J}" org/apache/iceberg/deletes/Deletes.class | grep -a -q 'contentEquals' \
+    && mkdir out && mv "${J}" out/
+
+FROM ${BASE_IMAGE}
+COPY --from=build /b/out/ /opt/spark/jars/
