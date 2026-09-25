@@ -48,27 +48,37 @@ RUN git clone --depth 1 https://github.com/databricks/tpcds-kit /opt/tpcds-kit \
 # ModuleHashes attribute (the rebuilt module no longer matches the recorded hash). Same JDK build, same
 # JIT; only the module metadata changes. Corretto because its tarball still ships jmods (Temurin stopped
 # at 24, and jlink from a run-time image takes the image's own copy over the module path).
+#
+# The image builds for the architecture of the node it is built on (x86-64 or Graviton, #253): the
+# Temurin base images are multi-arch, and the Corretto tarball and the jmods' target platform follow
+# the build stage's own architecture. Build it on a node of the architecture it will run on.
 FROM eclipse-temurin:25-jdk AS jre
 ARG CORRETTO_VERSION=25.0.4.8.1
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL "https://corretto.aws/downloads/resources/${CORRETTO_VERSION}/amazon-corretto-${CORRETTO_VERSION}-linux-x64.tar.gz" \
+RUN set -e; case "$(dpkg --print-architecture)" in \
+      amd64) echo "x64 linux-amd64" > /tmp/arch ;; \
+      arm64) echo "aarch64 linux-aarch64" > /tmp/arch ;; \
+      *) echo "unsupported architecture $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && read -r CORRETTO_ARCH JMOD_PLATFORM < /tmp/arch \
+    && apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://corretto.aws/downloads/resources/${CORRETTO_VERSION}/amazon-corretto-${CORRETTO_VERSION}-linux-${CORRETTO_ARCH}.tar.gz" \
       | tar -xz -C /opt \
-    && mv "/opt/amazon-corretto-${CORRETTO_VERSION}-linux-x64" /opt/corretto
+    && mv "/opt/amazon-corretto-${CORRETTO_VERSION}-linux-${CORRETTO_ARCH}" /opt/corretto
 COPY benchmarks/k8s/aot /aot
-RUN set -e; J=/opt/corretto; cd /aot \
+RUN set -e; J=/opt/corretto; read -r _ JMOD_PLATFORM < /tmp/arch; cd /aot \
     && $J/bin/javac -d classes StripModuleResolution.java StripModuleHashes.java \
     && mkdir jmods && cp $J/jmods/*.jmod jmods/ \
     && $J/bin/jmod extract --dir vector $J/jmods/jdk.incubator.vector.jmod \
     && $J/bin/java -cp classes StripModuleResolution vector/classes/module-info.class \
     && rm jmods/jdk.incubator.vector.jmod \
     && $J/bin/jmod create --class-path vector/classes --legal-notices vector/legal \
-         --module-version "${CORRETTO_VERSION}" --target-platform linux-amd64 jmods/jdk.incubator.vector.jmod \
+         --module-version "${CORRETTO_VERSION}" --target-platform "${JMOD_PLATFORM}" jmods/jdk.incubator.vector.jmod \
     && $J/bin/jmod extract --dir base $J/jmods/java.base.jmod \
     && $J/bin/java -cp classes StripModuleHashes base/classes/module-info.class \
     && rm jmods/java.base.jmod \
     && $J/bin/jmod create --class-path base/classes --libs base/lib --cmds base/bin --config base/conf \
          --header-files base/include --legal-notices base/legal --man-pages base/man \
-         --module-version "${CORRETTO_VERSION}" --target-platform linux-amd64 jmods/java.base.jmod \
+         --module-version "${CORRETTO_VERSION}" --target-platform "${JMOD_PLATFORM}" jmods/java.base.jmod \
     && $J/bin/jlink --module-path jmods --add-modules ALL-MODULE-PATH --output /opt/jre \
     && /opt/jre/bin/java -version \
     && /opt/jre/bin/java --show-module-resolution -version 2>&1 | grep -q "^root jdk.incubator.vector" \
