@@ -244,7 +244,7 @@ final class VectorShuffleWriter(
       // local reader prepend it; Spark's block transfer delivers a block's bytes alone, so it keeps the
       // per-block dictionaries.
       fileDictionary = VectorShuffleBackend.backendName(conf).equalsIgnoreCase("flight"),
-      scatterFlush = conf.getBoolean(VectorShuffleWriter.ScatterFlushKey, true)
+      scatterFlush = conf.getBoolean(VectorShuffleWriter.ScatterFlushKey, false)
     )
   }
   private var lengths: Array[Long] = _
@@ -372,7 +372,7 @@ object VectorShuffleWriter {
   /** A record batch's string column is dictionary-encoded only when distinct/rows is at most this (#356); 0 never, 1 always. */
   val DictionaryMaxRatioKey = "spark.vector.shuffle.writer.dictionaryMaxRatio"
 
-  /** `false`: the staged flush gathers every column through the partition order instead of scattering (#20); for A/B. */
+  /** `true`: the staged flush scatters instead of gathering through the partition order (#20; off by default, see #487); for A/B. */
   val ScatterFlushKey = "spark.vector.shuffle.writer.scatterFlush"
 
   /**

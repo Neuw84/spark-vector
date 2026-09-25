@@ -110,10 +110,11 @@ final class PartitionedIpcWriter(
     fileDictionary: Boolean = true,
     /**
      * The staged flush partitions fixed-width, BOOL and id columns by scatter rather than by a
-     * gather through the partition order (#20). `false` is the gather, kept for measuring one
-     * against the other.
+     * gather through the partition order (#20). Off by default: on the cluster CDC MERGE the
+     * scatter kernel deoptimized ~110 times per executor and the MERGE ran 127.5 s against the
+     * gather's 115.6 s (#487); `true` turns it on for measuring it until that is fixed.
      */
-    scatterFlush: Boolean = true
+    scatterFlush: Boolean = false
 ) extends AutoCloseable {
 
   private val arrowSchema: Schema = PartitionedIpcFile.arrowSchema(schema)
