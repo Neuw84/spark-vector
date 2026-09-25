@@ -1,0 +1,28 @@
+# Measurement image for the merged equality-delete set cache (#20): the cluster image the CDC numbers
+# were taken with, with Iceberg's 1.11.0 runtime jar carrying the patched BaseDeleteLoader of this
+# folder. For measuring the change only -- it speeds up OSS Spark and spark-vector alike, so it is
+# never the image of a Spark-vs-spark-vector comparison.
+#
+# Built on the cluster with Kaniko, this repository as the context (benchmarks/k8s/kaniko-build.yaml
+# with --dockerfile=upstream/iceberg-eqdelete-set-cache/Dockerfile.test-image, a -eqcache tag and a
+# nodeSelector for the architecture of BASE_IMAGE).
+ARG BASE_IMAGE=378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:shuffle-struct-6e3b0d9
+ARG ICEBERG_VERSION=1.11.0
+
+FROM eclipse-temurin:25-jdk AS build
+ARG ICEBERG_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends curl zip unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /b
+COPY upstream/iceberg-eqdelete-set-cache/data/src/main/java/org/apache/iceberg/data/BaseDeleteLoader.java src/
+# The runtime jar ships the relocated Guava and every Iceberg module the class compiles against; the
+# jar tool refuses its duplicate LICENSE entries, so the class is swapped in with zip.
+RUN set -e; J="iceberg-spark-runtime-4.1_2.13-${ICEBERG_VERSION}.jar" \
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.1_2.13/${ICEBERG_VERSION}/${J}" \
+    && curl -fsSLO "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.17/slf4j-api-2.0.17.jar" \
+    && javac --release 17 -Xlint:none -d classes -cp "${J}:slf4j-api-2.0.17.jar" src/BaseDeleteLoader.java \
+    && (cd classes && zip -q "../${J}" org/apache/iceberg/data/BaseDeleteLoader.class) \
+    && unzip -p "${J}" org/apache/iceberg/data/BaseDeleteLoader.class | grep -a -q 'eq-delete-set|' \
+    && mkdir out && mv "${J}" out/
+
+FROM ${BASE_IMAGE}
+COPY --from=build /b/out/ /opt/spark/jars/
