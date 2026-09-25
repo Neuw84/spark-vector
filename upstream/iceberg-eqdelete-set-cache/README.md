@@ -75,6 +75,21 @@ with, except for the patched class in Iceberg's runtime jar. The measurement run
 MERGE-only one-shot as #249 for OSS Spark and spark-vector, stock and patched, with
 `spark.sql.iceberg.executor-cache.max-entry-size` / `max-total-size` raised so the merged set fits.
 
-Results: *pending* (see #20).
+Results (2026-09-25; cold MERGE-only one-shot, 8 × m5.4xlarge, the #249 table and change batch):
+
+| engine | stock Iceberg 1.11.0 | patched | speedup |
+|---|---|---|---|
+| OSS Spark 4.1.3 | 162.1 s | **74.6 s** | **2.17×** |
+| spark-vector (columnar shuffle) | 172.2 s | 133.6 s | 1.29× |
+
+Every run leaves 425,665,996 rows. Per stage (Spark stock → patched), the two scan stages that apply
+the equality deletes go from 118 / 96 s to 10 / 32 s; the join (≈22 s) and the write (≈19 s) are
+unchanged. The table's checksums were not captured by these runs (the image predates the runner's
+own results upload); the unit test and the local SF1 runs (identical checksums, stock vs patched,
+both engines) cover correctness.
+
+spark-vector gains less because the change exposes costs of its own that the equality-delete work
+used to hide (#20): its scan-side stages take 62 / 47 s against Spark's 10 / 32 s, and AQE coalesces
+its write stage to 20 tasks where Spark's has 44 (47 s against 18 s).
 
 `ICEBERG-ISSUE.md` is the text for the upstream issue and PR description.
