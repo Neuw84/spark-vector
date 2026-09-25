@@ -16,7 +16,6 @@
 package io.sparkvector.kernels;
 
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 
 /**
  * The k-way merge of sorted runs (#285). A run is a set of columns and the
@@ -455,18 +454,8 @@ public final class RunMerge {
         int ea = offA.get(VectorBuffers.LE_INT, (long) (i + 1) << 2);
         int sb = offB.get(VectorBuffers.LE_INT, (long) j << 2);
         int eb = offB.get(VectorBuffers.LE_INT, (long) (j + 1) << 2);
-        int la = ea - sa;
-        int lb = eb - sb;
-        MemorySegment da = a.data();
-        MemorySegment db = b.data();
-        long mismatch = MemorySegment.mismatch(da, sa, ea, db, sb, eb);
-        if (mismatch == -1) {
-            return 0;
-        }
-        if (mismatch >= Math.min(la, lb)) {
-            return Integer.compare(la, lb);
-        }
-        return Integer.compare(da.get(ValueLayout.JAVA_BYTE, sa + mismatch) & 0xFF, db.get(ValueLayout.JAVA_BYTE, sb + mismatch) & 0xFF);
+        return Integer.signum(StringCompareKernels.compareBytes(a.data(), sa, ea, b.data(),
+                sb, eb));
     }
 
     /**

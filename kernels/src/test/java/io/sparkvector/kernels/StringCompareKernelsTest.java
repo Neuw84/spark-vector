@@ -226,4 +226,37 @@ class StringCompareKernelsTest {
             assertEquals(64, Bitmap.popcount(out, n));
         }
     }
+
+    @Test
+    void compareBytesOrdersLikeUnsignedArrayCompare() {
+        // #20: compareBytes compares eight bytes at a time; every length 0..40 (so both loops and the
+        // length tie-break), shared prefixes, bytes >= 0x80 and unaligned starts against the JDK's
+        // unsigned array comparison.
+        Random rnd = new Random(20);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment x = arena.allocate(64);
+            MemorySegment y = arena.allocate(64);
+            for (int iter = 0; iter < 20_000; iter++) {
+                int lx = rnd.nextInt(41), ly = rnd.nextInt(41);
+                byte[] a = new byte[lx], b = new byte[ly];
+                rnd.nextBytes(a);
+                int common = Math.min(lx, ly);
+                int shared = common == 0 ? 0 : rnd.nextInt(common + 1);
+                System.arraycopy(a, 0, b, 0, shared);
+                for (int i = shared; i < ly; i++) {
+                    b[i] = (byte) rnd.nextInt(256);
+                }
+                if (shared < common && rnd.nextBoolean()) {
+                    b[shared] = (byte) (a[shared] ^ 0x80); // differ only in the sign bit
+                }
+                int xs = rnd.nextInt(8), ys = rnd.nextInt(8);
+                MemorySegment.copy(a, 0, x, java.lang.foreign.ValueLayout.JAVA_BYTE, xs, lx);
+                MemorySegment.copy(b, 0, y, java.lang.foreign.ValueLayout.JAVA_BYTE, ys, ly);
+                int expected = Integer.signum(java.util.Arrays.compareUnsigned(a, b));
+                int got = Integer.signum(StringCompareKernels.compareBytes(x, xs, xs + lx, y, ys,
+                        ys + ly));
+                assertEquals(expected, got, "lengths " + lx + "/" + ly + ", shared prefix " + shared);
+            }
+        }
+    }
 }
