@@ -8,6 +8,10 @@
 #   sed -e 's|GIT_REF|refs/heads/main|' -e 's|IMAGE_TAG|main-2026-09-19|' benchmarks/k8s/kaniko-build.yaml | kubectl apply -f -
 #   kubectl -n bench logs -f job/spark-vector-image-build
 #
+# The image is built for the architecture of the node the Kaniko pod lands on (#253). For a Graviton
+# image, pin the pod to an arm64 node by adding `nodeSelector: {kubernetes.io/arch: arm64}` to the
+# pod spec, and give the destination tag its own suffix (e.g. -arm64) so it cannot replace the x86 one.
+#
 # The names below are the sfi-iceberg-bench cluster's (namespace bench, service account sfi-engine,
 # the account's ECR); change them for another cluster.
 apiVersion: v1
