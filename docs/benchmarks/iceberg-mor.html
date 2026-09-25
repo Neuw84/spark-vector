@@ -37,7 +37,11 @@ share — it shrinks, because the delete merge costs a <b>fixed price per batch<
 and a fixed price hurts the faster engine's ratio more. <b>Deletion vectors (v3) are the cheaper encoding</b> for both engines:
 the pure-merge probe costs Spark +15 ms and spark-vector +17–22 ms over a clean table, against +21–40 ms for v2 position files.
 <b>Equality deletes (v2) are the expensive kind</b> and the one shape spark-vector can lose (0.89× on <code>eq_10</code>): Iceberg
-evaluates the equality predicate row-at-a-time to build the mapping. Every checksum equalled Spark's, on all 90 cells.</div>
+evaluates the equality predicate row-at-a-time to build the mapping. Every checksum equalled Spark's, on all 90 cells.
+<br><br><b><a href="#cdc-cluster">CDC MERGE on the cluster</a></b> (~20 GB store_sales, 432M live rows, 20% position + 5% equality
+deletes, a 10% change batch touching every data file): spark-vector is <b>not faster yet</b>. The MERGE runs at <b>0.96×</b> (v2) and
+<b>0.92×</b> (v3) of Spark and the reads at <b>0.89–1.06×</b>, although 7 of the MERGE's 8 operators and every read operator run
+columnar, through the columnar shuffle. Every v3 checksum equalled Spark's.</div>
 
 <h2 id="setup">What was measured</h2>
 <div class="note"><b>Scope.</b> This is the merge-on-read <i>merge cost</i> at TPC-H scale factor 1 on a single host, over Iceberg's
@@ -106,6 +110,48 @@ ahead); on a deleted variant the filter's predicate runs over a batch that alrea
 is of a selection-over-selection. Spark's whole-stage codegen fuses the delete mapping and the predicate into one row loop. This
 is the one shape where spark-vector's per-row work over the physical rows shows — at most ~40 ms per query at this scale.</p>
 
+<h2 id="cdc-cluster">CDC MERGE on the cluster: ~20 GB store_sales, mixed deletes</h2>
+<p>The SF1 probes above isolate the delete merge on one host. This section is the workload a CDC pipeline actually runs: a
+<code>MERGE INTO</code> of a change batch into a merge-on-read table that already carries both kinds of v2 delete (or deletion
+vectors on v3), on a cluster, with the reads a consumer would run before and after it.</p>
+<table>
+<tr><th>Component</th><th style="text-align:left">Configuration</th></tr>
+<tr><td>Cluster</td><td style="text-align:left">EKS, 8 × m5.4xlarge executors (16 vCPU, 64 GiB, 300 GB disk each); Spark 4.1.3, Iceberg 1.11.0; tables on S3</td></tr>
+<tr><td>Table</td><td style="text-align:left">A 20% sample of TPC-DS SF1000 <code>store_sales</code>: 64 data files, 28.8 GiB, <b>432.0M live rows</b>; 616 delete files holding 126.2M deleted rows</td></tr>
+<tr><td>v2 <code>mix_20_5</code></td><td style="text-align:left">20% of rows deleted by position (parquet position-delete files) + 5% by equality (parquet equality-delete files)</td></tr>
+<tr><td>v3 <code>dvmix_20_5</code></td><td style="text-align:left">The same, with the position deletes as deletion vectors (Puffin) and the equality deletes unchanged</td></tr>
+<tr><td>Change batch</td><td style="text-align:left">10% of rows: <b>42.0M updates, 11.0M deletes, 4.6M inserts</b> (3.6 GiB parquet), touching <b>64 of 64</b> data files</td></tr>
+<tr><td>Protocol</td><td style="text-align:left">Reads: 2 warm-ups + 5 timed runs each. MERGE: 1 warm-up + 3 timed runs, each rolled back to the base snapshot, so every run starts from the same table. Median wall-clock; p90 in the JSON</td></tr>
+<tr><td>Configs</td><td style="text-align:left"><code>spark</code> (OSS Spark, no plugin) vs <code>vector-shuffle</code> (spark-vector with its columnar Arrow shuffle); image built from the branch carrying #476, #477 and #478</td></tr>
+</table>
+
+<h3>v2: position + equality delete files</h3>
+<div class="chart"><canvas id="cdcv2chart"></canvas></div>
+<table id="cdcv2table"></table>
+<h3>v3: deletion vectors + equality delete files</h3>
+<div class="chart"><canvas id="cdcv3chart"></canvas></div>
+<table id="cdcv3table"></table>
+
+<h3>What the cluster numbers say</h3>
+<p><b>Parity on the reads, a small loss on the MERGE.</b> Every read is within ±11% of Spark and the medians straddle 1.0×, which is
+the run-to-run spread here. The MERGE is consistently slower: all three of spark-vector's v3 runs (174.7–176.3 s) are slower than
+Spark's slowest (163.9 s). The plans are columnar where they can be — the scan, filters and projections, the columnar shuffle and a
+columnar shuffled hash join — with one row operator left: Iceberg's <code>WriteDelta</code>, which spark-vector feeds through a
+<code>ColumnarToRow</code>.</p>
+<p><b>Where the time goes is not yet profiled.</b> The working hypothesis is that each MERGE is dominated by work both engines share:
+the ~70 s merge-on-read scan (every read costs about that, whatever runs above it), and Iceberg's row writer, which here writes
+46.6M rows and 64 position-delete sets of 168M positions. The <code>ColumnarToRow</code> in front of that writer is extra work
+spark-vector pays and Spark does not, which would fit a loss of this size. A columnar delete writer (#20) and a faster
+merge-on-read scan are the two changes that would move this benchmark; a profile of the MERGE will split the time before either is
+built.</p>
+<p><b>Deletion vectors barely change the MERGE.</b> Spark's MERGE is 165.0 s on v2 and 161.7 s on v3, spark-vector's 172.2 s and
+175.4 s, and the reads are within noise of v2. The v2 MERGE rewrites every position-delete file; the v3 MERGE writes one
+deletion vector per data file instead. That rewrite is therefore not what the MERGE time is made of.</p>
+<p><b>Correctness.</b> On v3 all seven checksums — the three reads, the merged table, and the three reads after the merge — equalled
+Spark's, and both engines committed the same 46,641,979 added records and 64 deletion vectors (spark-vector in 8 data files,
+Spark in 14). On v2 both engines left 425,665,996 rows after the merge; Spark's v2 checksums were not kept (the harness lost that
+job's result file), so v2 is checked by row count only.</p>
+
 <p class="foot">Numbers from <a href="https://github.com/spark-vector/spark-vector/blob/main/docs/results.md">docs/results.md</a>
 (the #260 harness, #261 v2, #262 v3): TPC-H SF1 on one 8-vCPU host, median of 10 measured iterations, <code>local[8]</code>. Not a
 cluster benchmark and not comparable to the 1 TB TPC-DS results. Checksums equalled Spark's on all 90 cells; every <code>dv_*</code>
@@ -170,5 +216,47 @@ function chart(canvas, D, metric) {
 }
 chart("v3chart", V3, "probe-sum");
 chart("v2chart", V2, "probe-sum");
+// CDC MERGE on the cluster: [phase, spark median s, spark p90 s, vector median s, vector p90 s, vector ops accelerated]
+const CDC_V2 = [
+  ["read: count", 71.6, 79.8, 69.3, 72.7, "3/3"],
+  ["read: scan-agg", 69.4, 79.9, 69.7, 80.5, "5/5"],
+  ["read: filter-agg", 70.8, 78.9, 68.6, 78.2, "5/5"],
+  ["MERGE", 165.0, 181.9, 172.2, 173.2, "7/8"],
+  ["after merge: count", 68.7, 74.8, 73.0, 81.9, "3/3"],
+  ["after merge: scan-agg", 72.1, 82.1, 69.6, 76.7, "5/5"],
+  ["after merge: filter-agg", 68.5, 76.6, 68.2, 88.4, "5/5"],
+];
+const CDC_V3 = [
+  ["read: count", 74.1, 86.6, 71.5, 75.7, "3/3"],
+  ["read: scan-agg", 74.8, 86.0, 70.5, 77.6, "5/5"],
+  ["read: filter-agg", 68.0, 75.0, 73.5, 78.1, "5/5"],
+  ["MERGE", 161.7, 163.9, 175.4, 176.3, "7/8"],
+  ["after merge: count", 77.2, 83.0, 74.5, 80.1, "3/3"],
+  ["after merge: scan-agg", 68.7, 79.8, 77.6, 79.0, "5/5"],
+  ["after merge: filter-agg", 74.6, 77.3, 73.5, 81.7, "5/5"],
+];
+function cdcTable(id, rows) {
+  const head = "<tr><th>phase</th><th>spark median s</th><th>spark p90 s</th><th>vector median s</th><th>vector p90 s</th><th>ratio</th><th>vector ops columnar</th></tr>";
+  const body = rows.map(r => {
+    const ratio = r[1] / r[3]; const cls = ratio >= 1.0 ? "win" : "loss";
+    return `<tr><td>${r[0]}</td><td>${r[1].toFixed(1)}</td><td>${r[2].toFixed(1)}</td><td>${r[3].toFixed(1)}</td><td>${r[4].toFixed(1)}</td><td class="${cls}">${ratio.toFixed(2)}x</td><td>${r[5]}</td></tr>`;
+  }).join("");
+  document.getElementById(id).innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
+}
+function cdcChart(canvas, rows, title) {
+  new Chart(document.getElementById(canvas), {
+    type: "bar",
+    data: { labels: rows.map(r => r[0]), datasets: [
+      { label: "Apache Spark", backgroundColor: "#6b7280", data: rows.map(r => r[1]) },
+      { label: "spark-vector (columnar shuffle)", backgroundColor: "#2563eb", data: rows.map(r => r[3]) },
+    ] },
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      plugins: { title: { display: true, text: title + " — median seconds (lower is better)" }, legend: { position: "top" } },
+      scales: { y: { title: { display: true, text: "seconds" } } } }
+  });
+}
+cdcTable("cdcv2table", CDC_V2); cdcTable("cdcv3table", CDC_V3);
+cdcChart("cdcv2chart", CDC_V2, "v2 mix_20_5");
+cdcChart("cdcv3chart", CDC_V3, "v3 dvmix_20_5");
 </script>
 </body></html>
