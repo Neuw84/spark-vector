@@ -223,8 +223,13 @@ that pin it.
 - Platform dispatch (`kernels/Platform.java`, #283): the SIMD target is probed once at class init from
   HotSpot's own `UseAVX` / `UseSVE` / `MaxVectorSize` (`-Dsparkvector.platform=neon|sve|avx2|avx512`
   overrides it, for forcing a foreign path emulated or measuring one path against another on the same
-  machine) and folded into `static final` booleans -- `MASK_REGISTERS` (AVX-512, SVE) and
-  `NATIVE_COMPRESS` (AVX-512, SVE). Kernels switch on those at the top of a loop, never per call, and
+  machine) and folded into `static final` booleans -- `MASK_REGISTERS` (AVX-512 only;
+  `-Dsparkvector.maskRegisters=true|false` overrides it) and `NATIVE_COMPRESS` (AVX-512, SVE).
+  `MASK_REGISTERS` is off on SVE since #253: on Graviton4 (JDK 25, 128-bit SVE) `VectorMask.fromLong`
+  is not intrinsified (the Vector API's Java fallback runs) and the `fromLong` mask paths measured
+  0.50-0.79x of broadcast-AND-compare, while native `compress` wins (1.36x at 50 % selectivity).
+  Re-measure `-Dsparkvector.maskRegisters=true` on SVE after each JDK update. Kernels switch on those
+  at the top of a loop, never per call, and
   never on CPU flags read at runtime. A decision that differs by platform is gated here so the NEON
   path is untouched by construction.
 - AVX2 and AVX-512 paths are executed emulated (`vectorBits=256|512`) by the kernel test suite on the

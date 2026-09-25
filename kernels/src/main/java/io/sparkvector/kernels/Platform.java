@@ -33,11 +33,11 @@ import java.lang.management.ManagementFactory;
  * machine.
  *
  * <ul>
- *   <li>{@link #MASK_REGISTERS}: masks live in predicate registers ({@code
- *       k0-k7} on AVX-512, the {@code p} registers on SVE), so {@code
- *       VectorMask.fromLong} is one move and masked lanewise operations take
- *       the mask directly. On NEON and AVX2 a mask is a vector, and {@code
- *       fromLong} has no fast path -- the kernels build masks with a
+ *   <li>{@link #MASK_REGISTERS}: masks are built with {@code
+ *       VectorMask.fromLong} and live in predicate registers ({@code k0-k7}
+ *       on AVX-512), so masked lanewise operations take them directly.
+ *       Elsewhere -- NEON, AVX2, and SVE until the JDK intrinsifies {@code
+ *       fromLong} there (#253) -- the kernels build masks with a
  *       broadcast-AND-compare.
  *   <li>{@link #NATIVE_COMPRESS}: {@code Vector.compress} is one instruction
  *       ({@code vpcompress} on AVX-512, {@code compact} on SVE); elsewhere a
@@ -60,18 +60,46 @@ public final class Platform {
     public static final String NAME = probe();
 
     /**
-     * Predicate registers: {@code VectorMask.fromLong} and masked operations
-     * are native.
+     * Masks come from {@code VectorMask.fromLong} and masked lanewise operations
+     * take them directly: on AVX-512, where {@code fromLong} is one {@code kmov}
+     * into a {@code k} register. Not on SVE (#253): SVE has predicate registers,
+     * but on JDK 25 at 128 bits (Graviton4, {@code UseSVE=2}, {@code
+     * MaxVectorSize=16}) {@code fromLong} is not intrinsified -- HotSpot runs
+     * the Vector API's Java fallback ({@code VectorMask::lambda$fromLong$0}),
+     * and the masked kernels measured 0.50-0.79x of the broadcast-AND-compare
+     * form on the same SVE codegen. Re-measure on a JDK update and flip it back
+     * once {@code fromLong} is native. {@code -Dsparkvector.maskRegisters=true|false}
+     * overrides the choice, for that measurement.
      */
-    public static final boolean MASK_REGISTERS = NAME.equals(AVX512) || NAME.equals(SVE);
+    public static final boolean MASK_REGISTERS = maskRegisters();
 
-    /** {@code Vector.compress(mask)} is a single instruction. */
+    /**
+     * {@code Vector.compress(mask)} is a single instruction: {@code vpcompress}
+     * on AVX-512, {@code compact} on SVE (1.36x the shuffle table at 50 %
+     * selectivity on Graviton4, #253).
+     */
     public static final boolean NATIVE_COMPRESS = NAME.equals(AVX512) || NAME.equals(SVE);
 
     /** The JIT's maximum vector size in bytes, or 0 when unknown. */
     public static final int MAX_VECTOR_BYTES = vmOptionInt("MaxVectorSize");
 
     private Platform() {}
+
+    private static boolean maskRegisters() {
+        String override = System.getProperty("sparkvector.maskRegisters");
+        if (override != null && !override.isEmpty()) {
+            switch (override) {
+                case "true" -> {
+                    return true;
+                }
+                case "false" -> {
+                    return false;
+                }
+                default -> throw new IllegalArgumentException("sparkvector.maskRegisters must be true or false, got " + override);
+            }
+        }
+        return NAME.equals(AVX512);
+    }
 
     private static String probe() {
         String override = System.getProperty("sparkvector.platform");
