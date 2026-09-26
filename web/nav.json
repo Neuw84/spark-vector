@@ -1,0 +1,36 @@
+{
+  "site": {
+    "title": "spark-vector",
+    "description": "A JVM-native vectorized execution engine for Apache Spark SQL. Runs core operators on Arrow-layout columnar batches with the Java Vector API -- no native code -- with its own columnar shuffle over Arrow Flight.",
+    "repo_url": "https://github.com/spark-vector/spark-vector",
+    "baseurl": "/spark-vector"
+  },
+  "nav": [
+    {
+      "section": "Overview",
+      "items": [
+        { "title": "Introduction", "url": "/index.html" }
+      ]
+    },
+    {
+      "section": "User guide",
+      "items": [
+        { "title": "Supported operators", "url": "/operators.html" },
+        { "title": "Supported expressions", "url": "/expressions.html" },
+        { "title": "Configuration reference", "url": "/configuration.html" },
+        { "title": "Comet as the scan", "url": "/comet.html" },
+        { "title": "Apache Iceberg", "url": "/iceberg.html" },
+        { "title": "Flight shuffle", "url": "/flight-shuffle.html" }
+      ]
+    },
+    {
+      "section": "Benchmarks",
+      "items": [
+        { "title": "Results (lab notebook)", "url": "/results.html" },
+        { "title": "TPC-DS 1 TB (x86)", "url": "/benchmarks/tpcds-1tb.html" },
+        { "title": "TPC-DS 1 TB (Graviton4)", "url": "/benchmarks/tpcds-1tb-graviton.html" },
+        { "title": "Iceberg merge-on-read", "url": "/benchmarks/iceberg-mor.html" }
+      ]
+    }
+  ]
+}

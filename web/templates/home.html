@@ -1,0 +1,44 @@
+<div class="hero">
+  <div class="hero-copy">
+    <h1>spark-vector</h1>
+    <p class="tagline">A JVM-native vectorized execution engine for Apache Spark SQL. Core operators
+      run on Arrow-layout columnar batches with the Java Vector API &mdash; on the JVM, no native
+      code, no JNI &mdash; with its own columnar shuffle over Arrow Flight.</p>
+    <div class="cta">
+      <a class="btn primary" href="__BASE__/index.html#getting-started">Get started</a>
+      <a class="btn ghost" href="__BASE__/results.html">See the benchmarks</a>
+      <a class="btn ghost" href="__REPO_URL__" rel="noopener">GitHub</a>
+    </div>
+    <p class="lead-config">Add the plugin to an existing Spark job &mdash; no code changes. Register it
+      with <code>spark.plugins=io.sparkvector.spark.VectorPlugin</code>, and turn on the columnar
+      shuffle with <code>spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager</code>
+      and <code>spark.vector.shuffle.enabled=true</code> (the <code>spark-vector-shuffle</code> jar on
+      the classpath). The terminal shows the full launch.</p>
+  </div>
+
+  <div class="terminal" role="img" aria-label="Terminal launching Apache Spark with the spark-vector plugin and its columnar Arrow Flight shuffle enabled">
+    <div class="terminal-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="ttl">spark-submit &mdash; spark-vector</span>
+    </div>
+    <div class="terminal-body" id="terminal-body" aria-live="polite" data-lines='[
+      {"typed":true,"text":"$ spark-submit \\","html":"<span class=\"prompt\">$</span> spark-submit \\","pause":220},
+      {"typed":true,"text":"    --conf spark.plugins=io.sparkvector.spark.VectorPlugin \\","html":"    <span class=\"flag\">--conf</span> spark.plugins=<span class=\"val\">io.sparkvector.spark.VectorPlugin</span> \\","pause":180},
+      {"typed":true,"text":"    --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager \\","html":"    <span class=\"flag\">--conf</span> spark.shuffle.manager=<span class=\"val\">org.apache.spark.sql.vector.shuffle.VectorShuffleManager</span> \\","pause":180},
+      {"typed":true,"text":"    --conf spark.vector.shuffle.enabled=true \\","html":"    <span class=\"flag\">--conf</span> spark.vector.shuffle.enabled=<span class=\"val\">true</span> \\","pause":180},
+      {"typed":true,"text":"    --conf spark.driver.extraJavaOptions=\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\" \\","html":"    <span class=\"flag\">--conf</span> spark.driver.extraJavaOptions=<span class=\"val\">\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\"</span> \\","pause":140},
+      {"typed":true,"text":"    --conf spark.executor.extraJavaOptions=\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\" \\","html":"    <span class=\"flag\">--conf</span> spark.executor.extraJavaOptions=<span class=\"val\">\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\"</span> \\","pause":140},
+      {"typed":true,"text":"    --jars spark-vector-spark_2.13-0.0.1.jar,spark-vector-shuffle_2.13-0.0.1.jar \\","html":"    <span class=\"flag\">--jars</span> <span class=\"val\">spark-vector-spark_2.13-0.0.1.jar,spark-vector-shuffle_2.13-0.0.1.jar</span> \\","pause":180},
+      {"typed":true,"text":"    my-job.py","html":"    my-job.py","pause":420},
+      {"typed":false,"html":"<span class=\"dim\">Spark 4.1.3  ·  Scala 2.13  ·  JDK 25</span>","pause":260},
+      {"typed":false,"html":"<span class=\"ok\">[VectorPlugin]</span> registered io.sparkvector.spark.VectorSparkSessionExtensions","pause":220},
+      {"typed":false,"html":"<span class=\"ok\">[VectorPlugin]</span> Java Vector API (jdk.incubator.vector) active","pause":200},
+      {"typed":false,"html":"<span class=\"ok\">[shuffle]</span> VectorShuffleManager · backend=flight · compression=zstd","pause":260},
+      {"typed":false,"html":"<span class=\"dim\">Filter · Project · HashAggregate · Sort · Window · hash joins accelerated;</span>","pause":120},
+      {"typed":false,"html":"<span class=\"dim\">unsupported operators fall back to Spark, each with a recorded reason.</span>","pause":260},
+      {"typed":false,"html":"<span class=\"prompt\">$</span> <span class=\"comment\"># same results as Spark, faster.</span>","pause":0}
+    ]'>Launching Apache Spark with the spark-vector plugin and its Arrow Flight columnar shuffle.</div>
+  </div>
+</div>
+
+__OVERVIEW_BODY__

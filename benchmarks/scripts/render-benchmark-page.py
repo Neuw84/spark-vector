@@ -110,6 +110,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--spark", required=True); ap.add_argument("--vector", required=True); ap.add_argument("--comet", required=True)
     ap.add_argument("--out", required=True); ap.add_argument("--meta")
+    ap.add_argument("--web-out", help="also write a standalone web/ page (no Jekyll) to this path")
+    ap.add_argument("--web-base", default="/spark-vector", help="base URL prefix for the web/ page (default /spark-vector)")
     a = ap.parse_args()
     meta = dict(DEFAULT_META)
     if a.meta:
@@ -308,6 +310,11 @@ new Chart(document.getElementById('speedup'), {{ type: 'line',
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(page)
     print(f"wrote {a.out}: {n} queries; totals " + ", ".join(f"{e}={tot[e]:.0f}s" for e, _, _ in ENGINES))
+    if a.web_out:
+        from webwrap import to_web_page
+        Path(a.web_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.web_out).write_text(to_web_page(page, a.web_base, description=meta.get("dataset", "")))
+        print(f"wrote {a.web_out}: web/ page under {a.web_base}")
 
 
 if __name__ == "__main__":
