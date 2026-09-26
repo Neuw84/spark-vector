@@ -112,10 +112,15 @@ class RowProportionalSizesSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally spark.conf.unset(VectorShuffleExchangeExec.RebalanceRowSizingKey)
   }
 
-  test("an aggregate's exchange (ENSURE_REQUIREMENTS) keeps the real sizes") {
-    val ex = ourExchange("select k, count(*) c from keys group by k")
-    assert(ex.recordsByPartition.isEmpty)
-    assert(aqeSizes(ex) sameElements realSizes(ex))
+  test("an aggregate's exchange (ENSURE_REQUIREMENTS) keeps the real sizes with AQE map-size scaling off") {
+    // Row sizing is a rebalance's only; with #511's scaling (on by default) the aggregate's sizes are
+    // multiplied instead -- RebalanceAdvisorySuite covers that.
+    spark.conf.set(VectorShuffleExchangeExec.MapSizeScalingKey, "false")
+    try {
+      val ex = ourExchange("select k, count(*) c from keys group by k")
+      assert(ex.recordsByPartition.isEmpty)
+      assert(aqeSizes(ex) sameElements realSizes(ex))
+    } finally spark.conf.unset(VectorShuffleExchangeExec.MapSizeScalingKey)
   }
 
   private def counts(byMap: (Int, Array[Long])*): java.util.Map[Integer, Array[Long]] = {
