@@ -18,12 +18,12 @@ operators stay off, and vecruntime's JVM SIMD operators run above the scan. Opti
 native shuffle carries the partial aggregates too (see below). Comet 1.0 only ships
 the fully native DataFusion scan (`CometNativeScanExec`), which needs `spark.comet.exec.enabled=true`
 and off-heap memory; "scan-only" therefore means enabling exec and switching every Comet operator
-off individually (`io.sparkvector.benchmarks.TpchRunner.CometScanOnly` lists the full set).
+off individually (`io.vecruntime.benchmarks.TpchRunner.CometScanOnly` lists the full set).
 
 ## Configuration
 
 ```
---conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
+--conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin
 --conf spark.comet.enabled=true
 --conf spark.comet.scan.enabled=true
 --conf spark.comet.exec.enabled=true
@@ -36,13 +36,13 @@ off individually (`io.sparkvector.benchmarks.TpchRunner.CometScanOnly` lists the
 --conf spark.memory.offHeap.size=2g
 --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED"
 --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED"
---jars comet-spark-spark4.1_2.13-1.0.0.jar,spark-vector-spark_2.13-0.0.1.jar
+--jars comet-spark-spark4.1_2.13-1.0.0.jar,vecruntime-spark_2.13-0.0.1.jar
 ```
 
 List Comet's plugin first: session extensions run in registration order, and vecruntime's
 planner rule needs to see `CometScanExec` already in place. Nothing else is Comet-specific: the rule
 treats any child with `supportsColumnar = true` and supported column types as an input, and the
-Comet vector adapter (`io.sparkvector.spark.comet.CometVectorAdapter`) registers itself on first
+Comet vector adapter (`io.vecruntime.spark.comet.CometVectorAdapter`) registers itself on first
 use if Comet's classes are on the classpath. There is no compile-time dependency on Comet; the
 adapter binds to `org.apache.comet.vector.CometVector`, `CometDictionaryVector` and the shaded
 Arrow classes reflectively, so the same jar works with or without Comet.
@@ -107,7 +107,7 @@ is what the `comet` Maven profile of this project resolves. The Rust build takes
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@25   # or wherever JDK 25 lives
-mvn -Pcomet -pl spark verify -Dsuites=io.sparkvector.spark.comet.CometScanSuite,io.sparkvector.spark.comet.CometShuffleSuite
+mvn -Pcomet -pl spark verify -Dsuites=io.vecruntime.spark.comet.CometScanSuite,io.vecruntime.spark.comet.CometShuffleSuite
 ```
 
 Without `-Pcomet` the suites are excluded by their `CometTest` tag and the rest of the build has no

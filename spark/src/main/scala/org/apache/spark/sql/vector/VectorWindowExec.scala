@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,11 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.kernels.{Bitmap, GroupAssignment, VectorBuffers}
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.agg.{GroupedAggState, Rows, VectorAggFunction, VectorAggregates}
-import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch, VectorAllocators}
-import io.sparkvector.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.vecruntime.kernels.{Bitmap, GroupAssignment, VectorBuffers}
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.agg.{GroupedAggState, Rows, VectorAggFunction, VectorAggregates}
+import io.vecruntime.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch, VectorAllocators}
+import io.vecruntime.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -690,7 +690,7 @@ object VectorWindowPlanner {
         out
       }
     case av: Average if av.child.dataType.isInstanceOf[SparkDecimalType] =>
-      val result = io.sparkvector.spark.agg.DecimalAvgResult(av)
+      val result = io.vecruntime.spark.agg.DecimalAvgResult(av)
       Some { slots =>
         val out = slots.clone()
         out(0) =
@@ -826,7 +826,7 @@ private[vector] final class KeyTracker(keys: Array[VectorExpr]) {
   private var lanes: Array[VectorBuffers] = _
   var hasPrevious = false
 
-  def startBatch(ctx: io.sparkvector.spark.expr.EvalContext): Unit = lanes = keys.map(_.eval(ctx))
+  def startBatch(ctx: io.vecruntime.spark.expr.EvalContext): Unit = lanes = keys.map(_.eval(ctx))
 
   /** True when row `i` differs from the remembered row (or none is remembered). */
   def changed(i: Int): Boolean = {

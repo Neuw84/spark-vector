@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -92,8 +92,8 @@ object RebalanceAdvisory {
    * value's UTF-8 bytes rounded up to a word, dictionary-encoded columns resolved through their
    * dictionary. Non-string columns count nothing.
    */
-  def unsafeStringBytes(columns: Array[io.sparkvector.kernels.VectorBuffers], n: Int): Long = {
-    import io.sparkvector.kernels.{Bitmap, VecType, VectorBuffers}
+  def unsafeStringBytes(columns: Array[io.vecruntime.kernels.VectorBuffers], n: Int): Long = {
+    import io.vecruntime.kernels.{Bitmap, VecType, VectorBuffers}
     var total = 0L
     var c = 0
     while (c < columns.length) {

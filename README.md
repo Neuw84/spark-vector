@@ -2,7 +2,7 @@
 
 **A vectorized execution runtime for Apache Spark using Java**
 
-> vecruntime was previously named spark-vector; configuration keys (`spark.vector.*`), packages and artifacts keep their names.
+> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`), the `sparkvector.*` JVM system properties, and the shuffle manager class (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`) are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; and the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`).
 
 vecruntime accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
 
@@ -76,14 +76,14 @@ mvn -Piceberg verify                                # also runs the Iceberg suit
 mvn -Pcomet,iceberg verify                          # everything, including Comet's native Iceberg scan
 ```
 
-The plugin jar is `spark/target/spark-vector-spark_2.13-<version>.jar` (kernels shaded in, nothing
+The plugin jar is `spark/target/vecruntime-spark_2.13-<version>.jar` (kernels shaded in, nothing
 else). Spark and Arrow are `provided`.
 
 ## Getting the jars
 
 Every release is on the [releases page](https://github.com/vecruntime/vecruntime/releases): the plugin
-jar (`spark-vector-spark_2.13-<version>.jar`), the columnar shuffle jar
-(`spark-vector-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
+jar (`vecruntime-spark_2.13-<version>.jar`), the columnar shuffle jar
+(`vecruntime-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
 POMs, are published to a Maven repository served from this repository's `maven-repo` branch -- no
 account or token needed:
 
@@ -97,14 +97,14 @@ account or token needed:
 
 <dependencies>
   <dependency>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-spark_2.13</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-spark_2.13</artifactId>
     <version>0.0.1</version>
   </dependency>
   <!-- the columnar shuffle, if you run with spark.shuffle.manager=...VectorShuffleManager -->
   <dependency>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-shuffle_2.13</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-shuffle_2.13</artifactId>
     <version>0.0.1</version>
   </dependency>
 </dependencies>
@@ -120,15 +120,15 @@ GitHub release with their checksums, and publishes them to the `maven-repo` bran
 
 ```bash
 spark-submit \
-  --conf spark.plugins=io.sparkvector.spark.VectorPlugin \
+  --conf spark.plugins=io.vecruntime.spark.VectorPlugin \
   --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
   --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
-  --jars spark-vector-spark_2.13-0.0.1.jar \
+  --jars vecruntime-spark_2.13-0.0.1.jar \
   ...
 ```
 
 `spark.plugins` registers the session extension automatically; alternatively set
-`spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions`.
+`spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions`.
 
 Configuration keys (all default to `true` except the last; the complete reference, every
 `spark.vector.*` key with its default and unit, is [docs/configuration.md](docs/configuration.md)):
@@ -172,7 +172,7 @@ Configuration keys (all default to `true` except the last; the complete referenc
 | `spark.vector.exec.strictFloatingPoint` | **on by default**: double `sum`/`avg` round exactly like Spark (one accumulator per group, rows added in order). `false` uses lane-parallel and interleaved partial sums that differ from Spark's in the last bits (about 7% of aggregate kernel time, 2.5% of TPC-H Q1) and can make an equality between two double sums fail (TPC-H Q15 returns no rows). Comet's `spark.comet.exec.strictFloatingPoint` is the analogous switch with the opposite default (`false`) and mechanism (`true` makes Comet fall back to Spark for such operations; we compute the strict result in our kernels). The benchmark configurations run with `false`, matching Comet's default |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
-| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288). Default `true`, but it only takes effect with the `spark-vector-shuffle` jar on the classpath and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` -- without those the exchange stays Spark's. TPC-H SF10: 0.59x the row shuffle over the 22 queries (`docs/results.md`) |
+| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288). Default `true`, but it only takes effect with the `vecruntime-shuffle` jar on the classpath and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` -- without those the exchange stays Spark's. TPC-H SF10: 0.59x the row shuffle over the 22 queries (`docs/results.md`) |
 | `spark.vector.shuffle.backend` | how a reducer fetches a remote map output: `flight` (default; one Flight server per executor -- for executors that stay up for the job), `block` (Spark's block transfer), or the class name of a `VectorShuffleBackend` from another jar |
 | `spark.vector.shuffle.compression` | body compression of the shuffle's record batches: `zstd` (default; native), `lz4` (Arrow's codec is pure Java and an order of magnitude slower) or `none` |
 | `spark.vector.shuffle.batchRows`, `spark.vector.shuffle.batchBytes`, `spark.vector.shuffle.bufferBytes` | a map task holds each reduce partition's rows until `batchRows` (default `8192`) or `batchBytes` (default `1m`) and writes them as one record batch; `bufferBytes` (default `64m`) caps what one task holds across partitions |
@@ -353,7 +353,7 @@ HashAggregateExec -> VectorHashAggregateExec     Arrow vectors -> ArrowColumnVec
 Sort, Window, Expand, Generate, Limit, Sample,   the same contract: columnar child in, Arrow out
 Union, joins (hash, nested loop, sort-merge)     (see "Supported today")
 ShuffleExchange   -> VectorShuffleExchange       Arrow IPC record batches per reduce partition ->
-(spark-vector-shuffle jar)                       Spark's data file; reducers fetch over Arrow Flight
+(vecruntime-shuffle jar)                       Spark's data file; reducers fetch over Arrow Flight
 ShuffleExchange   -> CometShuffleExchange        Arrow C Data export -> CometVector (zero copy)
 (with Comet)         over VectorToComet
 ```
@@ -453,7 +453,7 @@ many times the memory (see "Memory tuning").
 
 ### Columnar shuffle (Arrow IPC over Arrow Flight)
 
-With the `spark-vector-shuffle` jar on the classpath and
+With the `vecruntime-shuffle` jar on the classpath and
 `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`, the rule replaces
 a `ShuffleExchangeExec` above one of our operators with `VectorShuffleExchangeExec` (#288) -- a
 `ShuffleExchangeLike`, so AQE's coalescing, skew splitting and local reads apply -- for hash,
@@ -596,7 +596,7 @@ runner warns when the session it runs in disagrees with the configuration it is 
 | configuration | what the session sets |
 |---|---|
 | `spark` | nothing: plain Spark, its vectorized Parquet reader, its sort-based shuffle |
-| `vector` | `spark.plugins=io.sparkvector.spark.VectorPlugin`; `spark.vector.exec.strictFloatingPoint=false` (Comet's rounding; see the note under Aggregation); `spark.vector.exec.sortMergeJoin.mode=auto`; `spark.sql.parquet.enableVectorizedReader=true` (Spark's default, made explicit -- our operators consume its batches, the row reader would make every plan fall back); `spark.sql.columnVector.offheap.enabled=true` (#403: the reader writes Arrow's fixed-width layout into native memory and the adapter wraps those lanes in place instead of copying them) |
+| `vector` | `spark.plugins=io.vecruntime.spark.VectorPlugin`; `spark.vector.exec.strictFloatingPoint=false` (Comet's rounding; see the note under Aggregation); `spark.vector.exec.sortMergeJoin.mode=auto`; `spark.sql.parquet.enableVectorizedReader=true` (Spark's default, made explicit -- our operators consume its batches, the row reader would make every plan fall back); `spark.sql.columnVector.offheap.enabled=true` (#403: the reader writes Arrow's fixed-width layout into native memory and the adapter wraps those lanes in place instead of copying them) |
 | `vector-shuffle` | `vector` plus `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` and `spark.vector.shuffle.enabled=true`: our columnar exchange (#288) |
 | `vector-shuffle-strict` | `vector-shuffle` with `strictFloatingPoint=true` (bit-identical double sums) |
 | `comet-scan-vector-ourshuffle` | `vector-shuffle` with Comet's plugin and scan (`spark.comet.enabled`, `spark.comet.scan.enabled`, every `spark.comet.exec.*` operator off, `spark.memory.offHeap.enabled` with `OFFHEAP`, 32 g) |

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,9 +22,9 @@ import java.util.concurrent.Executors
 
 import scala.collection.mutable
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, VectorBuffers}
-import io.sparkvector.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
-import io.sparkvector.spark.arrow.ArrowOutput
+import io.vecruntime.kernels.{ArrowLayout, Bitmap, VectorBuffers}
+import io.vecruntime.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
+import io.vecruntime.spark.arrow.ArrowOutput
 import org.apache.arrow.flight.{FlightServer, Location}
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.compression.CompressionUtil
@@ -36,7 +36,7 @@ import org.apache.spark.sql.vector.shuffle.flight.{FlightBlockStream, FlightLoca
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
 /**
- * The fixture behind `io.sparkvector.benchmarks.FlightShuffleBenchmark` (here rather than beside it: the
+ * The fixture behind `io.vecruntime.benchmarks.FlightShuffleBenchmark` (here rather than beside it: the
  * metrics reporter the block stream takes is `private[spark]`): two Arrow Flight servers on the loopback interface
  * standing in for two remote executors, each serving the map files of `maps` map tasks written by
  * the real [[PartitionedIpcWriter]] at `partitions` reduce partitions, and the operations a reduce

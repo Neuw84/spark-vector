@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,10 @@ import java.lang.foreign.Arena
 import java.nio.channels.FileChannel
 import java.nio.file.{Files, StandardOpenOption}
 
-import io.sparkvector.kernels.{Bitmap, PartitionKernels, VecType, VectorBuffers}
-import io.sparkvector.kernels.PartitionKernels.KeyKind
-import io.sparkvector.spark.adapter.{ColumnVectorAdapters, TypeMapping}
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDecimalColumnVector}
+import io.vecruntime.kernels.{Bitmap, PartitionKernels, VecType, VectorBuffers}
+import io.vecruntime.kernels.PartitionKernels.KeyKind
+import io.vecruntime.spark.adapter.{ColumnVectorAdapters, TypeMapping}
+import io.vecruntime.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDecimalColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, VectorSchemaRoot}
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}

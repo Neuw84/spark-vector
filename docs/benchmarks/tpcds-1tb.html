@@ -59,7 +59,7 @@ runner measures it. The result files, event logs and every study behind a number
 spark.sql.adaptive.advisoryPartitionSizeInBytes=128m
 spark.sql.adaptive.coalescePartitions.minPartitionNum=208
 spark.eventLog.enabled=true</pre>
-<div class="two"><div><p>vecruntime:</p><pre>spark.plugins=io.sparkvector.spark.VectorPlugin
+<div class="two"><div><p>vecruntime:</p><pre>spark.plugins=io.vecruntime.spark.VectorPlugin
 spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
 spark.vector.exec.strictFloatingPoint=false   # Comet&#x27;s default too
 spark.vector.scan.prefetch=0                 # measured: off

@@ -3,28 +3,28 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-parent</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-parent</artifactId>
     <version>0.0.2-SNAPSHOT</version>
   </parent>
 
-  <artifactId>spark-vector-benchmarks</artifactId>
-  <name>spark-vector-benchmarks</name>
+  <artifactId>vecruntime-benchmarks</artifactId>
+  <name>vecruntime-benchmarks</name>
   <description>JMH kernel microbenchmarks and TPC-H runner</description>
 
   <dependencies>
     <dependency>
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-kernels</artifactId>
+      <groupId>io.github.vecruntime</groupId>
+      <artifactId>vecruntime-kernels</artifactId>
     </dependency>
     <dependency>
       <!-- #288: the columnar shuffle (its own jar in a deployment, as here on the benchmark classpath). -->
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-shuffle_${scala.binary.version}</artifactId>
+      <groupId>io.github.vecruntime</groupId>
+      <artifactId>vecruntime-shuffle_${scala.binary.version}</artifactId>
     </dependency>
     <dependency>
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+      <groupId>io.github.vecruntime</groupId>
+      <artifactId>vecruntime-spark_${scala.binary.version}</artifactId>
     </dependency>
     <dependency>
       <groupId>org.openjdk.jmh</groupId>
@@ -109,7 +109,7 @@
               <finalName>benchmarks</finalName>
               <artifactSet>
                 <includes>
-                  <include>io.sparkvector:*</include>
+                  <include>io.github.vecruntime:*</include>
                   <include>org.openjdk.jmh:*</include>
                   <include>net.sf.jopt-simple:*</include>
                   <include>org.apache.commons:commons-math3</include>

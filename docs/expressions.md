@@ -10,7 +10,7 @@ incompatibility that still makes it fall back where one exists. Modelled on Come
 [Spark Expression Support](https://datafusion.apache.org/comet/user-guide/latest/expressions.html)
 page; the companion for operators is [docs/operators.md](operators.html).
 
-**How to read it.** `ExpressionCompiler.compile` (`spark/src/main/scala/io/sparkvector/spark/expr/`)
+**How to read it.** `ExpressionCompiler.compile` (`spark/src/main/scala/io/vecruntime/spark/expr/`)
 is one `match` over Catalyst expressions. Every case either produces a `VectorExpr` node with a kernel
 behind it or returns a `Left(reason)`; the reason is what the operator records (`VectorFallback`), what
 the UI tooltip and `spark.vector.explainFallback.enabled` show, and what the suites assert on with

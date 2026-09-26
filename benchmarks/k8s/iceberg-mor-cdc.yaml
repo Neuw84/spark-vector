@@ -5,14 +5,14 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: spark-vector-mor-cdc-CONFIG-TABLE
+  name: vecruntime-mor-cdc-CONFIG-TABLE
   namespace: bench
 spec:
   type: Scala
   mode: cluster
   image: IMAGE
   imagePullPolicy: IfNotPresent
-  mainClass: io.sparkvector.benchmarks.CdcMergeRunner
+  mainClass: io.vecruntime.benchmarks.CdcMergeRunner
   mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
   arguments:
     - "--config"

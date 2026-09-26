@@ -27,4 +27,4 @@ unset JAVA_TOOL_OPTIONS
 cd "$ROOT"
 # -Piceberg: the spark module's test sources include the Iceberg suites, which only compile with that profile.
 mvn -B -Pspark-sql-tests -Piceberg -pl spark-sql-tests -am -DskipTests install -q
-mvn -B -Pspark-sql-tests -pl spark-sql-tests -Dsuites=io.sparkvector.spark.sqltests.VectorSQLQueryTestSuite "-DsqlTests.filter=$FILTER" "-DsqlTests.exclude=$EXCLUDE" "-DsqlTests.jvmArgs=${SQL_TESTS_JVM_ARGS:-}" "-DsqlTests.updateBaseline=${SQL_TESTS_UPDATE_BASELINE:-false}" test
+mvn -B -Pspark-sql-tests -pl spark-sql-tests -Dsuites=io.vecruntime.spark.sqltests.VectorSQLQueryTestSuite "-DsqlTests.filter=$FILTER" "-DsqlTests.exclude=$EXCLUDE" "-DsqlTests.jvmArgs=${SQL_TESTS_JVM_ARGS:-}" "-DsqlTests.updateBaseline=${SQL_TESTS_UPDATE_BASELINE:-false}" test

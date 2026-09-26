@@ -15,7 +15,7 @@ CONFIGS="${CONFIGS:-spark vector-shuffle vector-shuffle-strict comet-scan-vector
 SUITE="${SUITE:-tpcds}"
 
 for cfg in $CONFIGS; do
-  name="spark-vector-$SUITE-$cfg-$DATASET"; name="${name//[^a-z0-9-]/-}"
+  name="vecruntime-$SUITE-$cfg-$DATASET"; name="${name//[^a-z0-9-]/-}"
   kubectl -n "$NAMESPACE" delete sparkapplication "$name" --ignore-not-found >/dev/null
   "$HERE/render-run.sh" "$cfg" "$TABLES" "$DATASET" "$OUT" "$IMAGE" "$@" | kubectl apply -f - >/dev/null
   start=$(date +%s)

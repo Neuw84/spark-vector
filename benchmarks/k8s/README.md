@@ -35,7 +35,7 @@ reads a fine-grained GitHub token (Contents: read) from the Secret `github-read`
 ## What a run needs
 
 - `benchmarks.jar` (`mvn -Piceberg -pl benchmarks -am -DskipTests package`) on the image or on S3;
-  the main class is `io.sparkvector.benchmarks.TpcdsRunner` (`TpchRunner` for TPC-H), invoked with
+  the main class is `io.vecruntime.benchmarks.TpcdsRunner` (`TpchRunner` for TPC-H), invoked with
   `--cluster --config <cfg> --tables <base URI | catalog:<ns>> --dataset <label> --out <URI>`.
 - The engine configuration as `spark.*` properties -- `benchmarks/scripts/submit-cluster.sh` emits
   them for `spark`, `vector`, `comet-scan-vector-shuffle` and `comet` (`DRY_RUN=1` prints the full

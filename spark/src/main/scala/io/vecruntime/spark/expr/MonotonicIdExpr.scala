@@ -1,0 +1,53 @@
+/*
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.vecruntime.spark.expr
+
+import io.vecruntime.kernels.{ArrowLayout, SegmentVectorBuffers, SequenceKernels, VecType, VectorBuffers}
+import org.apache.spark.TaskContext
+import org.apache.spark.sql.types.{DataType, LongType}
+
+/**
+ * `monotonically_increasing_id()`: Spark's contract is `partitionIndex.toLong << 33 | rowNumber`,
+ * with the row number counting the rows that reach the expression within the partition. The
+ * compiled expression tree is deserialised once per task, so the counter below is per task -- one
+ * partition -- exactly like Spark's `Stateful` implementation; the partition prefix is read from the
+ * task context on first use.
+ *
+ * With a forwarded selection only the selected rows are numbered, in order: those are the rows
+ * Spark would have seen after the filter below; unselected lanes are masked by the consumer.
+ * Rows outside an `active` mask (a CASE branch) are still numbered -- Spark evaluates the id only on
+ * the branch's rows, a difference this node accepts rather than reproducing, since the id is a tag
+ * and only its monotonicity and uniqueness within the partition are contractual.
+ */
+final case class MonotonicIdExpr() extends VectorExpr {
+  override def dataType: DataType = LongType
+  override def children: Seq[VectorExpr] = Nil
+
+  // Not transient on purpose: the driver never evaluates, so -1 travels to every task and marks
+  // "prefix not yet read" (a transient Long would come back as 0 and lose the partition prefix).
+  private var next: Long = -1L
+
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    if (next < 0L) {
+      val partition = Option(TaskContext.get()).map(_.partitionId()).getOrElse(0)
+      next = partition.toLong << 33
+    }
+    val n = ctx.numRows
+    val data = ArrowLayout.allocateData(ctx.arena, VecType.INT64, n)
+    next = SequenceKernels.iotaSelected(data, n, ctx.selection, next)
+    SegmentVectorBuffers.fixedWidth(VecType.INT64, n, null, data)
+  }
+}

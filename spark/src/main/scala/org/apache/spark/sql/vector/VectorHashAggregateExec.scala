@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,14 +15,14 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.kernels.{Bitmap, GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.agg.{AggState, GroupedAggState, VectorAggFunction, VectorAggregates}
-import io.sparkvector.spark.VectorConf
-import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators, VectorDictionaryColumnVector}
+import io.vecruntime.kernels.{Bitmap, GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.agg.{AggState, GroupedAggState, VectorAggFunction, VectorAggregates}
+import io.vecruntime.spark.VectorConf
+import io.vecruntime.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators, VectorDictionaryColumnVector}
 import java.lang.foreign.MemorySegment
 import org.apache.arrow.vector.{IntVector, VarCharVector}
-import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.vecruntime.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -417,7 +417,7 @@ private[vector] class VectorGroupedAggregateIterator(
    */
   private val accumulatorBytesPerGroup: Long =
     aggs.map(a =>
-      math.max(1, a.bufferTypes.length).toLong * 2L * 8L * io.sparkvector.kernels.GroupedAccumulators.INTERLEAVE
+      math.max(1, a.bufferTypes.length).toLong * 2L * 8L * io.vecruntime.kernels.GroupedAccumulators.INTERLEAVE
     ).sum
   private def estimatedBytes: Long = {
     val groups = table.size()
@@ -1033,15 +1033,15 @@ object AggBufferColumns {
             case null =>
               anyNull = true
               Bitmap.setTo(validity, o, false)
-              io.sparkvector.kernels.Decimal128.set(data, o, 0L, 0L)
+              io.vecruntime.kernels.Decimal128.set(data, o, 0L, 0L)
             case v: java.math.BigDecimal =>
               val unscaled = v.unscaledValue()
               Bitmap.setTo(validity, o, true)
-              io.sparkvector.kernels.Decimal128.set(
+              io.vecruntime.kernels.Decimal128.set(
                 data,
                 o,
-                io.sparkvector.kernels.Decimal128.hiOf(unscaled),
-                io.sparkvector.kernels.Decimal128.loOf(unscaled)
+                io.vecruntime.kernels.Decimal128.hiOf(unscaled),
+                io.vecruntime.kernels.Decimal128.loOf(unscaled)
               )
           }
           o += 1
@@ -1065,20 +1065,20 @@ object AggBufferColumns {
     var o = 0
     while (o < count) {
       get(o) match {
-        case null => io.sparkvector.kernels.Bitmap.clear(validity, o)
+        case null => io.vecruntime.kernels.Bitmap.clear(validity, o)
         case v: java.lang.Double =>
-          io.sparkvector.kernels.Bitmap.set(validity, o);
+          io.vecruntime.kernels.Bitmap.set(validity, o);
           data.set(VectorBuffers.LE_DOUBLE, o.toLong << 3, v.doubleValue())
         case v: java.lang.Long =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
+          io.vecruntime.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_LONG, o.toLong << 3, v.longValue())
         case v: java.lang.Integer =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+          io.vecruntime.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
         case v: java.lang.Byte => // tinyint / smallint values ride the int lane (#327)
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+          io.vecruntime.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
         case v: java.lang.Short =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
+          io.vecruntime.kernels.Bitmap.set(validity, o); data.set(VectorBuffers.LE_INT, o.toLong << 2, v.intValue())
         case v: java.lang.Boolean =>
-          io.sparkvector.kernels.Bitmap.set(validity, o); io.sparkvector.kernels.Bitmap.setTo(data, o, v.booleanValue())
+          io.vecruntime.kernels.Bitmap.set(validity, o); io.vecruntime.kernels.Bitmap.setTo(data, o, v.booleanValue())
         case other => throw new IllegalStateException(s"unexpected buffer value $other")
       }
       o += 1

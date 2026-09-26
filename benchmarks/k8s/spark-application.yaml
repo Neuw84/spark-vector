@@ -5,14 +5,14 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: spark-vector-tpcds-CONFIG-DATASET
+  name: vecruntime-tpcds-CONFIG-DATASET
   namespace: spark-team-a
 spec:
   type: Scala
   mode: cluster
   image: IMAGE            # Spark 4.1.x on JDK 25 with benchmarks.jar, the Comet Spark 4.1 jar, iceberg-spark-runtime-4.1_2.13
   imagePullPolicy: IfNotPresent
-  mainClass: io.sparkvector.benchmarks.TpcdsRunner
+  mainClass: io.vecruntime.benchmarks.TpcdsRunner
   mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
   arguments:
     - "--cluster"

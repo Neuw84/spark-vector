@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import org.apache.spark.internal.Logging
  * Attaches [[VectorAccelerationTab]] to a running application's UI.
  *
  * `SparkContext.ui`, `SparkUI.attachTab` and `SparkUITab` are all `private[spark]`, so the call has
- * to be made from inside the `org.apache.spark` package; `io.sparkvector.spark.VectorPlugin` goes
+ * to be made from inside the `org.apache.spark` package; `io.vecruntime.spark.VectorPlugin` goes
  * through here.
  */
 object VectorUi extends Logging {

@@ -20,7 +20,7 @@
 #   JVM_EXTRA   extra JVM options, e.g. -XX:StartFlightRecording=filename=q1.jfr,settings=profile
 #   RESULTS_DIR where .jsonl measurements and reports go (default benchmarks/results); point it
 #               elsewhere for profiling runs that should not enter the report
-#   RUNNER      runner class (default io.sparkvector.benchmarks.TpchRunner; run-tpcds.sh sets TpcdsRunner)
+#   RUNNER      runner class (default io.vecruntime.benchmarks.TpchRunner; run-tpcds.sh sets TpcdsRunner)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -44,7 +44,7 @@ JAVA="${JAVA_HOME:?set JAVA_HOME to a JDK 25}/bin/java"
 JVM_MEM="${JVM_MEM:-6g}"
 THREADS="${THREADS:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)}"
 OUT="${RESULTS_DIR:-$ROOT/benchmarks/results}"
-RUNNER="${RUNNER:-io.sparkvector.benchmarks.TpchRunner}"
+RUNNER="${RUNNER:-io.vecruntime.benchmarks.TpchRunner}"
 mkdir -p "$OUT"
 
 # Classpath: benchmark classes + every dependency (Spark is 'provided', so this includes it).

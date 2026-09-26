@@ -39,7 +39,7 @@ JVM_OPTS=(
   -Dlog4j2.level=warn -Dspark.log.level=WARN
 )
 if [ "${1:-}" = "--report" ]; then
-  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.sparkvector.benchmarks.CdcMergeRunner --report "$OUT"
+  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.vecruntime.benchmarks.CdcMergeRunner --report "$OUT"
   exit 0
 fi
 WAREHOUSE="${1:?usage: run-cdc-merge.sh <warehouse> <namespace.table> [configs] [extra args] | --report}"
@@ -51,7 +51,7 @@ for cfg in ${CONFIGS//,/ }; do
     comet*|hybrid) if [ -z "${COMET_JAR:-}" ]; then echo "skipping $cfg: COMET_JAR not set"; continue; fi ;;
   esac
   echo "[cdc] === $cfg ==="
-  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.sparkvector.benchmarks.CdcMergeRunner \
+  "$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.vecruntime.benchmarks.CdcMergeRunner \
     --config "$cfg" --iceberg "$WAREHOUSE" --table "$TABLE" --out "$OUT" --threads "$THREADS" "$@"
 done
-"$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.sparkvector.benchmarks.CdcMergeRunner --report "$OUT"
+"$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.vecruntime.benchmarks.CdcMergeRunner --report "$OUT"

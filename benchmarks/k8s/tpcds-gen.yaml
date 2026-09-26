@@ -16,7 +16,7 @@ spec:
   mode: cluster
   image: 378683551918.dkr.ecr.us-east-1.amazonaws.com/spark-vector/spark:IMAGE_TAG
   imagePullPolicy: IfNotPresent
-  mainClass: io.sparkvector.benchmarks.TpcdsGenRunner
+  mainClass: io.vecruntime.benchmarks.TpcdsGenRunner
   mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
   arguments:
     - "--scale"

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@ package org.apache.spark.sql.vector
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.Bitmap
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.ArrowOutput
+import io.vecruntime.kernels.Bitmap
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.arrow.ArrowOutput
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.{
@@ -97,7 +97,7 @@ private[vector] object VectorLimitIterator {
       selection: MemorySegment,
       numRows: Int,
       keep: Int,
-      ctx: io.sparkvector.spark.expr.EvalContext
+      ctx: io.vecruntime.spark.expr.EvalContext
   ): MemorySegment = {
     val out = ctx.bitmap()
     Bitmap.fill(out, numRows, false)

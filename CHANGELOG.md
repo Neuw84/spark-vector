@@ -6,6 +6,25 @@ version may change configuration keys or defaults, always noted here.
 
 ## Unreleased
 
+### Changed (breaking)
+
+- **Renamed the code and Maven coordinates to vecruntime.** The plugin class, the Java/Scala
+  packages, and the published artifacts changed; anyone loading the plugin, importing the packages,
+  or depending on the artifacts must update. Old → new:
+  - Plugin class: `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`
+    (`--conf spark.plugins=...`).
+  - Packages: `io.sparkvector.*` → `io.vecruntime.*` (kernels, spark, shuffle, benchmarks, sqltests,
+    the Iceberg bridge `io.sparkvector.spark.iceberg` → `io.vecruntime.spark.iceberg`).
+  - Maven groupId: `io.sparkvector` → `io.github.vecruntime`.
+  - Artifacts: `spark-vector-*` → `vecruntime-*` (`vecruntime-parent`, `vecruntime-kernels`,
+    `vecruntime-spark_2.13`, `vecruntime-shuffle_2.13`, `vecruntime-benchmarks`,
+    `vecruntime-spark-sql-tests_2.13`); jar names follow.
+  - **Unchanged:** the `spark.vector.*` configuration keys, the `sparkvector.*` JVM system properties
+    and metric names, and the shuffle manager class
+    `org.apache.spark.sql.vector.shuffle.VectorShuffleManager` (it stays in Spark's namespace to reach
+    package-private APIs); `org.apache.spark.sql.vector.*` and `org.apache.iceberg.*` are unchanged for
+    the same reason.
+
 ## 0.0.1 -- 2026-09-24
 
 The first preview release: the plugin as measured on the 1 TB TPC-DS campaign
@@ -19,7 +38,7 @@ The first preview release: the plugin as measured on the 1 TB TPC-DS campaign
   re-planned as hash or order-preserving merge joins -- on Arrow-layout batches with the Java Vector
   API, on the JVM, no native code. The operator and expression coverage, with what falls back and why,
   is in `docs/operators.md` and `docs/expressions.md`; the summary table is in the README.
-- A columnar shuffle (`spark-vector-shuffle`): Arrow IPC record batches per reduce partition,
+- A columnar shuffle (`vecruntime-shuffle`): Arrow IPC record batches per reduce partition,
   zstd-compressed, served between executors over Arrow Flight or through Spark's block transfer
   (`docs/flight-shuffle.md`).
 - Input from Spark's vectorized Parquet reader, from Comet's native Parquet and Iceberg scans in

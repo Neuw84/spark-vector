@@ -18,7 +18,7 @@ JAVA="${JAVA_HOME:-/opt/java/openjdk}/bin/java"
 LIST="$(cat "${CLASSPATH_FILE:-$SPARK_HOME/aot/classpath}")"
 CP="$LIST:$LIST"
 
-mapfile -t MODULE_OPTS < <("$JAVA" -cp "$CP" io.sparkvector.benchmarks.AotTraining --module-options)
+mapfile -t MODULE_OPTS < <("$JAVA" -cp "$CP" io.vecruntime.benchmarks.AotTraining --module-options)
 # Keep in step with JVM_FLAGS in benchmarks/scripts/submit-cluster.sh.
 JVM_FLAGS=(--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
   --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED

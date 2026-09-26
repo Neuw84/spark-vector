@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,9 +21,9 @@ import java.nio.file.Files
 
 import scala.collection.mutable
 
-import io.sparkvector.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
-import io.sparkvector.kernels.ArrowLayout
-import io.sparkvector.spark.arrow.ArrowOutput
+import io.vecruntime.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
+import io.vecruntime.kernels.ArrowLayout
+import io.vecruntime.spark.arrow.ArrowOutput
 import org.apache.arrow.flight.{FlightServer, Location}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.SparkConf
@@ -55,8 +55,8 @@ class FlightBlockStreamSuite extends AnyFunSuite {
     val ks = Array.tabulate(n)(i => i * 7)
     val ss = Array.tabulate(n)(i => s"$prefix-${i % 37}") // 37 distinct per batch, repeats within it
     val buffers = Array(ArrowLayout.ofInts(arena, ks, Array.fill(n)(false)), ArrowLayout.ofStrings(arena, ss))
-    val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
-    io.sparkvector.kernels.Bitmap.fill(all, n, true)
+    val all = arena.allocate(io.vecruntime.kernels.Bitmap.bytesFor(n), 8)
+    io.vecruntime.kernels.Bitmap.fill(all, n, true)
     val columns: Array[ColumnVector] = schema.fields.indices.toArray.map { c =>
       ArrowOutput.compact(schema.fields(c).name, schema.fields(c).dataType, buffers(c), all, n, allocator)
     }

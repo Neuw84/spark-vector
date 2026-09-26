@@ -2,11 +2,11 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>io.sparkvector</groupId>
-  <artifactId>spark-vector-parent</artifactId>
+  <groupId>io.github.vecruntime</groupId>
+  <artifactId>vecruntime-parent</artifactId>
   <version>0.0.2-SNAPSHOT</version>
   <packaging>pom</packaging>
-  <name>spark-vector</name>
+  <name>vecruntime</name>
   <description>JVM SIMD (Java Vector API) execution layer for Spark SQL</description>
   <url>https://github.com/vecruntime/vecruntime</url>
   <licenses>
@@ -145,6 +145,21 @@
         <version>1.19.0</version>
       </dependency>
       <dependency>
+        <groupId>io.github.vecruntime</groupId>
+        <artifactId>vecruntime-kernels</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.vecruntime</groupId>
+        <artifactId>vecruntime-shuffle_${scala.binary.version}</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.vecruntime</groupId>
+        <artifactId>vecruntime-spark_${scala.binary.version}</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
         <groupId>io.netty</groupId>
         <artifactId>netty-buffer</artifactId>
         <version>${netty.version}</version>
@@ -153,21 +168,6 @@
         <groupId>io.netty</groupId>
         <artifactId>netty-common</artifactId>
         <version>${netty.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>io.sparkvector</groupId>
-        <artifactId>spark-vector-kernels</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>io.sparkvector</groupId>
-        <artifactId>spark-vector-shuffle_${scala.binary.version}</artifactId>
-        <version>${project.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>io.sparkvector</groupId>
-        <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
-        <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.arrow</groupId>

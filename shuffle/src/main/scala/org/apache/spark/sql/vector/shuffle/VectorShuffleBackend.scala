@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ import org.apache.spark.util.Utils
  * service, no `maps x reduces` small objects). Such a backend implements this trait from its own
  * jar and is named by class in `spark.vector.shuffle.backend`: [[mapOutputCommitted]] is where it
  * pushes each partition's IPC bytes, [[read]] is overridden whole because it reads a reduce
- * partition from the service rather than from executors, and [[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader]]
+ * partition from the service rather than from executors, and [[io.vecruntime.shuffle.PartitionedIpcFile.StreamReader]]
  * already decodes the concatenation of several map outputs' streams, which is what an aggregated
  * partition file from such a service contains.
  */

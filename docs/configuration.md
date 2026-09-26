@@ -12,7 +12,7 @@ reads them from the session's `SQLConf` when it plans a query, so a change appli
 their tables). The defaults were set from measurements on TPC-DS at 1 TB and TPC-H at SF10 -- see
 `docs/results.md` for the runs behind each threshold. Size-valued keys accept Spark's size strings
 (`512m`, `1g`) as well as byte counts. Where a `spark.vector.*` key is read is named in
-`spark/src/main/scala/io/sparkvector/spark/VectorConf.scala` (the planner and operator keys),
+`spark/src/main/scala/io/vecruntime/spark/VectorConf.scala` (the planner and operator keys),
 `spark/src/main/scala/org/apache/spark/sql/vector/AggregateSpill.scala` (the aggregate spill keys) and
 the `shuffle` module (the columnar shuffle keys).
 
@@ -83,7 +83,7 @@ of the plan stays columnar.
 |---|---|---|---|
 | `spark.vector.scan.prefetch` | `0` (off) | int 0-8 | Depth of the prefetching converter's queue (#403, lever 2): `1` or `2` inserts `VectorPrefetchScanExec` between a Spark vectorized file scan (Parquet, Iceberg's `BatchScanExec`; not a Comet scan) and the first operator of ours above it, whose helper thread pulls and converts the reader's next batch while the task thread works on the previous one. Memory grows by that many converted batches per task; larger values are accepted and capped at 8. |
 
-## Columnar shuffle (the `spark-vector-shuffle` jar)
+## Columnar shuffle (the `vecruntime-shuffle` jar)
 
 `spark.vector.shuffle.enabled` is a session key; the rest are read from the `SparkConf` by the
 shuffle manager, the writer and the Flight server at start-up, so set them on `spark-submit`. None
@@ -130,13 +130,13 @@ These matter only with Comet's jar on the classpath; see `docs/comet.md`.
   defaults to the heap size: set it to the executor's memory overhead less what the JVM itself needs
   (the 1 TB campaign ran a 30 GB heap and 20 GB of overhead per 13-core executor, the cluster
   manifests setting the bound to the overhead less 2 GB; see "Memory tuning" in `README.md`).
-- **Registering the plugin.** `spark.plugins=io.sparkvector.spark.VectorPlugin` registers the
+- **Registering the plugin.** `spark.plugins=io.vecruntime.spark.VectorPlugin` registers the
   session extension and attaches the UI tab; alternatively
-  `spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions` injects the planner
+  `spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions` injects the planner
   rule alone.
 - **The columnar shuffle manager.**
   `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` (from the
-  `spark-vector-shuffle` jar) is what makes `spark.vector.shuffle.enabled` take effect; the manager
+  `vecruntime-shuffle` jar) is what makes `spark.vector.shuffle.enabled` take effect; the manager
   serves our dependencies with the Arrow IPC writer and reader and delegates every other shuffle to
   Spark's sort shuffle. With `spark.authenticate` on, the Flight server requires Spark's shuffle
   secret as a bearer token; under `spark.ssl.rpc.enabled` it refuses to start, so use

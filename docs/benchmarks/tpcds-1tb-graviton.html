@@ -67,7 +67,7 @@ was compiled; the time is the wall-clock of the query's execution as the runner 
 <p>Common to both engines:</p><pre>spark.sql.shuffle.partitions=300
 # spark.sql.adaptive.advisoryPartitionSizeInBytes left at Spark&#x27;s default (64 MB); no coalescePartitions.minPartitionNum
 spark.eventLog.enabled=true</pre>
-<p>vecruntime:</p><pre>spark.plugins=io.sparkvector.spark.VectorPlugin
+<p>vecruntime:</p><pre>spark.plugins=io.vecruntime.spark.VectorPlugin
 spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
 spark.vector.exec.strictFloatingPoint=false   # Comet&#x27;s default too
 spark.vector.shuffle.aqe.mapSizeScaling=true   # #514&#x27;s default: AQE sees Spark-scale map output sizes

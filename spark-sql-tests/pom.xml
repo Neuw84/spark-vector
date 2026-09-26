@@ -9,13 +9,13 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-parent</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-parent</artifactId>
     <version>0.0.2-SNAPSHOT</version>
   </parent>
 
-  <artifactId>spark-vector-spark-sql-tests_${scala.binary.version}</artifactId>
-  <name>spark-vector :: Spark SQL test suite</name>
+  <artifactId>vecruntime-spark-sql-tests_${scala.binary.version}</artifactId>
+  <name>vecruntime :: Spark SQL test suite</name>
 
   <properties>
     <!-- Regex over test case names; -DsqlTests.filter=... selects a subset (see the script). -->
@@ -31,8 +31,8 @@
 
   <dependencies>
     <dependency>
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+      <groupId>io.github.vecruntime</groupId>
+      <artifactId>vecruntime-spark_${scala.binary.version}</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>

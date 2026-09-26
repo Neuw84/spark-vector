@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@ import java.lang.foreign.Arena
 
 import scala.collection.mutable.ArrayBuffer
 
-import io.sparkvector.kernels.{ColumnBuilder, RunMerge, SortKernels, VecType, VectorBuffers}
-import io.sparkvector.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators}
-import io.sparkvector.spark.expr.{ColumnRef, VectorExpr}
+import io.vecruntime.kernels.{ColumnBuilder, RunMerge, SortKernels, VecType, VectorBuffers}
+import io.vecruntime.spark.arrow.{ArrowOutput, ArrowVectorBuffers, VectorAllocators}
+import io.vecruntime.spark.expr.{ColumnRef, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.types.DataType
