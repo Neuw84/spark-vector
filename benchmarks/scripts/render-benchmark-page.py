@@ -57,6 +57,7 @@ DEFAULT_META = {
         "Every engine returned Spark's row counts and checksums on every query except q65 (its result has ties, ordered differently by every engine) and, for Comet, q64 (0 rows against 12,185 -- a stale dynamic-pruning value, apache/datafusion-comet#6133).",
         "The four legs ran in one window on the same nodes, one after another (Spark, spark-vector, Comet), each alone on the cluster; the AQE minimum of 208 partitions keeps the sort stages of the window queries wide (measured: Spark -4%, Comet -3%, spark-vector q67 -12%, the rest inside the run-to-run band).",
         "Spark's memory split is the one that completes: at 30 GB heap / 20 GB overhead Spark loses q23b, q24a and q24b to node-disk evictions during q23b's 503 GB spill; per query the heavier heap is 2-3% faster where it completes. Every split is measured in docs/results.md.",
+        "coalescePartitions.minPartitionNum=208 is set for this run (and the Graviton4 run that compares with it); it is deprecated in Spark 3.2+, and later TPC-DS runs leave it unset (#253).",
     ],
     "results_doc": "https://github.com/spark-vector/spark-vector/blob/main/docs/results.md",
     "repo": "https://github.com/spark-vector/spark-vector",
