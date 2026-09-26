@@ -298,6 +298,7 @@ object AggSpillPolicy {
   val ThresholdKey = "spark.vector.agg.spillThreshold"
   val BucketsKey = "spark.vector.agg.spillBuckets"
   val PassThroughKey = "spark.vector.agg.passThroughRatio"
+
   /**
    * 1 GiB, the sort's budget (`spark.vector.sort.spillBytes`, #416/#451). #511: at 512m, TPC-DS q67 at
    * 1 TB on Graviton4 spilled 115 GB from its final ROLLUP aggregate once AQE coalesced the stage to 150
