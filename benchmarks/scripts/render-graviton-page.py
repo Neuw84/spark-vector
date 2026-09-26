@@ -70,6 +70,10 @@ DEFAULT_META = {
     "run_doc": "https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md",
     "x86_page": "tpcds-1tb.html",
     "issue": "https://github.com/spark-vector/spark-vector/issues/253",
+    # How the x86 reference run relates to this one: the lede says "the published x86 run <x86_relation>",
+    # the architecture section "..., <x86_settings>." Override both when the two runs' settings differ.
+    "x86_relation": "with the same settings",
+    "x86_settings": "the same data, executors and Spark settings",
 }
 
 COLORS = {"spark": "#6b7280", "vector": "#2563eb"}
@@ -192,7 +196,7 @@ title: {json.dumps(meta["title"])}
 <p class="lede"><a href="{meta["repo"]}">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
 This page compares it against plain Apache Spark on the TPC-DS 1 TB workload on Amazon EKS with AWS Graviton4 (arm64) nodes, and sets both against
-the <a href="{meta["x86_page"]}">published x86 run</a> with the same settings (<a href="{meta["issue"]}">#253</a>).</p>
+the <a href="{meta["x86_page"]}">published x86 run</a> {html.escape(meta["x86_relation"])} (<a href="{meta["issue"]}">#253</a>).</p>
 
 <div class="tldr"><b>TL;DR.</b> On Graviton4, over the {n} TPC-DS queries at 1 TB, <b>spark-vector</b> finished in <b>{tot["vector"]:,.0f} s</b> against Spark's
 {tot["spark"]:,.0f} s -- <b>{tot["spark"] / tot["vector"]:.2f}x</b>, {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime (geometric mean {geo:.2f}x),
@@ -215,7 +219,7 @@ Both engines run faster on Graviton4 than on the m5.4xlarge nodes -- Spark's tim
 <div class="chart"><canvas id="totals"></canvas></div>
 
 <h2 id="arch">Graviton4 against x86</h2>
-<p>The x86 numbers are the <a href="{meta["x86_page"]}">published run</a>: 9 x m5.4xlarge (16 vCPU, 64 GB, AVX-512), the same data, executors and Spark settings.</p>
+<p>The x86 numbers are the <a href="{meta["x86_page"]}">published run</a>: 9 x m5.4xlarge (16 vCPU, 64 GB, AVX-512), {html.escape(meta["x86_settings"])}.</p>
 {table(["", "Spark (s)", "spark-vector (s)", "spark-vector speedup", "geometric mean"], [
     ("Graviton4 (m8g.4xlarge)", f"{tot['spark']:,.1f}", f"{tot['vector']:,.1f}", f"<b>{tot['spark'] / tot['vector']:.2f}x</b>", f"{geo:.2f}x"),
     ("x86 (m5.4xlarge)", f"{x86tot['spark']:,.1f}", f"{x86tot['vector']:,.1f}", f"{x86tot['spark'] / x86tot['vector']:.2f}x", f"{x86_geo:.2f}x"),

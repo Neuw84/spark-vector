@@ -21,6 +21,7 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeProjection
 import org.apache.spark.sql.catalyst.plans.logical.RebalancePartitions
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
+import org.apache.spark.sql.execution.exchange.ENSURE_REQUIREMENTS
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vector.VectorShuffleExchangeExec
 import org.apache.spark.unsafe.types.UTF8String
@@ -195,5 +196,81 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(RebalanceAdvisory.scale(1000L, schema, 10L, 1000000L) === 1000L)
     // An absurdly small ratio is floored.
     assert(RebalanceAdvisory.scale(1600L, Seq.fill(64)(LongType), 1000L, 1L) === 100L)
+  }
+
+  test("mapSizeFactor: Spark's estimated on-disk bytes per row over ours, bounded, 1.0 without data") {
+    val schema = Seq(IntegerType, LongType)
+    // UnsafeRow 24 B/row; / 2.5 = 9.6 against our 5 on disk.
+    val f = RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 5000L, 2.5)
+    assert(math.abs(f - 9.6 / 5) < 1e-9, f.toString)
+    // Compression <= 0: the uncompressed ratio, 24 / 12.25.
+    val g = RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 5000L, 0.0)
+    assert(math.abs(g - 24.0 / 12.25) < 1e-9, g.toString)
+    assert(RebalanceAdvisory.mapSizeFactor(schema, 0L, 12250L, 5000L, 2.5) === 1.0)
+    assert(RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 0L, 2.5) === 1.0)
+    assert(RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 1L, 2.5) === RebalanceAdvisory.MaxMapSizeFactor)
+    assert(
+      RebalanceAdvisory.mapSizeFactor(
+        schema,
+        1000L,
+        12250L,
+        1000000000L,
+        2.5
+      ) === 1.0 / RebalanceAdvisory.MaxMapSizeFactor
+    )
+    assert(RebalanceAdvisory.scaleSizes(Array(0L, 10L, 1L), 2.5).toSeq === Seq(0L, 25L, 3L))
+  }
+
+  /** An aggregate over `rows` with [[VectorShuffleExchangeExec.MapSizeScalingKey]] at `on`: its exchange and rows. */
+  private def aggregated(on: Boolean): (VectorShuffleExchangeExec, Array[org.apache.spark.sql.Row]) = {
+    spark.conf.set(VectorShuffleExchangeExec.MapSizeScalingKey, on.toString)
+    try {
+      val df = spark.sql("select g, count(*) c, sum(d) s, max(payload) p from rows group by g order by g")
+      val out = df.collect()
+      val plan = df.queryExecution.executedPlan match {
+        case a: AdaptiveSparkPlanExec => a.executedPlan
+        case p => p
+      }
+      val ex = nodes(plan).collectFirst {
+        case e: VectorShuffleExchangeExec if e.shuffleOrigin == ENSURE_REQUIREMENTS => e
+      }.getOrElse(fail(s"no exchange of ours in\n$plan"))
+      (ex, out)
+    } finally spark.conf.unset(VectorShuffleExchangeExec.MapSizeScalingKey)
+  }
+
+  private def statsOf(ex: VectorShuffleExchangeExec): org.apache.spark.MapOutputStatistics =
+    scala.concurrent.Await.result(ex.mapOutputStatisticsFuture, scala.concurrent.duration.Duration(60, "s"))
+
+  private def realSizes(ex: VectorShuffleExchangeExec): Array[Long] =
+    org.apache.spark.SparkEnv.get.mapOutputTracker.asInstanceOf[org.apache.spark.MapOutputTrackerMaster]
+      .getStatistics(ex.shuffleDependency).bytesByPartitionId
+
+  test("with map size scaling on, AQE reads an aggregate exchange's sizes times the factor; the results are the same") {
+    val (off, rowsOff) = aggregated(on = false)
+    assert(statsOf(off).bytesByPartitionId.toSeq === realSizes(off).toSeq)
+    assert(off.shuffleDependency.stringBytes.isEmpty)
+
+    val (on, rowsOn) = aggregated(on = true)
+    assert(rowsOn.toSeq === rowsOff.toSeq)
+    val real = realSizes(on)
+    val strings = on.shuffleDependency.stringBytes.getOrElse(fail("no string bytes measured")).value
+    val factor = RebalanceAdvisory.mapSizeFactor(
+      on.output.map(_.dataType),
+      on.metrics("shuffleRecordsWritten").value,
+      on.metrics("dataSize").value,
+      real.sum,
+      VectorShuffleExchangeExec.DefaultSparkCompression,
+      Some(strings)
+    )
+    assert(factor != 1.0, s"factor $factor")
+    assert(statsOf(on).bytesByPartitionId.toSeq === RebalanceAdvisory.scaleSizes(real, factor).toSeq)
+  }
+
+  test("map size scaling leaves a rebalance's row-proportional sizes alone") {
+    spark.conf.set(VectorShuffleExchangeExec.MapSizeScalingKey, "true")
+    try {
+      val ex = rebalanced()
+      assert(!VectorShuffleExchangeExec.mapSizesScaled(ex.shuffleOrigin, spark.sessionState.conf))
+    } finally spark.conf.unset(VectorShuffleExchangeExec.MapSizeScalingKey)
   }
 }
