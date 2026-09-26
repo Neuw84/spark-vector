@@ -55,10 +55,12 @@ case class VectorWriteDeltaStrategy(session: SparkSession) extends SparkStrategy
     if (!IcebergDvBridge.isAvailable) return Some("iceberg-bridge module is not on the classpath")
     if (wd.write.isEmpty) return Some("the DeltaWrite is not resolved")
     // Delete-only: no data (insert) rows. UPDATE/MERGE with an insert half is slice 5.
-    if (wd.projections.rowProjection.isDefined) return Some("write has an insert half (data rows); delete-only only for now")
+    if (wd.projections.rowProjection.isDefined)
+      return Some("write has an insert half (data rows); delete-only only for now")
     val table = VectorWriteDeltaStrategy.icebergTableOf(wd.table)
     if (table.isEmpty) return Some("target is not an Iceberg table")
-    if (!IcebergDvBridge.isDvEligible(table.get)) return Some("target is not a format-version-3 (deletion-vector) table")
+    if (!IcebergDvBridge.isDvEligible(table.get))
+      return Some("target is not a format-version-3 (deletion-vector) table")
     None
   }
 }
@@ -91,16 +93,6 @@ object VectorWriteDeltaStrategy {
     target.getClass.getMethods
       .find(m => m.getName == name && m.getParameterCount == 0)
       .flatMap(m => Option(m.invoke(target)))
-
-  def debugConnectorTable(relation: AnyRef): String = {
-    val ct = invokeNoArg(relation, "table").orNull
-    if (ct == null) "connectorTable=null"
-    else {
-      val iceberg = invokeNoArg(ct, "table").orNull
-      s"connectorTable=${ct.getClass.getName}, iceberg=${if (iceberg == null) "null" else iceberg.getClass.getName}, " +
-        s"isIcebergTable=${if (iceberg == null) false else isIcebergTable(iceberg.getClass)}"
-    }
-  }
 
   private def isIcebergTable(c: Class[_]): Boolean = {
     var cur: Class[_] = c

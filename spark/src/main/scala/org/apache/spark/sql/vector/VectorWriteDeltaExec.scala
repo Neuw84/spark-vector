@@ -51,8 +51,8 @@ case class VectorWriteDeltaExec(
     table: AnyRef,
     write: DeltaWrite,
     projections: WriteDeltaProjections,
-    query: SparkPlan)
-    extends V2CommandExec
+    query: SparkPlan
+) extends V2CommandExec
     with Logging {
 
   override def output: Seq[Attribute] = Nil
@@ -92,7 +92,8 @@ object VectorWriteDeltaExec {
   private def writePartition(
       table: AnyRef,
       projections: WriteDeltaProjections,
-      rows: Iterator[InternalRow]): WriterCommitMessage = {
+      rows: Iterator[InternalRow]
+  ): WriterCommitMessage = {
     val tc = TaskContext.get()
     val partitionId = if (tc != null) tc.partitionId() else 0
     val taskId = if (tc != null) tc.taskAttemptId() else 0L

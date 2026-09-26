@@ -111,18 +111,31 @@ optional artifact.
    mutable `BitmapPositionDeleteIndex`) and drives Iceberg's public `BaseDVFileWriter`. Differential
    test: order-independent, cardinality == distinct positions, membership holds, empty set → empty
    index — passes.
-4. **`VectorWriteDeltaExec` + planner strategy** — *eligibility seam done; live operator remaining.*
+4. **`VectorWriteDeltaExec` + planner strategy** — *done (DELETE, delete-only).*
    `IcebergDvCommitBridge.isDvEligible(table)` (public-API format-version check, the stand-in for the
    private `Context.useDVs()`) decides v3 vs decline, tested (v3 eligible, v2/null decline). The live
-   piece still to land: a `SparkStrategy` (`injectPlannerStrategy`) matching the logical `WriteDelta`
-   that, when eligible and `spark.vector.iceberg.dvWriter.enabled`, plans a `VectorWriteDeltaExec`
-   command; it runs an RDD job over the child's columnar batches, builds DVs per `_file` run via the
-   bridge, assembles `DeltaTaskCommit` per task, and commits through `deltaWrite.toBatch().commit(...)`
-   (Iceberg's own `RowDelta`). Executor-side `OutputFileFactory` is built from `OutputFileFactory
-   .builderFor(table, partId, taskId)` (public) and the previous-DV loader from Iceberg's public
-   `DeleteLoader`. v2/unsupported → `Nil`, so Spark's `DataSourceV2Strategy` plans the ordinary writer.
-5. **Insert/update path via Iceberg's appender** — *remaining.* Data rows through Iceberg's existing
-   appender so full MERGE works on v3; verify commit and row lineage.
+   `SparkStrategy` (`injectPlannerStrategy`) matches the logical `WriteDelta` and, when eligible and
+   `spark.vector.iceberg.dvWriter.enabled` and the write is **delete-only** (no row/insert
+   projection), plans a `VectorWriteDeltaExec` command; it runs an RDD job over the child's columnar
+   batches, builds DVs per `_file` run via the bridge, assembles `DeltaTaskCommit` per task, and
+   commits through `deltaWrite.toBatch().commit(...)` (Iceberg's own `RowDelta`). Executor-side
+   `OutputFileFactory` is built from `OutputFileFactory.builderFor(table, partId, taskId)` (public) and
+   the previous-DV loader from Iceberg's public `DeleteLoader`. Flag off, bridge absent, v2, or a write
+   with an insert half → `Nil`, so Spark's `DataSourceV2Strategy` plans the ordinary writer.
+   Correctness is covered by `VectorDvWriteSuite` (bridge module): on/off identical, operator planned,
+   v2 falls back, DVs readable via Spark metadata tables and the Iceberg API, snapshot summary counts
+   match, several files/partitions, repeated DELETEs merge the prior DV, nulls, empty delete set, and a
+   failing task aborts with no snapshot committed. The decline/fallback paths are covered inside the
+   CI gate by `DvWriteStrategyFallbackSuite` (spark module), where the bridge is by construction
+   absent.
+5. **Insert/update path via Iceberg's appender** — *deferred; UPDATE/MERGE fall back, delete-only
+   ships.* A correct MERGE/UPDATE v3 commit needs the insert half to go through Iceberg's own data
+   writer (`SparkFileWriterFactory`/`OutputFileFactory`) and be combined with the DV deletes into one
+   `RowDelta`; rather than ship a half-correct commit path, the strategy stays **delete-only**: any
+   `WriteDelta` carrying a row/insert projection (UPDATE, MERGE with inserts) declines with a printed
+   reason and Spark's own writer handles it, unchanged and correct. The delete half of those
+   statements is not accelerated yet either — only pure `DELETE` is. `DvWriteStrategyFallbackSuite`
+   asserts UPDATE and MERGE fall back and stay correct.
 
 Not in option B: a columnar Parquet **data** writer, and v2 position-delete files (option A).
 
@@ -131,3 +144,29 @@ Not in option B: a columnar Parquet **data** writer, and v2 position-delete file
 `spark.vector.iceberg.dvWriter.enabled` (session `SQLConf`, boolean, default `false`). Off while the
 writer is landed in slices; flips to `true` once every Iceberg merge-on-read suite is byte-identical
 with it on and off. See `docs/configuration.md`.
+
+## Running the tests
+
+CI's gate builds `-pl kernels,spark,shuffle,benchmarks` and does **not** build the optional
+`iceberg-bridge` module, so the operator's correctness suite is run manually. The gate itself does
+cover the strategy's decline/fallback paths through `DvWriteStrategyFallbackSuite` in the spark
+module (the bridge is absent there by construction).
+
+- Gate-visible fallback suite (runs in CI, needs `-Piceberg`):
+
+  ```
+  mvn -B -Pcomet,iceberg -pl spark test -Dsuites='io.sparkvector.spark.iceberg.DvWriteStrategyFallbackSuite'
+  ```
+
+- Operator correctness suite (manual — bridge module, not in the gate):
+
+  ```
+  mvn -B -Pcomet,iceberg -pl kernels,spark install -DskipTests
+  mvn -B -Piceberg -pl iceberg-bridge test
+  ```
+
+  `VectorDvWriteSuite` asserts, on a v3 merge-on-read table: results identical with the writer on and
+  off, `VectorWriteDeltaExec` in the plan when on, v2 falls back, DVs readable via Spark metadata
+  tables and the Iceberg Java API, snapshot summary counts match, several files/partitions, repeated
+  DELETEs merge the prior DV, nulls, an empty delete set, and a failing task aborts with nothing
+  committed.
