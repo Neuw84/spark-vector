@@ -47,10 +47,10 @@ loses it is the scan-bound queries (q88 142 against Spark's 126) and a handful o
 except q65, whose result has ties that every engine orders differently.
 
 The same comparison as a page with per-query charts: [Apache Spark vs vecruntime vs DataFusion Comet on
-TPC-DS 1 TB](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb.html) (rendered from the result
+TPC-DS 1 TB](https://vecruntime.github.io/vecruntime/benchmarks/tpcds-1tb.html) (rendered from the result
 files by `benchmarks/scripts/render-benchmark-page.py`; the source is `docs/benchmarks/tpcds-1tb.html`).
 On AWS Graviton4 (arm64), with AQE at its defaults for both engines, the TPC-DS 1 TB comparison against Spark is 1.23x (x86 at the earlier 128m settings: 1.29x):
-[Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb-graviton.html).
+[Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4](https://vecruntime.github.io/vecruntime/benchmarks/tpcds-1tb-graviton.html).
 
 Requirements and the things it does not do yet are listed under
 [Requirements and known limitations](#requirements-and-known-limitations); every configuration key
@@ -81,7 +81,7 @@ else). Spark and Arrow are `provided`.
 
 ## Getting the jars
 
-Every release is on the [releases page](https://github.com/spark-vector/spark-vector/releases): the plugin
+Every release is on the [releases page](https://github.com/vecruntime/vecruntime/releases): the plugin
 jar (`spark-vector-spark_2.13-<version>.jar`), the columnar shuffle jar
 (`spark-vector-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
 POMs, are published to a Maven repository served from this repository's `maven-repo` branch -- no
@@ -91,7 +91,7 @@ account or token needed:
 <repositories>
   <repository>
     <id>vecruntime</id>
-    <url>https://raw.githubusercontent.com/spark-vector/spark-vector/maven-repo/</url>
+    <url>https://raw.githubusercontent.com/vecruntime/vecruntime/maven-repo/</url>
   </repository>
 </repositories>
 
@@ -111,7 +111,7 @@ account or token needed:
 ```
 
 The same coordinates work with `--packages` on `spark-submit` together with
-`--repositories https://raw.githubusercontent.com/spark-vector/spark-vector/maven-repo/`. A release is cut
+`--repositories https://raw.githubusercontent.com/vecruntime/vecruntime/maven-repo/`. A release is cut
 by pushing a `v<version>` tag: the release workflow builds the jars on JDK 25, attaches them to the
 GitHub release with their checksums, and publishes them to the `maven-repo` branch
 (`.github/workflows/release.yml`). `CHANGELOG.md` has what each release carries.

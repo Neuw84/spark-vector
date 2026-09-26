@@ -9,7 +9,7 @@ description: A vectorized execution runtime for Apache Spark using Java
 A Spark SQL plugin that runs Filter, Project, HashAggregate, Sort, Window and the hash joins on
 Arrow-layout batches with the Java Vector API -- on the JVM, no native code -- with its own columnar
 shuffle over Arrow Flight. Source, releases and the README:
-[github.com/spark-vector/spark-vector](https://github.com/spark-vector/spark-vector).
+[github.com/vecruntime/vecruntime](https://github.com/vecruntime/vecruntime).
 
 vecruntime accelerates Spark SQL workloads by executing core operators directly on Arrow-layout
 columnar batches using the Java Vector API (`jdk.incubator.vector`), bringing SIMD-optimized
@@ -46,9 +46,9 @@ spark-submit \
 `spark.plugins` registers the session extension automatically; alternatively set
 `spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions`. Every release, with the
 plugin jar, the columnar shuffle jar and a `SHA256SUMS` file, is on the
-[releases page](https://github.com/spark-vector/spark-vector/releases); the same artifacts are
+[releases page](https://github.com/vecruntime/vecruntime/releases); the same artifacts are
 published to a Maven repository served from the repository's `maven-repo` branch. See the
-[README](https://github.com/spark-vector/spark-vector#getting-the-jars) for Maven coordinates and
+[README](https://github.com/vecruntime/vecruntime#getting-the-jars) for Maven coordinates and
 `--packages` usage, and the [Configuration reference](configuration.html) for every `spark.vector.*`
 key.
 
