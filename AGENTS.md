@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Working notes for agents and contributors changing spark-vector. This file records the design
+Working notes for agents and contributors changing vecruntime. This file records the design
 decisions the code embodies, why they were taken, and how a change must be validated before it is
 considered done. `README.md` is the user-facing description, `docs/results.md` the measurements,
 `docs/comet.md` the Comet integration; this file is the contract behind them.
@@ -70,7 +70,7 @@ that pin it.
 - Operators are replaced by `VectorExecRule` (registered through `injectColumnar`, in
   `preColumnarTransitions`), bottom-up. An operator is converted only if its child already
   produces columnar batches of supported types (vectorized Parquet scan, Comet scan, or another
-  spark-vector operator) and every expression compiles.
+  vecruntime operator) and every expression compiles.
 - Everything that is not converted gets a reason attached as a `VectorFallback.Tag` on the
   original operator. There is no silent fallback: tests assert on the reason text
   (`checkFallback(..., reasonContains = ...)`), the UI shows it, and
@@ -246,7 +246,7 @@ that pin it.
 
 ### 3.4 Selection vectors between our operators
 
-- A filter feeding another spark-vector operator forwards a `SelectedColumnarBatch` (the input
+- A filter feeding another vecruntime operator forwards a `SelectedColumnarBatch` (the input
   batch plus a selection bitmap) instead of compacting, when at least
   `sparkvector.selection.minFraction` (0.5) of the rows survive; below that it compacts, because
   downstream operators then walk far fewer rows (Q6 at 2% selectivity forwarded made the project
@@ -748,7 +748,7 @@ into these rather than adding special cases to operators.
 ### 3.10 The columnar shuffle (#288)
 
 Our exchange, `VectorShuffleExchangeExec` (a `ShuffleExchangeLike`, so AQE's coalescing, skew
-splitting and local reads apply unchanged), replaces `ShuffleExchangeExec` above a spark-vector
+splitting and local reads apply unchanged), replaces `ShuffleExchangeExec` above a vecruntime
 operator when `spark.vector.shuffle.enabled` is on, the `spark-vector-shuffle` jar is present and
 `spark.shuffle.manager` is `VectorShuffleManager`; Comet's native shuffle takes precedence where it
 is configured. Four pieces, in the `shuffle` module except the kernel:
@@ -841,7 +841,7 @@ A change is not done until all of the following that apply have run green, local
 2. Spark SQL comparison. Operator and expression behaviour is validated by running the same SQL
    twice on the same session with `spark.vector.enabled` toggled and comparing rows
    (`VectorQuerySuite.checkVectorized`, tolerance `1e-9` for doubles), while asserting the expected
-   spark-vector operators are in the final (post-AQE) plan. Unsupported cases are validated the same
+   vecruntime operators are in the final (post-AQE) plan. Unsupported cases are validated the same
    way with `checkFallback`, which asserts the Spark operator stayed and the recorded reason
    contains the expected text. Suites: `VectorFilterSuite`, `VectorProjectSuite`,
    `VectorAggregateSuite`, `VectorSortSuite`, `VectorDecimalSuite` (exact comparison, no double

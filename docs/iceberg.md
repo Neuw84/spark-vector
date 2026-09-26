@@ -5,7 +5,7 @@ title: Apache Iceberg
 
 # Apache Iceberg merge-on-read tables
 
-spark-vector operators run over Iceberg tables through either of the two columnar readers Spark
+vecruntime operators run over Iceberg tables through either of the two columnar readers Spark
 can plan for them. Neither needs planner changes: the rule accepts any columnar leaf with supported
 types, and the Iceberg-specific work is in the input adapter seam.
 

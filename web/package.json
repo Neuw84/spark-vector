@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Static documentation site for spark-vector. Plain-file output; no Jekyll.",
+  "description": "A vectorized execution runtime for Apache Spark using Java",
   "license": "Apache-2.0",
   "scripts": {
     "build": "node scripts/build.mjs",

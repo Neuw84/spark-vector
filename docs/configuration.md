@@ -27,7 +27,7 @@ the `shuffle` module (the columnar shuffle keys).
 
 ## Operator switches
 
-Each converts one Spark operator into its spark-vector counterpart when the conditions in
+Each converts one Spark operator into its vecruntime counterpart when the conditions in
 `docs/operators.md` hold; set one to `false` to keep Spark's operator for that kind while the rest
 of the plan stays columnar.
 

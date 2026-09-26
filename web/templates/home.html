@@ -1,9 +1,7 @@
 <div class="hero">
   <div class="hero-copy">
-    <h1>spark-vector</h1>
-    <p class="tagline">A JVM-native vectorized execution engine for Apache Spark SQL. Core operators
-      run on Arrow-layout columnar batches with the Java Vector API &mdash; on the JVM, no native
-      code, no JNI &mdash; with its own columnar shuffle over Arrow Flight.</p>
+    <h1>vecruntime</h1>
+    <p class="tagline">A vectorized execution runtime for Apache Spark using Java</p>
     <div class="cta">
       <a class="btn primary" href="__BASE__/index.html#getting-started">Get started</a>
       <a class="btn ghost" href="__BASE__/results.html">See the benchmarks</a>
@@ -16,10 +14,10 @@
       the classpath), as in the launch below.</p>
   </div>
 
-  <div class="terminal" role="img" aria-label="Terminal launching Apache Spark with the spark-vector plugin and its columnar Arrow Flight shuffle enabled">
+  <div class="terminal" role="img" aria-label="Terminal launching Apache Spark with the vecruntime plugin and its columnar Arrow Flight shuffle enabled">
     <div class="terminal-bar">
       <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-      <span class="ttl">spark-submit &mdash; spark-vector</span>
+      <span class="ttl">spark-submit &mdash; vecruntime</span>
     </div>
     <div class="terminal-body" id="terminal-body" aria-live="polite" data-lines='[
       {"typed":true,"text":"$ spark-submit \\","html":"<span class=\"prompt\">$</span> spark-submit \\","pause":220},
@@ -37,7 +35,7 @@
       {"typed":false,"html":"<span class=\"dim\">Filter · Project · HashAggregate · Sort · Window · hash joins accelerated;</span>","pause":120},
       {"typed":false,"html":"<span class=\"dim\">unsupported operators fall back to Spark, each with a recorded reason.</span>","pause":260},
       {"typed":false,"html":"<span class=\"prompt\">$</span> <span class=\"comment\"># same results as Spark, faster.</span>","pause":0}
-    ]'>Launching Apache Spark with the spark-vector plugin and its Arrow Flight columnar shuffle.</div>
+    ]'>Launching Apache Spark with the vecruntime plugin and its Arrow Flight columnar shuffle.</div>
   </div>
 </div>
 

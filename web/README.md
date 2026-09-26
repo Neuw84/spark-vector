@@ -1,6 +1,6 @@
-# spark-vector website (`web/`)
+# vecruntime website (`web/`)
 
-A static documentation site for spark-vector, modelled on the
+A static documentation site for vecruntime, modelled on the
 [Apache DataFusion Comet](https://datafusion.apache.org/comet/) site: a hero with an animated
 terminal, a top nav with a GitHub link, a docs sidebar, an on-page table of contents, and light/dark
 themes. **No Jekyll.** The build output is plain HTML/CSS/JS files.

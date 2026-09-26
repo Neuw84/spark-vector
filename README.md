@@ -1,14 +1,16 @@
-# spark-vector
+# vecruntime
 
-**A JVM-native vectorized execution engine for Apache Spark SQL.**
+**A vectorized execution runtime for Apache Spark using Java**
 
-spark-vector accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
+> vecruntime was previously named spark-vector; configuration keys (`spark.vector.*`), packages and artifacts keep their names.
 
-Inspired by the execution architecture of Apache DataFusion Comet, spark-vector provides a native-style execution path for **Filter, Project, HashAggregate, Sort, and hash joins**, while preserving Spark as the execution fallback for unsupported operators, expressions, and data types.
+vecruntime accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
+
+Inspired by the execution architecture of Apache DataFusion Comet, vecruntime provides a native-style execution path for **Filter, Project, HashAggregate, Sort, and hash joins**, while preserving Spark as the execution fallback for unsupported operators, expressions, and data types.
 
 The result is a **fully JVM-based execution engine** that combines the performance potential of vectorized execution with the portability and simplicity of the Java ecosystem.
 
-spark-vector can also integrate with native accelerators such as **Apache DataFusion Comet**: Comet can provide native Parquet decoding and shuffle, while spark-vector performs the intermediate SQL execution directly over the same columnar representation, enabling a **zero-copy execution pipeline** across the stack.
+vecruntime can also integrate with native accelerators such as **Apache DataFusion Comet**: Comet can provide native Parquet decoding and shuffle, while vecruntime performs the intermediate SQL execution directly over the same columnar representation, enabling a **zero-copy execution pipeline** across the stack.
 
 ### Key characteristics
 
@@ -20,7 +22,7 @@ spark-vector can also integrate with native accelerators such as **Apache DataFu
 * **Zero-copy integration:** designed to interoperate with columnar native components such as Comet without serialization between execution stages.
 * **Incremental adoption:** operators can be accelerated individually while the rest of the Spark plan continues to execute normally.
 
-In essence, **spark-vector brings a DataFusion-Comet/Velox-style vectorized execution model to the JVM, using the Java Vector API instead of native code.**
+In essence, **vecruntime brings a DataFusion-Comet/Velox-style vectorized execution model to the JVM, using the Java Vector API instead of native code.**
 
 ## Status
 
@@ -36,7 +38,7 @@ window per engine, all queries once, the median of the measured iteration
 | Spark 4.1.3 | 3309 s | -- | 20 GB heap / 30 GB overhead; the reference |
 | Apache DataFusion Comet 1.0 | 2514 s | 90 | native scan, operators and shuffle |
 | Comet's scan + our operators and shuffle | 2706 s | 67 | `spark.comet.scan.impl=native_datafusion` |
-| **spark-vector** (Spark's scan, our operators, our Flight shuffle) | **2557 s** | **82** | 30 GB heap / 20 GB overhead; 23% under Spark, 2% over Comet |
+| **vecruntime** (Spark's scan, our operators, our Flight shuffle) | **2557 s** | **82** | 30 GB heap / 20 GB overhead; 23% under Spark, 2% over Comet |
 
 Where the plugin wins it is the joins and aggregates (q23a 118 s against Spark's 211 and Comet's
 132; q23b 125 against 291 and 153; q93 66 against 137 and 85; q64 51 against 93 and 56). Where it
@@ -44,11 +46,11 @@ loses it is the scan-bound queries (q88 142 against Spark's 126) and a handful o
 (q99, q36, q12, q57), each with its cause named in `docs/results.md`. Every checksum equals Spark's
 except q65, whose result has ties that every engine orders differently.
 
-The same comparison as a page with per-query charts: [Apache Spark vs spark-vector vs DataFusion Comet on
+The same comparison as a page with per-query charts: [Apache Spark vs vecruntime vs DataFusion Comet on
 TPC-DS 1 TB](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb.html) (rendered from the result
 files by `benchmarks/scripts/render-benchmark-page.py`; the source is `docs/benchmarks/tpcds-1tb.html`).
 On AWS Graviton4 (arm64), with AQE at its defaults for both engines, the TPC-DS 1 TB comparison against Spark is 1.23x (x86 at the earlier 128m settings: 1.29x):
-[Apache Spark vs spark-vector on TPC-DS 1 TB, AWS Graviton4](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb-graviton.html).
+[Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb-graviton.html).
 
 Requirements and the things it does not do yet are listed under
 [Requirements and known limitations](#requirements-and-known-limitations); every configuration key
@@ -88,7 +90,7 @@ account or token needed:
 ```xml
 <repositories>
   <repository>
-    <id>spark-vector</id>
+    <id>vecruntime</id>
     <url>https://raw.githubusercontent.com/spark-vector/spark-vector/maven-repo/</url>
   </repository>
 </repositories>
@@ -358,7 +360,7 @@ ShuffleExchange   -> CometShuffleExchange        Arrow C Data export -> CometVec
 
 `VectorColumnarRule` runs in Spark's `preColumnarTransitions`, bottom-up. An operator is converted
 when its child is already columnar with supported types (a vectorized Parquet scan, a Comet scan, or
-another spark-vector operator) and every expression compiles to the kernel IR. Otherwise the reason
+another vecruntime operator) and every expression compiles to the kernel IR. Otherwise the reason
 is stored as a tree-node tag; `VectorFallback.reasons(plan)` lists them.
 
 ### The Vector Acceleration tab
@@ -858,7 +860,7 @@ whose golden output is Spark's own physical plan, the DataSketches files (`hll`,
 `thetasketch`), whose library refuses to start on any JDK newer than 21, and `udtf/udtf.sql`, which
 needs `pyspark` installed (the Python UDF variants skip themselves without it and count as ignored).
 Everything else passes: 642 test cases, 111 ignored, with 2972 of the 33856 query executions running
-at least one spark-vector operator. Passing is the low bar -- a file passes just as well when every
+at least one vecruntime operator. Passing is the low bar -- a file passes just as well when every
 operator falls back -- so the run also prints a per-test-case table (executions, executions that ran
 one of our operators, operators) split into the 147 cases that run our operators and the 437 that never
 can (analyzer-only cases, DDL, files with no supported operator), and a full run compares every case

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to spark-vector. The format follows [Keep a Changelog](https://keepachangelog.com/);
+All notable changes to vecruntime. The format follows [Keep a Changelog](https://keepachangelog.com/);
 the project uses [semantic versioning](https://semver.org/) once it reaches 1.0 -- until then a minor
 version may change configuration keys or defaults, always noted here.
 
