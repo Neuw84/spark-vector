@@ -54,6 +54,7 @@ import org.apache.spark.sql.execution.metric.{
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vector.shuffle.{
+  RebalanceAdvisory,
   RecordsByPartitionAccumulator,
   RowProportionalSizes,
   VectorPartitioning,
@@ -78,7 +79,8 @@ case class VectorShuffleExchangeExec(
     override val outputPartitioning: Partitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin,
-    advisoryPartitionSize: Option[Long] = None,
+    /** The advisory size the plan asked for (Spark's exchange's); AQE reads [[advisoryPartitionSize]]. */
+    requestedAdvisoryPartitionSize: Option[Long] = None,
     /**
      * Trailing columns of the child that exist only to hold computed hash keys (the columnar rule
      * materialises `rn + 1` and the like in a projection under the exchange): they partition the rows
@@ -127,6 +129,33 @@ case class VectorShuffleExchangeExec(
       case Some(acc) => VectorShuffleExchangeExec.submitRowSizedMapStage(sparkContext, shuffleDependency, acc)
       case None => sparkContext.submitMapStage(shuffleDependency)
     }
+
+  @transient private var scaledAdvisory: Option[Long] = None
+
+  /**
+   * The size AQE packs and splits this exchange's partitions to (#20). A rebalance's size that the
+   * user did not set -- a data source's default, sized for Spark's shuffle -- is put on our scale
+   * ([[RebalanceAdvisory.scale]]) once the map stage has written, which is when AQE's rules read it;
+   * before that, and for every other exchange, it is the requested size.
+   */
+  override def advisoryPartitionSize: Option[Long] = requestedAdvisoryPartitionSize.map { size =>
+    if (scaledAdvisory.isDefined) scaledAdvisory.get
+    else if (!VectorShuffleExchangeExec.advisoryScaled(shuffleOrigin, size, conf)) size
+    else {
+      val rows = metrics(SQLShuffleWriteMetricsReporter.SHUFFLE_RECORDS_WRITTEN).value
+      val bytes = metrics("dataSize").value
+      if (rows <= 0) size
+      else {
+        val scaled = RebalanceAdvisory.scale(size, output.map(_.dataType), rows, bytes)
+        logInfo(
+          s"Rebalance exchange: advisory partition size $size -> $scaled for our shuffle " +
+            f"(${bytes.toDouble / rows}%.1f bytes per row uncompressed over $rows rows)"
+        )
+        scaledAdvisory = Some(scaled)
+        scaled
+      }
+    }
+  }
 
   override def numMappers: Int = shuffleDependency.rdd.getNumPartitions
   override def numPartitions: Int = shuffleDependency.partitioner.numPartitions
@@ -178,6 +207,27 @@ object VectorShuffleExchangeExec {
   def rowSized(origin: ShuffleOrigin, conf: SQLConf): Boolean = origin match {
     case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE =>
       conf.getConfString(RebalanceRowSizingKey, "true").toBoolean
+    case _ => false
+  }
+
+  /** `false` keeps a rebalance's requested advisory size as is, on our shuffle's bytes (#20). */
+  val RebalanceAdvisoryScalingKey = "spark.vector.shuffle.rebalance.advisoryScaling"
+
+  /** Iceberg's session setting for the write's advisory size: a value the user chose. */
+  val IcebergAdvisorySizeKey = "spark.sql.iceberg.advisory-partition-size"
+
+  /**
+   * Whether a rebalance's requested `size` is scaled to our shuffle (#20): the switch is on and the
+   * size is not the user's own Iceberg session setting, which is taken as the size wanted in our
+   * bytes. (A size set as an Iceberg write option or table property cannot be told apart from
+   * Iceberg's default here and is scaled; turn the switch off to keep it exact.)
+   */
+  def advisoryScaled(origin: ShuffleOrigin, size: Long, conf: SQLConf): Boolean = origin match {
+    case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE =>
+      conf.getConfString(RebalanceAdvisoryScalingKey, "true").toBoolean &&
+      !Option(conf.getConfString(IcebergAdvisorySizeKey, null)).exists(v =>
+        scala.util.Try(org.apache.spark.network.util.JavaUtils.byteStringAsBytes(v.trim)).toOption.contains(size)
+      )
     case _ => false
   }
 
