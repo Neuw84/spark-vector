@@ -106,6 +106,7 @@ case class VectorShuffleExchangeExec(
   private[sql] lazy val readMetrics = SQLShuffleReadMetricsReporter.createShuffleReadMetrics(sparkContext)
   override lazy val metrics: Map[String, SQLMetric] = Map(
     "dataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size"),
+    "stringBytes" -> SQLMetrics.createSizeMetric(sparkContext, "string bytes as UnsafeRow (rebalance sizing)"),
     "numPartitions" -> SQLMetrics.createMetric(sparkContext, "partitions")
   ) ++ readMetrics ++ writeMetrics
 
@@ -144,12 +145,14 @@ case class VectorShuffleExchangeExec(
     else {
       val rows = metrics(SQLShuffleWriteMetricsReporter.SHUFFLE_RECORDS_WRITTEN).value
       val bytes = metrics("dataSize").value
+      val strings = shuffleDependency.stringBytes.map(_.value)
       if (rows <= 0) size
       else {
-        val scaled = RebalanceAdvisory.scale(size, output.map(_.dataType), rows, bytes)
+        val scaled = RebalanceAdvisory.scale(size, output.map(_.dataType), rows, bytes, strings)
         logInfo(
           s"Rebalance exchange: advisory partition size $size -> $scaled for our shuffle " +
-            f"(${bytes.toDouble / rows}%.1f bytes per row uncompressed over $rows rows)"
+            f"(${bytes.toDouble / rows}%.1f bytes per row uncompressed over $rows rows" +
+            strings.fold("")(s => f", ${s.toDouble / rows}%.1f string bytes per row as UnsafeRow") + ")"
         )
         scaledAdvisory = Some(scaled)
         scaled
@@ -178,7 +181,8 @@ case class VectorShuffleExchangeExec(
       VectorShuffleExchangeExec.keysAsColumns(outputPartitioning, child),
       writeMetrics,
       metrics("dataSize"),
-      recordsByPartition
+      recordsByPartition,
+      if (VectorShuffleExchangeExec.stringsMeasured(shuffleOrigin, conf)) Some(metrics("stringBytes")) else None
     )
     metrics("numPartitions").set(dep.partitioner.numPartitions)
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
@@ -215,6 +219,13 @@ object VectorShuffleExchangeExec {
 
   /** Iceberg's session setting for the write's advisory size: a value the user chose. */
   val IcebergAdvisorySizeKey = "spark.sql.iceberg.advisory-partition-size"
+
+  /** Whether a rebalance exchange measures its string bytes for [[RebalanceAdvisory]] (#20). */
+  def stringsMeasured(origin: ShuffleOrigin, conf: SQLConf): Boolean = origin match {
+    case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE =>
+      conf.getConfString(RebalanceAdvisoryScalingKey, "true").toBoolean
+    case _ => false
+  }
 
   /**
    * Whether a rebalance's requested `size` is scaled to our shuffle (#20): the switch is on and the
@@ -304,7 +315,8 @@ object VectorShuffleExchangeExec {
       partitioning: Partitioning,
       writeMetrics: Map[String, SQLMetric],
       dataSize: SQLMetric,
-      recordsByPartition: Option[RecordsByPartitionAccumulator] = None
+      recordsByPartition: Option[RecordsByPartitionAccumulator] = None,
+      stringBytes: Option[SQLMetric] = None
   ): VectorShuffleDependency = {
     // `output` is the child's (keys are resolved against it); `written` is what the shuffle carries --
     // the same, less the trailing materialised key columns.
@@ -364,7 +376,8 @@ object VectorShuffleExchangeExec {
       ShuffleExchangeExec.createShuffleWriteProcessor(writeMetrics),
       dataSize,
       layout,
-      recordsByPartition
+      recordsByPartition,
+      stringBytes
     )
   }
 }
