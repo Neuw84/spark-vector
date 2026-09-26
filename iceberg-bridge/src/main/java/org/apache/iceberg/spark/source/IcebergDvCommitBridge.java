@@ -68,19 +68,62 @@ public final class IcebergDvCommitBridge {
     }
 
     /**
-     * Resolves the partition tuple of a delete run as an Iceberg {@link org.apache.iceberg.StructLike}
-     * from the row-level operation's {@code specId} and the partition as the Spark
-     * {@code InternalRow} Iceberg's {@code WriteDeltaProjections} produced. Returns {@code null} for an
-     * unpartitioned spec. Uses the package-private {@code InternalRowWrapper}, which is why it lives in
-     * this same-package bridge.
+     * Whether the table's current partition spec is unpartitioned. The columnar DELETE operator only
+     * supports unpartitioned tables in this landing: for a partitioned spec the per-file partition
+     * tuple must be threaded through to Iceberg's commit, which is a later slice, so the strategy
+     * declines to Spark's own writer for partitioned tables.
      */
-    public static org.apache.iceberg.StructLike wrapPartition(
-            org.apache.iceberg.PartitionSpec spec, org.apache.spark.sql.catalyst.InternalRow partitionRow) {
+    public static boolean isUnpartitioned(org.apache.iceberg.Table table) {
+        if (table == null) {
+            return false;
+        }
+        try {
+            return !table.spec().isPartitioned();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether the table's current snapshot already carries delete files (positional, equality, or
+     * deletion vectors). This landing writes an append-only DV per touched data file and does NOT
+     * merge a previously-committed DV for that file (Iceberg rejects two DVs indexing the same data
+     * file), so the strategy declines when the table already has deletes and lets Spark's own writer
+     * handle the merge; repeated-delete DV merging is a later slice.
+     */
+    public static boolean hasCommittedDeletes(org.apache.iceberg.Table table) {
+        if (table == null) {
+            return true; // fail safe: if we cannot tell, decline
+        }
+        try {
+            org.apache.iceberg.Snapshot snap = table.currentSnapshot();
+            if (snap == null) {
+                return false;
+            }
+            String total = snap.summary() == null ? null : snap.summary().get("total-delete-files");
+            if (total != null) {
+                return Long.parseLong(total) > 0L;
+            }
+            // No summary hint: be conservative and decline.
+            return true;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Resolves the partition tuple of a delete run as an Iceberg {@link
+     * org.apache.iceberg.StructLike} from the row-level operation's {@code
+     * specId} and the partition as the Spark {@code InternalRow} Iceberg's
+     * {@code WriteDeltaProjections} produced. Returns {@code null} for an
+     * unpartitioned spec. Uses the package-private {@code InternalRowWrapper},
+     * which is why it lives in this same-package bridge.
+     */
+    public static org.apache.iceberg.StructLike wrapPartition(org.apache.iceberg.PartitionSpec spec, org.apache.spark.sql.catalyst.InternalRow partitionRow) {
         if (spec == null || !spec.isPartitioned() || partitionRow == null) {
             return null;
         }
-        org.apache.spark.sql.types.StructType sparkType =
-                (org.apache.spark.sql.types.StructType) org.apache.iceberg.spark.SparkSchemaUtil.convert(spec.partitionType());
+        org.apache.spark.sql.types.StructType sparkType = (org.apache.spark.sql.types.StructType) org.apache.iceberg.spark.SparkSchemaUtil.convert(spec.partitionType());
         return new InternalRowWrapper(sparkType, spec.partitionType()).wrap(partitionRow);
     }
 

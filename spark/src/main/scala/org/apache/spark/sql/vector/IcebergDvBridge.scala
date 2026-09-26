@@ -48,6 +48,22 @@ object IcebergDvBridge {
     m.exists(_.invoke(null, table).asInstanceOf[Boolean])
   }
 
+  /** Whether the table's current spec is unpartitioned (the operator's supported case this landing). */
+  def isUnpartitioned(table: AnyRef): Boolean = commitBridgeClass.exists { c =>
+    val m = c.getMethods.find(x => x.getName == "isUnpartitioned" && x.getParameterCount == 1)
+    m.exists(_.invoke(null, table).asInstanceOf[Boolean])
+  }
+
+  /**
+   * Whether the table already carries committed delete files. When it does, the columnar operator
+   * declines (a repeated delete would index a second DV for a data file that already has one, which
+   * Iceberg rejects); merging previous DVs is a later slice. Fails safe to `true` (decline).
+   */
+  def hasCommittedDeletes(table: AnyRef): Boolean = commitBridgeClass.forall { c =>
+    val m = c.getMethods.find(x => x.getName == "hasCommittedDeletes" && x.getParameterCount == 1)
+    m.forall(_.invoke(null, table).asInstanceOf[Boolean])
+  }
+
   /** Creates a per-task DV writer handle (reflective wrapper over the bridge's DvDeltaTaskWriter). */
   def createTaskWriter(table: AnyRef, partitionId: Int, taskId: Long): IcebergDvTaskWriterHandle = {
     val c = taskWriterClass.getOrElse(

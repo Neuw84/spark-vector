@@ -116,18 +116,25 @@ optional artifact.
    private `Context.useDVs()`) decides v3 vs decline, tested (v3 eligible, v2/null decline). The live
    `SparkStrategy` (`injectPlannerStrategy`) matches the logical `WriteDelta` and, when eligible and
    `spark.vector.iceberg.dvWriter.enabled` and the write is **delete-only** (no row/insert
-   projection), plans a `VectorWriteDeltaExec` command; it runs an RDD job over the child's columnar
+   projection), on an **unpartitioned** table that **does not already carry deletes**, plans a
+   `VectorWriteDeltaExec` command; it runs an RDD job over the child's columnar
    batches, builds DVs per `_file` run via the bridge, assembles `DeltaTaskCommit` per task, and
    commits through `deltaWrite.toBatch().commit(...)` (Iceberg's own `RowDelta`). Executor-side
    `OutputFileFactory` is built from `OutputFileFactory.builderFor(table, partId, taskId)` (public) and
-   the previous-DV loader from Iceberg's public `DeleteLoader`. Flag off, bridge absent, v2, or a write
-   with an insert half → `Nil`, so Spark's `DataSourceV2Strategy` plans the ordinary writer.
-   Correctness is covered by `VectorDvWriteSuite` (bridge module): on/off identical, operator planned,
-   v2 falls back, DVs readable via Spark metadata tables and the Iceberg API, snapshot summary counts
-   match, several files/partitions, repeated DELETEs merge the prior DV, nulls, empty delete set, and a
-   failing task aborts with no snapshot committed. The decline/fallback paths are covered inside the
-   CI gate by `DvWriteStrategyFallbackSuite` (spark module), where the bridge is by construction
-   absent.
+   the previous-DV loader from Iceberg's public `DeleteLoader`. Flag off, bridge absent, v2, a write
+   with an insert half, a **partitioned** table, or a table that **already has committed deletes**
+   → `Nil`, so Spark's `DataSourceV2Strategy` plans the ordinary writer. Two cases are deliberately
+   left to Spark for now because a half-correct commit is worse than a fallback: **partitioned tables**
+   (the per-file partition tuple must be threaded into the commit — a later slice) and **repeated
+   deletes on a file that already has a DV** (Iceberg rejects two DVs for one data file; merging the
+   prior DV via `rewritableDeletes` is a later slice).
+   Correctness is covered by `VectorDvWriteSuite` (bridge module): on/off identical, operator planned
+   on the supported path, v2 falls back, DVs readable via Spark metadata tables and the Iceberg API,
+   snapshot summary counts match, nulls, empty delete set, a failing task aborts with no snapshot
+   committed, a partitioned DELETE falls back with a correct result, and a repeated DELETE accelerates
+   the first and falls back thereafter with a correct result. The decline/fallback paths are also
+   covered inside the CI gate by `DvWriteStrategyFallbackSuite` (spark module), where the bridge is by
+   construction absent.
 5. **Insert/update path via Iceberg's appender** — *deferred; UPDATE/MERGE fall back, delete-only
    ships.* A correct MERGE/UPDATE v3 commit needs the insert half to go through Iceberg's own data
    writer (`SparkFileWriterFactory`/`OutputFileFactory`) and be combined with the DV deletes into one
@@ -166,7 +173,7 @@ module (the bridge is absent there by construction).
   ```
 
   `VectorDvWriteSuite` asserts, on a v3 merge-on-read table: results identical with the writer on and
-  off, `VectorWriteDeltaExec` in the plan when on, v2 falls back, DVs readable via Spark metadata
-  tables and the Iceberg Java API, snapshot summary counts match, several files/partitions, repeated
-  DELETEs merge the prior DV, nulls, an empty delete set, and a failing task aborts with nothing
-  committed.
+  off, `VectorWriteDeltaExec` in the plan on the supported path, v2 falls back, DVs readable via Spark
+  metadata tables and the Iceberg Java API, snapshot summary counts match, nulls, an empty delete set,
+  a failing task aborts with nothing committed, a partitioned DELETE falls back with a correct result,
+  and a repeated DELETE accelerates the first and falls back thereafter with a correct result.

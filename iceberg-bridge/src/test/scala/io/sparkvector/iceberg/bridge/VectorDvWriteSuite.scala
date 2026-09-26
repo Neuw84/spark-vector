@@ -154,17 +154,28 @@ class VectorDvWriteSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(count("SELECT count(*) FROM ice.db.dv_v2 WHERE id % 3 = 0") == 0L)
   }
 
-  test("repeated DELETEs on v3 merge previous DVs correctly") {
+  test("repeated DELETEs on v3: first accelerates, later ones fall back, result correct") {
     createV3("ice.db.dv_rep_on")
     createV3("ice.db.dv_rep_off")
+    val hadPlanned = scala.collection.mutable.ArrayBuffer[Boolean]()
     for (m <- Seq(3, 4, 5)) {
       withFlag(on = false)(spark.sql(s"DELETE FROM ice.db.dv_rep_off WHERE id % $m = 0").collect())
-      withFlag(on = true)(spark.sql(s"DELETE FROM ice.db.dv_rep_on WHERE id % $m = 0").collect())
+      val had = withFlag(on = true) {
+        val df = spark.sql(s"DELETE FROM ice.db.dv_rep_on WHERE id % $m = 0")
+        val h = planHasVectorWriteDelta(df)
+        df.collect()
+        h
+      }
+      hadPlanned += had
     }
-    assert(rows("ice.db.dv_rep_on").sameElements(rows("ice.db.dv_rep_off")), "repeated-merge contents differ")
+    // First DELETE has no prior deletes -> operator runs; the table then carries a DV, so the next
+    // DELETEs decline (repeated-DV merge is a later slice) and Spark's writer keeps them correct.
+    assert(hadPlanned.head, "the first DELETE on a clean v3 table must use the columnar operator")
+    assert(hadPlanned.tail.forall(!_), "DELETEs after the table has deletes must fall back")
+    assert(rows("ice.db.dv_rep_on").sameElements(rows("ice.db.dv_rep_off")), "repeated-delete contents differ")
   }
 
-  test("partitioned v3 DELETE across several files/partitions: identical on/off, our operator ran") {
+  test("partitioned v3 DELETE falls back (partitioned not yet supported), result correct") {
     def createPart(name: String): Unit = {
       spark.sql(s"DROP TABLE IF EXISTS $name")
       spark.sql(
@@ -187,12 +198,10 @@ class VectorDvWriteSuite extends AnyFunSuite with BeforeAndAfterAll {
       df.collect()
       h
     }
-    assert(onHad, "operator must be planned for a partitioned v3 DELETE")
+    // A partitioned target is out of scope this landing: the strategy declines, Spark's writer runs.
+    assert(!onHad, "partitioned v3 DELETE must fall back to Spark's writer (operator absent)")
     assert(rows("ice.db.dv_part_on").sameElements(rows("ice.db.dv_part_off")), "partitioned contents differ")
-    val on = org.apache.iceberg.spark.Spark3Util.loadIcebergTable(spark, "ice.db.dv_part_on").currentSnapshot().summary()
-    val off = org.apache.iceberg.spark.Spark3Util.loadIcebergTable(spark, "ice.db.dv_part_off").currentSnapshot().summary()
-    assert(on.get("added-delete-files") == off.get("added-delete-files"), "added-delete-files differ across partitions")
-    assert(on.get("added-position-deletes") == off.get("added-position-deletes"), "added-position-deletes differ")
+    assert(count("SELECT count(*) FROM ice.db.dv_part_on WHERE id % 3 = 0") == 0L, "deleted rows still present")
   }
 
   test("a failing task aborts: nothing is committed, table unchanged") {
@@ -211,6 +220,9 @@ class VectorDvWriteSuite extends AnyFunSuite with BeforeAndAfterAll {
 
     val after = org.apache.iceberg.spark.Spark3Util.loadIcebergTable(spark, "ice.db.dv_abort")
     assert(after.currentSnapshot().snapshotId() == snapBefore, "a failed delete must not create a new snapshot")
-    assert(count("SELECT count(*) FROM ice.db.dv_abort") == liveBefore, "the table must be unchanged after an aborted delete")
+    assert(
+      count("SELECT count(*) FROM ice.db.dv_abort") == liveBefore,
+      "the table must be unchanged after an aborted delete"
+    )
   }
 }
