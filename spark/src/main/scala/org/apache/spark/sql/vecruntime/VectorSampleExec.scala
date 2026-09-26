@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.kernels.Bitmap
 import io.vecruntime.spark.adapter.TypeMapping
@@ -66,7 +66,7 @@ case class VectorSampleExec(
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
 }
 
-private[vector] class VectorSampleIterator(
+private[vecruntime] class VectorSampleIterator(
     input: Iterator[ColumnarBatch],
     sampler: BernoulliCellSampler[AnyRef],
     outputAttrs: Array[(String, DataType)],

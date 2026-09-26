@@ -16,7 +16,7 @@
 package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.VectorProjectExec
+import org.apache.spark.sql.vecruntime.VectorProjectExec
 
 /**
  * SQL correctness coverage ported from DataFusion Comet's expression suites

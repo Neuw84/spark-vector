@@ -45,7 +45,7 @@ import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{
 import org.apache.spark.sql.execution.{ColumnarToRowExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec, VectorMergeRowsExec, VectorMergeRowsPlanner}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFilterExec, VectorMergeRowsExec, VectorMergeRowsPlanner}
 
 /**
  * The columnar MergeRows (#21) against Spark's `MergeRowsExec`, both built by hand over the same
@@ -237,7 +237,7 @@ class VectorMergeRowsSuite extends VectorQuerySuite {
       nbs,
       checkCardinality = true,
       output,
-      org.apache.spark.sql.vector.VectorProjectExec(child.output.filterNot(_.name == MergeRows.ROW_ID), child)
+      org.apache.spark.sql.vecruntime.VectorProjectExec(child.output.filterNot(_.name == MergeRows.ROW_ID), child)
     )
     assert(VectorMergeRowsPlanner.reason(noRowId).exists(_.contains("without a __row_id column")))
     val unsupported = VectorMergeRowsExec(s, t, bad, nm, nbs, checkCardinality = false, output, child)

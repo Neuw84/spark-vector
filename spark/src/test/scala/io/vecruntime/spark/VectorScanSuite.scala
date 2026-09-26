@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.adapter.{ColumnVectorAdapters, SparkColumnVectorBuffers}
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.FileSourceScanExec
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 /**
  * What counts as a columnar input (#61): Spark's vectorized Parquet reader, on-heap (copied once per

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.shuffle.flight
+package org.apache.spark.sql.vecruntime.shuffle.flight
 
 import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, Executors}
@@ -53,12 +53,12 @@ import org.apache.spark.storage.ShuffleBlockId
  */
 object FlightShuffle extends Logging {
 
-  val BackendKey: String = org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.Key
+  val BackendKey: String = org.apache.spark.sql.vecruntime.shuffle.VectorShuffleBackend.Key
   val BindHostKey = "spark.vector.shuffle.flight.bindHost"
   val ThreadsKey = "spark.vector.shuffle.flight.threads"
 
   def backend(conf: SparkConf): String =
-    org.apache.spark.sql.vector.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
+    org.apache.spark.sql.vecruntime.shuffle.VectorShuffleBackend.backendName(conf).toLowerCase
 
   /**
    * The ticket of one reduce task's blocks on one executor (#347, #411): 4-byte shuffleId, 4-byte
@@ -318,7 +318,7 @@ final case class LookupFlight(executorId: String) extends FlightMessage
 
 /**
  * The location registry: the driver plugin holds it and answers lookups; each executor caches what
- * it has asked for. Hooked into `VectorPlugin` reflectively ([[org.apache.spark.sql.vector.VectorShuffle]]).
+ * it has asked for. Hooked into `VectorPlugin` reflectively ([[org.apache.spark.sql.vecruntime.VectorShuffle]]).
  */
 object FlightRegistry extends Logging {
   private val locations = new ConcurrentHashMap[String, FlightLocation]()
@@ -352,7 +352,7 @@ object FlightRegistry extends Logging {
     val conf = ctx.conf()
     pluginContext = ctx
     if (
-      org.apache.spark.sql.vector.shuffle.VectorShuffleManager.isConfigured(conf) && FlightShuffle.backend(
+      org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager.isConfigured(conf) && FlightShuffle.backend(
         conf
       ) == "flight"
     ) {

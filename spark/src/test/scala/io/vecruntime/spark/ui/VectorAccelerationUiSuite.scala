@@ -21,8 +21,8 @@ import scala.io.Source
 
 import io.vecruntime.spark.VectorPlugin
 import io.vecruntime.spark.test.{SparkVectorFunSuite, TestTables}
-import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
-import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec}
+import org.apache.spark.sql.vecruntime.ui.{Engine, PlanAcceleration}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFilterExec}
 import org.scalatest.concurrent.Eventually
 import org.scalatest.time.{Seconds, Span}
 

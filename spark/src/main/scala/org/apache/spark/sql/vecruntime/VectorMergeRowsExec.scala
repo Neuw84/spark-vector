@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.lang.foreign.MemorySegment
 import java.util.ArrayDeque
@@ -88,13 +88,21 @@ case class VectorMergeRowsExec(
 }
 
 /** One clause of a group: its compiled condition and what it emits (none for Discard, one for Keep, two for Split). */
-private[vector] final case class CompiledInstruction(condition: Option[VectorExpr], outputs: Seq[Array[CompiledOutput]])
+private[vecruntime] final case class CompiledInstruction(
+    condition: Option[VectorExpr],
+    outputs: Seq[Array[CompiledOutput]]
+)
 
 /** One output column of a projection: a compiled expression, or a foreign (lane-less) column passed through by ordinal. */
-private[vector] final case class CompiledOutput(name: String, dataType: DataType, expr: VectorExpr, foreignOrdinal: Int)
+private[vecruntime] final case class CompiledOutput(
+    name: String,
+    dataType: DataType,
+    expr: VectorExpr,
+    foreignOrdinal: Int
+)
 
 /** A boolean column that is `true` on every row of the batch: the presence predicate of a side every row has. */
-private[vector] object AllRowsExpr extends VectorExpr {
+private[vecruntime] object AllRowsExpr extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Nil
   override def eval(ctx: EvalContext): io.vecruntime.kernels.VectorBuffers = {
@@ -104,7 +112,7 @@ private[vector] object AllRowsExpr extends VectorExpr {
   }
 }
 
-private[vector] final case class MergeProgram(
+private[vecruntime] final case class MergeProgram(
     sourcePresent: VectorExpr,
     targetPresent: VectorExpr,
     matched: Seq[CompiledInstruction],
@@ -119,7 +127,7 @@ object VectorMergeRowsPlanner {
   /** Why the merge would not compile over its child's output, input aside. */
   def reason(m: MergeRowsExec): Option[String] = compile(m).left.toOption
 
-  private[vector] def compile(m: MergeRowsExec): Either[String, MergeProgram] =
+  private[vecruntime] def compile(m: MergeRowsExec): Either[String, MergeProgram] =
     compile(
       m.isSourceRowPresent,
       m.isTargetRowPresent,
@@ -134,7 +142,7 @@ object VectorMergeRowsPlanner {
   /** Why a hand-built operator would not compile (tests). */
   def reason(v: VectorMergeRowsExec): Option[String] = compile(v).left.toOption
 
-  private[vector] def compile(v: VectorMergeRowsExec): Either[String, MergeProgram] =
+  private[vecruntime] def compile(v: VectorMergeRowsExec): Either[String, MergeProgram] =
     compile(
       v.isSourceRowPresent,
       v.isTargetRowPresent,
@@ -242,7 +250,7 @@ object VectorMergeRowsPlanner {
   }
 }
 
-private[vector] class VectorMergeRowsIterator(
+private[vecruntime] class VectorMergeRowsIterator(
     input: Iterator[ColumnarBatch],
     program: MergeProgram,
     metrics: VectorMetrics

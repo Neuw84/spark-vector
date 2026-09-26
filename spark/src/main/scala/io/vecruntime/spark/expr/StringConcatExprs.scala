@@ -19,7 +19,7 @@ import io.vecruntime.kernels.{StringConcatKernels, VectorBuffers}
 import io.vecruntime.kernels.StringConcatKernels.Part
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, StringType}
-import org.apache.spark.sql.vector.VectorErrors
+import org.apache.spark.sql.vecruntime.VectorErrors
 
 /**
  * `concat`, `concat_ws` and `elt` over `StringConcatKernels`: each input is a UTF8 lane or a string

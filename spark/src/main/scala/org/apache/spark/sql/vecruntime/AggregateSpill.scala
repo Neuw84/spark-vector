@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.io.File
 import java.lang.foreign.Arena
@@ -256,7 +256,7 @@ object AggregateSpill {
     case _ => false
   }
 
-  private[vector] def vectorOf(col: ColumnVector): FieldVector = col match {
+  private[vecruntime] def vectorOf(col: ColumnVector): FieldVector = col match {
     case v: VectorArrowColumnVector => v.getValueVector.asInstanceOf[FieldVector]
     case d: VectorDecimalColumnVector => d.vector()
     case other =>
@@ -264,7 +264,7 @@ object AggregateSpill {
   }
 
   /** A file in the task's local directory (Spark's disk block manager), or a plain temp file outside Spark. */
-  private[vector] def newFile(): File = Option(SparkEnv.get) match {
+  private[vecruntime] def newFile(): File = Option(SparkEnv.get) match {
     case Some(env) => env.blockManager.diskBlockManager.createTempLocalBlock()._2
     case None => Files.createTempFile("vector-agg-spill", ".arrow").toFile
   }

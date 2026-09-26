@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.{SortExec, TakeOrderedAndProjectExec}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorFilterExec,
   VectorHashAggregateExec,
   VectorSortExec,

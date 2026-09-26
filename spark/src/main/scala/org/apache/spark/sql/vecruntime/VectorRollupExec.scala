@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.spark.arrow.{ArrowOutput, BorrowedColumnVector, VectorAllocators}
 import io.vecruntime.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
@@ -93,7 +93,7 @@ case class VectorRollupExec(
 }
 
 /** Drives the levels: level 0 over the input, each next level fed with the batches of the one before. */
-private[vector] class RollupChainIterator(
+private[vecruntime] class RollupChainIterator(
     levels: Array[RollupLevel],
     slots: Array[Array[VectorExpr]],
     outputAttrs: Array[(String, DataType)],

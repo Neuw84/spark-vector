@@ -19,7 +19,7 @@ import io.vecruntime.spark.VectorPlugin
 import io.vecruntime.spark.test.{CometTest, TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   CometShuffle,
   PlanUtils,
   VectorFilterExec,
@@ -143,7 +143,7 @@ class CometShuffleSuite extends VectorQuerySuite {
 
   test("range-partitioned exchange above our operators takes the native shuffle; sort above it is ours", CometTest) {
     val sql = "SELECT s, count(*) AS c, sum(d2) AS total FROM t GROUP BY s ORDER BY s, c DESC"
-    val df = checkVectorized(sql, Seq(Agg, classOf[org.apache.spark.sql.vector.VectorSortExec]))
+    val df = checkVectorized(sql, Seq(Agg, classOf[org.apache.spark.sql.vecruntime.VectorSortExec]))
     val plan = finalPlan(df)
     val exchanges = cometExchanges(plan)
     val range = exchanges.filter(

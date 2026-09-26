@@ -18,7 +18,7 @@ package io.vecruntime.spark.test
 import io.vecruntime.spark.{VectorConf, VectorSparkSessionExtensions}
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.vector.{PlanUtils, VectorFallback}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFallback}
 
 /**
  * Base class for plugin-on/plugin-off comparison suites. Every query is run twice on the same

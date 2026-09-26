@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.kernels.Bitmap
 import io.vecruntime.spark.adapter.TypeMapping
@@ -97,7 +97,7 @@ object VectorGeneratePlanner {
     spec(g.generator, g.child.output, g.generatorOutput, g.outer)
       .map(_ => VectorGenerateExec(g.generator, g.requiredChildOutput, g.outer, g.generatorOutput, g.child))
 
-  private[vector] def spec(v: VectorGenerateExec): Either[String, GenerateSpec] =
+  private[vecruntime] def spec(v: VectorGenerateExec): Either[String, GenerateSpec] =
     spec(v.generator, v.child.output, v.generatorOutput, v.outer)
 
   private def spec(
@@ -128,7 +128,7 @@ object VectorGeneratePlanner {
   }
 }
 
-private[vector] class VectorGenerateIterator(
+private[vecruntime] class VectorGenerateIterator(
     input: Iterator[ColumnarBatch],
     spec: GenerateSpec,
     required: Array[(String, DataType, Int)],

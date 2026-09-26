@@ -18,7 +18,7 @@ package io.vecruntime.benchmarks;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.spark.sql.vector.bench.FlightBench;
+import org.apache.spark.sql.vecruntime.bench.FlightBench;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.openjdk.jmh.annotations.AuxCounters;
 import org.openjdk.jmh.annotations.Benchmark;

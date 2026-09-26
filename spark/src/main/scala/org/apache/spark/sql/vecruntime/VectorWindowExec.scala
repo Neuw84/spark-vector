@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.kernels.{Bitmap, GroupAssignment, VectorBuffers}
 import io.vecruntime.spark.adapter.TypeMapping
@@ -821,7 +821,7 @@ object VectorWindowPlanner {
 }
 
 /** Detects partition (or peer) boundaries: null-safe equality of a row's keys with the previous row's. */
-private[vector] final class KeyTracker(keys: Array[VectorExpr]) {
+private[vecruntime] final class KeyTracker(keys: Array[VectorExpr]) {
   private val previous = new Array[Any](keys.length)
   private var lanes: Array[VectorBuffers] = _
   var hasPrevious = false
@@ -852,7 +852,7 @@ private[vector] final class KeyTracker(keys: Array[VectorExpr]) {
 }
 
 /** The ranking walk over sorted batches; the previous row's keys and the counters carry across batches. */
-private[vector] class VectorWindowIterator(
+private[vecruntime] class VectorWindowIterator(
     input: Iterator[ColumnarBatch],
     partitionKeys: Array[VectorExpr],
     orderKeys: Array[VectorExpr],
@@ -943,7 +943,7 @@ private[vector] class VectorWindowIterator(
  * the next batch starts a new one, or the input ends -- and is then emitted with the values of its
  * partitions gathered per row.
  */
-private[vector] class VectorWindowAggregateIterator(
+private[vecruntime] class VectorWindowAggregateIterator(
     input: Iterator[ColumnarBatch],
     partitionKeys: Array[VectorExpr],
     orderKeys: Array[VectorExpr],
@@ -1242,7 +1242,7 @@ object VectorWindowGroupLimitPlanner {
 }
 
 /** The ranking walk with a filter: rows whose ranking value is at most `limit` survive. */
-private[vector] class VectorWindowGroupLimitIterator(
+private[vecruntime] class VectorWindowGroupLimitIterator(
     input: Iterator[ColumnarBatch],
     partitionKeys: Array[VectorExpr],
     orderKeys: Array[VectorExpr],
@@ -1324,7 +1324,7 @@ private[vector] class VectorWindowGroupLimitIterator(
  * borrowed) until no later batch can still address a row of one of its partitions, since `lag` reads
  * backwards across batch boundaries.
  */
-private[vector] class VectorWindowOffsetIterator(
+private[vecruntime] class VectorWindowOffsetIterator(
     input: Iterator[ColumnarBatch],
     partitionKeys: Array[VectorExpr],
     orderKeys: Array[VectorExpr],

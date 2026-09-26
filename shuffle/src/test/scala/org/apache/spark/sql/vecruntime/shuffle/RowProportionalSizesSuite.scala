@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.shuffle
+package org.apache.spark.sql.vecruntime.shuffle
 
 import org.apache.spark.{MapOutputTrackerMaster, SparkEnv}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
-import org.apache.spark.sql.vector.VectorShuffleExchangeExec
+import org.apache.spark.sql.vecruntime.VectorShuffleExchangeExec
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -37,7 +37,7 @@ class RowProportionalSizesSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.driver.host", "localhost")
       .config("spark.sql.shuffle.partitions", "8")
       .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
-      .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
+      .config("spark.shuffle.manager", "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .getOrCreate()
     tempDir = java.nio.file.Files.createTempDirectory("vecruntime-rowsizes")

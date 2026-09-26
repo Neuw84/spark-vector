@@ -20,7 +20,7 @@ import java.lang.foreign.Arena
 import io.vecruntime.kernels.{ArrowLayout, Bitmap, PartitionKernels}
 import io.vecruntime.spark.arrow.{ArrowOutput, VectorAllocators}
 import org.apache.spark.sql.types.{IntegerType, LongType}
-import org.apache.spark.sql.vector.AggregateSpill
+import org.apache.spark.sql.vecruntime.AggregateSpill
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.scalatest.funsuite.AnyFunSuite
 

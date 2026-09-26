@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.ui
+package org.apache.spark.sql.vecruntime.ui
 
 import scala.xml.Node
 
@@ -47,7 +47,7 @@ class VectorAccelerationTab(val store: VectorAccelerationStore, sparkUI: SparkUI
 }
 
 object VectorAccelerationTab {
-  val StaticResourceDir = "org/apache/spark/sql/vector/ui/static"
+  val StaticResourceDir = "org/apache/spark/sql/vecruntime/ui/static"
 
   /** Shared legend, so the list and the plan page agree on what each colour means. */
   def legend: Seq[Node] =

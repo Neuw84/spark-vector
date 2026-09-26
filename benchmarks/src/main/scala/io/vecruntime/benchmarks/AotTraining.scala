@@ -94,7 +94,7 @@ object AotTraining {
     .config("spark.sql.shuffle.partitions", "8")
     .config("spark.sql.autoBroadcastJoinThreshold", "1m")
     .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
-    .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
+    .config("spark.shuffle.manager", "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager")
     .config("spark.vector.shuffle.enabled", "true")
     .config("spark.vector.exec.strictFloatingPoint", "false")
     .config("spark.vector.exec.sortMergeJoin.enabled", "true")

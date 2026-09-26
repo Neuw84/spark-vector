@@ -19,7 +19,7 @@ import io.vecruntime.kernels.{ArrowLayout, RoundKernels, SegmentVectorBuffers, V
 import io.vecruntime.spark.adapter.TypeMapping
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, DecimalType, DoubleType}
-import org.apache.spark.sql.vector.VectorErrors
+import org.apache.spark.sql.vecruntime.VectorErrors
 
 /**
  * `ceil` / `floor` of a double (to a long, Java's cast) or of a decimal (an unscaled divide with the

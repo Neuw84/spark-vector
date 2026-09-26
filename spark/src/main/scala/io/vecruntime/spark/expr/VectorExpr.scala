@@ -476,7 +476,7 @@ final case class ArithExpr(
       else BitmapKernels.andNot(validity, overflow, newValidity, n)
       validity = newValidity
     } else if (overflow != null && ArithExpr.anyActive(overflow, validity, ctx)) {
-      throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(
+      throw org.apache.spark.sql.vecruntime.VectorErrors.arithmeticOverflow(
         ArithExpr.overflowMessage(vecType),
         ArithExpr.hint(op),
         queryContext
@@ -493,7 +493,7 @@ final case class ArithExpr(
       val count = Bitmap.popcount(affected, n)
       if (count > 0) {
         if (ansiDivideByZero) {
-          throw org.apache.spark.sql.vector.VectorErrors.divideByZero(queryContext)
+          throw org.apache.spark.sql.vecruntime.VectorErrors.divideByZero(queryContext)
         }
         val newValidity = ctx.bitmap()
         if (validity == null) BitmapKernels.not(divisorZero, newValidity, n)
@@ -572,7 +572,7 @@ final case class NegateExpr(
       val overflow = ctx.bitmap()
       OverflowKernels.negateOverflow(a, overflow)
       if (ArithExpr.anyActive(overflow, a.validity(), ctx)) {
-        throw org.apache.spark.sql.vector.VectorErrors.arithmeticOverflow(
+        throw org.apache.spark.sql.vecruntime.VectorErrors.arithmeticOverflow(
           ArithExpr.overflowMessage(vecType),
           "",
           queryContext

@@ -17,7 +17,7 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorFallback,
   VectorFilterExec,
   VectorHashAggregateExec,
@@ -473,7 +473,7 @@ class VectorDecimalSuite extends VectorQuerySuite {
     import org.apache.spark.sql.catalyst.expressions.CheckOverflow
     import org.apache.spark.sql.functions.col
     import org.apache.spark.sql.types.DecimalType
-    import org.apache.spark.sql.vector.TestExprs.column
+    import org.apache.spark.sql.vecruntime.TestExprs.column
     // Spark 4.1 leaves no CheckOverflow in a batch plan, so the node is built directly and viewed.
     def view(name: String, nullOnOverflow: Boolean, target: DecimalType, source: String = "dec12"): Unit =
       spark.table("t").select(
@@ -557,7 +557,7 @@ class VectorDecimalSuite extends VectorQuerySuite {
     val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
     val df = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); d }
     assertRowsEqual(expected, df.collect(), 1e-9, sql)
-    assert(nodesOf[org.apache.spark.sql.vector.VectorUnionExec](df).nonEmpty, finalPlan(df).treeString)
+    assert(nodesOf[org.apache.spark.sql.vecruntime.VectorUnionExec](df).nonEmpty, finalPlan(df).treeString)
     assert(nodesOf[org.apache.spark.sql.execution.UnionExec](df).isEmpty, finalPlan(df).treeString)
     assert(nodesOf[ShuffleExchangeLike](df).size === 2, finalPlan(df).treeString)
     val rows = df.collect()
@@ -570,7 +570,7 @@ class VectorDecimalSuite extends VectorQuerySuite {
     val expected2 = withPlugin(enabled = false)(spark.sql(sql2).collect())
     val df2 = withPlugin(enabled = true) { val d = spark.sql(sql2); d.collect(); d }
     assertRowsEqual(expected2, df2.collect(), 1e-9, sql2)
-    val union = nodesOf[org.apache.spark.sql.vector.VectorUnionExec](df2).head
+    val union = nodesOf[org.apache.spark.sql.vecruntime.VectorUnionExec](df2).head
     assert(
       union.outputPartitioning.isInstanceOf[org.apache.spark.sql.catalyst.plans.physical.HashPartitioningLike],
       union.outputPartitioning.toString

@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.ui
+package org.apache.spark.sql.vecruntime.ui
 
 import scala.collection.mutable
 
 import org.apache.commons.text.StringEscapeUtils
 import org.apache.spark.sql.execution.{SparkPlan, SparkPlanInfo}
-import org.apache.spark.sql.vector.{VectorFallback, VectorPlan}
+import org.apache.spark.sql.vecruntime.{VectorFallback, VectorPlan}
 
 /**
  * Which engine executes an operator. This is what the UI colours nodes by.

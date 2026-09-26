@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 
 import org.apache.spark.sql.execution.{ColumnarToRowExec, RowToColumnarExec}
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 class VectorProjectSuite extends VectorQuerySuite {
 
@@ -72,7 +72,7 @@ class VectorProjectSuite extends VectorQuerySuite {
     checkVectorized("SELECT i, true AS t, CAST(NULL AS bigint) AS n FROM t WHERE i % 3 = 0", Seq(Project, Filter))
     checkVectorized(
       "SELECT count(*) AS c, sum(i) AS s FROM (SELECT i, true AS flag FROM t) WHERE flag",
-      Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+      Seq(classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
     )
   }
 
@@ -1219,18 +1219,18 @@ class VectorProjectSuite extends VectorQuerySuite {
   test("selection survives an identity projection and reaches the aggregate") {
     val df = checkVectorized(
       "SELECT count(*), sum(d), min(i), max(l), avg(d2) FROM t WHERE d > 5 AND d2 > 0.5",
-      Seq(Filter, classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+      Seq(Filter, classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
     )
     assert(nodesOf[VectorFilterExec](df).head.emitSelection)
     val grouped = checkVectorized(
       "SELECT s, count(*), sum(d), count(l) FROM t WHERE d > 5 GROUP BY s",
-      Seq(Filter, classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+      Seq(Filter, classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
     )
     assert(nodesOf[VectorFilterExec](grouped).head.emitSelection)
     // Groups that only occur in filtered-out rows must not appear.
     checkVectorized(
       "SELECT s, count(*) FROM t WHERE i < 30 GROUP BY s",
-      Seq(Filter, classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+      Seq(Filter, classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
     )
   }
 

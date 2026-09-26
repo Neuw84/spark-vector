@@ -17,7 +17,7 @@ package io.vecruntime.spark.comet
 
 import io.vecruntime.spark.VectorConf
 import io.vecruntime.spark.test.{CometTest, TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 /**
  * Comet in scan-only mode feeding spark-vector operators. Requires the Comet jar on the test
@@ -34,7 +34,7 @@ class CometScanSuite extends VectorQuerySuite {
 
   /** Comet 1.0 plans its scan as CometNativeScanExec (or CometScanExec / CometBatchScanExec). */
   private def cometScans(df: org.apache.spark.sql.DataFrame) =
-    org.apache.spark.sql.vector.PlanUtils.allNodes(finalPlan(df)).filter { n =>
+    org.apache.spark.sql.vecruntime.PlanUtils.allNodes(finalPlan(df)).filter { n =>
       val name = n.getClass.getSimpleName
       name.startsWith("Comet") && name.contains("Scan")
     }
@@ -69,7 +69,7 @@ class CometScanSuite extends VectorQuerySuite {
   test("the prefetching converter never wraps a Comet scan (#403)", CometTest) {
     withConf(VectorConf.ScanPrefetch -> "2") {
       val df = checkVectorized("SELECT s, count(*), max(d) FROM t WHERE i > 100 GROUP BY s", Seq(Filter, Agg))
-      assert(nodesOf[org.apache.spark.sql.vector.VectorPrefetchScanExec](df).isEmpty, finalPlan(df).treeString)
+      assert(nodesOf[org.apache.spark.sql.vecruntime.VectorPrefetchScanExec](df).isEmpty, finalPlan(df).treeString)
       val filter = nodesOf[VectorFilterExec](df).head
       assert(cometScans(df).contains(filter.child), filter.child.nodeName)
     }

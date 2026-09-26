@@ -25,7 +25,7 @@ import io.vecruntime.kernels.{
   VectorBuffers
 }
 import org.apache.spark.sql.types.{DataType, LongType, StringType, TimestampType}
-import org.apache.spark.sql.vector.SparkFormatters
+import org.apache.spark.sql.vecruntime.SparkFormatters
 import org.apache.spark.unsafe.types.UTF8String
 
 /** Shared micros-of-row reading for a timestamp lane or a date lane behind Spark's date -> timestamp cast. */

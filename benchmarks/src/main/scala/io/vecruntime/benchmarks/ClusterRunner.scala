@@ -118,7 +118,7 @@ object ClusterRunner {
     try {
       val result = body
       // Stage-completed events are delivered asynchronously; drain before reading them.
-      org.apache.spark.sql.vector.BenchmarkListenerSync.drain(spark)
+      org.apache.spark.sql.vecruntime.BenchmarkListenerSync.drain(spark)
       (result, listener.metrics(group))
     } finally spark.sparkContext.clearJobGroup()
   }

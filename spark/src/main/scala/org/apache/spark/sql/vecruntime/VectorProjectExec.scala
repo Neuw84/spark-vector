@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.spark.adapter.TypeMapping
 import io.vecruntime.spark.arrow.{
@@ -139,7 +139,7 @@ object VectorProjectExec {
   }
 }
 
-private[vector] class VectorProjectIterator(
+private[vecruntime] class VectorProjectIterator(
     input: Iterator[ColumnarBatch],
     exprs: Array[VectorExpr],
     identity: Boolean,

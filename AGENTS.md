@@ -728,7 +728,7 @@ into these rather than adding special cases to operators.
 
 ### 3.9 The Vector Acceleration UI tab
 
-- Attached from the driver plugin; lives under `org.apache.spark.sql.vector.ui` because
+- Attached from the driver plugin; lives under `org.apache.spark.sql.vecruntime.ui` because
   `SparkUITab`, `WebUIPage` and `UIUtils` are `private[spark]`. It never influences execution: every
   listener callback and the attachment itself are wrapped so a UI failure cannot fail a query or
   application start.
@@ -1076,7 +1076,7 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
   `NestedColumnRef` -> `NestedFieldColumnVector.of(ctx.column, path, numRows)`, a view with the
   ancestors' nulls folded in; remapped like any foreign column under a selection). `SizeExpr` and
   `NestedValidityExpr` read the array/map length and the nulls of such a column from Spark's vector.
-- Generate (#59): `VectorGenerateExec` (spark/src/main/scala/org/apache/spark/sql/vector/VectorGenerateExec.scala)
+- Generate (#59): `VectorGenerateExec` (spark/src/main/scala/org/apache/spark/sql/vecruntime/VectorGenerateExec.scala)
   replaces `GenerateExec` for `Explode`/`PosExplode` over a nested column path
   (`ExpressionCompiler.nestedColumnPath`) with a lane element type. The iterator builds `rowIdx`/`elemIdx`
   from the array lengths (a null/empty array -> one `-1` row under `outer`), gathers lanes with

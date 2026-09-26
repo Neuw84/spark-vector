@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.spark.adapter.TypeMapping
 import io.vecruntime.spark.arrow.{ArrowOutput, RemappedColumnVector, SelectedColumnarBatch}
@@ -69,7 +69,7 @@ case class VectorFilterExec(condition: Expression, child: SparkPlan, emitSelecti
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan = copy(child = newChild)
 }
 
-private[vector] class VectorFilterIterator(
+private[vecruntime] class VectorFilterIterator(
     input: Iterator[ColumnarBatch],
     predicate: VectorExpr,
     outputAttrs: Array[(String, org.apache.spark.sql.types.DataType)],

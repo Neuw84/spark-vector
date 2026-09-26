@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.shuffle.flight
+package org.apache.spark.sql.vecruntime.shuffle.flight
 
 import java.lang.foreign.Arena
 import java.nio.ByteBuffer
@@ -29,7 +29,7 @@ import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.SparkConf
 import org.apache.spark.network.buffer.NioManagedBuffer
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.shuffle.VectorShuffleBackend
+import org.apache.spark.sql.vecruntime.shuffle.VectorShuffleBackend
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.scalatest.funsuite.AnyFunSuite
 

@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.VectorHashAggregateExec
+import org.apache.spark.sql.vecruntime.VectorHashAggregateExec
 
 /**
  * SQL correctness coverage ported from DataFusion Comet's `CometAggregateSuite`, adapted to

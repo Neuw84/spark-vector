@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.{CollectLimitExec, GlobalLimitExec, LocalLimitExec}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorBroadcastHashJoinExec,
   VectorCollectLimitExec,
   VectorFallback,

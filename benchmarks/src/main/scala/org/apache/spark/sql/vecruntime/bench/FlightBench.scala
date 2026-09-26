@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.bench
+package org.apache.spark.sql.vecruntime.bench
 
 import java.lang.foreign.Arena
 import java.nio.file.{Files, Path}
@@ -32,7 +32,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
 import org.apache.spark.network.util.{MapConfigProvider, TransportConf}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.shuffle.flight.{FlightBlockStream, FlightLocation, FlightShuffle}
+import org.apache.spark.sql.vecruntime.shuffle.flight.{FlightBlockStream, FlightLocation, FlightShuffle}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 
 /**

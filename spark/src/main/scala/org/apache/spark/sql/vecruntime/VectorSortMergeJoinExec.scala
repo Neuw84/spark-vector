@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.lang.foreign.{Arena, MemorySegment}
 import java.util.ArrayDeque
@@ -176,7 +176,7 @@ final case class MergeJoinSpec(
  * [[SortedRows]] -- its output columns, its evaluated keys and its run starts -- borrowed from the
  * batch when it carries no selection, compacted into the iterator's arena otherwise.
  */
-private[vector] class VectorSortMergeJoinIterator(
+private[vecruntime] class VectorSortMergeJoinIterator(
     leftInput: Iterator[ColumnarBatch],
     rightInput: Iterator[ColumnarBatch],
     spec: MergeJoinSpec,

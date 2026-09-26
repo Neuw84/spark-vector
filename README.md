@@ -2,7 +2,7 @@
 
 **A vectorized execution runtime for Apache Spark using Java**
 
-> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`), the `sparkvector.*` JVM system properties, and the shuffle manager class (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`) are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; and the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`).
+> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`) and the `sparkvector.*` JVM system properties are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`); and, in 0.0.2, the shuffle manager class `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` → `org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager` (the old name still works as a deprecated alias, to be removed in a later release).
 
 vecruntime accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
 
@@ -172,7 +172,7 @@ Configuration keys (all default to `true` except the last; the complete referenc
 | `spark.vector.exec.strictFloatingPoint` | **on by default**: double `sum`/`avg` round exactly like Spark (one accumulator per group, rows added in order). `false` uses lane-parallel and interleaved partial sums that differ from Spark's in the last bits (about 7% of aggregate kernel time, 2.5% of TPC-H Q1) and can make an equality between two double sums fail (TPC-H Q15 returns no rows). Comet's `spark.comet.exec.strictFloatingPoint` is the analogous switch with the opposite default (`false`) and mechanism (`true` makes Comet fall back to Spark for such operations; we compute the strict result in our kernels). The benchmark configurations run with `false`, matching Comet's default |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
-| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288). Default `true`, but it only takes effect with the `vecruntime-shuffle` jar on the classpath and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` -- without those the exchange stays Spark's. TPC-H SF10: 0.59x the row shuffle over the 22 queries (`docs/results.md`) |
+| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288). Default `true`, but it only takes effect with the `vecruntime-shuffle` jar on the classpath and `spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager` -- without those the exchange stays Spark's. TPC-H SF10: 0.59x the row shuffle over the 22 queries (`docs/results.md`) |
 | `spark.vector.shuffle.backend` | how a reducer fetches a remote map output: `flight` (default; one Flight server per executor -- for executors that stay up for the job), `block` (Spark's block transfer), or the class name of a `VectorShuffleBackend` from another jar |
 | `spark.vector.shuffle.compression` | body compression of the shuffle's record batches: `zstd` (default; native), `lz4` (Arrow's codec is pure Java and an order of magnitude slower) or `none` |
 | `spark.vector.shuffle.batchRows`, `spark.vector.shuffle.batchBytes`, `spark.vector.shuffle.bufferBytes` | a map task holds each reduce partition's rows until `batchRows` (default `8192`) or `batchBytes` (default `1m`) and writes them as one record batch; `bufferBytes` (default `64m`) caps what one task holds across partitions |
@@ -300,14 +300,16 @@ measurements behind each item are in the linked docs and issues.
   use a 30 GB heap and 20 GB of overhead, with `-XX:MaxDirectMemorySize` set to the overhead less
   what the JVM itself needs (about 2 GB). Plain Spark on the same nodes prefers 20 / 30. The
   [Memory tuning](#memory-tuning) section has the rules.
-- **The columnar shuffle** (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`)
+- **The columnar shuffle** (`spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager`)
   serves reducers over Arrow Flight from each executor on an ephemeral port
   (`spark.vector.shuffle.flight.bindHost` chooses the interface): executors must reach each other
   directly. With `spark.authenticate` on, every call carries Spark's shuffle secret; TLS is not
   implemented, and under `spark.ssl.rpc.enabled` the server refuses to start -- use
   `spark.vector.shuffle.backend=block` (Spark's own block transfer carrying our batches) there
   (`docs/flight-shuffle.md`). Without the manager the plugin runs over Spark's row shuffle,
-  converting at the boundary.
+  converting at the boundary. The manager was renamed in 0.0.2 from
+  `org.apache.spark.sql.vector.shuffle.VectorShuffleManager`; the old name still works as a
+  deprecated alias, to be removed in a later release.
 - **Platforms measured:** x86-64 with AVX-512 (the 1 TB campaign) and AVX2, and Apple silicon
   (NEON, 128-bit lanes) for the local suites. Graviton (SVE) is untested (#253); the kernels choose
   the lane width at start-up, so it should run, but the thresholds were set on x86.
@@ -454,7 +456,7 @@ many times the memory (see "Memory tuning").
 ### Columnar shuffle (Arrow IPC over Arrow Flight)
 
 With the `vecruntime-shuffle` jar on the classpath and
-`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`, the rule replaces
+`spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager`, the rule replaces
 a `ShuffleExchangeExec` above one of our operators with `VectorShuffleExchangeExec` (#288) -- a
 `ShuffleExchangeLike`, so AQE's coalescing, skew splitting and local reads apply -- for hash,
 round-robin, single and range partitioning (range samples the child once with Spark's own
@@ -597,7 +599,7 @@ runner warns when the session it runs in disagrees with the configuration it is 
 |---|---|
 | `spark` | nothing: plain Spark, its vectorized Parquet reader, its sort-based shuffle |
 | `vector` | `spark.plugins=io.vecruntime.spark.VectorPlugin`; `spark.vector.exec.strictFloatingPoint=false` (Comet's rounding; see the note under Aggregation); `spark.vector.exec.sortMergeJoin.mode=auto`; `spark.sql.parquet.enableVectorizedReader=true` (Spark's default, made explicit -- our operators consume its batches, the row reader would make every plan fall back); `spark.sql.columnVector.offheap.enabled=true` (#403: the reader writes Arrow's fixed-width layout into native memory and the adapter wraps those lanes in place instead of copying them) |
-| `vector-shuffle` | `vector` plus `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` and `spark.vector.shuffle.enabled=true`: our columnar exchange (#288) |
+| `vector-shuffle` | `vector` plus `spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager` and `spark.vector.shuffle.enabled=true`: our columnar exchange (#288) |
 | `vector-shuffle-strict` | `vector-shuffle` with `strictFloatingPoint=true` (bit-identical double sums) |
 | `comet-scan-vector-ourshuffle` | `vector-shuffle` with Comet's plugin and scan (`spark.comet.enabled`, `spark.comet.scan.enabled`, every `spark.comet.exec.*` operator off, `spark.memory.offHeap.enabled` with `OFFHEAP`, 32 g) |
 | `comet-scan-vector-shuffle`, `hybrid`, `comet` | Comet's scan and native shuffle under our operators; the same with the mixed pass (`spark.vector.comet.mixed.enabled`); pure Comet |

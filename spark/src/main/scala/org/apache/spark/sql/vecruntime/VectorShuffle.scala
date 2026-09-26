@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.Attribute
@@ -27,8 +27,8 @@ import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
  * `spark.shuffle.manager`, so the planner checks both before it replaces an exchange.
  */
 object VectorShuffle {
-  val ExchangeClass = "org.apache.spark.sql.vector.VectorShuffleExchangeExec"
-  val ManagerClass = "org.apache.spark.sql.vector.shuffle.VectorShuffleManager"
+  val ExchangeClass = "org.apache.spark.sql.vecruntime.VectorShuffleExchangeExec"
+  val ManagerClass = "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager"
 
   private lazy val companion: Option[AnyRef] =
     try {
@@ -47,7 +47,7 @@ object VectorShuffle {
     ).invoke(c, partitioning, output).asInstanceOf[Boolean]
   }
 
-  val RegistryClass = "org.apache.spark.sql.vector.shuffle.flight.FlightRegistry"
+  val RegistryClass = "org.apache.spark.sql.vecruntime.shuffle.flight.FlightRegistry"
 
   private lazy val registry: Option[AnyRef] =
     try {

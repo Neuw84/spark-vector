@@ -21,7 +21,7 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.execution.{ColumnarToRowExec, RowToColumnarExec, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AQEShuffleReadExec, QueryStageExec}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
-import org.apache.spark.sql.vector.VectorShuffleExchangeExec
+import org.apache.spark.sql.vecruntime.VectorShuffleExchangeExec
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -47,7 +47,7 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.sql.shuffle.partitions", "6")
       .config("spark.sql.warehouse.dir", tempDir.resolve("wh").toString)
       .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
-      .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
+      .config("spark.shuffle.manager", "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .config("spark.vector.exec.strictFloatingPoint", "true")
       .getOrCreate()

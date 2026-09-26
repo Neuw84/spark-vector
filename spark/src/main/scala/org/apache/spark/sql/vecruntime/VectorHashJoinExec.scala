@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.lang.foreign.{Arena, MemorySegment}
 import java.util.ArrayDeque
@@ -480,7 +480,7 @@ object BuildTable {
 }
 
 /** Accumulates one column of `InternalRow`s, then lays it out in Arrow memory. */
-private[vector] final class RowColumnBuilder(dt: DataType) {
+private[vecruntime] final class RowColumnBuilder(dt: DataType) {
   private val vecType = TypeMapping.vecTypeOf(dt)
   private var n = 0
   private var nulls = new Array[Boolean](1024)
@@ -561,7 +561,7 @@ private[vector] final class RowColumnBuilder(dt: DataType) {
  * the task ends: a closed bucket then costs what an open one does, and the task's heap grows with its
  * input instead of with a bucket (#416). The owner closes such an iterator itself.
  */
-private[vector] class VectorHashJoinIterator(
+private[vecruntime] class VectorHashJoinIterator(
     input: Iterator[ColumnarBatch],
     build: BuildTable,
     spec: JoinSpec,

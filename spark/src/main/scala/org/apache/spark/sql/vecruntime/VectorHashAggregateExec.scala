@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.kernels.{Bitmap, GroupAssignment, GroupKeyTable, VecType, VectorBuffers}
 import io.vecruntime.spark.adapter.TypeMapping
@@ -226,7 +226,7 @@ case class VectorHashAggregateExec(
    * compiled here, once), so the rollup chain (#383) can run one of these levels over an input of its
    * own choosing.
    */
-  private[vector] def partitionIterator: Iterator[ColumnarBatch] => Iterator[ColumnarBatch] = {
+  private[vecruntime] def partitionIterator: Iterator[ColumnarBatch] => Iterator[ColumnarBatch] = {
     val aggs = compiled
     val keys = compiledKeys
     val l = layout
@@ -273,7 +273,7 @@ case class VectorHashAggregateExec(
   }
 
   /** A buffer-emitting level of the rollup chain (#383): the iterator itself, for push-mode feeding (the empty set is ungrouped). */
-  private[vector] def levelIterator: Iterator[ColumnarBatch] => RollupLevel = {
+  private[vecruntime] def levelIterator: Iterator[ColumnarBatch] => RollupLevel = {
     require(!emitsResults, "a rollup level is a buffer-emitting aggregate")
     val aggs = compiled
     val keys = compiledKeys
@@ -305,13 +305,13 @@ case class VectorHashAggregateExec(
  * `feed` one batch at a time (early emissions under a memory budget come back, owned by the caller),
  * then `finishFeed`, then the remaining table through `next`.
  */
-private[vector] trait RollupLevel extends Iterator[ColumnarBatch] with AutoCloseable {
+private[vecruntime] trait RollupLevel extends Iterator[ColumnarBatch] with AutoCloseable {
   def feed(batch: ColumnarBatch): Seq[ColumnarBatch]
   def finishFeed(): Unit
 }
 
 /** Drains the partition, then emits exactly one buffer row. */
-private[vector] class VectorUngroupedAggregateIterator(
+private[vecruntime] class VectorUngroupedAggregateIterator(
     input: Iterator[ColumnarBatch],
     aggs: Array[VectorAggFunction],
     layout: Array[OutputSlot],
@@ -377,7 +377,7 @@ private[vector] class VectorUngroupedAggregateIterator(
  * (#363) it either emits the table and starts over (buffer-emitting modes: the next stage merges)
  * or spills the table hash-partitioned and merges one bucket at a time (Final: [[AggregateSpill]]).
  */
-private[vector] class VectorGroupedAggregateIterator(
+private[vecruntime] class VectorGroupedAggregateIterator(
     input: Iterator[ColumnarBatch],
     keyExprs: Array[VectorExpr],
     aggs: Array[VectorAggFunction],

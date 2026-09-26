@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.lang.foreign.MemorySegment
 
@@ -47,7 +47,7 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * arena / allocator release runs from its task-completion listener as for every abandoned columnar
  * iterator in this project.
  */
-private[vector] class VectorLimitIterator(
+private[vecruntime] class VectorLimitIterator(
     input: Iterator[ColumnarBatch],
     limit: Int,
     outputAttrs: Array[(String, DataType)],
@@ -90,7 +90,7 @@ private[vector] class VectorLimitIterator(
   }
 }
 
-private[vector] object VectorLimitIterator {
+private[vecruntime] object VectorLimitIterator {
 
   /** A selection with only the first `keep` live rows of `selection` (every row when it is null). */
   def head(

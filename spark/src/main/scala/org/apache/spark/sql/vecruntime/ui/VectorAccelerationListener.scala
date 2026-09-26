@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.ui
+package org.apache.spark.sql.vecruntime.ui
 
 import scala.util.control.NonFatal
 

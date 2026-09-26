@@ -100,7 +100,7 @@ final case class SizeExpr(inputOrdinal: Int, path: Seq[Int], isMap: Boolean, leg
 
 /**
  * A struct field of a type without a lane (struct, array, map, wide decimal) projected as a value: never
- * evaluated as a lane -- [[org.apache.spark.sql.vector.VectorProjectExec]] turns it into a
+ * evaluated as a lane -- [[org.apache.spark.sql.vecruntime.VectorProjectExec]] turns it into a
  * `NestedFieldColumnVector` view of Spark's child vector, exactly as it passes a whole such column through.
  */
 final case class NestedColumnRef(inputOrdinal: Int, path: Seq[Int], dataType: DataType) extends VectorExpr {

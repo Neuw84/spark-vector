@@ -9,7 +9,7 @@
     </div>
     <p class="lead-config">Add the plugin to an existing Spark job &mdash; no code changes. Register it
       with <code>spark.plugins=io.vecruntime.spark.VectorPlugin</code>, and turn on the columnar
-      shuffle with <code>spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager</code>
+      shuffle with <code>spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager</code>
       and <code>spark.vector.shuffle.enabled=true</code> (the <code>vecruntime-shuffle</code> jar on
       the classpath), as in the launch below.</p>
   </div>
@@ -22,7 +22,7 @@
     <div class="terminal-body" id="terminal-body" aria-live="polite" data-lines='[
       {"typed":true,"text":"$ spark-submit \\","html":"<span class=\"prompt\">$</span> spark-submit \\","pause":220},
       {"typed":true,"text":"    --conf spark.plugins=io.vecruntime.spark.VectorPlugin \\","html":"    <span class=\"flag\">--conf</span> spark.plugins=<span class=\"val\">io.vecruntime.spark.VectorPlugin</span> \\","pause":180},
-      {"typed":true,"text":"    --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager \\","html":"    <span class=\"flag\">--conf</span> spark.shuffle.manager=<span class=\"val\">org.apache.spark.sql.vector.shuffle.VectorShuffleManager</span> \\","pause":180},
+      {"typed":true,"text":"    --conf spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager \\","html":"    <span class=\"flag\">--conf</span> spark.shuffle.manager=<span class=\"val\">org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager</span> \\","pause":180},
       {"typed":true,"text":"    --conf spark.vector.shuffle.enabled=true \\","html":"    <span class=\"flag\">--conf</span> spark.vector.shuffle.enabled=<span class=\"val\">true</span> \\","pause":180},
       {"typed":true,"text":"    --conf spark.driver.extraJavaOptions=\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\" \\","html":"    <span class=\"flag\">--conf</span> spark.driver.extraJavaOptions=<span class=\"val\">\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\"</span> \\","pause":140},
       {"typed":true,"text":"    --conf spark.executor.extraJavaOptions=\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\" \\","html":"    <span class=\"flag\">--conf</span> spark.executor.extraJavaOptions=<span class=\"val\">\"--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED\"</span> \\","pause":140},

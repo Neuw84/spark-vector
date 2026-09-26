@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import org.apache.spark.sql.types.{Decimal, NullType}
 import org.apache.spark.sql.vectorized.{ColumnarArray, ColumnarMap, ColumnVector}
@@ -26,7 +26,7 @@ import org.apache.spark.unsafe.types.UTF8String
  * (#310 for the merge join, #332 for the hash joins); the others are this object. Any access is a
  * bug in the ordinal bookkeeping and throws.
  */
-private[vector] object PlaceholderColumn extends ColumnVector(NullType) {
+private[vecruntime] object PlaceholderColumn extends ColumnVector(NullType) {
   private def no = throw new UnsupportedOperationException("a joined column the condition does not read")
   override def close(): Unit = ()
   override def hasNull: Boolean = no

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector.shuffle.flight
+package org.apache.spark.sql.vecruntime.shuffle.flight
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -63,7 +63,7 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.executor.extraClassPath", System.getProperty("java.class.path"))
       .config("spark.executor.extraJavaOptions", jvmArgs)
       .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
-      .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
+      .config("spark.shuffle.manager", "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .config("spark.vector.shuffle.backend", "flight")
       .config("spark.vector.exec.strictFloatingPoint", "true")

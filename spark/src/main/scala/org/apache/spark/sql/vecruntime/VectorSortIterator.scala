@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.lang.foreign.Arena
 
@@ -39,7 +39,7 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * emitted can be gathered from the batch they refer to, and the next batch is loaded after. An
  * output batch is therefore up to `OutputBatchSize` rows, fewer where a spilled run's batch ended.
  */
-private[vector] class VectorSortIterator(
+private[vecruntime] class VectorSortIterator(
     input: Iterator[ColumnarBatch],
     keyExprs: Array[VectorExpr],
     ascending: Array[Boolean],

@@ -21,7 +21,7 @@ import io.vecruntime.spark.VectorConf
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
-import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 import org.scalatest.Tag
 
 /**
@@ -174,7 +174,7 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
       d
     }
     val vectorNodes =
-      PlanUtils.allNodes(finalPlan(merge)).filter(_.isInstanceOf[org.apache.spark.sql.vector.VectorExec])
+      PlanUtils.allNodes(finalPlan(merge)).filter(_.isInstanceOf[org.apache.spark.sql.vecruntime.VectorExec])
     info(s"spark-vector operators in the MERGE plan: ${vectorNodes.map(_.nodeName).mkString(", ")}")
     info(finalPlan(merge).treeString)
     assert(
@@ -226,9 +226,12 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
     ) {
       val merge = withPlugin(enabled = true) { val d = spark.sql(IcebergTables.mergeSql(on)); d.collect(); d }
       val nodes = PlanUtils.allNodes(finalPlan(merge))
-      assert(nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorMergeRowsExec]), finalPlan(merge).treeString)
       assert(
-        nodes.exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]),
+        nodes.exists(_.isInstanceOf[org.apache.spark.sql.vecruntime.VectorMergeRowsExec]),
+        finalPlan(merge).treeString
+      )
+      assert(
+        nodes.exists(_.isInstanceOf[org.apache.spark.sql.vecruntime.VectorShuffledHashJoinExec]),
         finalPlan(merge).treeString
       )
     }
@@ -283,7 +286,9 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
         val d = spark.sql(mergeSql(on, s"$Db.m_cast_src")); d.collect(); d
       }
       assert(
-        PlanUtils.allNodes(finalPlan(merge)).exists(_.isInstanceOf[org.apache.spark.sql.vector.VectorMergeRowsExec]),
+        PlanUtils.allNodes(
+          finalPlan(merge)
+        ).exists(_.isInstanceOf[org.apache.spark.sql.vecruntime.VectorMergeRowsExec]),
         finalPlan(merge).treeString
       )
     }

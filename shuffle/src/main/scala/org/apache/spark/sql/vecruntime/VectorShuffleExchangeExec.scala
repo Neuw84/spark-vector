@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.Future
@@ -53,7 +53,7 @@ import org.apache.spark.sql.execution.metric.{
 }
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vector.shuffle.{
+import org.apache.spark.sql.vecruntime.shuffle.{
   RebalanceAdvisory,
   RecordsByPartitionAccumulator,
   RowProportionalSizes,
@@ -296,7 +296,7 @@ object VectorShuffleExchangeExec {
    * then. Still a `SimpleFutureAction` over the job's waiter, so AQE can cancel the stage as before;
    * the map output tracker and the reducers' fetch sizes keep the real bytes.
    */
-  private[vector] def submitRowSizedMapStage(
+  private[vecruntime] def submitRowSizedMapStage(
       sc: org.apache.spark.SparkContext,
       dependency: VectorShuffleDependency,
       records: RecordsByPartitionAccumulator
@@ -311,7 +311,7 @@ object VectorShuffleExchangeExec {
    * (the task accumulators, SQL metrics included, are in by then). The map output tracker keeps the
    * real sizes, so only what AQE decides from changes.
    */
-  private[vector] def submitMapStageWith(sc: org.apache.spark.SparkContext, dependency: VectorShuffleDependency)(
+  private[vecruntime] def submitMapStageWith(sc: org.apache.spark.SparkContext, dependency: VectorShuffleDependency)(
       resize: MapOutputStatistics => MapOutputStatistics
   ): FutureAction[MapOutputStatistics] = {
     sc.assertNotStopped()

@@ -19,7 +19,7 @@ import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.joins.{BroadcastNestedLoopJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorBroadcastHashJoinExec,
   VectorBroadcastNestedLoopJoinExec,
   VectorHashAggregateExec,

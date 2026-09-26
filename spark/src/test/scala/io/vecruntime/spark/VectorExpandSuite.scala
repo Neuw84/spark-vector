@@ -17,7 +17,7 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.ExpandExec
-import org.apache.spark.sql.vector.{VectorExpandExec, VectorFilterExec, VectorHashAggregateExec, VectorRollupExec}
+import org.apache.spark.sql.vecruntime.{VectorExpandExec, VectorFilterExec, VectorHashAggregateExec, VectorRollupExec}
 
 /** ExpandExec: grouping sets and the distinct-aggregate rewrite, row for row against Spark. */
 class VectorExpandSuite extends VectorQuerySuite {
@@ -69,7 +69,7 @@ class VectorExpandSuite extends VectorQuerySuite {
 
   test("#383: a rollup aggregates the finest grouping once and rolls the partials up") {
     // The partial over the Expand becomes one chain operator: the finest-set partial, then a merge per coarser set.
-    def rollups(df: org.apache.spark.sql.DataFrame) = nodesOf[org.apache.spark.sql.vector.VectorRollupExec](df)
+    def rollups(df: org.apache.spark.sql.DataFrame) = nodesOf[org.apache.spark.sql.vecruntime.VectorRollupExec](df)
     val rollup = checkVectorized(
       "SELECT s, b, count(*) AS c, sum(l) AS sl, avg(d2) AS ad, min(i) AS mi, grouping_id() AS gid FROM t GROUP BY ROLLUP(s, b)",
       Seq(Agg)

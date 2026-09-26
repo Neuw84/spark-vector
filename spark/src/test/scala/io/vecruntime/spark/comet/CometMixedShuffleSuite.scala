@@ -17,7 +17,7 @@ package io.vecruntime.spark.comet
 
 import io.vecruntime.spark.{VectorConf, VectorPlugin}
 import io.vecruntime.spark.test.{CometTest, TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec, VectorToCometExec}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFilterExec, VectorToCometExec}
 
 /**
  * Mixed chains through Comet's native shuffle (#280): a join or a final aggregate of Comet's is
@@ -75,7 +75,7 @@ class CometMixedShuffleSuite extends VectorQuerySuite {
   private val Join = "SELECT a.i, b.s FROM t a JOIN t b ON a.i = b.i WHERE a.d > 0.5 AND b.l IS NOT NULL"
 
   private def reasonsOf(df: org.apache.spark.sql.DataFrame): String =
-    org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) =>
+    org.apache.spark.sql.vecruntime.VectorFallback.reasons(finalPlan(df)).map { case (n, r) =>
       s"${n.nodeName}: $r"
     }.mkString("; ")
 

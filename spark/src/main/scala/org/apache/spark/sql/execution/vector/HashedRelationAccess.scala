@@ -25,7 +25,7 @@ import org.apache.spark.sql.execution.joins.{
 
 /**
  * `HashedRelation` is `private[execution]`; this bridge lives inside that package so the join
- * operators (in `org.apache.spark.sql.vector`) can read the rows of Spark's broadcast relation.
+ * operators (in `org.apache.spark.sql.vecruntime`) can read the rows of Spark's broadcast relation.
  */
 object HashedRelationAccess {
 

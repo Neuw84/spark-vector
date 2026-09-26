@@ -17,7 +17,7 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.FilterExec
-import org.apache.spark.sql.vector.VectorFilterExec
+import org.apache.spark.sql.vecruntime.VectorFilterExec
 
 class VectorFilterSuite extends VectorQuerySuite {
 
@@ -278,8 +278,8 @@ class VectorFilterSuite extends VectorQuerySuite {
   test(
     "scalar subqueries are literals by execution time: filters, projections, aggregates, merged struct fields, nulls"
   ) {
-    val Project = classOf[org.apache.spark.sql.vector.VectorProjectExec]
-    val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+    val Project = classOf[org.apache.spark.sql.vecruntime.VectorProjectExec]
+    val Agg = classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec]
     // In a filter, alone and combined; a string-valued and a boolean-valued subquery.
     checkVectorized("SELECT i, d2 FROM t WHERE d2 > (SELECT avg(d2) FROM t)", Seq(Filter))
     checkVectorized(

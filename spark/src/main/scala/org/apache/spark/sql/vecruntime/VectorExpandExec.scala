@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.vector
+package org.apache.spark.sql.vecruntime
 
 import io.vecruntime.spark.adapter.TypeMapping
 import io.vecruntime.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch, VectorAllocators}
@@ -76,7 +76,7 @@ case class VectorExpandExec(projections: Seq[Seq[Expression]], output: Seq[Attri
 }
 
 /** One input batch in, `projections.length` output batches out, then the next input. */
-private[vector] class VectorExpandIterator(
+private[vecruntime] class VectorExpandIterator(
     input: Iterator[ColumnarBatch],
     projections: Array[Array[VectorExpr]],
     outputAttrs: Array[(String, DataType)],
