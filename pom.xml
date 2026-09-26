@@ -493,5 +493,18 @@
         <module>spark-sql-tests</module>
       </modules>
     </profile>
+    <profile>
+      <!--
+        The optional Iceberg-compiled bridge for the columnar v3 deletion-vector writer (#20). Built
+        only under -Piceberg because it compiles against the Iceberg Spark runtime; the plugin core
+        never depends on it at compile time and reaches it reflectively when Iceberg is on the
+        classpath, exactly as it reaches Iceberg's reader. Not on the default reactor so a plain
+        (non-Iceberg) build never needs the Iceberg runtime.
+      -->
+      <id>iceberg</id>
+      <modules>
+        <module>iceberg-bridge</module>
+      </modules>
+    </profile>
   </profiles>
 </project>

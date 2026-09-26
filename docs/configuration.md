@@ -24,6 +24,7 @@ the `shuffle` module (the columnar shuffle keys).
 | `spark.vector.explainFallback.enabled` | `false` | boolean | Logs why each operator was left to Spark (the same reasons the Vector Acceleration tab shows); turn it on when a plan is not as accelerated as expected. |
 | `spark.vector.ui.enabled` | `true` | boolean | Attaches the Vector Acceleration tab to the Spark UI; read from the `SparkConf` by the driver plugin before any session exists, so it must be set at start-up. |
 | `spark.vector.ui.retainedExecutions` | `100` | positive int | How many SQL executions the Vector Acceleration tab keeps; also read from the `SparkConf` at start-up. |
+| `spark.vector.iceberg.dvWriter.enabled` | `false` | boolean | The columnar Iceberg v3 deletion-vector writer (#20): on a format-version-3 merge-on-read table (delete file format PUFFIN), writes the DELETE half of DELETE/UPDATE/MERGE from the `_file`/`_pos` lanes as deletion vectors instead of Spark's row-by-row `WriteDeltaExec`; inserts and the commit stay Iceberg's. v2 tables decline to Spark's writer. Default off while the writer is landed in slices (see `docs/iceberg-dv-writer.md`); it will default on once every Iceberg merge-on-read suite is byte-identical with it on and off. |
 
 ## Operator switches
 

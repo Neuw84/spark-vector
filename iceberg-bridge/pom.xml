@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.sparkvector</groupId>
+    <artifactId>spark-vector-parent</artifactId>
+    <version>0.0.2-SNAPSHOT</version>
+  </parent>
+  <artifactId>spark-vector-iceberg-bridge_2.13</artifactId>
+  <name>spark-vector-iceberg-bridge</name>
+  <description>Optional Iceberg-compiled bridge for the columnar v3 deletion-vector writer (#20); kept apart from the plugin core so the core keeps its zero Iceberg compile-time dependency and reaches this module reflectively when Iceberg is on the classpath</description>
+  <dependencies>
+    <dependency>
+      <!-- Compiled against here to reach the package-private DeltaTaskCommit constructors and the
+           public DV writer API; at run time the classes come from the Iceberg runtime already on
+           the Spark classpath, so provided keeps them out of this artifact. -->
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-spark-runtime-4.1_${scala.binary.version}</artifactId>
+      <version>${iceberg.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <!-- Test-only: loads the plugin's operator, planner strategy and session extensions so the DV
+           writer's integration tests can run the columnar path end to end. The gate's -pl list does
+           not include this module, so these tests are run manually (see docs/iceberg-dv-writer.md). -->
+      <groupId>io.sparkvector</groupId>
+      <artifactId>spark-vector-spark_${scala.binary.version}</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>scala-compile-first</id>
+            <goals>
+              <goal>add-source</goal>
+              <goal>compile</goal>
+            </goals>
+            <phase>process-resources</phase>
+          </execution>
+          <execution>
+            <id>scala-test-compile-first</id>
+            <goals>
+              <goal>testCompile</goal>
+            </goals>
+            <phase>process-test-resources</phase>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest-maven-plugin</artifactId>
+        <configuration>
+          <reportsDirectory>${project.build.directory}/scalatest-reports</reportsDirectory>
+          <junitxml>.</junitxml>
+          <filereports>SparkVectorIcebergBridgeTestSuite.txt</filereports>
+          <stdout>W</stdout>
+          <argLine>${vector.jvm.args} ${spark.jvm.args} -Xmx3g -Dspark.ui.enabled=false -Dspark.driver.host=localhost</argLine>
+        </configuration>
+        <executions>
+          <execution>
+            <id>test</id>
+            <goals>
+              <goal>test</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
