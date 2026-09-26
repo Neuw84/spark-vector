@@ -320,6 +320,9 @@ object ExpressionCompiler {
     // operands, IN lists, string arguments) match the Spark node before compiling and keep their reasons.
     case Literal(null, dt) if TypeMapping.isSupported(dt) => Right(NullLiteralExpr(dt))
     case Literal(null, dt) => Left(s"null literal of ${dt.simpleString}")
+    // A non-null boolean literal is a real constant BOOL column (a `WHERE true`, a join `ON true` /
+    // `ON false`, a projected constant); a NULL boolean fell to the NullLiteralExpr case above.
+    case Literal(v: Boolean, BooleanType) => Right(ConstBoolExpr(v))
     case Literal(v, dt) if isLiteralType(dt) => Right(LiteralExpr(v, dt))
     case Literal(_, dt) => Left(s"unsupported literal type ${dt.simpleString}")
 

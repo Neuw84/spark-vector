@@ -156,6 +156,24 @@ final case class NullLiteralExpr(dataType: DataType) extends VectorExpr {
 }
 
 /**
+ * A non-null boolean literal (`true` / `false`) materialised as a constant BOOL column of the
+ * batch's length, every value valid. Unlike [[LiteralExpr]] -- a scalar operand that throws when
+ * evaluated as a column -- this is a real column, so it is a valid predicate on its own (a `WHERE
+ * true`, a join `ON true` / `ON false`) and a projected value. A `NULL` boolean literal is a
+ * [[NullLiteralExpr]] instead (an all-invalid column, so `selection` keeps no row -- Spark's `ON
+ * NULL` never matches).
+ */
+final case class ConstBoolExpr(value: Boolean) extends VectorExpr {
+  override def dataType: DataType = BooleanType
+  override def children: Seq[VectorExpr] = Nil
+  override def eval(ctx: EvalContext): VectorBuffers = {
+    val bits = ArrowLayout.allocateBitmap(ctx.arena, ctx.numRows)
+    Bitmap.fill(bits, ctx.numRows, value)
+    SegmentVectorBuffers.fixedWidth(VecType.BOOL, ctx.numRows, null, bits)
+  }
+}
+
+/**
  * Comparison of two same-typed operands, at most one of which is a literal. Numbers (and the types
  * carried as numeric lanes) go through `CompareKernels`; strings through `StringCompareKernels`, in
  * Spark's default UTF8_BINARY order.
