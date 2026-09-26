@@ -135,7 +135,8 @@ case class VectorShuffleExchangeExec(
           val bytes = metrics("dataSize").value
           val strings = shuffleDependency.stringBytes.map(_.value)
           val onDisk = stats.bytesByPartitionId.sum
-          val factor = RebalanceAdvisory.mapSizeFactor(output.map(_.dataType), rows, bytes, onDisk, compression, strings)
+          val factor =
+            RebalanceAdvisory.mapSizeFactor(output.map(_.dataType), rows, bytes, onDisk, compression, strings)
           logInfo(
             f"Map output sizes x$factor%.2f for AQE (#511): $onDisk bytes on disk over $rows rows " +
               f"(${onDisk.toDouble / math.max(rows, 1)}%.1f per row), ${bytes.toDouble / math.max(rows, 1)}%.1f " +

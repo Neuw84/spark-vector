@@ -210,7 +210,13 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 0L, 2.5) === 1.0)
     assert(RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 1L, 2.5) === RebalanceAdvisory.MaxMapSizeFactor)
     assert(
-      RebalanceAdvisory.mapSizeFactor(schema, 1000L, 12250L, 1000000000L, 2.5) === 1.0 / RebalanceAdvisory.MaxMapSizeFactor
+      RebalanceAdvisory.mapSizeFactor(
+        schema,
+        1000L,
+        12250L,
+        1000000000L,
+        2.5
+      ) === 1.0 / RebalanceAdvisory.MaxMapSizeFactor
     )
     assert(RebalanceAdvisory.scaleSizes(Array(0L, 10L, 1L), 2.5).toSeq === Seq(0L, 25L, 3L))
   }
