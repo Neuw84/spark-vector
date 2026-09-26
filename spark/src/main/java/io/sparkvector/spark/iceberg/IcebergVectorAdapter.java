@@ -124,6 +124,18 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
     private final Method dictionaryMaxId;
     private final Method dictionaryDecodeToBinary;
     private final Method binaryGetBytes;
+    // Dictionary.decodeToInt / decodeToLong (shaded parquet) as (Object, int)int / (Object, int)long, or
+    // null. Handles, not Methods: the lookup table is filled with one call per dictionary entry, and
+    // Method.invoke's boxing and argument array were most of the table build on the cluster (#20).
+    private final java.lang.invoke.MethodHandle dictionaryDecodeToInt;
+    private final java.lang.invoke.MethodHandle dictionaryDecodeToLong;
+    // A dictionary-encoded decimal of up to 18 digits, decoded once per Parquet dictionary (#20): the
+    // copy path read it through getDecimal, a Spark Decimal per row plus its unscaled long, ~6% of the
+    // CDC MERGE's target scan. Per thread, keyed weakly by the dictionary (Parquet's Dictionary keeps
+    // Object's identity equals), so a table does not outlive its row group; cleared when it grows.
+    private static final ThreadLocal<java.util.WeakHashMap<Object, long[]>> SMALL_DECIMAL_LUTS = ThreadLocal.withInitial(java.util.WeakHashMap::new);
+    private static final int SMALL_DECIMAL_LUT_ENTRIES = 16;
+    private static final java.util.concurrent.atomic.LongAdder ADAPTED_DICTIONARY_DECIMAL_COLUMNS = new java.util.concurrent.atomic.LongAdder();
 
     private IcebergVectorAdapter(ClassLoader loader) throws ReflectiveOperationException {
         arrowColumnVector = Class.forName(ARROW_COLUMN_VECTOR, false, loader);
@@ -151,6 +163,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         Method maxId = null;
         Method decode = null;
         Method getBytes = null;
+        Method decodeInt = null;
+        Method decodeLong = null;
         try {
             dsa = Class.forName(DICTIONARY_STRING_ACCESSOR, false, loader);
             dictField = accessible(dsa.getDeclaredField("dictionary"));
@@ -159,6 +173,8 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             maxId = dictionary.getMethod("getMaxId");
             decode = dictionary.getMethod("decodeToBinary", int.class);
             getBytes = binary.getMethod("getBytes");
+            decodeInt = dictionary.getMethod("decodeToInt", int.class);
+            decodeLong = dictionary.getMethod("decodeToLong", int.class);
         } catch (ReflectiveOperationException e) {
             LOG.debug("spark-vector: Iceberg dictionary accessor not resolvable, dictionary strings will be copied", e);
             dsa = null;
@@ -176,6 +192,21 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         dictionaryMaxId = maxId;
         dictionaryDecodeToBinary = decode;
         binaryGetBytes = getBytes;
+        java.lang.invoke.MethodHandle intHandle = null;
+        java.lang.invoke.MethodHandle longHandle = null;
+        if (decodeInt != null && decodeLong != null) {
+            try {
+                java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.publicLookup();
+                intHandle = lookup.unreflect(decodeInt).asType(java.lang.invoke.MethodType.methodType(int.class, Object.class, int.class));
+                longHandle = lookup.unreflect(decodeLong).asType(java.lang.invoke.MethodType.methodType(long.class, Object.class, int.class));
+            } catch (IllegalAccessException e) {
+                LOG.debug("spark-vector: Iceberg dictionary decoders not accessible, dictionary decimals will be copied", e);
+                intHandle = null;
+                longHandle = null;
+            }
+        }
+        dictionaryDecodeToInt = intHandle;
+        dictionaryDecodeToLong = longHandle;
     }
 
     private static <T extends java.lang.reflect.AccessibleObject> T accessible(T member) {
@@ -324,6 +355,16 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
                     .getSimpleName()
                     .equals("DictionaryDecimalBinaryAccessor")) {
                 result = adaptDictionaryWideDecimal(acc, vector, numRows, validity, scratch);
+            } else if (type == VecType.INT64 && (acc.getClass()
+                    .getSimpleName()
+                    .equals("DictionaryDecimalIntAccessor")
+                    || acc.getClass()
+                          .getSimpleName()
+                          .equals("DictionaryDecimalLongAccessor"))) {
+                result = adaptDictionarySmallDecimal(acc, vector, numRows, validity, scratch);
+                if (result != null) {
+                    ADAPTED_DICTIONARY_DECIMAL_COLUMNS.increment();
+                }
             } else if (acc.getClass()
                           .getSimpleName()
                           .startsWith("Dictionary")) {
@@ -509,6 +550,110 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             Decimal128.set(data, i, hi[id], lo[id]);
         }
         return SegmentVectorBuffers.fixedWidth(VecType.DECIMAL128, numRows, validity, data);
+    }
+
+    /**
+     * Dictionary-encoded decimal columns of up to 18 digits adapted through a
+     * lookup table (#20).
+     */
+    public static long adaptedDictionaryDecimalColumns() {
+        return ADAPTED_DICTIONARY_DECIMAL_COLUMNS.sum();
+    }
+
+    /**
+     * A dictionary-encoded decimal of up to 18 digits (Iceberg's
+     * DictionaryDecimalInt/LongAccessor over an IntVector of dictionary ids):
+     * the INT64 lane of unscaled values, from a table decoding each Parquet
+     * dictionary entry once, instead of a Spark Decimal per row through
+     * getDecimal (#20).
+     */
+    private VectorBuffers adaptDictionarySmallDecimal(Object acc, Object indexVector, int numRows,
+            MemorySegment validity, Arena scratch)
+            throws ReflectiveOperationException {
+        if (dictionaryParquetField == null || dictionaryDecodeToInt == null || dictionaryDecodeToLong == null) {
+            return null;
+        }
+        boolean ints = acc.getClass()
+                          .getSimpleName()
+                          .equals("DictionaryDecimalIntAccessor");
+        Object dictionary = dictionaryParquetField.get(acc);
+        java.util.WeakHashMap<Object, long[]> luts = SMALL_DECIMAL_LUTS.get();
+        long[] lut = luts.get(dictionary);
+        if (lut == null) {
+            int size = (Integer) dictionaryMaxId.invoke(dictionary) + 1;
+            lut = new long[size];
+            try {
+                if (ints) {
+                    for (int i = 0; i < size; i++) {
+                        lut[i] = (int) dictionaryDecodeToInt.invokeExact(dictionary, i);
+                    }
+                } else {
+                    for (int i = 0; i < size; i++) {
+                        lut[i] = (long) dictionaryDecodeToLong.invokeExact(dictionary, i);
+                    }
+                }
+            } catch (RuntimeException | Error e) {
+                throw e;
+            } catch (Throwable e) {
+                throw new IllegalStateException("cannot decode an Iceberg decimal dictionary", e);
+            }
+            if (luts.size() >= SMALL_DECIMAL_LUT_ENTRIES) {
+                luts.clear();
+            }
+            luts.put(dictionary, lut);
+        }
+        MemorySegment indices = segment(getDataBuffer.invoke(indexVector));
+        if (indices.byteSize() < (long) numRows << 2) {
+            return null;
+        }
+        MemorySegment data = ArrowLayout.allocateData(scratch, VecType.INT64, numRows);
+        // Decode on heap arrays with one bulk copy in and one out: element-wise segment accesses (and a
+        // validity test per row) paid a segment liveness check per access on the cluster (#20). A null
+        // row's id is whatever the index vector holds there, so an out-of-range id is an error only on
+        // a valid row; a null row's lane is left 0.
+        int[] ids = scratchIds(numRows);
+        long[] out = scratchLongs(numRows);
+        MemorySegment.copy(indices, VectorBuffers.LE_INT, 0, ids, 0, numRows);
+        int size = lut.length;
+        for (int i = 0; i < numRows; i++) {
+            int id = ids[i];
+            if (Integer.compareUnsigned(id, size) < 0) {
+                out[i] = lut[id];
+            } else if (validity == null || io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+                return null;
+            } else {
+                out[i] = 0L;
+            }
+        }
+        MemorySegment.copy(out, 0, data, VectorBuffers.LE_LONG, 0, numRows);
+        return SegmentVectorBuffers.fixedWidth(VecType.INT64, numRows, validity, data);
+    }
+
+    private static final ThreadLocal<int[][]> SCRATCH_IDS = ThreadLocal.withInitial(() -> new int[1][0]);
+    private static final ThreadLocal<long[][]> SCRATCH_LONGS = ThreadLocal.withInitial(() -> new long[1][0]);
+
+    /**
+     * A per-thread int array of at least {@code n} elements (contents
+     * unspecified).
+     */
+    private static int[] scratchIds(int n) {
+        int[][] holder = SCRATCH_IDS.get();
+        if (holder[0].length < n) {
+            holder[0] = new int[n];
+        }
+        return holder[0];
+    }
+
+    /**
+     * A per-thread long array of at least {@code n} elements (contents
+     * unspecified).
+     */
+    private static long[] scratchLongs(int n) {
+        long[][] holder = SCRATCH_LONGS.get();
+        if (holder[0].length < n) {
+            holder[0] = new long[n];
+        }
+        return holder[0];
     }
 
     private MemorySegment segment(Object arrowBuf) throws ReflectiveOperationException {

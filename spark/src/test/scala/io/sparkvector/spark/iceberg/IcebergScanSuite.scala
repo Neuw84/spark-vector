@@ -127,6 +127,31 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
     checkVectorized("SELECT s, sum(d7), max(d7) FROM t GROUP BY s", Seq(Agg))
   }
 
+  icebergTest("dictionary-encoded decimals of up to 18 digits are decoded through one table per dictionary (#20)") {
+    // Few distinct values, so Parquet dictionary-encodes both columns and Iceberg hands out a
+    // DictionaryDecimalInt/LongAccessor over the ids; the copy path read those through getDecimal,
+    // a Spark Decimal per row.
+    spark.sql(
+      s"""CREATE OR REPLACE TABLE ${IcebergTables.Db}.t_dict_dec USING iceberg AS
+         |SELECT i, s,
+         |  CASE WHEN i % 13 = 0 THEN NULL ELSE CAST(((i % 37) - 18) / 4.0 AS DECIMAL(7,2)) END AS d7,
+         |  CAST((i % 23) * CAST(1000000007 AS BIGINT) / 8.0 AS DECIMAL(15,2)) AS d15
+         |FROM ${IcebergTables.Db}.t_pos""".stripMargin
+    )
+    IcebergTables.useAsT(spark, s"${IcebergTables.Db}.t_dict_dec")
+    val before = IcebergVectorAdapter.adaptedDictionaryDecimalColumns()
+    checkVectorized("SELECT i, d7, d15 FROM t WHERE i % 3 = 0", Seq(Filter))
+    checkVectorized("SELECT s, sum(d7), sum(d15), count(d7), min(d15) FROM t GROUP BY s", Seq(Agg))
+    assert(
+      IcebergVectorAdapter.adaptedDictionaryDecimalColumns() > before,
+      "expected the dictionary-encoded decimal columns to go through the lookup table"
+    )
+    // Under positional deletes the lane is built over the physical rows.
+    spark.sql(s"DELETE FROM ${IcebergTables.Db}.t_dict_dec WHERE i % 7 = 0")
+    checkVectorized("SELECT i, d7, d15 FROM t WHERE i % 2 = 0", Seq(Filter))
+    checkVectorized("SELECT s, sum(d7), max(d15) FROM t GROUP BY s", Seq(Agg))
+  }
+
   icebergTest("the prefetching converter wraps Iceberg's scan and converts its batches on the helper (#403)") {
     val Prefetch = classOf[VectorPrefetchScanExec]
     def prefetched(sql: String, ops: Class[_ <: SparkPlan]*): Unit = {
