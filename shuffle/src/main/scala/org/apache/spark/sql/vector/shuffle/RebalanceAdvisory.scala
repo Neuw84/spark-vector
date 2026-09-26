@@ -133,4 +133,42 @@ object RebalanceAdvisory {
     val factor = math.min(1.0, math.max(MinFactor, ours / spark))
     math.max(1L, math.round(size * factor))
   }
+
+  /** Bounds of [[mapSizeFactor]], so a mis-estimate cannot blow the sizes up or shrink them to nothing. */
+  val MaxMapSizeFactor = 16.0
+
+  /**
+   * The factor that puts an exchange's map output sizes -- our on-disk bytes, which AQE packs, splits
+   * and tests for skew against sizes set for Spark's shuffle -- on Spark's scale (#511): Spark's
+   * estimated on-disk bytes per row over ours. Spark's are the estimated `UnsafeRow` bytes per row
+   * ([[unsafeRowBytes]], or [[unsafeRowBytesWithStrings]] with measured string bytes) divided by
+   * `sparkCompression`, the compression expected of Spark's shuffle (TPC-DS 1 TB, 2026-09-26: 2.57
+   * over the whole run, 1.8-3.4 per query); `sparkCompression <= 0` assumes Spark's shuffle
+   * compresses as well as ours, and takes the uncompressed ratio. `rows`/`bytes` are what the
+   * exchange wrote (records and uncompressed `dataSize`), `onDisk` the sum of its map output sizes.
+   * Bounded to [1/16, 16]; `1.0` when anything is missing.
+   */
+  def mapSizeFactor(
+      schema: Seq[DataType],
+      rows: Long,
+      bytes: Long,
+      onDisk: Long,
+      sparkCompression: Double,
+      stringBytes: Option[Long] = None
+  ): Double = {
+    if (rows <= 0 || bytes <= 0 || onDisk <= 0) return 1.0
+    val oursRow = bytes.toDouble / rows
+    val sparkRow = stringBytes match {
+      case Some(s) if s >= 0 => unsafeRowBytesWithStrings(schema, s.toDouble / rows)
+      case _ => unsafeRowBytes(schema, oursRow)
+    }
+    val raw =
+      if (sparkCompression > 0) (sparkRow / sparkCompression) / (onDisk.toDouble / rows)
+      else sparkRow / oursRow
+    math.min(MaxMapSizeFactor, math.max(1.0 / MaxMapSizeFactor, raw))
+  }
+
+  /** `sizes` times `factor`, rounded; a non-empty partition stays non-empty. */
+  def scaleSizes(sizes: Array[Long], factor: Double): Array[Long] =
+    sizes.map(s => if (s <= 0) s else math.max(1L, math.round(s * factor)))
 }
