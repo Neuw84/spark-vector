@@ -114,8 +114,8 @@ class VectorPortedCometWindowSuite extends VectorQuerySuite {
   test("decimal sum/avg over a whole partition and a running ROWS frame") {
     // Whole-partition decimal sum, running sum (ROWS UNBOUNDED PRECEDING .. CURRENT ROW) and the
     // RANGE default are ours since #259. Each expression is pinned on its own so a fallback in one
-    // shape is visible and does not mask the others. (Decimal running AVG is a known gap -- see the
-    // ignored case below.)
+    // shape is visible and does not mask the others. (Decimal running AVG: the case below, ours
+    // since #513.)
     checkWindow("SELECT a, d, sum(d) OVER (PARTITION BY a) AS total FROM w")
     checkWindow(
       "SELECT a, b, d, sum(d) OVER (PARTITION BY a ORDER BY b, c ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_sum FROM w"
@@ -124,16 +124,11 @@ class VectorPortedCometWindowSuite extends VectorQuerySuite {
     checkWindow("SELECT a, b, d, sum(d) OVER (PARTITION BY a ORDER BY b) AS running FROM w")
   }
 
-  // Known limitation (see the PR body): a decimal AVG over a running ROWS frame, on a *native*
-  // decimal Parquet column, falls back. Spark rewrites a decimal avg to
-  // `cast(avg(UnscaledValue(d)) OVER (...) / scale as decimal(p,s))`, nesting the WindowExpression
-  // inside a Cast(Divide(...)) that VectorWindowPlanner's `Alias(WindowExpression(...), _)` matchers
-  // do not see through, so the whole operator stays Spark's with
-  // `window expression CAST((avg(unscaledvalue(d)) OVER (...) / 100.0) AS DECIMAL(...)) not supported`.
-  // A decimal running SUM (a bare WindowExpression) is ours, and so is a decimal avg whose input is a
-  // cast bigint in VectorWindowSuite; only this native-decimal running-avg shape falls back. Marked
-  // ignore, not fixed here (coverage-only PR).
-  ignore("BUG: decimal AVG over a running ROWS frame on a native decimal column falls back") {
+  // A decimal AVG over a running ROWS frame on a *native* decimal Parquet column: Spark rewrites it to
+  // `cast(avg(UnscaledValue(d)) OVER (...) / scale as decimal(p,s))`, which nests the WindowExpression
+  // inside a Cast(Divide(...)). This fell back until #513 taught VectorWindowPlanner to see through the
+  // scalar wrapper and compute it over the window column.
+  test("decimal AVG over a running ROWS frame on a native decimal column") {
     checkWindow(
       "SELECT a, b, d, avg(d) OVER (PARTITION BY a ORDER BY b, c ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_avg FROM w"
     )
