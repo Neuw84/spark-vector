@@ -68,10 +68,11 @@ public final class IcebergDvCommitBridge {
     }
 
     /**
-     * Whether the table's current partition spec is unpartitioned. The columnar DELETE operator only
-     * supports unpartitioned tables in this landing: for a partitioned spec the per-file partition
-     * tuple must be threaded through to Iceberg's commit, which is a later slice, so the strategy
-     * declines to Spark's own writer for partitioned tables.
+     * Whether the table's current partition spec is unpartitioned. The columnar
+     * DELETE operator only supports unpartitioned tables in this landing: for a
+     * partitioned spec the per-file partition tuple must be threaded through to
+     * Iceberg's commit, which is a later slice, so the strategy declines to
+     * Spark's own writer for partitioned tables.
      */
     public static boolean isUnpartitioned(org.apache.iceberg.Table table) {
         if (table == null) {
@@ -85,11 +86,13 @@ public final class IcebergDvCommitBridge {
     }
 
     /**
-     * Whether the table's current snapshot already carries delete files (positional, equality, or
-     * deletion vectors). This landing writes an append-only DV per touched data file and does NOT
-     * merge a previously-committed DV for that file (Iceberg rejects two DVs indexing the same data
-     * file), so the strategy declines when the table already has deletes and lets Spark's own writer
-     * handle the merge; repeated-delete DV merging is a later slice.
+     * Whether the table's current snapshot already carries delete files
+     * (positional, equality, or deletion vectors). This landing writes an
+     * append-only DV per touched data file and does NOT merge a
+     * previously-committed DV for that file (Iceberg rejects two DVs indexing
+     * the same data file), so the strategy declines when the table already has
+     * deletes and lets Spark's own writer handle the merge; repeated-delete DV
+     * merging is a later slice.
      */
     public static boolean hasCommittedDeletes(org.apache.iceberg.Table table) {
         if (table == null) {
