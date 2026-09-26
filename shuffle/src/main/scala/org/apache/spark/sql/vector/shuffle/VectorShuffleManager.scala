@@ -338,7 +338,8 @@ final class VectorShuffleWriter(
         None
       } else {
         val start = System.nanoTime()
-        val index = writer.finish(withFooter = false)
+        val sync = SparkEnv.get.conf.get(org.apache.spark.internal.config.SHUFFLE_SYNC)
+        val index = writer.finish(withFooter = false, sync = sync)
         val rawBytes = writer.rawBytes
         writer.close()
         lengths = index.lengths
