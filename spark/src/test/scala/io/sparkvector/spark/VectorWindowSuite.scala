@@ -377,4 +377,55 @@ class VectorWindowSuite extends VectorQuerySuite {
       assert(nodesOf[WindowExec](df).nonEmpty && nodesOf[VectorWindowExec](df).isEmpty, finalPlan(df).treeString)
     }
   }
+
+  test("decimal AVG over a running ROWS frame on a native decimal column equals Spark") {
+    // A NATIVE decimal Parquet column (not a cast expression): Spark rewrites its window avg to
+    // `cast(avg(UnscaledValue(d)) OVER (...) / scale as decimal(p,s))`, nesting the WindowExpression
+    // inside a Cast(Divide(...)) the planner now sees through (it computes the window column, then
+    // projects the wrapper). Decimals of several precisions, a null partition key and null values, a
+    // running ROWS frame and the RANGE default; the results must equal Spark's exactly.
+    val path = newTempPath("window/wd")
+    spark
+      .range(0, 4000)
+      .selectExpr(
+        "cast(id as int) as i",
+        "if(id % 10 = 0, null, concat('g', id % 40)) as g",
+        "cast(if(id % 13 = 0, null, (id % 1000) / 7.0) as decimal(10,2)) as d10",
+        "cast(if(id % 17 = 0, null, (id % 100000) / 3.0) as decimal(18,4)) as d18",
+        "cast(if(id % 7 = 0, null, (id % 500) / 11.0) as decimal(6,2)) as d6"
+      )
+      .repartition(3)
+      .write
+      .mode("overwrite")
+      .parquet(path)
+    spark.read.parquet(path).createOrReplaceTempView("wd")
+
+    // The gap: decimal avg over a running ROWS UNBOUNDED PRECEDING .. CURRENT ROW frame, decimal(10,2).
+    // The `cast(avg(UnscaledValue(d)) OVER (...) / scale as decimal)` wrapper is part of the window
+    // expression itself (Spark keeps it in the Window node), so the vector window operator produces
+    // the decimal column directly -- no separate projection is required.
+    checkWindow(
+      "SELECT i, g, d10, avg(d10) OVER (PARTITION BY g ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_avg FROM wd"
+    )
+    // Higher precision, and beside a decimal running SUM (a bare window expression) in one operator.
+    checkWindow(
+      "SELECT i, avg(d18) OVER (PARTITION BY g ORDER BY i ROWS UNBOUNDED PRECEDING) AS a18, sum(d18) OVER (PARTITION BY g ORDER BY i ROWS UNBOUNDED PRECEDING) AS s18 FROM wd"
+    )
+    // decimal(6,2), the RANGE default frame with ORDER BY (peers share the group's value).
+    checkWindow("SELECT i, avg(d6) OVER (PARTITION BY g ORDER BY i) AS a6 FROM wd")
+    // Whole-partition decimal avg (no ORDER BY) already worked; kept as the wrapper's identity edge.
+    checkWindow("SELECT i, avg(d10) OVER (PARTITION BY g) AS a FROM wd")
+    // No PARTITION BY: one partition across several held batches; a running decimal avg per row.
+    checkWindow(
+      "SELECT i, avg(d10) OVER (ORDER BY i ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM wd"
+    )
+    // A sliding decimal frame is still refused. On a native decimal column Spark's avg rewrite makes
+    // the window input `UnscaledValue(d)` -- not a bare column -- so the sliding path refuses it there
+    // (the sliding kernels read a column input); the window falls back to Spark.
+    checkFallback(
+      "SELECT i, avg(d10) OVER (PARTITION BY g ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS moving FROM wd",
+      Seq(Window),
+      "is not a column"
+    )
+  }
 }

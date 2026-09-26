@@ -386,16 +386,47 @@ class VectorPortedCometJoinSuite extends VectorQuerySuite {
     }
   }
 
-  // A LEFT OUTER broadcast nested loop join whose condition is the literal `true` (Comet's
-  // "BroadcastNestedLoopJoin LEFT OUTER without condition") falls back: the condition compiler refuses
-  // the bare boolean literal with `unsupported literal type boolean`, so the whole outer nested loop
-  // join stays Spark's -- even though a build-right LEFT OUTER BNLJ with a real condition is ours.
-  // This is a known engine limitation (see the PR body); a cross join / `count(*)` over the same
-  // `nl, nr` tables (no `ON true` in the plan) converts. Marked ignore, not fixed here.
-  ignore("BUG: LEFT OUTER broadcast nested loop join ON true falls back (unsupported literal type boolean)") {
+  // A boolean-literal join condition now compiles (ConstBoolExpr): `ON true` is every pair, `ON
+  // false` matches nothing (each preserved-side row null-padded once for an outer join). Comet's
+  // "BroadcastNestedLoopJoin LEFT OUTER without condition" -- the shape that used to fall back with
+  // `unsupported literal type boolean` -- is the LEFT OUTER `ON true` case here.
+  //
+  // `ON true` always keeps a nested loop join in the plan; `ON false` is checked for row-equality
+  // only, because Spark's optimizer may prune a `false` join to an empty relation with no join
+  // operator (in which case there is nothing for us to accelerate, and nothing that fell back).
+  test("broadcast nested loop join: literal true condition (inner, left outer, right outer, semi)") {
     withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1") {
+      // LEFT OUTER, build-right: the case Comet names, previously ignored.
       checkNested("SELECT /*+ BROADCAST(nr) */ nl.k, nr.v FROM nl LEFT JOIN nr ON true")
+      // INNER `ON true` is the cross product.
+      checkNested("SELECT /*+ BROADCAST(nr) */ nl.k, nr.v FROM nl JOIN nr ON true")
+      // RIGHT OUTER with the broadcast (build) side on the left: the swap path.
+      checkNested("SELECT /*+ BROADCAST(nl) */ nl.k, nr.v FROM nl RIGHT JOIN nr ON true")
+      // Left semi `ON true` reduces (in Spark) to an existence check that keeps every left row when
+      // nr is non-empty; Spark prunes the join to a bare scan, so no operator is asserted -- only
+      // that the vector path agrees on the rows.
+      checkVectorized("SELECT /*+ BROADCAST(nr) */ nl.k FROM nl LEFT SEMI JOIN nr ON true", Seq.empty)
     }
+  }
+
+  test("broadcast nested loop join: literal false condition produces Spark-equal rows") {
+    withConf("spark.sql.autoBroadcastJoinThreshold" -> "-1") {
+      // No operator asserted: Spark may fold a `false` join to EmptyRelation. What matters is that
+      // when the join does run (ConstBoolExpr(false) as the residual) the rows match Spark exactly:
+      // an inner/semi join is empty, a left outer null-pads every left row, an anti keeps them all.
+      checkVectorized("SELECT /*+ BROADCAST(nr) */ nl.k, nr.v FROM nl LEFT JOIN nr ON false", Seq.empty)
+      checkVectorized("SELECT /*+ BROADCAST(nr) */ nl.k, nr.v FROM nl JOIN nr ON false", Seq.empty)
+      checkVectorized("SELECT /*+ BROADCAST(nl) */ nl.k, nr.v FROM nl RIGHT JOIN nr ON false", Seq.empty)
+      checkVectorized("SELECT /*+ BROADCAST(nr) */ nl.k FROM nl LEFT ANTI JOIN nr ON false", Seq.empty)
+    }
+  }
+
+  // A bare boolean literal is also a valid filter predicate and a projected value now. Spark prunes
+  // a `WHERE true`, so no Filter node is asserted; what is checked is that the plugin path agrees
+  // with Spark on the rows (and, for the projection, on the constant column).
+  test("boolean literal as a filter predicate and a projected column") {
+    checkVectorized("SELECT k, v FROM nl WHERE true", Seq.empty)
+    checkVectorized("SELECT k, true AS flag, false AS off FROM nl", Seq.empty)
   }
 
   test("broadcast nested loop joins that fall back: full outer, and a preserved broadcast side") {
