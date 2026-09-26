@@ -1,32 +1,27 @@
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Apache Spark vs spark-vector vs DataFusion Comet on TPC-DS 1 TB</title>
+---
+layout: default
+title: 'Apache Spark vs spark-vector vs DataFusion Comet on TPC-DS 1 TB'
+---
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-:root { --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --card:#f9fafb; --accent:#2563eb; }
-@media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --bg:#0f172a; --card:#1e293b; } }
-body { font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--fg); background:var(--bg); margin:0; }
-main { max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }
-h1 { font-size: 1.9rem; margin: .2em 0 .3em; } h2 { margin-top: 2.2em; border-bottom: 1px solid var(--line); padding-bottom: .3em; } h3 { margin-top: 1.6em; }
-.lede { color: var(--muted); }
-.tldr { background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }
-.cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 1em 0; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
-.card .n { font-size: 1.7rem; font-weight: 700; } .card .l { color: var(--muted); font-size: .9rem; }
-table { border-collapse: collapse; width: 100%; margin: .8em 0 1.4em; font-size: .93rem; }
-th, td { border-bottom: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; } th { background: var(--card); }
-td:nth-child(n+2):not(:last-child) { font-variant-numeric: tabular-nums; }
-.kv td:first-child { font-weight: 600; white-space: nowrap; }
-pre { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: .85rem; }
-.chart { position: relative; height: 340px; margin: 1em 0 2em; } .chart.tall { height: 420px; }
-.two { display:grid; grid-template-columns: 1fr 1fr; gap: 24px; } @media (max-width: 860px) { .two { grid-template-columns: 1fr; } }
-details summary { cursor: pointer; font-weight: 600; margin: 1em 0; }
-.foot { color: var(--muted); font-size: .85rem; margin-top: 3em; }
-a { color: var(--accent); }
-</style></head>
-<body><main>
+/* Benchmark-page components. Scoped under .bench so they never restyle the site
+   shell; colours come from the site theme variables (light/dark toggle works). */
+.doc:has(.bench) { max-width: none; }
+.bench .lede { color: var(--muted); }
+.bench .tldr { background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }
+.bench .cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 1em 0; }
+.bench .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.bench .card .n { font-size: 1.7rem; font-weight: 700; } .bench .card .l { color: var(--muted); font-size: .9rem; }
+.bench table td:nth-child(n+2):not(:last-child) { font-variant-numeric: tabular-nums; }
+.bench table.kv td:first-child { font-weight: 600; white-space: nowrap; }
+.bench .chart { position: relative; height: 340px; margin: 1em 0 2em; } .bench .chart.tall { height: 420px; }
+.bench .two { display:grid; grid-template-columns: 1fr 1fr; gap: 24px; } @media (max-width: 860px) { .bench .two { grid-template-columns: 1fr; } }
+.bench details summary { cursor: pointer; font-weight: 600; margin: 1em 0; }
+.bench .foot { color: var(--muted); font-size: .85rem; margin-top: 3em; }
+</style>
+<div class="bench">
 <h1>Apache Spark vs spark-vector vs DataFusion Comet on TPC-DS 1 TB</h1>
-<p class="lede"><a href="https://github.com/Neuw84/spark-vector">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
+<p class="lede"><a href="https://github.com/spark-vector/spark-vector">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
 <a href="https://github.com/apache/datafusion-comet">Apache DataFusion Comet</a> offloads the same operators to a native Rust engine. This page
 compares both against plain Apache Spark on the TPC-DS 1 TB workload on Amazon EKS, all three on identical hardware, data and Spark settings.</p>
@@ -54,7 +49,7 @@ Every engine returned Spark's results (two footnoted exceptions).</div>
 S3 data with the same Spark settings; only the execution engine and its own memory split differ (every engine has 50 GB per executor; where it
 puts them follows where it allocates). Each query ran once after the plan was compiled; the time is the wall-clock of the query's execution as the
 runner measures it. The result files, event logs and every study behind a number are in
-<a href="https://github.com/Neuw84/spark-vector/blob/main/docs/results.md">docs/results.md</a>.</p>
+<a href="{{ '/results.html' | relative_url }}">Benchmark results</a>.</p>
 <h3>Test environment</h3>
 <table class="kv"><thead><tr><th>Component</th><th>Configuration</th></tr></thead><tbody><tr><td>Dataset</td><td>TPC-DS scale factor 1000 (1 TB), Parquet on Amazon S3 (103 query variants, one measured iteration each, no warm-up)</td></tr><tr><td>Cluster</td><td>Amazon EKS 1.36; 9 x m5.4xlarge (16 vCPU, 64 GB, x86-64 with AVX-512), 20 GB root volume; one node group, the driver on the ninth node</td></tr><tr><td>Executors</td><td>8 executors x 13 cores x 50 GB each (Spark: 20 GB heap / 30 GB overhead; spark-vector: 30 GB heap / 20 GB overhead; Comet: 20 GB heap / 6 GB overhead / 24 GB off-heap); driver 2 cores x 6 GB</td></tr><tr><td>Storage</td><td>Amazon S3 through Hadoop 3.4.3 S3A with the Analytics Accelerator input stream (the default in 3.4.3)</td></tr></tbody></table>
 <h3>Versions</h3>
@@ -112,7 +107,7 @@ q4 60.1 against 90.1, q95 57.5 against 69.3, q14a/b by about 12 s each -- its na
 and off-heap execution (GC 0.02 h against Spark's 0.59 and spark-vector's 0.41) pay on the queries that are read-bound.
 spark-vector's one heavy loss to Spark is q88 (141.7 against 125.5; Comet 158.1): eight scans of <code>store_sales</code>
 through Spark's own Parquet reader, where the reader's per-file request latency is the cost and the operators have little to add; its other regressions are short queries (2-9 s)
-where the columnar boundary and shuffle set-up outweigh the operator gains. Each is analysed in <a href="https://github.com/Neuw84/spark-vector/blob/main/docs/results.md">docs/results.md</a>.</p>
+where the columnar boundary and shuffle set-up outweigh the operator gains. Each is analysed in <a href="{{ '/results.html' | relative_url }}">Benchmark results</a>.</p>
 
 <h3>Notes</h3>
 <ul><li>Every engine returned Spark&#x27;s row counts and checksums on every query except q65 (its result has ties, ordered differently by every engine) and, for Comet, q64 (0 rows against 12,185 -- a stale dynamic-pruning value, apache/datafusion-comet#6133).</li><li>The four legs ran in one window on the same nodes, one after another (Spark, spark-vector, Comet), each alone on the cluster; the AQE minimum of 208 partitions keeps the sort stages of the window queries wide (measured: Spark -4%, Comet -3%, spark-vector q67 -12%, the rest inside the run-to-run band).</li><li>Spark&#x27;s memory split is the one that completes: at 30 GB heap / 20 GB overhead Spark loses q23b, q24a and q24b to node-disk evictions during q23b&#x27;s 503 GB spill; per query the heavier heap is 2-3% faster where it completes. Every split is measured in docs/results.md.</li></ul>
@@ -124,13 +119,13 @@ where the columnar boundary and shuffle set-up outweigh the operator gains. Each
 
 <h2 id="running">Running the benchmark</h2>
 <p>The cluster runner, the Spark-on-Kubernetes manifests, the image and the data generation are in
-<a href="https://github.com/Neuw84/spark-vector/blob/main/benchmarks/k8s/README.md">benchmarks/k8s/README.md</a>: <code>run-matrix.sh</code> renders a <code>SparkApplication</code> per engine configuration
+<a href="https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md">the benchmark runner's README</a>: <code>run-matrix.sh</code> renders a <code>SparkApplication</code> per engine configuration
 (<code>spark</code>, <code>vector-shuffle</code>, <code>comet</code>, ...) and writes one JSON-lines result file per run; this page is rendered from three of them by
 <code>benchmarks/scripts/render-benchmark-page.py</code>.</p>
 
 <p class="foot">TPC-DS is a benchmark of the Transaction Processing Performance Council; these results are not audited TPC results and are not comparable to
 published TPC-DS results. Times are the median of one measured iteration per query on the cluster described above; run-to-run variation on the heavy queries is a few percent.</p>
-</main>
+</div>
 <script>
 const D = {"queries": ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10", "q11", "q12", "q13", "q14a", "q14b", "q15", "q16", "q17", "q18", "q19", "q20", "q21", "q22", "q23a", "q23b", "q24a", "q24b", "q25", "q26", "q27", "q28", "q29", "q30", "q31", "q32", "q33", "q34", "q35", "q36", "q37", "q38", "q39a", "q39b", "q40", "q41", "q42", "q43", "q44", "q45", "q46", "q47", "q48", "q49", "q50", "q51", "q52", "q53", "q54", "q55", "q56", "q57", "q58", "q59", "q60", "q61", "q62", "q63", "q64", "q65", "q66", "q67", "q68", "q69", "q70", "q71", "q72", "q73", "q74", "q75", "q76", "q77", "q78", "q79", "q80", "q81", "q82", "q83", "q84", "q85", "q86", "q87", "q88", "q89", "q90", "q91", "q92", "q93", "q94", "q95", "q96", "q97", "q98", "q99"], "series": {"spark": [13.05, 51.44, 3.95, 91.18, 46.01, 9.78, 6.23, 7.59, 92.8, 7.53, 44.14, 2.33, 7.92, 102.51, 94.63, 8.81, 30.84, 12.14, 8.68, 5.33, 2.16, 1.76, 8.53, 210.57, 291.12, 109.99, 102.67, 9.4, 3.76, 6.23, 114.02, 25.09, 18.69, 14.02, 1.47, 4.35, 5.82, 18.5, 5.62, 7.41, 33.54, 5.75, 5.96, 8.33, 0.75, 1.61, 5.57, 36.81, 7.84, 8.86, 12.94, 8.85, 44.4, 68.17, 24.48, 1.54, 4.78, 7.15, 1.75, 3.82, 7.11, 3.01, 35.76, 3.49, 5.13, 22.96, 5.13, 92.67, 29.66, 9.54, 126.52, 6.74, 7.2, 11.1, 3.18, 29.62, 5.32, 43.65, 76.83, 46.26, 2.78, 123.3, 5.7, 48.29, 18.0, 20.59, 1.67, 19.43, 22.67, 5.77, 31.21, 125.52, 5.72, 35.07, 4.16, 2.4, 136.62, 59.72, 106.39, 18.52, 31.11, 3.72, 8.47], "vector": [13.22, 42.21, 4.06, 90.13, 24.36, 2.78, 6.91, 4.59, 90.3, 6.99, 47.56, 2.87, 7.99, 88.59, 82.77, 5.55, 20.9, 7.17, 8.06, 3.06, 2.29, 1.62, 7.61, 117.57, 124.79, 110.87, 108.24, 10.92, 3.2, 6.17, 113.69, 9.84, 14.43, 12.52, 0.91, 3.83, 4.5, 11.44, 7.79, 6.95, 21.18, 5.12, 4.41, 6.22, 0.62, 1.17, 5.46, 35.06, 4.03, 7.06, 14.34, 7.03, 38.93, 37.8, 14.61, 1.05, 4.31, 4.07, 1.36, 3.41, 8.5, 2.74, 33.02, 3.92, 3.74, 22.91, 4.45, 51.44, 23.39, 9.86, 72.88, 3.68, 4.45, 9.83, 3.01, 32.32, 2.77, 39.51, 69.31, 38.66, 1.89, 79.25, 5.39, 39.11, 14.36, 19.29, 1.56, 17.96, 21.92, 5.68, 20.3, 141.72, 5.97, 36.89, 2.49, 2.14, 65.92, 57.33, 69.26, 19.76, 14.29, 2.69, 14.43], "comet": [12.29, 42.84, 3.84, 60.09, 31.17, 4.96, 6.17, 3.65, 78.06, 6.71, 35.61, 1.83, 7.71, 76.12, 69.66, 4.39, 20.86, 9.31, 6.67, 2.75, 1.57, 1.23, 3.75, 131.65, 153.39, 101.12, 97.68, 6.52, 2.99, 6.59, 102.54, 14.76, 12.69, 13.93, 1.71, 2.37, 3.95, 13.9, 6.47, 6.4, 22.25, 3.69, 2.9, 13.91, 0.53, 1.36, 4.57, 34.01, 5.05, 8.09, 10.28, 6.3, 47.45, 54.37, 13.55, 1.08, 4.68, 6.32, 1.75, 1.79, 5.23, 3.41, 35.68, 2.36, 2.82, 25.13, 4.25, 56.25, 15.49, 9.49, 60.7, 3.35, 5.13, 12.1, 3.37, 34.09, 2.72, 30.97, 73.28, 43.45, 2.55, 74.55, 4.5, 40.37, 11.97, 17.94, 1.22, 17.22, 18.36, 5.05, 19.0, 158.06, 20.17, 34.05, 1.81, 1.76, 85.37, 57.92, 57.51, 16.94, 13.64, 2.27, 8.37]}, "labels": {"spark": "Apache Spark 4.1.3", "vector": "spark-vector (plugin + Flight shuffle)", "comet": "DataFusion Comet 1.0.0"}, "colors": {"spark": "#6b7280", "vector": "#2563eb", "comet": "#f59e0b"}, "totals": {"spark": 3308.7, "vector": 2556.5, "comet": 2513.7}};
 const opts = (title, yTitle, extra={}) => Object.assign({
@@ -151,4 +146,3 @@ new Chart(document.getElementById('speedup'), { type: 'line',
     data: D.queries.map((q, i) => +(D.series.spark[i] / D.series[e][i]).toFixed(3)) })) },
   options: opts('Speedup over Spark (log scale; 1 = Spark)', 'x faster than Spark', { scales: { y: { type: 'logarithmic', min: 0.4, max: 4, title: { display: true, text: 'x faster than Spark' } } } }) });
 </script>
-</body></html>

@@ -65,11 +65,11 @@ DEFAULT_META = {
         "The two legs ran one after another on the same nodes, each alone on the cluster, with the settings of the published x86 run -- only the instance type and the image's architecture differ; the x86 numbers are that run's (Comet is left out here).",
         "coalescePartitions.minPartitionNum=208 is kept so the two architectures compare; it is deprecated in Spark 3.2+, and runs after this one leave it unset.",
     ],
-    "results_doc": "https://github.com/Neuw84/spark-vector/blob/main/docs/results.md",
-    "repo": "https://github.com/Neuw84/spark-vector",
-    "run_doc": "https://github.com/Neuw84/spark-vector/blob/main/benchmarks/k8s/README.md",
+    "results_doc": "https://github.com/spark-vector/spark-vector/blob/main/docs/results.md",
+    "repo": "https://github.com/spark-vector/spark-vector",
+    "run_doc": "https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md",
     "x86_page": "tpcds-1tb.html",
-    "issue": "https://github.com/Neuw84/spark-vector/issues/253",
+    "issue": "https://github.com/spark-vector/spark-vector/issues/253",
 }
 
 COLORS = {"spark": "#6b7280", "vector": "#2563eb"}
@@ -164,33 +164,28 @@ def main():
     csum = ("every query" if not checksum_diff else
             f"every query except {', '.join(checksum_diff)} (ties in the result, ordered differently by each engine)")
 
-    page = f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(meta["title"])}</title>
+    page = f"""---
+layout: default
+title: {json.dumps(meta["title"])}
+---
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-:root {{ --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --card:#f9fafb; --accent:#2563eb; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --bg:#0f172a; --card:#1e293b; }} }}
-body {{ font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--fg); background:var(--bg); margin:0; }}
-main {{ max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }}
-h1 {{ font-size: 1.9rem; margin: .2em 0 .3em; }} h2 {{ margin-top: 2.2em; border-bottom: 1px solid var(--line); padding-bottom: .3em; }} h3 {{ margin-top: 1.6em; }}
-.lede {{ color: var(--muted); }}
-.tldr {{ background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }}
-.cards {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 1em 0; }}
-.card {{ background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }}
-.card .n {{ font-size: 1.7rem; font-weight: 700; }} .card .l {{ color: var(--muted); font-size: .9rem; }}
-table {{ border-collapse: collapse; width: 100%; margin: .8em 0 1.4em; font-size: .93rem; }}
-th, td {{ border-bottom: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }} th {{ background: var(--card); }}
-td:nth-child(n+2):not(:last-child) {{ font-variant-numeric: tabular-nums; }}
-.kv td:first-child {{ font-weight: 600; white-space: nowrap; }}
-pre {{ background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: .85rem; }}
-.chart {{ position: relative; height: 340px; margin: 1em 0 2em; }} .chart.tall {{ height: 420px; }}
-.two {{ display:grid; grid-template-columns: 1fr 1fr; gap: 24px; }} @media (max-width: 860px) {{ .two {{ grid-template-columns: 1fr; }} }}
-details summary {{ cursor: pointer; font-weight: 600; margin: 1em 0; }}
-.foot {{ color: var(--muted); font-size: .85rem; margin-top: 3em; }}
-a {{ color: var(--accent); }}
-</style></head>
-<body><main>
+/* Benchmark-page components. Scoped under .bench so they never restyle the site
+   shell; colours come from the site theme variables (light/dark toggle works). */
+.doc:has(.bench) {{ max-width: none; }}
+.bench .lede {{ color: var(--muted); }}
+.bench .tldr {{ background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }}
+.bench .cards {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 1em 0; }}
+.bench .card {{ background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }}
+.bench .card .n {{ font-size: 1.7rem; font-weight: 700; }} .bench .card .l {{ color: var(--muted); font-size: .9rem; }}
+.bench table td:nth-child(n+2):not(:last-child) {{ font-variant-numeric: tabular-nums; }}
+.bench table.kv td:first-child {{ font-weight: 600; white-space: nowrap; }}
+.bench .chart {{ position: relative; height: 340px; margin: 1em 0 2em; }} .bench .chart.tall {{ height: 420px; }}
+.bench .two {{ display:grid; grid-template-columns: 1fr 1fr; gap: 24px; }} @media (max-width: 860px) {{ .bench .two {{ grid-template-columns: 1fr; }} }}
+.bench details summary {{ cursor: pointer; font-weight: 600; margin: 1em 0; }}
+.bench .foot {{ color: var(--muted); font-size: .85rem; margin-top: 3em; }}
+</style>
+<div class="bench">
 <h1>{html.escape(meta["title"])}</h1>
 <p class="lede"><a href="{meta["repo"]}">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
@@ -269,13 +264,13 @@ was compiled; the time is the wall-clock of the query's execution as the runner 
 
 <h2 id="running">Running the benchmark</h2>
 <p>The cluster runner, the Spark-on-Kubernetes manifests, the image and the data generation are in
-<a href="{meta["run_doc"]}">benchmarks/k8s/README.md</a>; on Graviton the image builds for arm64 on an arm64 node and the runs select the arm64 node group.
+<a href="{meta["run_doc"]}">the benchmark runner's README</a>; on Graviton the image builds for arm64 on an arm64 node and the runs select the arm64 node group.
 <code>run-matrix.sh</code> writes one JSON-lines result file per run; this page is rendered from two of them, with the x86 page as the reference,
 by <code>benchmarks/scripts/render-graviton-page.py</code>.</p>
 
 <p class="foot">TPC-DS is a benchmark of the Transaction Processing Performance Council; these results are not audited TPC results and are not comparable to
 published TPC-DS results. Times are one measured iteration per query on the cluster described above; run-to-run variation on the heavy queries is a few percent.</p>
-</main>
+</div>
 <script>
 const D = {json.dumps(chart_data)};
 const opts = (title, yTitle, extra={{}}) => Object.assign({{
@@ -301,7 +296,6 @@ new Chart(document.getElementById('archspeed'), {{ type: 'line',
   options: opts('spark-vector speedup over Spark per query, Graviton4 and x86 (log scale; 1 = Spark)', 'x faster than Spark',
     {{ scales: {{ y: {{ type: 'logarithmic', min: 0.4, max: 4, title: {{ display: true, text: 'x faster than Spark' }} }} }} }}) }});
 </script>
-</body></html>
 """
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(page)

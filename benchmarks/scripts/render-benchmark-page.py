@@ -58,9 +58,9 @@ DEFAULT_META = {
         "The four legs ran in one window on the same nodes, one after another (Spark, spark-vector, Comet), each alone on the cluster; the AQE minimum of 208 partitions keeps the sort stages of the window queries wide (measured: Spark -4%, Comet -3%, spark-vector q67 -12%, the rest inside the run-to-run band).",
         "Spark's memory split is the one that completes: at 30 GB heap / 20 GB overhead Spark loses q23b, q24a and q24b to node-disk evictions during q23b's 503 GB spill; per query the heavier heap is 2-3% faster where it completes. Every split is measured in docs/results.md.",
     ],
-    "results_doc": "https://github.com/Neuw84/spark-vector/blob/main/docs/results.md",
-    "repo": "https://github.com/Neuw84/spark-vector",
-    "run_doc": "https://github.com/Neuw84/spark-vector/blob/main/benchmarks/k8s/README.md",
+    "results_doc": "https://github.com/spark-vector/spark-vector/blob/main/docs/results.md",
+    "repo": "https://github.com/spark-vector/spark-vector",
+    "run_doc": "https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md",
 }
 
 ENGINES = [("spark", "Apache Spark 4.1.3", "#6b7280"), ("vector", "spark-vector (plugin + Flight shuffle)", "#2563eb"), ("comet", "DataFusion Comet 1.0.0", "#f59e0b")]
@@ -165,33 +165,28 @@ def main():
     conf_common = "\n".join(meta["common_conf"]); conf_v = "\n".join(meta["vector_conf"]); conf_c = "\n".join(meta["comet_conf"])
     notes = "".join(f"<li>{html.escape(x)}</li>" for x in meta["notes"])
 
-    page = f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(meta["title"])}</title>
+    page = f"""---
+layout: default
+title: {json.dumps(meta["title"])}
+---
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-:root {{ --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --card:#f9fafb; --accent:#2563eb; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --bg:#0f172a; --card:#1e293b; }} }}
-body {{ font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--fg); background:var(--bg); margin:0; }}
-main {{ max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }}
-h1 {{ font-size: 1.9rem; margin: .2em 0 .3em; }} h2 {{ margin-top: 2.2em; border-bottom: 1px solid var(--line); padding-bottom: .3em; }} h3 {{ margin-top: 1.6em; }}
-.lede {{ color: var(--muted); }}
-.tldr {{ background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }}
-.cards {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 1em 0; }}
-.card {{ background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }}
-.card .n {{ font-size: 1.7rem; font-weight: 700; }} .card .l {{ color: var(--muted); font-size: .9rem; }}
-table {{ border-collapse: collapse; width: 100%; margin: .8em 0 1.4em; font-size: .93rem; }}
-th, td {{ border-bottom: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }} th {{ background: var(--card); }}
-td:nth-child(n+2):not(:last-child) {{ font-variant-numeric: tabular-nums; }}
-.kv td:first-child {{ font-weight: 600; white-space: nowrap; }}
-pre {{ background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: .85rem; }}
-.chart {{ position: relative; height: 340px; margin: 1em 0 2em; }} .chart.tall {{ height: 420px; }}
-.two {{ display:grid; grid-template-columns: 1fr 1fr; gap: 24px; }} @media (max-width: 860px) {{ .two {{ grid-template-columns: 1fr; }} }}
-details summary {{ cursor: pointer; font-weight: 600; margin: 1em 0; }}
-.foot {{ color: var(--muted); font-size: .85rem; margin-top: 3em; }}
-a {{ color: var(--accent); }}
-</style></head>
-<body><main>
+/* Benchmark-page components. Scoped under .bench so they never restyle the site
+   shell; colours come from the site theme variables (light/dark toggle works). */
+.doc:has(.bench) {{ max-width: none; }}
+.bench .lede {{ color: var(--muted); }}
+.bench .tldr {{ background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }}
+.bench .cards {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 1em 0; }}
+.bench .card {{ background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }}
+.bench .card .n {{ font-size: 1.7rem; font-weight: 700; }} .bench .card .l {{ color: var(--muted); font-size: .9rem; }}
+.bench table td:nth-child(n+2):not(:last-child) {{ font-variant-numeric: tabular-nums; }}
+.bench table.kv td:first-child {{ font-weight: 600; white-space: nowrap; }}
+.bench .chart {{ position: relative; height: 340px; margin: 1em 0 2em; }} .bench .chart.tall {{ height: 420px; }}
+.bench .two {{ display:grid; grid-template-columns: 1fr 1fr; gap: 24px; }} @media (max-width: 860px) {{ .bench .two {{ grid-template-columns: 1fr; }} }}
+.bench details summary {{ cursor: pointer; font-weight: 600; margin: 1em 0; }}
+.bench .foot {{ color: var(--muted); font-size: .85rem; margin-top: 3em; }}
+</style>
+<div class="bench">
 <h1>{html.escape(meta["title"])}</h1>
 <p class="lede"><a href="{meta["repo"]}">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
@@ -225,7 +220,7 @@ Every engine returned Spark's results (two footnoted exceptions).</div>
 S3 data with the same Spark settings; only the execution engine and its own memory split differ (every engine has 50 GB per executor; where it
 puts them follows where it allocates). Each query ran once after the plan was compiled; the time is the wall-clock of the query's execution as the
 runner measures it. The result files, event logs and every study behind a number are in
-<a href="{meta["results_doc"]}">docs/results.md</a>.</p>
+<a href="{{{{ '/results.html' | relative_url }}}}">Benchmark results</a>.</p>
 <h3>Test environment</h3>
 {env}
 <h3>Versions</h3>
@@ -269,7 +264,7 @@ q4 {fmt_s(C["q4"]["medianMs"])} against {fmt_s(V["q4"]["medianMs"])}, q95 {fmt_s
 and off-heap execution (GC {gc["comet"]:.2f} h against Spark's {gc["spark"]:.2f} and spark-vector's {gc["vector"]:.2f}) pay on the queries that are read-bound.
 spark-vector's one heavy loss to Spark is q88 ({fmt_s(V["q88"]["medianMs"])} against {fmt_s(S["q88"]["medianMs"])}; Comet {fmt_s(C["q88"]["medianMs"])}): eight scans of <code>store_sales</code>
 through Spark's own Parquet reader, where the reader's per-file request latency is the cost and the operators have little to add; its other regressions are short queries (2-9 s)
-where the columnar boundary and shuffle set-up outweigh the operator gains. Each is analysed in <a href="{meta["results_doc"]}">docs/results.md</a>.</p>
+where the columnar boundary and shuffle set-up outweigh the operator gains. Each is analysed in <a href="{{{{ '/results.html' | relative_url }}}}">Benchmark results</a>.</p>
 
 <h3>Notes</h3>
 <ul>{notes}</ul>
@@ -281,13 +276,13 @@ where the columnar boundary and shuffle set-up outweigh the operator gains. Each
 
 <h2 id="running">Running the benchmark</h2>
 <p>The cluster runner, the Spark-on-Kubernetes manifests, the image and the data generation are in
-<a href="{meta["run_doc"]}">benchmarks/k8s/README.md</a>: <code>run-matrix.sh</code> renders a <code>SparkApplication</code> per engine configuration
+<a href="{meta["run_doc"]}">the benchmark runner's README</a>: <code>run-matrix.sh</code> renders a <code>SparkApplication</code> per engine configuration
 (<code>spark</code>, <code>vector-shuffle</code>, <code>comet</code>, ...) and writes one JSON-lines result file per run; this page is rendered from three of them by
 <code>benchmarks/scripts/render-benchmark-page.py</code>.</p>
 
 <p class="foot">TPC-DS is a benchmark of the Transaction Processing Performance Council; these results are not audited TPC results and are not comparable to
 published TPC-DS results. Times are the median of one measured iteration per query on the cluster described above; run-to-run variation on the heavy queries is a few percent.</p>
-</main>
+</div>
 <script>
 const D = {json.dumps(chart_data)};
 const opts = (title, yTitle, extra={{}}) => Object.assign({{
@@ -308,7 +303,6 @@ new Chart(document.getElementById('speedup'), {{ type: 'line',
     data: D.queries.map((q, i) => +(D.series.spark[i] / D.series[e][i]).toFixed(3)) }})) }},
   options: opts('Speedup over Spark (log scale; 1 = Spark)', 'x faster than Spark', {{ scales: {{ y: {{ type: 'logarithmic', min: 0.4, max: 4, title: {{ display: true, text: 'x faster than Spark' }} }} }} }}) }});
 </script>
-</body></html>
 """
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(page)
