@@ -84,6 +84,23 @@ class ColumnarDvWriterSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("eligibility: v3 tables are DV-eligible, v2 tables decline") {
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.db")
+    spark.sql("DROP TABLE IF EXISTS ice.db.elig_v3")
+    spark.sql("DROP TABLE IF EXISTS ice.db.elig_v2")
+    spark.sql(
+      "CREATE TABLE ice.db.elig_v3 (id BIGINT) USING iceberg TBLPROPERTIES ('format-version'='3', 'write.delete.mode'='merge-on-read')"
+    )
+    spark.sql(
+      "CREATE TABLE ice.db.elig_v2 (id BIGINT) USING iceberg TBLPROPERTIES ('format-version'='2', 'write.delete.mode'='merge-on-read')"
+    )
+    val v3 = Spark3Util.loadIcebergTable(spark, "ice.db.elig_v3")
+    val v2 = Spark3Util.loadIcebergTable(spark, "ice.db.elig_v2")
+    assert(org.apache.iceberg.spark.source.IcebergDvCommitBridge.isDvEligible(v3), "v3 must be DV-eligible")
+    assert(!org.apache.iceberg.spark.source.IcebergDvCommitBridge.isDvEligible(v2), "v2 must decline")
+    assert(!org.apache.iceberg.spark.source.IcebergDvCommitBridge.isDvEligible(null), "null must decline")
+  }
+
   test("end-to-end: a DV written by ColumnarDvWriter commits via RowDelta and reads back") {
     val t = "ice.db.dvbridge_t"
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.db")

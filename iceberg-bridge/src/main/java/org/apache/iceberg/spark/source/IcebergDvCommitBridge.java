@@ -45,6 +45,29 @@ public final class IcebergDvCommitBridge {
     private IcebergDvCommitBridge() {}
 
     /**
+     * Whether a target Iceberg table is the columnar DV writer's kind: format
+     * version &ge; 3, where positional deletes are encoded as deletion vectors
+     * (Puffin) rather than positional-delete Parquet files. This is the
+     * public-API stand-in for Iceberg's package-private {@code
+     * Context.useDVs()} (which is {@code deleteFileFormat == PUFFIN}, and
+     * Iceberg selects PUFFIN exactly for v3): the plugin's planner strategy
+     * checks it on the target table of a logical {@code WriteDelta}, and
+     * declines to Spark's own {@code WriteDeltaExec} (with a printed reason)
+     * for v2 or any non-Iceberg table. Reading the format version needs no
+     * private access.
+     */
+    public static boolean isDvEligible(org.apache.iceberg.Table table) {
+        if (table == null) {
+            return false;
+        }
+        try {
+            return org.apache.iceberg.TableUtil.formatVersion(table) >= 3;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
      * Wraps a {@link DeleteWriteResult} (the output of the columnar DV writer's
      * {@code close()}) as the {@link WriterCommitMessage} Iceberg's {@code
      * PositionDeltaBatchWrite.commit(...)} expects for a delete-only task. The

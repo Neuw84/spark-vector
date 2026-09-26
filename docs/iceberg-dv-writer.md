@@ -101,15 +101,28 @@ optional artifact.
 ## Slices (option B path)
 
 1. **Profile split** — *done, this document + `DvWriteProfileSuite`.*
-2. **`iceberg-bridge` module skeleton** — optional module compiled against Iceberg; handles to
-   `BaseDVFileWriter`, `PositionDeleteIndex`, `OutputFileFactory`, and the commit-result assembly.
-   Unit test: build an empty DV, commit via `RowDelta`, read back with Spark.
-3. **Columnar DV build** — from a batch's `_file`/`_pos` lanes, per run of equal `_file`, fill a
-   `PositionDeleteIndex`. Differential test: our bitmap equals Iceberg's per-row-built index.
-4. **`VectorWriteDeltaExec` (v3, delete-only first)** — the planner strategy, gated on `useDVs()`;
-   inserts still via Iceberg's appender. Declines to Spark's writer for v2.
-5. **Insert/update path via Iceberg's appender** — data rows through Iceberg's existing appender so
-   full MERGE works on v3; verify commit and row lineage.
+2. **`iceberg-bridge` module skeleton** — *done.* Optional module compiled against Iceberg under
+   `-Piceberg`, gated in the parent pom like `spark-sql-tests`. `IcebergDvCommitBridge` (package
+   `org.apache.iceberg.spark.source`) assembles the per-task `WriterCommitMessage` via the
+   package-private `DeltaTaskCommit` constructors. Bridge test: build a DV, commit via `RowDelta`,
+   read back — passes.
+3. **Columnar DV build** — *done.* `ColumnarDvWriter` fills a `PositionDeleteIndex` per data file from
+   a run of positions (`PositionDeleteIndexFactory`, in `org.apache.iceberg.deletes` to reach the
+   mutable `BitmapPositionDeleteIndex`) and drives Iceberg's public `BaseDVFileWriter`. Differential
+   test: order-independent, cardinality == distinct positions, membership holds, empty set → empty
+   index — passes.
+4. **`VectorWriteDeltaExec` + planner strategy** — *eligibility seam done; live operator remaining.*
+   `IcebergDvCommitBridge.isDvEligible(table)` (public-API format-version check, the stand-in for the
+   private `Context.useDVs()`) decides v3 vs decline, tested (v3 eligible, v2/null decline). The live
+   piece still to land: a `SparkStrategy` (`injectPlannerStrategy`) matching the logical `WriteDelta`
+   that, when eligible and `spark.vector.iceberg.dvWriter.enabled`, plans a `VectorWriteDeltaExec`
+   command; it runs an RDD job over the child's columnar batches, builds DVs per `_file` run via the
+   bridge, assembles `DeltaTaskCommit` per task, and commits through `deltaWrite.toBatch().commit(...)`
+   (Iceberg's own `RowDelta`). Executor-side `OutputFileFactory` is built from `OutputFileFactory
+   .builderFor(table, partId, taskId)` (public) and the previous-DV loader from Iceberg's public
+   `DeleteLoader`. v2/unsupported → `Nil`, so Spark's `DataSourceV2Strategy` plans the ordinary writer.
+5. **Insert/update path via Iceberg's appender** — *remaining.* Data rows through Iceberg's existing
+   appender so full MERGE works on v3; verify commit and row lineage.
 
 Not in option B: a columnar Parquet **data** writer, and v2 position-delete files (option A).
 
