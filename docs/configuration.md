@@ -67,7 +67,7 @@ of the plan stays columnar.
 
 | Key | Default | Type / values | What it does |
 |---|---|---|---|
-| `spark.vector.agg.spillThreshold` | `512m` | size, `0` = never | Hard cap on one grouped aggregate table; below it the operator acquires its real footprint from Spark's task memory manager and acts on a refusal (#363, #367). Past the budget a buffer-emitting mode emits its table and starts over, a merging mode spills into hash buckets; `0` keeps everything in memory. |
+| `spark.vector.agg.spillThreshold` | `1g` | size, `0` = never | Hard cap on one grouped aggregate table; below it the operator acquires its real footprint from Spark's task memory manager and acts on a refusal (#363, #367). Past the budget a buffer-emitting mode emits its table and starts over, a merging mode spills into hash buckets; `0` keeps everything in memory. |
 | `spark.vector.agg.spillBuckets` | `16` | int (at least 2) | Buckets a merging (Final) aggregate spills its table into and merges one at a time; each bucket is merged in memory, so the buckets, not the input, must fit. |
 | `spark.vector.agg.passThroughRatio` | `1.5` | double, `0` = never | A partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on to the exchange (#376); `0` keeps aggregating whatever the ratio. |
 | `spark.vector.sort.runRows` | `1048576` | positive int | Rows per sorted run (#285): the sort orders each run as the partition arrives and k-way merges the runs on output, bounding its JVM scratch to the run rather than the partition. |

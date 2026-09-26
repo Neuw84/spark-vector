@@ -140,7 +140,7 @@ Configuration keys (all default to `true` except the last; the complete referenc
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
 | `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (spills past `spark.vector.sort.spillBytes`, #416) |
-| `spark.vector.agg.spillThreshold` | hard cap on one grouped aggregate table (default `512m`; `0` = never spill). Below it the operator acquires its real footprint from Spark's task memory manager as the table grows and acts on a refusal: a partial aggregate emits its table and starts over, a final one spills into hash buckets and merges them one at a time (#363, #367) |
+| `spark.vector.agg.spillThreshold` | hard cap on one grouped aggregate table (default `1g`, the sort's budget, #511; `0` = never spill). Below it the operator acquires its real footprint from Spark's task memory manager as the table grows and acts on a refusal: a partial aggregate emits its table and starts over, a final one spills into hash buckets and merges them one at a time (#363, #367) |
 | `spark.vector.agg.spillBuckets` | buckets a final aggregate spills into (default `16`) |
 | `spark.vector.agg.passThroughRatio` | a partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on (default `1.5`, `0` = never; #376) |
 | `spark.vector.sort.runRows` | rows per sorted run (default 1048576): the sort orders each run as the partition arrives and k-way merges the runs on output, bounding its scratch to the run (#285) |
@@ -232,7 +232,7 @@ their footprint by the same factor -- strict mode is the cheapest in memory as w
 | setting | what it bounds |
 |---|---|
 | `spark.executor.memory`, `spark.executor.memoryOverhead`, `-XX:MaxDirectMemorySize` | the tables (heap) and the data (direct); the 1 TB campaign ran 20 GB / 30 GB / 28 GB per 13-core executor |
-| `spark.vector.agg.spillThreshold` | a hard cap on one grouped aggregate table (default `512m`). Below it the operator asks Spark's task memory manager for the table's real footprint as it grows and acts on a refusal: a partial aggregate emits its table and starts over, a final aggregate spills into hash buckets and merges them one at a time (#363, #367). `0` disables both |
+| `spark.vector.agg.spillThreshold` | a hard cap on one grouped aggregate table (default `1g`, #511). Below it the operator asks Spark's task memory manager for the table's real footprint as it grows and acts on a refusal: a partial aggregate emits its table and starts over, a final aggregate spills into hash buckets and merges them one at a time (#363, #367). `0` disables both |
 | `spark.vector.agg.spillBuckets` | buckets a final aggregate spills into (default `16`); each is merged in memory, so the buckets, not the input, must fit |
 | `spark.vector.agg.passThroughRatio` | a partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on (default `1.5`, `0` = never; #376). The exchange receives the same rows either way |
 | `spark.vector.join.maxBuildSize` | the largest build side the hash joins take (per task, on the heap) |
