@@ -99,12 +99,13 @@ churn and merge conflicts. Publish by building in CI (below).
 ## Publishing
 
 The site is built for a GitHub Pages **project** site under `/spark-vector/` (the same base URL the
-current Jekyll site uses). Two ways to publish it — the owner chooses; this PR touches **no**
-`.github/` files:
+current Jekyll site uses). Two ways to publish it:
 
-1. **GitHub Actions (recommended).** Add a Pages workflow that runs `cd web && npm ci && npm run build`
-   and uploads `web/site/` with `actions/upload-pages-artifact` + `actions/deploy-pages`, then set
-   **Settings → Pages → Source = GitHub Actions**. This replaces the Jekyll-from-`/docs` publish.
+1. **GitHub Actions (recommended, included).** `.github/workflows/pages.yml` runs
+   `cd web && npm ci && npm run build` on pushes to `main` that touch the site's sources (or by hand),
+   and uploads `web/site/` with `actions/upload-pages-artifact` + `actions/deploy-pages`. After this is
+   merged, set **Settings → Pages → Source = GitHub Actions** (which replaces the Jekyll-from-`/docs`
+   publish) and run the workflow once from the Actions tab.
 
 2. **Publish the built files from a branch.** Run `npm run build`, copy `web/site/` to the branch/dir
    GitHub Pages serves (e.g. a `gh-pages` branch, or move it under `docs/` if you retire the Jekyll
