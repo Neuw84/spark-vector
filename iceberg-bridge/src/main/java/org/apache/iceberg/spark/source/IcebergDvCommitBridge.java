@@ -68,6 +68,23 @@ public final class IcebergDvCommitBridge {
     }
 
     /**
+     * Resolves the partition tuple of a delete run as an Iceberg {@link org.apache.iceberg.StructLike}
+     * from the row-level operation's {@code specId} and the partition as the Spark
+     * {@code InternalRow} Iceberg's {@code WriteDeltaProjections} produced. Returns {@code null} for an
+     * unpartitioned spec. Uses the package-private {@code InternalRowWrapper}, which is why it lives in
+     * this same-package bridge.
+     */
+    public static org.apache.iceberg.StructLike wrapPartition(
+            org.apache.iceberg.PartitionSpec spec, org.apache.spark.sql.catalyst.InternalRow partitionRow) {
+        if (spec == null || !spec.isPartitioned() || partitionRow == null) {
+            return null;
+        }
+        org.apache.spark.sql.types.StructType sparkType =
+                (org.apache.spark.sql.types.StructType) org.apache.iceberg.spark.SparkSchemaUtil.convert(spec.partitionType());
+        return new InternalRowWrapper(sparkType, spec.partitionType()).wrap(partitionRow);
+    }
+
+    /**
      * Wraps a {@link DeleteWriteResult} (the output of the columnar DV writer's
      * {@code close()}) as the {@link WriterCommitMessage} Iceberg's {@code
      * PositionDeltaBatchWrite.commit(...)} expects for a delete-only task. The
