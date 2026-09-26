@@ -19,7 +19,7 @@ import io.vecruntime.kernels.{StringSearchKernels, VectorBuffers}
 import io.vecruntime.kernels.StringConcatKernels.Part
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, IntegerType, StringType}
-import org.apache.spark.sql.vector.VectorErrors
+import org.apache.spark.sql.vecruntime.VectorErrors
 
 /** The search family over `StringSearchKernels`; string inputs are lanes or literals (`StringConcats.parts`). */
 private[expr] object StringSearches {

@@ -247,7 +247,7 @@ object VectorConf {
   /**
    * Depth of the prefetching converter's queue under the first operator of ours above a Spark file
    * scan (#403, lever 2): `0` (the default) leaves the scan's batches to be converted lazily on the
-   * task thread; `1` or `2` inserts [[org.apache.spark.sql.vector.VectorPrefetchScanExec]], whose
+   * task thread; `1` or `2` inserts [[org.apache.spark.sql.vecruntime.VectorPrefetchScanExec]], whose
    * helper thread pulls the reader's next batch and converts every column into our Arrow vectors
    * while the task thread works on the previous one. Memory grows by that many converted batches
    * per task. Larger values are accepted and capped at 8.

@@ -25,7 +25,7 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
-import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
+import org.apache.spark.sql.vecruntime.ui.{Engine, PlanAcceleration}
 import io.vecruntime.spark.iceberg.IcebergVectorAdapter
 import io.vecruntime.benchmarks.IcebergMorGenerator.TableProfile
 

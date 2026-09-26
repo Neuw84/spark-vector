@@ -17,7 +17,7 @@ package io.vecruntime.spark.comet
 
 import io.vecruntime.spark.{VectorConf, VectorPlugin}
 import io.vecruntime.spark.test.{CometTest, TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   PlanUtils,
   PreferComet,
   VectorFallback,

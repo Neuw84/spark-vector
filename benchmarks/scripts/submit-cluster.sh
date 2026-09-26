@@ -62,10 +62,10 @@ case "$CONFIG" in
   spark) ENGINE=() ;;
   vector) ENGINE=("${VECTOR[@]}") ;;
   vector-shuffle)
-    ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
+    ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager
             --conf spark.vector.shuffle.enabled=true) ;;
   vector-shuffle-strict)
-    ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
+    ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager
             --conf spark.vector.shuffle.enabled=true --conf spark.vector.exec.strictFloatingPoint=true) ;;
   comet-scan-vector-shuffle)
     ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin
@@ -77,7 +77,7 @@ case "$CONFIG" in
     ENGINE=(--conf spark.plugins=org.apache.spark.CometPlugin "${COMET_SCAN_ONLY[@]}") ;;
   comet-scan-vector-ourshuffle)
     ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin
-            --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
+            --conf spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager
             --conf spark.vector.shuffle.enabled=true "${COMET_SCAN_ONLY[@]}") ;;
   hybrid)
     ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin

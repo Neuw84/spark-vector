@@ -17,7 +17,7 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.{LocalTableScanExec, SampleExec}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorFilterExec,
   VectorHashAggregateExec,
   VectorLocalTableScanExec,

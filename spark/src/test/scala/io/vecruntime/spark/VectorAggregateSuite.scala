@@ -17,8 +17,8 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
-import org.apache.spark.sql.vector.AggSpillPolicy
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec}
+import org.apache.spark.sql.vecruntime.AggSpillPolicy
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorHashAggregateExec}
 
 class VectorAggregateSuite extends VectorQuerySuite {
 
@@ -68,7 +68,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
     import io.vecruntime.spark.arrow.{VectorArrowColumnVector, VectorDictionaryColumnVector}
     def keyColumns(sql: String): Seq[Class[_]] = withPlugin(enabled = true) {
       val plan = finalPlan { val d = spark.sql(sql); d.collect(); d }
-      val agg = org.apache.spark.sql.vector.PlanUtils.allNodes(plan).collect { case a: VectorHashAggregateExec =>
+      val agg = org.apache.spark.sql.vecruntime.PlanUtils.allNodes(plan).collect { case a: VectorHashAggregateExec =>
         a
       }.last // the partial, over the scan
       // Classified inside the task: a ColumnarBatch does not travel to the driver.
@@ -238,7 +238,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
     val ours = nodesOf[VectorHashAggregateExec](df)
     assert(
       ours.size === 4,
-      org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ") + "\n" + finalPlan(
+      org.apache.spark.sql.vecruntime.VectorFallback.reasons(finalPlan(df)).map(_._2).mkString("; ") + "\n" + finalPlan(
         df
       ).treeString
     )
@@ -300,7 +300,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
     )
     assert(
       nodesOf[org.apache.spark.sql.execution.aggregate.HashAggregateExec](f).isEmpty,
-      org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(f)).map(_._2).mkString("; ") + "\n" + finalPlan(
+      org.apache.spark.sql.vecruntime.VectorFallback.reasons(finalPlan(f)).map(_._2).mkString("; ") + "\n" + finalPlan(
         f
       ).treeString
     )
@@ -375,15 +375,16 @@ class VectorAggregateSuite extends VectorQuerySuite {
   test("Complete: update functions with the Final result expressions in one operator") {
     import org.apache.spark.sql.catalyst.expressions.aggregate.{Complete, Final, Partial}
     import org.apache.spark.sql.execution.ColumnarToRowExec
-    import org.apache.spark.sql.vector.VectorAggregatePlanner
+    import org.apache.spark.sql.vecruntime.VectorAggregatePlanner
     // Batch planning in Spark 4.1 never emits Complete (only the streaming planners do), so build the
     // operator from a real plan's two stages: the Partial stage's columnar child and functions, the
     // Final stage's result expressions.
     val sql = "SELECT s, sum(d2) AS sd, count(*) AS c, min(i) AS mi, avg(l) AS al FROM t WHERE i > 50 GROUP BY s"
     val expected = withPlugin(enabled = false)(spark.sql(sql).collect())
     val vectorPlan = withPlugin(enabled = true) { val d = spark.sql(sql); d.collect(); finalPlan(d) }
-    val aggs = org.apache.spark.sql.vector.PlanUtils.allNodes(vectorPlan).collect { case h: VectorHashAggregateExec =>
-      h
+    val aggs = org.apache.spark.sql.vecruntime.PlanUtils.allNodes(vectorPlan).collect {
+      case h: VectorHashAggregateExec =>
+        h
     }
     val partial = aggs.find(_.modes == Seq(Partial)).get
     val fin = aggs.find(_.modes == Seq(Final)).get
@@ -403,7 +404,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
     val ours = planned.toOption.get
     assert(ours.modes === Seq(Complete) && ours.emitsResults && !ours.isFinal)
     // A Complete aggregate emits one group set per partition, so run it over a single partition.
-    val single = ours.copy(child = org.apache.spark.sql.vector.VectorCoalesceExec(1, partial.child))
+    val single = ours.copy(child = org.apache.spark.sql.vecruntime.VectorCoalesceExec(1, partial.child))
     val rows = ColumnarToRowExec(single).executeCollect().map(_.copy())
     val actual = rows.map(r =>
       org.apache.spark.sql.Row.fromSeq(single.output.indices.map(i =>
@@ -418,11 +419,11 @@ class VectorAggregateSuite extends VectorQuerySuite {
 
   test("an operator mixing buffer and result modes is refused with a reason") {
     import org.apache.spark.sql.catalyst.expressions.aggregate.{Final, Partial}
-    import org.apache.spark.sql.vector.VectorAggregatePlanner
+    import org.apache.spark.sql.vecruntime.VectorAggregatePlanner
     val sparkPlan = withPlugin(enabled =
       false
     )(spark.sql("SELECT s, sum(d2), count(*) FROM t GROUP BY s").queryExecution.executedPlan)
-    val fin = org.apache.spark.sql.vector.PlanUtils.allNodes(
+    val fin = org.apache.spark.sql.vecruntime.PlanUtils.allNodes(
       sparkPlan
     ).collect { case h: HashAggregateExec => h }.find(_.aggregateExpressions.forall(_.mode == Final)).get
     val mixed = fin.copy(aggregateExpressions =
@@ -711,7 +712,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
     )
     checkFallback(
       "SELECT s COLLATE UTF8_LCASE AS c, i FROM t WHERE i < 10",
-      Seq(classOf[org.apache.spark.sql.vector.VectorProjectExec]),
+      Seq(classOf[org.apache.spark.sql.vecruntime.VectorProjectExec]),
       "collate"
     )
   }

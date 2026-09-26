@@ -16,7 +16,7 @@
 package io.vecruntime.spark
 
 import org.apache.spark.sql.SparkSessionExtensions
-import org.apache.spark.sql.vector.VectorColumnarRule
+import org.apache.spark.sql.vecruntime.VectorColumnarRule
 
 /**
  * Registers the planner rule. Enable with

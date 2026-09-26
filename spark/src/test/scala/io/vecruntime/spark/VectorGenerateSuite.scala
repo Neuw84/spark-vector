@@ -18,7 +18,12 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.VectorQuerySuite
 
 import org.apache.spark.sql.execution.{GenerateExec, RowToColumnarExec}
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorGenerateExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{
+  VectorFilterExec,
+  VectorGenerateExec,
+  VectorHashAggregateExec,
+  VectorProjectExec
+}
 
 class VectorGenerateSuite extends VectorQuerySuite {
 

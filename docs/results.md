@@ -349,7 +349,7 @@ this crew leaves it to the maintainer with the two readings it could take. The b
 
 `vector` is the plugin over Spark's row shuffle -- `ColumnarToRowExec` above every shuffled
 operator, `RowToColumnarExec` below its consumer; `vector-shuffle` is the same plugin with
-`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` and
+`spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager` and
 `spark.vector.shuffle.enabled=true`, every exchange above our operators `VectorShuffleExchangeExec`
 over Arrow IPC files (zstd bodies, 8192-row record batches, dictionary strings) with the Arrow Flight
 data plane in place (all reads are local in this one-JVM run). One session per configuration,

@@ -32,7 +32,7 @@ import io.vecruntime.kernels.{
 }
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, DoubleType, LongType}
-import org.apache.spark.sql.vector.VectorErrors
+import org.apache.spark.sql.vecruntime.VectorErrors
 
 /** `abs`; in ANSI mode an integer `MIN_VALUE` raises Spark's overflow error (the `negateExact` message, no hint). */
 final case class AbsExpr(child: VectorExpr, ansi: Boolean, queryContext: QueryContext) extends VectorExpr {

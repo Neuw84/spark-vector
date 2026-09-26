@@ -17,7 +17,7 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.{CoalesceExec, RowToColumnarExec, UnionExec}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorCoalesceExec,
   VectorFallback,
   VectorFilterExec,

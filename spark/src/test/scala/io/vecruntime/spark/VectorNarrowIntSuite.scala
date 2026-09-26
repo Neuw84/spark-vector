@@ -16,7 +16,7 @@
 package io.vecruntime.spark
 
 import io.vecruntime.spark.test.VectorQuerySuite
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorFilterExec,
   VectorHashAggregateExec,
   VectorProjectExec,
@@ -134,7 +134,7 @@ class VectorNarrowIntSuite extends VectorQuerySuite {
       )
       checkVectorized(
         s"SELECT t, s, i FROM $t ORDER BY t NULLS FIRST, s DESC, i LIMIT 500",
-        Seq(classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec])
+        Seq(classOf[org.apache.spark.sql.vecruntime.VectorTakeOrderedAndProjectExec])
       )
       checkVectorized(
         s"SELECT g, rank() OVER (PARTITION BY g ORDER BY t, i) AS r, lag(t, 1) OVER (PARTITION BY g ORDER BY i) AS prev FROM $t WHERE i < 3000",

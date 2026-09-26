@@ -17,7 +17,7 @@ package io.vecruntime.spark.comet
 
 import io.vecruntime.spark.VectorConf
 import io.vecruntime.spark.test.{CometTest, TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec, VectorProjectExec, VectorToCometExec}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFilterExec, VectorProjectExec, VectorToCometExec}
 
 /**
  * Mixed chains (#280): Comet's native operators above ours through the sink leaf, and ours above
@@ -45,7 +45,7 @@ class CometMixedChainSuite extends VectorQuerySuite {
     PlanUtils.allNodes(finalPlan(df)).filter(_.getClass.getSimpleName.startsWith(prefix))
 
   private def reasonsOf(df: org.apache.spark.sql.DataFrame): String =
-    org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) =>
+    org.apache.spark.sql.vecruntime.VectorFallback.reasons(finalPlan(df)).map { case (n, r) =>
       s"${n.nodeName}: $r"
     }.mkString("; ")
 
@@ -102,7 +102,9 @@ class CometMixedChainSuite extends VectorQuerySuite {
       // (Comet's own list), so the partial goes to Comet over the leaf and the final, above Spark's
       // shuffle, may be anyone's.
       val df = checkVectorized("SELECT s, sum(d), max(i), min(l), avg(d2) FROM t WHERE i > 100 GROUP BY s", Seq(Filter))
-      val reasons = org.apache.spark.sql.vector.VectorFallback.reasons(finalPlan(df)).map { case (n, r) => s"$n: $r" }
+      val reasons = org.apache.spark.sql.vecruntime.VectorFallback.reasons(finalPlan(df)).map { case (n, r) =>
+        s"$n: $r"
+      }
       assert(
         nodesNamed(df, "CometHashAggregate").nonEmpty,
         s"expected Comet's partial aggregate; reasons: ${reasons.mkString("; ")}\n${finalPlan(df).treeString}"
@@ -181,7 +183,7 @@ class CometMixedChainSuite extends VectorQuerySuite {
     withConf("spark.comet.exec.filter.enabled" -> "true", VectorConf.FilterEnabled -> "false") {
       checkVectorized(
         "SELECT g, sum(m + n), count(*) FROM dec WHERE m > 10 AND i > 100 GROUP BY g",
-        Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+        Seq(classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
       )
     }
     // q17 / q11 shapes: Comet's filter, delegated, above our join or aggregate, over WIDE decimals our
@@ -191,7 +193,7 @@ class CometMixedChainSuite extends VectorQuerySuite {
     withConf("spark.comet.exec.filter.enabled" -> "true", VectorConf.CometPreferComet -> "filter") {
       val base =
         "FROM dec d JOIN (SELECT g AS g2, avg(m) AS a, 0.2 * avg(m) AS thr, sum(m) AS s FROM dec GROUP BY g) x ON d.g = x.g2"
-      val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
+      val Agg = classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec]
       val df1 = checkVectorized(s"SELECT d.i, x.thr $base WHERE x.thr > 14.15 ORDER BY d.i", Seq(Agg))
       assert(
         nodesNamed(df1, "CometFilter").nonEmpty,
@@ -200,11 +202,11 @@ class CometMixedChainSuite extends VectorQuerySuite {
       checkVectorized(s"SELECT d.i, x.a, x.s $base WHERE x.a > 70 AND x.s > 35000 ORDER BY d.i", Seq(Agg))
       checkVectorized(
         "SELECT sum(d.m) / 7.0 FROM dec d JOIN (SELECT g AS g2, 0.2 * avg(m) AS thr FROM dec GROUP BY g) a ON d.g = a.g2 WHERE d.m < a.thr",
-        Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+        Seq(classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
       )
       checkVectorized(
         "SELECT g, sum(m * n) AS v FROM dec WHERE i > 100 GROUP BY g HAVING sum(m * n) > (SELECT sum(m * n) * 0.0001 FROM dec WHERE i > 100)",
-        Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec])
+        Seq(classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec])
       )
     }
     awaitReleased()
@@ -213,15 +215,15 @@ class CometMixedChainSuite extends VectorQuerySuite {
   test("the acceleration view counts both engines and the leaf as the bridge", CometTest) {
     withConf(VectorConf.ProjectEnabled -> "false") {
       val df = checkVectorized("SELECT i * 2 AS ii FROM t WHERE i > 100", Seq(Filter))
-      val accelerated = org.apache.spark.sql.vector.ui.PlanAcceleration.fromPlan(finalPlan(df))
+      val accelerated = org.apache.spark.sql.vecruntime.ui.PlanAcceleration.fromPlan(finalPlan(df))
       val engines = accelerated.nodes.map(_.engine).toSet
       assert(
-        engines.contains(org.apache.spark.sql.vector.ui.Engine.Vector) && engines.contains(
-          org.apache.spark.sql.vector.ui.Engine.Comet
+        engines.contains(org.apache.spark.sql.vecruntime.ui.Engine.Vector) && engines.contains(
+          org.apache.spark.sql.vecruntime.ui.Engine.Comet
         ),
         engines.toString
       )
-      val bridges = accelerated.nodes.filter(_.engine == org.apache.spark.sql.vector.ui.Engine.Bridge)
+      val bridges = accelerated.nodes.filter(_.engine == org.apache.spark.sql.vecruntime.ui.Engine.Bridge)
       assert(bridges.size == 2, s"the export node and the pass-through union are the bridge: ${accelerated.nodes.map(n => s"${n.name}=${n.engine}")}")
       assert(accelerated.fullyAccelerated, accelerated.nodes.map(n => s"${n.name}=${n.engine}").toString)
     }
@@ -241,7 +243,7 @@ class CometMixedChainSuite extends VectorQuerySuite {
       // count is not on Comet's list of buffers it will share with Spark: the pair is not split.
       checkFallback(
         "SELECT s, count(*), sum(d) FROM t WHERE i > 100 GROUP BY s",
-        Seq(classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]),
+        Seq(classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec]),
         "aggregate halves cannot be split across engines"
       )
     }

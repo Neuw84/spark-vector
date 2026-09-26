@@ -16,7 +16,7 @@
 package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{SparkVectorFunSuite, TestTables}
-import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorFilterExec}
 
 /** The `spark.plugins` entry point must register the extension without any other configuration. */
 class VectorPluginSuite extends SparkVectorFunSuite {

@@ -19,7 +19,7 @@ import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.VectorWindowExec
+import org.apache.spark.sql.vecruntime.VectorWindowExec
 
 /**
  * SQL correctness coverage ported from DataFusion Comet's `CometWindowExecSuite`, adapted to

@@ -26,7 +26,7 @@ import io.vecruntime.kernels.{
 }
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types.{DataType, DateType, DoubleType, IntegerType, LongType, TimestampType}
-import org.apache.spark.sql.vector.VectorErrors
+import org.apache.spark.sql.vecruntime.VectorErrors
 
 /** The child's lane under another Spark type -- `unix_date`, `date_from_unix_date`, `timestamp_micros`, `unix_micros`. */
 final case class RelabelExpr(child: VectorExpr, dataType: DataType) extends VectorExpr {

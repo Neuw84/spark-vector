@@ -28,7 +28,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.SQLQueryTestSuite
 import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.util.QueryExecutionListener
-import org.apache.spark.sql.vector.{ListenerSync, PlanUtils, VectorPlan}
+import org.apache.spark.sql.vecruntime.{ListenerSync, PlanUtils, VectorPlan}
 
 /**
  * Apache Spark's SQL golden-file suite (`sql/core/src/test/resources/sql-tests`, taken from the

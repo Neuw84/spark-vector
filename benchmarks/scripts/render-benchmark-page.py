@@ -38,7 +38,7 @@ DEFAULT_META = {
     ],
     "vector_conf": [
         "spark.plugins=io.vecruntime.spark.VectorPlugin",
-        "spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
+        "spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager",
         "spark.vector.exec.strictFloatingPoint=false   # Comet's default too",
         "spark.vector.scan.prefetch=0                 # measured: off",
         "AOT class-data cache off                     # measured: costs the heavy queries 20%",

@@ -19,8 +19,8 @@ import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference,
 import org.apache.spark.sql.comet.{FakeCometColumnarExchangeExec, FakeCometScanExec, FakeCometShuffleExchangeExec}
 import org.apache.spark.sql.execution.{ColumnarToRowExec, SparkPlanInfo}
 import org.apache.spark.sql.types.LongType
-import org.apache.spark.sql.vector.VectorSortExec
-import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
+import org.apache.spark.sql.vecruntime.VectorSortExec
+import org.apache.spark.sql.vecruntime.ui.{Engine, PlanAcceleration}
 import org.scalatest.funsuite.AnyFunSuite
 
 /**
@@ -96,7 +96,7 @@ class PlanAccelerationSuite extends AnyFunSuite {
       FakeCometShuffleExchangeExec(FakeCometScanExec(attrs))
     )
     // Root is id 0, its child id 1, and the edge runs child -> parent.
-    assert(plan.edges === Seq(org.apache.spark.sql.vector.ui.PlanEdge(1, 0)))
+    assert(plan.edges === Seq(org.apache.spark.sql.vecruntime.ui.PlanEdge(1, 0)))
     assert(plan.toDotFile.contains("1->0"))
   }
 

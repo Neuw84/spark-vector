@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vector.VectorProjectExec
+import org.apache.spark.sql.vecruntime.VectorProjectExec
 
 /**
  * SQL correctness coverage ported from DataFusion Comet's `CometCastSuite`, adapted to

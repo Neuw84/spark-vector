@@ -24,7 +24,7 @@ import scala.io.Source
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
-import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
+import org.apache.spark.sql.vecruntime.ui.{Engine, PlanAcceleration}
 import io.vecruntime.spark.iceberg.IcebergVectorAdapter
 
 /**
@@ -117,7 +117,7 @@ object TpchRunner {
     "vector" -> VectorFast,
     // #288: our columnar exchange over Arrow IPC files and Arrow Flight, no row conversion around shuffles.
     "vector-shuffle" -> (VectorFast ++ Map(
-      "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
+      "spark.shuffle.manager" -> "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager",
       "spark.vector.shuffle.enabled" -> "true"
     )),
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
@@ -128,14 +128,14 @@ object TpchRunner {
     // Spark's order, so every result equals vanilla Spark's bit for bit. The maintainer's question
     // for the 1 TB runs: what exact agreement costs against the fast mode the benchmarks use.
     "vector-shuffle-strict" -> (VectorFast ++ Map(
-      "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
+      "spark.shuffle.manager" -> "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager",
       "spark.vector.shuffle.enabled" -> "true",
       "spark.vector.exec.strictFloatingPoint" -> "true"
     )),
     // #311: Comet's native scan, our operators, and OUR columnar shuffle (#288) -- Comet's shuffle off.
     "comet-scan-vector-ourshuffle" -> (VectorFast ++ Map(
       "spark.plugins" -> "org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin",
-      "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
+      "spark.shuffle.manager" -> "org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager",
       "spark.vector.shuffle.enabled" -> "true"
     ) ++ CometScanOnly),
     // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.

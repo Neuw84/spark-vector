@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.joins.SortMergeJoinExec
-import org.apache.spark.sql.vector.{VectorShuffledHashJoinExec, VectorSortMergeJoinExec}
+import org.apache.spark.sql.vecruntime.{VectorShuffledHashJoinExec, VectorSortMergeJoinExec}
 
 /**
  * The merge join (#286) against Spark's sort-merge join, row order included: both are
@@ -146,14 +146,14 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
       // The window's partition is the join key: it needs the join's ordering and gets it, no sort between.
       val w = checkVectorized(
         "SELECT a.ki, a.v, b.w, row_number() OVER (PARTITION BY a.ki ORDER BY a.ki) AS rn FROM a JOIN b ON a.ki = b.ki",
-        Seq(SMJ, classOf[org.apache.spark.sql.vector.VectorWindowExec])
+        Seq(SMJ, classOf[org.apache.spark.sql.vecruntime.VectorWindowExec])
       )
       assert(
         nodesOf[org.apache.spark.sql.execution.SortExec](w).forall(s => !s.child.isInstanceOf[VectorSortMergeJoinExec]),
         "a sort was placed over the merge join"
       )
       assert(
-        nodesOf[org.apache.spark.sql.vector.VectorSortExec](w).forall(s =>
+        nodesOf[org.apache.spark.sql.vecruntime.VectorSortExec](w).forall(s =>
           !s.child.isInstanceOf[VectorSortMergeJoinExec]
         ),
         "our sort was placed over the merge join"
@@ -177,7 +177,7 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     def why(df: org.apache.spark.sql.DataFrame): String =
       (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](
         df
-      )).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
+      )).flatMap(_.getTagValue(org.apache.spark.sql.vecruntime.VectorExecRule.SortMergeWhy)).mkString("; ")
     withConf(auto: _*) {
       // A small side with AQE statistics: the hash rewrite, the reason names the side and the budget.
       val h = checkVectorized("SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki", Seq(classOf[VectorShuffledHashJoinExec]))
@@ -239,7 +239,7 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
     def why(df: org.apache.spark.sql.DataFrame): String =
       (nodesOf[VectorShuffledHashJoinExec](df) ++ nodesOf[VectorSortMergeJoinExec](
         df
-      )).flatMap(_.getTagValue(org.apache.spark.sql.vector.VectorExecRule.SortMergeWhy)).mkString("; ")
+      )).flatMap(_.getTagValue(org.apache.spark.sql.vecruntime.VectorExecRule.SortMergeWhy)).mkString("; ")
     val q = "SELECT a.v, b.w FROM a JOIN b ON a.ki = b.ki"
     // b (the smaller side) weighs some tens of kilobytes per task by the stage's statistics.
     // Budgets far above it: the in-memory hash join, the reason says so.
@@ -261,7 +261,7 @@ class VectorSortMergeJoinSuite extends VectorQuerySuite {
 
   test("the join's input estimate reads the stage that has run, not a sort's product estimate (#329)") {
     import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
-    import org.apache.spark.sql.vector.VectorJoinPlanner
+    import org.apache.spark.sql.vecruntime.VectorJoinPlanner
     // The q1/q30/q81 shape: an aggregate self-joined against its own average, a sort above the join.
     // The logical estimate of the join's inputs is derived from a join; the stages below have run.
     val ctr =

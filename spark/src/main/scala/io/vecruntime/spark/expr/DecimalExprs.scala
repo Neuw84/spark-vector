@@ -195,7 +195,7 @@ final case class DecimalArithExpr(
     }
     val (zeroRows, zeroCount) = DecimalExprs.affected(ctx, divisorZero, validity)
     if (zeroCount > 0) {
-      if (ansi) throw org.apache.spark.sql.vector.VectorErrors.divideByZero(queryContext)
+      if (ansi) throw org.apache.spark.sql.vecruntime.VectorErrors.divideByZero(queryContext)
       validity = DecimalExprs.without(ctx, validity, divisorZero)
     }
     val (overflowRows, overflowCount) = DecimalExprs.affected(ctx, overflow, validity)
@@ -211,7 +211,7 @@ final case class DecimalArithExpr(
           case lit: LiteralExpr => lit.value.asInstanceOf[Decimal];
           case e => Decimal.createUnsafe(e.eval(ctx).getLong(i), rightType.precision, s2)
         }
-        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+        throw org.apache.spark.sql.vecruntime.VectorErrors.decimalPrecisionOverflow(
           a / b,
           dataType.precision,
           dataType.scale,
@@ -290,7 +290,7 @@ final case class DecimalCastExpr(
         val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
         if (count > 0 && ansi) {
           val i = DecimalExprs.firstSet(rows, n)
-          throw org.apache.spark.sql.vector.VectorErrors.castOverflow(
+          throw org.apache.spark.sql.vecruntime.VectorErrors.castOverflow(
             Decimal.createUnsafe(a.getLong(i), f.precision, f.scale),
             f,
             IntegerType
@@ -323,11 +323,12 @@ final case class DecimalCastExpr(
           case LongType => Decimal(in.getLong(i))
           case DoubleType =>
             val d = in.getDouble(i)
-            if (d.isNaN || d.isInfinite) throw org.apache.spark.sql.vector.VectorErrors.castOverflow(d, DoubleType, t)
+            if (d.isNaN || d.isInfinite)
+              throw org.apache.spark.sql.vecruntime.VectorErrors.castOverflow(d, DoubleType, t)
             Decimal(d)
           case _ => throw new IllegalStateException(s"unexpected source type $f")
         }
-        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+        throw org.apache.spark.sql.vecruntime.VectorErrors.decimalPrecisionOverflow(
           value,
           t.precision,
           t.scale,
@@ -430,7 +431,7 @@ private[expr] final class Escalations(dataType: DecimalType, ansi: Boolean, quer
   def add(i: Int, v: java.math.BigInteger): Unit = {
     if (v.abs.compareTo(limit) >= 0) {
       // Past the declared precision: Spark's operator yields null (legacy) or raises (ANSI) for this row.
-      if (ansi) throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+      if (ansi) throw org.apache.spark.sql.vecruntime.VectorErrors.decimalPrecisionOverflow(
         Decimal(new java.math.BigDecimal(v, dataType.scale)),
         dataType.precision,
         dataType.scale,
@@ -657,7 +658,7 @@ final case class WideDecimalArithExpr(
     if (divisorZero != null) {
       val (_, zeroCount) = DecimalExprs.affected(ctx, divisorZero, validity)
       if (zeroCount > 0) {
-        if (ansi) throw org.apache.spark.sql.vector.VectorErrors.divideByZero(queryContext)
+        if (ansi) throw org.apache.spark.sql.vecruntime.VectorErrors.divideByZero(queryContext)
         validity = DecimalExprs.without(ctx, validity, divisorZero)
       }
     }
@@ -674,7 +675,7 @@ final case class WideDecimalArithExpr(
           case ArithOp.MUL => x * y
           case ArithOp.DIV => x / y
         }
-        throw org.apache.spark.sql.vector.VectorErrors.decimalPrecisionOverflow(
+        throw org.apache.spark.sql.vecruntime.VectorErrors.decimalPrecisionOverflow(
           v,
           dataType.precision,
           dataType.scale,
@@ -797,7 +798,7 @@ final case class WideDecimalCastExpr(
     val (rows, count) = DecimalExprs.affected(ctx, invalid, a.validity())
     if (count > 0 && ansi) {
       val i = DecimalExprs.firstSet(rows, ctx.numRows)
-      throw org.apache.spark.sql.vector.VectorErrors.castOverflow(sourceValue(a, i), from, dataType)
+      throw org.apache.spark.sql.vecruntime.VectorErrors.castOverflow(sourceValue(a, i), from, dataType)
     }
   }
 
@@ -814,7 +815,7 @@ final case class WideDecimalCastExpr(
     if (count > 0) {
       if (ansi) {
         val i = DecimalExprs.firstSet(rows, n)
-        throw org.apache.spark.sql.vector.VectorErrors.castOverflow(sourceValue(a, i), from, dataType)
+        throw org.apache.spark.sql.vecruntime.VectorErrors.castOverflow(sourceValue(a, i), from, dataType)
       }
       validity = DecimalExprs.without(ctx, validity, invalid)
     }

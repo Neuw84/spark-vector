@@ -17,7 +17,12 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.window.{WindowExec, WindowGroupLimitExec}
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorProjectExec, VectorWindowExec, VectorWindowGroupLimitExec}
+import org.apache.spark.sql.vecruntime.{
+  VectorFilterExec,
+  VectorProjectExec,
+  VectorWindowExec,
+  VectorWindowGroupLimitExec
+}
 
 /** Window functions (#58), first layer: row_number, rank, dense_rank over sorted input. */
 class VectorWindowSuite extends VectorQuerySuite {

@@ -37,7 +37,7 @@ import org.apache.spark.sql.types.{
   StringType,
   TimestampType
 }
-import org.apache.spark.sql.vector.{SparkCasts, SparkFormatters, VectorErrors}
+import org.apache.spark.sql.vecruntime.{SparkCasts, SparkFormatters, VectorErrors}
 import org.apache.spark.unsafe.types.UTF8String
 
 /**
@@ -390,7 +390,7 @@ final case class TableInsertOverflowExpr(child: VectorExpr, from: DataType, data
   override def eval(ctx: EvalContext): VectorBuffers =
     try child.eval(ctx)
     catch {
-      case e: ArithmeticException if org.apache.spark.sql.vector.VectorErrors.isArithmeticOverflow(e) =>
-        throw org.apache.spark.sql.vector.VectorErrors.castOverflowInTableInsert(from, dataType, columnName)
+      case e: ArithmeticException if org.apache.spark.sql.vecruntime.VectorErrors.isArithmeticOverflow(e) =>
+        throw org.apache.spark.sql.vecruntime.VectorErrors.castOverflowInTableInsert(from, dataType, columnName)
     }
 }

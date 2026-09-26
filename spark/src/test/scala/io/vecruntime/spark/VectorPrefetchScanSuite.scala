@@ -24,7 +24,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{DoubleType, IntegerType, LongType, StringType, StructType}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   PlanUtils,
   PrefetchingBatchConverter,
   PrefetchMetrics,
@@ -34,7 +34,7 @@ import org.apache.spark.sql.vector.{
   VectorPrefetchScanExec,
   VectorRowStages
 }
-import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
+import org.apache.spark.sql.vecruntime.ui.{Engine, PlanAcceleration}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 

@@ -13,7 +13,7 @@ their tables). The defaults were set from measurements on TPC-DS at 1 TB and TPC
 `docs/results.md` for the runs behind each threshold. Size-valued keys accept Spark's size strings
 (`512m`, `1g`) as well as byte counts. Where a `spark.vector.*` key is read is named in
 `spark/src/main/scala/io/vecruntime/spark/VectorConf.scala` (the planner and operator keys),
-`spark/src/main/scala/org/apache/spark/sql/vector/AggregateSpill.scala` (the aggregate spill keys) and
+`spark/src/main/scala/org/apache/spark/sql/vecruntime/AggregateSpill.scala` (the aggregate spill keys) and
 the `shuffle` module (the columnar shuffle keys).
 
 ## Main switch and diagnostics
@@ -135,7 +135,7 @@ These matter only with Comet's jar on the classpath; see `docs/comet.md`.
   `spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions` injects the planner
   rule alone.
 - **The columnar shuffle manager.**
-  `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` (from the
+  `spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager` (from the
   `vecruntime-shuffle` jar) is what makes `spark.vector.shuffle.enabled` take effect; the manager
   serves our dependencies with the Arrow IPC writer and reader and delegates every other shuffle to
   Spark's sort shuffle. With `spark.authenticate` on, the Flight server requires Spark's shuffle

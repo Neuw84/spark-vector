@@ -20,7 +20,7 @@ import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.RowToColumnarExec
 import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 /**
  * Cached tables (#55, level 1: consume the cache). `InMemoryTableScanExec` emits columnar batches

@@ -17,7 +17,7 @@ package io.vecruntime.spark
 
 import io.vecruntime.spark.adapter.SparkColumnVectorBuffers
 import io.vecruntime.spark.test.VectorQuerySuite
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorProjectExec}
 
 /**
  * Wide decimals (p > 18) as a DECIMAL128 lane (#257, the storage half of #28): a column read from
@@ -312,8 +312,8 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
     }
   }
 
-  private val Agg = classOf[org.apache.spark.sql.vector.VectorHashAggregateExec]
-  private val Window = classOf[org.apache.spark.sql.vector.VectorWindowExec]
+  private val Agg = classOf[org.apache.spark.sql.vecruntime.VectorHashAggregateExec]
+  private val Window = classOf[org.apache.spark.sql.vecruntime.VectorWindowExec]
 
   Seq("tw_dict", "tw_plain").foreach { t =>
     test(s"$t: window aggregates over wide decimals -- whole partition and running -- and wide window keys (#259)") {
@@ -382,8 +382,8 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
       )
     }
   }
-  private val BHJ = classOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec]
-  private val SHJ = classOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec]
+  private val BHJ = classOf[org.apache.spark.sql.vecruntime.VectorBroadcastHashJoinExec]
+  private val SHJ = classOf[org.apache.spark.sql.vecruntime.VectorShuffledHashJoinExec]
 
   test("wide decimal join keys and payloads in the broadcast and shuffled hash joins (#259)") {
     // A small dimension keyed on a wide decimal (the 40 distinct w27 values), with wide payloads on both sides.
@@ -438,14 +438,14 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
       Seq(SHJ, Filter)
     )
   }
-  private val TopN = classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec]
-  private val Collect = classOf[org.apache.spark.sql.vector.VectorCollectLimitExec]
-  private val LocalLimit = classOf[org.apache.spark.sql.vector.VectorLocalLimitExec]
-  private val Sample = classOf[org.apache.spark.sql.vector.VectorSampleExec]
-  private val Expand = classOf[org.apache.spark.sql.vector.VectorExpandExec]
-  private val Rollup = classOf[org.apache.spark.sql.vector.VectorRollupExec]
-  private val Union = classOf[org.apache.spark.sql.vector.VectorUnionExec]
-  private val Coalesce = classOf[org.apache.spark.sql.vector.VectorCoalesceExec]
+  private val TopN = classOf[org.apache.spark.sql.vecruntime.VectorTakeOrderedAndProjectExec]
+  private val Collect = classOf[org.apache.spark.sql.vecruntime.VectorCollectLimitExec]
+  private val LocalLimit = classOf[org.apache.spark.sql.vecruntime.VectorLocalLimitExec]
+  private val Sample = classOf[org.apache.spark.sql.vecruntime.VectorSampleExec]
+  private val Expand = classOf[org.apache.spark.sql.vecruntime.VectorExpandExec]
+  private val Rollup = classOf[org.apache.spark.sql.vecruntime.VectorRollupExec]
+  private val Union = classOf[org.apache.spark.sql.vecruntime.VectorUnionExec]
+  private val Coalesce = classOf[org.apache.spark.sql.vecruntime.VectorCoalesceExec]
 
   Seq("tw_dict", "tw_plain").foreach { t =>
     test(s"$t: the column movers carry wide decimals -- take-ordered, limits, sample, expand, union, coalesce (#259)") {
@@ -460,7 +460,7 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
       )
       // Limits: a collect limit and a local limit over wide columns, across a batch boundary.
       checkVectorized(s"SELECT i, w38, w20 FROM $t LIMIT 5000", Seq(Collect))
-      assert(nodesOf[org.apache.spark.sql.vector.VectorLocalLimitExec](
+      assert(nodesOf[org.apache.spark.sql.vecruntime.VectorLocalLimitExec](
         checkVectorized(s"SELECT count(*) AS c, sum(w20) AS s FROM (SELECT w20 FROM $t LIMIT 7000)", Seq(Agg))
       ).nonEmpty)
       // A sample keeps the wide columns with their rows.
@@ -557,7 +557,7 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
 
 /** Sorting over the lane: the four-pass two-limb key order equals Spark's in every partition. */
 class VectorWideDecimalSortSuite extends VectorQuerySuite {
-  private val Sort = classOf[org.apache.spark.sql.vector.VectorSortExec]
+  private val Sort = classOf[org.apache.spark.sql.vecruntime.VectorSortExec]
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()

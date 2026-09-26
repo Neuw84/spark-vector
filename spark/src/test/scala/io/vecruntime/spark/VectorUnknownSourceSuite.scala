@@ -19,7 +19,7 @@ import io.vecruntime.spark.adapter.ColumnVectorAdapters
 import io.vecruntime.spark.test.{UnknownColumnarSource, VectorQuerySuite}
 import org.apache.spark.sql.execution.RowToColumnarExec
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
-import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
+import org.apache.spark.sql.vecruntime.{VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
 
 /**
  * An unknown columnar DSv2 source -- `ColumnVector`s no adapter recognises -- is accepted as input
@@ -83,7 +83,7 @@ class VectorUnknownSourceSuite extends VectorQuerySuite {
   ) {
     checkVectorized(
       "SELECT i, st.a AS a FROM u_struct WHERE i > 10",
-      Seq(Filter, classOf[org.apache.spark.sql.vector.VectorProjectExec])
+      Seq(Filter, classOf[org.apache.spark.sql.vecruntime.VectorProjectExec])
     )
     checkVectorized("SELECT i, st FROM u_struct WHERE i > 10", Seq(Filter))
   }

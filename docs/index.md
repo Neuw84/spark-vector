@@ -30,7 +30,7 @@ operators, expressions, and types transparently fall back to Spark, always with 
 
 ## Getting started
 
-> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`), the `sparkvector.*` JVM system properties, and the shuffle manager class (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`) are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; and the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`).
+> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`), the `sparkvector.*` JVM system properties, and the shuffle manager class (`spark.shuffle.manager=org.apache.spark.sql.vecruntime.shuffle.VectorShuffleManager`) are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; and the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`).
 
 Add the plugin jar to an existing Spark job -- no code changes:
 

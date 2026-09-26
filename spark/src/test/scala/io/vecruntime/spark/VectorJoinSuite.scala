@@ -18,7 +18,7 @@ package io.vecruntime.spark
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec}
-import org.apache.spark.sql.vector.{
+import org.apache.spark.sql.vecruntime.{
   VectorBroadcastHashJoinExec,
   VectorBroadcastNestedLoopJoinExec,
   VectorFilterExec,
@@ -255,13 +255,15 @@ class VectorJoinSuite extends VectorQuerySuite {
   test("a full outer join over a broadcast is refused, as Spark never plans one") {
     import org.apache.spark.sql.catalyst.plans.FullOuter
     import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
-    import org.apache.spark.sql.vector.VectorJoinPlanner
+    import org.apache.spark.sql.vecruntime.VectorJoinPlanner
     // Spark's JoinSelection excludes FullOuter from broadcasting, so build the operator by hand from a
     // real broadcast join and change only the join type.
     val plan = withPlugin(enabled =
       false
     )(spark.sql("SELECT tk.i, dim.name FROM tk JOIN dim ON tk.i50 = dim.di").queryExecution.executedPlan)
-    val bhj = org.apache.spark.sql.vector.PlanUtils.allNodes(plan).collect { case b: BroadcastHashJoinExec => b }.head
+    val bhj = org.apache.spark.sql.vecruntime.PlanUtils.allNodes(plan).collect { case b: BroadcastHashJoinExec =>
+      b
+    }.head
     val planned = VectorJoinPlanner.plan(bhj.copy(joinType = FullOuter))
     assert(planned.isLeft && planned.left.toOption.get.contains("full outer join over a broadcast"), planned.toString)
   }
@@ -269,10 +271,10 @@ class VectorJoinSuite extends VectorQuerySuite {
   test("existence join: EXISTS used as a value emits every row plus a boolean") {
     import org.apache.spark.sql.catalyst.plans.ExistenceJoin
     def isExistence(df: org.apache.spark.sql.DataFrame): Boolean =
-      nodesOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec](
+      nodesOf[org.apache.spark.sql.vecruntime.VectorBroadcastHashJoinExec](
         df
       ).exists(_.joinType.isInstanceOf[ExistenceJoin]) ||
-        nodesOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec](
+        nodesOf[org.apache.spark.sql.vecruntime.VectorShuffledHashJoinExec](
           df
         ).exists(_.joinType.isInstanceOf[ExistenceJoin])
     // OR of two EXISTS: Spark plans two ExistenceJoins feeding one filter. Broadcast at this size.
@@ -522,7 +524,7 @@ class VectorJoinSuite extends VectorQuerySuite {
     assert(
       nodesOf[org.apache.spark.sql.execution.SortExec](
         df
-      ).isEmpty && nodesOf[org.apache.spark.sql.vector.VectorSortExec](df).isEmpty,
+      ).isEmpty && nodesOf[org.apache.spark.sql.vecruntime.VectorSortExec](df).isEmpty,
       finalPlan(df).treeString
     )
     df
@@ -546,10 +548,10 @@ class VectorJoinSuite extends VectorQuerySuite {
         "SELECT tk.i, EXISTS (SELECT 1 FROM dim WHERE dim.di = tk.i50 AND dim.weight > 60) AS e FROM tk WHERE tk.i < 3000"
       )
       def isExistence(df: org.apache.spark.sql.DataFrame): Boolean =
-        nodesOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec](
+        nodesOf[org.apache.spark.sql.vecruntime.VectorBroadcastHashJoinExec](
           df
         ).exists(_.joinType.isInstanceOf[org.apache.spark.sql.catalyst.plans.ExistenceJoin]) ||
-          nodesOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec](
+          nodesOf[org.apache.spark.sql.vecruntime.VectorShuffledHashJoinExec](
             df
           ).exists(_.joinType.isInstanceOf[org.apache.spark.sql.catalyst.plans.ExistenceJoin])
       assert(isExistence(existence), finalPlan(existence).treeString)
@@ -575,7 +577,7 @@ class VectorJoinSuite extends VectorQuerySuite {
         "SELECT tk.i, a.name, b.name, c.name FROM tk JOIN dim a ON tk.i50 = a.di JOIN dim b ON tk.i50 = b.di JOIN dim c ON tk.i50 = c.di WHERE tk.i < 1000"
       )
       assert(
-        nodesOf[org.apache.spark.sql.vector.VectorShuffledHashJoinExec](three).length === 3,
+        nodesOf[org.apache.spark.sql.vecruntime.VectorShuffledHashJoinExec](three).length === 3,
         finalPlan(three).treeString
       )
     }
@@ -622,8 +624,8 @@ class VectorJoinSuite extends VectorQuerySuite {
       )
       val smj = nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](healed)
       assert(smj.length === 1, finalPlan(healed).treeString)
-      val resort = nodesOf[org.apache.spark.sql.vector.VectorSortExec](healed).filter(sort =>
-        !sort.global && sort.child.collectFirst { case j: org.apache.spark.sql.vector.VectorShuffledHashJoinExec =>
+      val resort = nodesOf[org.apache.spark.sql.vecruntime.VectorSortExec](healed).filter(sort =>
+        !sort.global && sort.child.collectFirst { case j: org.apache.spark.sql.vecruntime.VectorShuffledHashJoinExec =>
           j
         }.isDefined
       )
@@ -652,7 +654,7 @@ class VectorJoinSuite extends VectorQuerySuite {
     ) {
       val df =
         checkVectorized("SELECT tk.i, tk.l, dim.name FROM tk JOIN dim ON tk.i50 = dim.di WHERE tk.i < 4000", Seq(BHJ))
-      val bhj = nodesOf[org.apache.spark.sql.vector.VectorBroadcastHashJoinExec](df)
+      val bhj = nodesOf[org.apache.spark.sql.vecruntime.VectorBroadcastHashJoinExec](df)
       assert(
         bhj.nonEmpty && nodesOf[org.apache.spark.sql.execution.joins.BroadcastHashJoinExec](df).isEmpty,
         finalPlan(df).treeString

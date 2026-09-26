@@ -18,7 +18,7 @@ package io.vecruntime.spark.iceberg
 import io.vecruntime.spark.{VectorConf, VectorPlugin}
 import io.vecruntime.spark.test.IcebergTest
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.vector.{PlanUtils, VectorPlan, VectorPrefetchScanExec}
+import org.apache.spark.sql.vecruntime.{PlanUtils, VectorPlan, VectorPrefetchScanExec}
 import org.scalatest.Tag
 
 /**
@@ -68,7 +68,7 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
     assert(IcebergVectorAdapter.adaptedColumns() > columnsBefore)
   }
 
-  private val Sort = classOf[org.apache.spark.sql.vector.VectorSortExec]
+  private val Sort = classOf[org.apache.spark.sql.vecruntime.VectorSortExec]
 
   icebergTest("wide decimals from Iceberg's reader become DECIMAL128 lanes: filtered, projected and sorted") {
     // Iceberg keeps decimal(p > 18) as a 16-byte FixedSizeBinaryVector of big-endian bytes; the adapter

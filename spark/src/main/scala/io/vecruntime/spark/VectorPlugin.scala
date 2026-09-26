@@ -44,7 +44,7 @@ class VectorPlugin extends SparkPlugin {
       }
       // The UI tab needs the SparkContext, which only exists here.
       val get: String => Option[String] = k => ctx.conf().getOption(k)
-      org.apache.spark.sql.vector.ui.VectorUi.attach(
+      org.apache.spark.sql.vecruntime.ui.VectorUi.attach(
         sc,
         enabled = VectorConf.uiEnabled(get),
         retainedExecutions = VectorConf.uiRetainedExecutions(get)
@@ -54,7 +54,7 @@ class VectorPlugin extends SparkPlugin {
 
     /** The columnar shuffle's Flight location registry (#288), when its module is on the classpath. */
     override def receive(message: AnyRef): AnyRef =
-      org.apache.spark.sql.vector.VectorShuffle.driverReceive(message)
+      org.apache.spark.sql.vecruntime.VectorShuffle.driverReceive(message)
   }
 
   override def executorPlugin(): ExecutorPlugin = new ExecutorPlugin {
@@ -63,10 +63,10 @@ class VectorPlugin extends SparkPlugin {
       io.vecruntime.spark.comet.CometVectorAdapter.tryRegister()
       // Starts the Flight shuffle server on this executor when the shuffle module is present, its
       // manager configured and the backend is Flight (#288).
-      org.apache.spark.sql.vector.VectorShuffle.executorInit(ctx)
+      org.apache.spark.sql.vecruntime.VectorShuffle.executorInit(ctx)
     }
 
-    override def shutdown(): Unit = org.apache.spark.sql.vector.VectorShuffle.executorShutdown()
+    override def shutdown(): Unit = org.apache.spark.sql.vecruntime.VectorShuffle.executorShutdown()
   }
 }
 

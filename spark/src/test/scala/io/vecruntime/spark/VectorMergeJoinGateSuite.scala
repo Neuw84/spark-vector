@@ -16,7 +16,7 @@
 package io.vecruntime.spark
 
 import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
-import org.apache.spark.sql.vector.VectorFallback
+import org.apache.spark.sql.vecruntime.VectorFallback
 
 /**
  * #402: the merge join's size gate on q47's shape -- a windowed CTE self-joined on rn-1 / rn+1 under
@@ -51,13 +51,16 @@ class VectorMergeJoinGateSuite extends VectorQuerySuite {
       val df = checkVectorized(
         sql,
         Seq(
-          classOf[org.apache.spark.sql.vector.VectorSortMergeJoinExec],
-          classOf[org.apache.spark.sql.vector.VectorTakeOrderedAndProjectExec]
+          classOf[org.apache.spark.sql.vecruntime.VectorSortMergeJoinExec],
+          classOf[org.apache.spark.sql.vecruntime.VectorTakeOrderedAndProjectExec]
         )
       )
       val reasons = VectorFallback.reasons(finalPlan(df)).map(_._2)
       assert(nodesOf[org.apache.spark.sql.execution.joins.SortMergeJoinExec](df).isEmpty, finalPlan(df).treeString)
-      assert(nodesOf[org.apache.spark.sql.vector.VectorSortMergeJoinExec](df).length === 2, finalPlan(df).treeString)
+      assert(
+        nodesOf[org.apache.spark.sql.vecruntime.VectorSortMergeJoinExec](df).length === 2,
+        finalPlan(df).treeString
+      )
     }
   }
 }
