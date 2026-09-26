@@ -432,7 +432,7 @@ that pin it.
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
   4096-row batches through `GatherKernels` (shared with the joins; `-1` indices pad outer joins). The sort does not spill (that is
   documented, and the reason the config key exists; #380 designs the external merge sort). The
-  grouped aggregate does, since #363: past `spark.vector.agg.spillThreshold` (512m) or a refusal by
+  grouped aggregate does, since #363: past `spark.vector.agg.spillThreshold` (1g since #511) or a refusal by
   Spark's task memory manager -- the operator acquires its real footprint as the table grows (#367,
   #376) -- a buffer-emitting mode emits its table and starts over (`EmitAndReset`, with a
   pass-through once a full table shows the input does not reduce), a merging mode spills into hash
