@@ -1,28 +1,27 @@
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>spark-vector vs Apache Spark on Iceberg merge-on-read (v2 deletes, v3 deletion vectors)</title>
+---
+layout: default
+title: 'spark-vector vs Apache Spark on Iceberg merge-on-read (v2 deletes, v3 deletion vectors)'
+---
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-:root { --fg:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --card:#f9fafb; --accent:#2563eb; --good:#16a34a; --bad:#dc2626; }
-@media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --bg:#0f172a; --card:#1e293b; } }
-body { font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--fg); background:var(--bg); margin:0; }
-main { max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }
-h1 { font-size: 1.85rem; margin: .2em 0 .3em; } h2 { margin-top: 2.2em; border-bottom: 1px solid var(--line); padding-bottom: .3em; } h3 { margin-top: 1.6em; }
-.lede { color: var(--muted); }
-.tldr { background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }
-.cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin: 1em 0; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
-.card .n { font-size: 1.6rem; font-weight: 700; } .card .l { color: var(--muted); font-size: .9rem; }
-table { border-collapse: collapse; width: 100%; margin: .8em 0 1.4em; font-size: .9rem; }
-th, td { border-bottom: 1px solid var(--line); padding: 6px 9px; text-align: right; } th { background: var(--card); } th:first-child, td:first-child { text-align: left; }
-td { font-variant-numeric: tabular-nums; }
-.win { color: var(--good); } .loss { color: var(--bad); }
-.chart { position: relative; height: 340px; margin: 1em 0 2em; }
-pre { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: .85rem; }
-.foot { color: var(--muted); font-size: .85rem; margin-top: 3em; } a { color: var(--accent); }
-.note { background: var(--card); border-left: 3px solid var(--muted); padding: 2px 14px; border-radius: 4px; margin: 1em 0; }
-</style></head>
-<body><main>
+/* Benchmark-page components. Scoped under .bench so they never restyle the site
+   shell; colours come from the site theme variables (light/dark toggle works). */
+.bench { --good:#16a34a; --bad:#dc2626; }
+:root[data-theme="dark"] .bench { --good:#3fb950; --bad:#f85149; }
+.doc:has(.bench) { max-width: none; }
+.bench .lede { color: var(--muted); }
+.bench .tldr { background: var(--card); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 1.2em 0; }
+.bench .cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin: 1em 0; }
+.bench .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.bench .card .n { font-size: 1.6rem; font-weight: 700; } .bench .card .l { color: var(--muted); font-size: .9rem; }
+.bench table th, .bench table td { text-align: right; } .bench table th:first-child, .bench table td:first-child { text-align: left; }
+.bench table td { font-variant-numeric: tabular-nums; }
+.bench .win { color: var(--good); } .bench .loss { color: var(--bad); }
+.bench .chart { position: relative; height: 340px; margin: 1em 0 2em; }
+.bench .foot { color: var(--muted); font-size: .85rem; margin-top: 3em; }
+.bench .note { background: var(--card); border-left: 3px solid var(--muted); padding: 2px 14px; border-radius: 4px; margin: 1em 0; }
+</style>
+<div class="bench">
 <h1>Iceberg merge-on-read: spark-vector vs Apache Spark</h1>
 <p class="lede">A merge-on-read Iceberg table carries <b>delete files</b> between compactions — the record of the UPDATEs, DELETEs and
 MERGEs applied since the data files were written. A reader must merge those deletes against the data on every scan.
@@ -152,12 +151,12 @@ Spark's, and both engines committed the same 46,641,979 added records and 64 del
 Spark in 14). On v2 both engines left 425,665,996 rows after the merge; Spark's v2 checksums were not kept (the harness lost that
 job's result file), so v2 is checked by row count only.</p>
 
-<p class="foot">Numbers from <a href="https://github.com/spark-vector/spark-vector/blob/main/docs/results.md">docs/results.md</a>
+<p class="foot">Numbers from <a href="{{ '/results.html' | relative_url }}">Benchmark results</a>
 (the #260 harness, #261 v2, #262 v3): TPC-H SF1 on one 8-vCPU host, median of 10 measured iterations, <code>local[8]</code>. Not a
 cluster benchmark and not comparable to the 1 TB TPC-DS results. Checksums equalled Spark's on all 90 cells; every <code>dv_*</code>
 checksum equalled its <code>pos_*</code> twin (same rows, different encoding). Two of sixteen JVMs showed a transient JIT-deopt spike
 on Q1's first post-warm-up iterations that recovered within the same JVM — a compilation storm, not a delete-layout cost.</p>
-</main>
+</div>
 <script>
 const V3 = {
   cols: ["probe-count", "probe-sum", "probe-group", "q6", "q1"],
@@ -259,4 +258,3 @@ cdcTable("cdcv2table", CDC_V2); cdcTable("cdcv3table", CDC_V3);
 cdcChart("cdcv2chart", CDC_V2, "v2 mix_20_5");
 cdcChart("cdcv3chart", CDC_V3, "v3 dvmix_20_5");
 </script>
-</body></html>
