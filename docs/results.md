@@ -18,7 +18,7 @@ Every number below is reproducible with the commands in the README; the JMH text
 
 `-wi 2 -i 3 -w 1 -r 1 -f 1`, throughput in elements per millisecond, one thread, batches of 8192
 (4096 for grouped aggregation). `reference` is the scalar loop in
-`io.sparkvector.kernels.reference.ScalarReference`, the same code the unit tests use as oracle.
+`io.vecruntime.kernels.reference.ScalarReference`, the same code the unit tests use as oracle.
 
 ### Compare (column `<` literal, column `<` column) → selection bitmap
 
@@ -2673,3 +2673,34 @@ The page is [benchmarks/tpcds-1tb-graviton.html](benchmarks/tpcds-1tb-graviton.h
 - **Speed:** we are faster than Spark on 86 of 103 queries. Executor time is 53.7 h against 67.3 h, and shuffle read 0.52 TB against 0.94 TB.
 - **Where the lead shrinks:** mostly queries where Spark itself gains more on Graviton4 (q45, q6, q29, q77, q78, q93).
 - **Where it grows:** queries at parity or behind on x86 (q7 0.90x → 1.71x, q25 0.86x → 1.39x, q11 0.93x → 1.22x, q9 1.03x → 1.45x).
+
+#### Rerun with AQE's defaults (2026-09-26)
+
+The page now shows this run. Changes from the one above:
+
+- **AQE settings:** the advisory size is left at Spark's default (64 MB), and `minPartitionNum` is unset.
+- **Our build:** main d50d3e9, plus AQE map-size scaling from #514 (`spark.vector.shuffle.aqe.mapSizeScaling=true`, `sparkCompressionRatio=0`).
+- **The rest is the same:** same nodes, executors and data, one engine after the other, each alone on the cluster.
+
+| | Spark (s) | ours (s) | speedup | geomean |
+|---|---|---|---|---|
+| Graviton4, AQE defaults (2026-09-26) | 2,207.3 | 1,800.5 | 1.23x | 1.21x |
+| Graviton4, advisory 128m + `minPartitionNum=208` (above) | 2,695.5 | 2,158.5 | 1.25x | 1.22x |
+
+- **Spark is faster at its defaults:** 2,207 s against 2,696 s, so the lead is now measured against the faster Spark.
+- **Correctness:** row counts are equal on every query. Checksums are equal except q65, whose checksum also differs between two runs of the same engine today.
+- **Speed:** we are faster than Spark on 77 of 103 queries. Executor time is 43.3 h against 53.4 h, and shuffle read 0.47 TB against 0.94 TB.
+- **Our runs between the two** (all advisory 128m unless noted, #511):
+
+  | Run | Total |
+  |---|---|
+  | main, scaling off | 1,986.4 s |
+  | scaling on, compression 2.5 | 1,973.8 s (geomean 4.5 % slower) |
+  | scaling on, compression 0 | 1,835.6 s (geomean 2.6 % faster) |
+  | at 64 MB, compression 2.5 | 1,829.1 s |
+  | at 64 MB, compression 0 | 1,800.5 s |
+
+  - **Without the scaling:** q67's final aggregate ran 150 tasks of 5.5 M rows and spilled 115 GB, taking 92 s.
+  - **With it:** 300 tasks, no spill, 39 s.
+  - **The larger compression-2.5 factor:** it stops AQE merging the short queries' small partitions, which is why it loses on the geomean.
+- **The x86 comparison on the page mixes settings:** its reference is still the published 128m run.

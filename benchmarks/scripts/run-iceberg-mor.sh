@@ -45,7 +45,7 @@ apply_and_wait() { # <name> <rendered-yaml-file>
 }
 
 gen() { # <namespace> <variants>
-  local ns="$1" variants="$2" name="spark-vector-mor-gen-$1" f
+  local ns="$1" variants="$2" name="vecruntime-mor-gen-$1" f
   f="$(mktemp)"
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|DATA_PREFIX|${DATA_PREFIX}|g" \
       -e "s|NAMESPACE|${ns}|g" -e "s|VARIANTS|${variants}|g" -e "s|FILES|${FILES}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" -e "s|SAMPLE_FRAC|${SAMPLE_FRAC}|g" \
@@ -56,11 +56,11 @@ gen() { # <namespace> <variants>
 cdc() { # <config> <namespace> <variant>
   local config="$1" ns="$2" variant="$3"
   local table="${ns}.${variant}"
-  local name="spark-vector-mor-cdc-${config}-${ns}-${variant//_/-}" f
+  local name="vecruntime-mor-cdc-${config}-${ns}-${variant//_/-}" f
   f="$(mktemp)"
   # The manifest name pattern is CONFIG-TABLE; render TABLE as ns.variant and give the SparkApplication a k8s-safe name.
   sed -e "s|IMAGE|${IMAGE}|g" -e "s|S3_BUCKET|${BUCKET}|g" -e "s|NAMESPACE|${ns}|g" -e "s|BASE_TABLE|${BASE_TABLE}|g" \
-      -e "s|spark-vector-mor-cdc-CONFIG-TABLE|${name}|" -e "s|\"CONFIG\"|\"${config}\"|" -e "s|\"TABLE\"|\"${table}\"|" -e "s|CHANGE_PCT|${CHANGE_PCT}|" \
+      -e "s|vecruntime-mor-cdc-CONFIG-TABLE|${name}|" -e "s|\"CONFIG\"|\"${config}\"|" -e "s|\"TABLE\"|\"${table}\"|" -e "s|CHANGE_PCT|${CHANGE_PCT}|" \
       "$HERE/../k8s/iceberg-mor-cdc.yaml" > "$f"
   apply_and_wait "$name" "$f" || { rm -f "$f"; return 1; }
   # The runner uploads its JSONL to s3://<bucket>/results/iceberg-mor-cdc/cdc-<config>-<ns>-<variant>.jsonl after

@@ -1,13 +1,11 @@
-title: spark-vector
+title: vecruntime
 description: >-
-  A JVM-native vectorized execution engine for Apache Spark SQL. Runs core
-  operators on Arrow-layout columnar batches with the Java Vector API -- no
-  native code -- with its own columnar shuffle over Arrow Flight.
-# GitHub Pages serves this project site under /spark-vector.
-baseurl: "/spark-vector"
-url: "https://spark-vector.github.io"
+  A vectorized execution runtime for Apache Spark using Java
+# GitHub Pages serves this project site under /vecruntime.
+baseurl: "/vecruntime"
+url: "https://vecruntime.github.io"
 
-repo_url: "https://github.com/spark-vector/spark-vector"
+repo_url: "https://github.com/vecruntime/vecruntime"
 
 # Stock GitHub Pages Jekyll: no custom plugins, no theme gem. We ship our own
 # layouts/includes/assets so nothing outside the allowed plugin set is used.

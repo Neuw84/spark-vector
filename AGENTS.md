@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Working notes for agents and contributors changing spark-vector. This file records the design
+Working notes for agents and contributors changing vecruntime. This file records the design
 decisions the code embodies, why they were taken, and how a change must be validated before it is
 considered done. `README.md` is the user-facing description, `docs/results.md` the measurements,
 `docs/comet.md` the Comet integration; this file is the contract behind them.
@@ -41,7 +41,7 @@ mvn -B -q clean install                    # kernels + Spark suites, Comet suite
 mvn -B -q -Pcomet clean install            # also the Comet-backed suites (needs the Comet jar in ~/.m2)
 mvn -B -q -Pcomet,iceberg clean install    # plus the Iceberg suites (Iceberg 1.11 runtime from Maven Central)
 mvn -pl kernels test -Dvector.jvm.args="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow -Dsparkvector.vectorBits=512"
-mvn -pl spark install -Dsuites=io.sparkvector.spark.VectorAggregateSuite   # one suite
+mvn -pl spark install -Dsuites=io.vecruntime.spark.VectorAggregateSuite   # one suite
 mvn -B -Pcomet,iceberg -pl kernels,spark,shuffle,benchmarks install   # the gate the crews run before a PR
 benchmarks/scripts/gen-tpch.sh 1           # DuckDB-generated eight tables, decimals as doubles; 10 for SF10 (gitignored)
 benchmarks/scripts/gen-tpch.sh 1 benchmarks/data --decimals   # same tables with real DECIMAL(15,2), into sf1-decimal
@@ -70,7 +70,7 @@ that pin it.
 - Operators are replaced by `VectorExecRule` (registered through `injectColumnar`, in
   `preColumnarTransitions`), bottom-up. An operator is converted only if its child already
   produces columnar batches of supported types (vectorized Parquet scan, Comet scan, or another
-  spark-vector operator) and every expression compiles.
+  vecruntime operator) and every expression compiles.
 - Everything that is not converted gets a reason attached as a `VectorFallback.Tag` on the
   original operator. There is no silent fallback: tests assert on the reason text
   (`checkFallback(..., reasonContains = ...)`), the UI shows it, and
@@ -246,7 +246,7 @@ that pin it.
 
 ### 3.4 Selection vectors between our operators
 
-- A filter feeding another spark-vector operator forwards a `SelectedColumnarBatch` (the input
+- A filter feeding another vecruntime operator forwards a `SelectedColumnarBatch` (the input
   batch plus a selection bitmap) instead of compacting, when at least
   `sparkvector.selection.minFraction` (0.5) of the rows survive; below that it compacts, because
   downstream operators then walk far fewer rows (Q6 at 2% selectivity forwarded made the project
@@ -432,7 +432,7 @@ that pin it.
   decoded because every chunk may carry a different dictionary), sorted, and gathered out in
   4096-row batches through `GatherKernels` (shared with the joins; `-1` indices pad outer joins). The sort does not spill (that is
   documented, and the reason the config key exists; #380 designs the external merge sort). The
-  grouped aggregate does, since #363: past `spark.vector.agg.spillThreshold` (512m) or a refusal by
+  grouped aggregate does, since #363: past `spark.vector.agg.spillThreshold` (1g since #511) or a refusal by
   Spark's task memory manager -- the operator acquires its real footprint as the table grows (#367,
   #376) -- a buffer-emitting mode emits its table and starts over (`EmitAndReset`, with a
   pass-through once a full table shows the input does not reduce), a merging mode spills into hash
@@ -748,8 +748,8 @@ into these rather than adding special cases to operators.
 ### 3.10 The columnar shuffle (#288)
 
 Our exchange, `VectorShuffleExchangeExec` (a `ShuffleExchangeLike`, so AQE's coalescing, skew
-splitting and local reads apply unchanged), replaces `ShuffleExchangeExec` above a spark-vector
-operator when `spark.vector.shuffle.enabled` is on, the `spark-vector-shuffle` jar is present and
+splitting and local reads apply unchanged), replaces `ShuffleExchangeExec` above a vecruntime
+operator when `spark.vector.shuffle.enabled` is on, the `vecruntime-shuffle` jar is present and
 `spark.shuffle.manager` is `VectorShuffleManager`; Comet's native shuffle takes precedence where it
 is configured. Four pieces, in the `shuffle` module except the kernel:
 
@@ -841,7 +841,7 @@ A change is not done until all of the following that apply have run green, local
 2. Spark SQL comparison. Operator and expression behaviour is validated by running the same SQL
    twice on the same session with `spark.vector.enabled` toggled and comparing rows
    (`VectorQuerySuite.checkVectorized`, tolerance `1e-9` for doubles), while asserting the expected
-   spark-vector operators are in the final (post-AQE) plan. Unsupported cases are validated the same
+   vecruntime operators are in the final (post-AQE) plan. Unsupported cases are validated the same
    way with `checkFallback`, which asserts the Spark operator stayed and the recorded reason
    contains the expected text. Suites: `VectorFilterSuite`, `VectorProjectSuite`,
    `VectorAggregateSuite`, `VectorSortSuite`, `VectorDecimalSuite` (exact comparison, no double
@@ -929,7 +929,7 @@ A change is not done until all of the following that apply have run green, local
    reading order above: `jfr view hot-methods`; the callers of the JDK-internal `MemorySegment` and
    `Buffer.checkIndex` frames (a stack walk over `jdk.ExecutionSample`, so the hot JDK frame is
    attributed to the kernel or reader that called it); the plugin's own frames by self time (the
-   first `io.sparkvector` frame of each stack -- which kernel or expression owns the samples, and how
+   first `io.vecruntime` frame of each stack -- which kernel or expression owns the samples, and how
    much of the JVM's time is not ours at all); then allocation sites, GC pauses, latencies by type
    and native methods (Comet's JVM side). The cluster half of the regression protocol -- submitting
    the single-query application with `--flags-only`'s options and pulling the recordings back --
@@ -972,7 +972,7 @@ Iceberg alone; the Comet suites contribute 42, `CometMixedChainSuite` 10, `Comet
   executors are waiting, not computing -- read the `jdk.ThreadPark` events by thread and first
   non-JDK frame before blaming a kernel. `jfr-summary.sh` needs `JAVA_HOME`.
 - Read a run's medians from the driver log before the next run of the same configuration replaces
-  the pod (the application name is `spark-vector-<suite>-<config>-<dataset>`), and know that the
+  the pod (the application name is `vecruntime-<suite>-<config>-<dataset>`), and know that the
   container log rotates at 10 MB; the `.jsonl` results in the prefix and `run-tpcds.sh --cluster-report`
   (the in-cluster report job) are the durable record. The results bucket is KMS-protected: read it
   in-cluster.

@@ -5,14 +5,14 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: spark-vector-mor-gen-NAMESPACE
+  name: vecruntime-mor-gen-NAMESPACE
   namespace: bench
 spec:
   type: Scala
   mode: cluster
   image: IMAGE
   imagePullPolicy: IfNotPresent
-  mainClass: io.sparkvector.benchmarks.IcebergMorGenerator
+  mainClass: io.vecruntime.benchmarks.IcebergMorGenerator
   mainApplicationFile: local:///opt/spark/jars/benchmarks.jar
   arguments:
     - "--data"

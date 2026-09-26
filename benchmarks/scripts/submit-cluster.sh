@@ -32,8 +32,8 @@ OUT="${4:?output URI}"
 shift 4
 SUITE="${SUITE:-tpcds}"
 case "$SUITE" in
-  tpcds) MAIN=io.sparkvector.benchmarks.TpcdsRunner ;;
-  tpch) MAIN=io.sparkvector.benchmarks.TpchRunner ;;
+  tpcds) MAIN=io.vecruntime.benchmarks.TpcdsRunner ;;
+  tpch) MAIN=io.vecruntime.benchmarks.TpchRunner ;;
   *) echo "SUITE must be tpcds or tpch" >&2; exit 2 ;;
 esac
 JAR="${BENCH_JAR:-$ROOT/benchmarks/target/benchmarks.jar}"
@@ -41,7 +41,7 @@ OFFHEAP="${OFFHEAP:-32g}"
 
 # The engine configurations, mirroring TpchRunner.Configs (kept in step by hand; the runner warns
 # when the session disagrees with the configuration it is labelled with).
-VECTOR=(--conf spark.plugins=io.sparkvector.spark.VectorPlugin
+VECTOR=(--conf spark.plugins=io.vecruntime.spark.VectorPlugin
         --conf spark.vector.exec.strictFloatingPoint=false
         --conf spark.vector.exec.sortMergeJoin.enabled=true
         --conf spark.sql.parquet.enableVectorizedReader=true
@@ -68,7 +68,7 @@ case "$CONFIG" in
     ENGINE=("${VECTOR[@]}" --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
             --conf spark.vector.shuffle.enabled=true --conf spark.vector.exec.strictFloatingPoint=true) ;;
   comet-scan-vector-shuffle)
-    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
+    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin
             --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
             "${COMET_SCAN_ONLY[@]}" --conf spark.comet.exec.shuffle.enabled=true) ;;
   comet-scan)
@@ -76,11 +76,11 @@ case "$CONFIG" in
     # differs only when the scan is Comet's (#248, q64 at 1 TB).
     ENGINE=(--conf spark.plugins=org.apache.spark.CometPlugin "${COMET_SCAN_ONLY[@]}") ;;
   comet-scan-vector-ourshuffle)
-    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
+    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin
             --conf spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager
             --conf spark.vector.shuffle.enabled=true "${COMET_SCAN_ONLY[@]}") ;;
   hybrid)
-    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin
+    ENGINE=("${VECTOR[@]}" --conf spark.plugins=org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin
             --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
             "${COMET_SCAN_ONLY[@]}" --conf spark.comet.exec.shuffle.enabled=true --conf spark.vector.comet.mixed.enabled=true) ;;
   comet)
@@ -109,7 +109,7 @@ if [ -n "${MASTER:-}" ]; then MASTER_ARGS=(--master "$MASTER"); fi
 EXTRA=()
 if [ -n "${SUBMIT_ARGS:-}" ]; then read -ra EXTRA <<< "$SUBMIT_ARGS"; fi
 
-CMD=("${SPARK_SUBMIT:-spark-submit}" "${MASTER_ARGS[@]}" --class "$MAIN" --name "spark-vector-$SUITE-$CONFIG-$DATASET"
+CMD=("${SPARK_SUBMIT:-spark-submit}" "${MASTER_ARGS[@]}" --class "$MAIN" --name "vecruntime-$SUITE-$CONFIG-$DATASET"
      --conf "spark.driver.extraJavaOptions=$JVM_FLAGS" --conf "spark.executor.extraJavaOptions=$JVM_FLAGS"
      --conf spark.sql.adaptive.enabled=true
      "${ENGINE[@]}" ${JARS[@]+"${JARS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"}

@@ -29,7 +29,7 @@ import org.apache.spark.sql.connector.write.WriterCommitMessage
  */
 object IcebergDvBridge {
   private val CommitBridge = "org.apache.iceberg.spark.source.IcebergDvCommitBridge"
-  private val TaskWriter = "io.sparkvector.iceberg.bridge.DvDeltaTaskWriter"
+  private val TaskWriter = "io.vecruntime.iceberg.bridge.DvDeltaTaskWriter"
 
   private lazy val commitBridgeClass: Option[Class[_]] =
     try Some(Class.forName(CommitBridge, true, getClass.getClassLoader))
@@ -78,7 +78,7 @@ object IcebergDvBridge {
 }
 
 /**
- * Reflective wrapper over one `io.sparkvector.iceberg.bridge.DvDeltaTaskWriter` instance. Created and
+ * Reflective wrapper over one `io.vecruntime.iceberg.bridge.DvDeltaTaskWriter` instance. Created and
  * used entirely on the executor, so it holds the instance and looks its methods up once.
  */
 final class IcebergDvTaskWriterHandle(instance: AnyRef) {

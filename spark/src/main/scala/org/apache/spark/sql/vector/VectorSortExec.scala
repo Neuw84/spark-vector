@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.VectorConf
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.vecruntime.spark.VectorConf
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.expr.{ColumnRef, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, NullsFirst, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.{

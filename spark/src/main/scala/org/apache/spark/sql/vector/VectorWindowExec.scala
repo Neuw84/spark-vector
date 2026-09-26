@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,11 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.kernels.{Bitmap, GroupAssignment, VectorBuffers}
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.agg.{GroupedAggState, Rows, VectorAggFunction, VectorAggregates}
-import io.sparkvector.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch, VectorAllocators}
-import io.sparkvector.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.vecruntime.kernels.{Bitmap, GroupAssignment, VectorBuffers}
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.agg.{GroupedAggState, Rows, VectorAggFunction, VectorAggregates}
+import io.vecruntime.spark.arrow.{ArrowOutput, BorrowedColumnVector, SelectedColumnarBatch, VectorAllocators}
+import io.vecruntime.spark.expr.{ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -205,7 +205,12 @@ case class VectorWindowExec(
   }.toArray
   @transient private lazy val aggResults: Array[VectorExpr] = {
     val attrs = aggregates.map(_.resultAttribute)
-    VectorAggregatePlanner.compileFinalResults(Nil, aggregates, attrs, attrs) match {
+    // Each output column is the window alias's value: the aggregate's own result, wrapped in any
+    // scalar expressions over it (Spark's decimal-avg `cast(avg(UnscaledValue(d)) OVER (...) / scale
+    // as decimal(p,s))`). For a bare window alias the wrapper is the identity, so this is the result
+    // attribute as before.
+    val resultExprs = VectorWindowPlanner.resultExpressions(windowExpression, aggregates)
+    VectorAggregatePlanner.compileFinalResults(Nil, aggregates, attrs, resultExprs) match {
       case Right(exprs) => exprs.toArray
       case Left(reason) => throw new IllegalStateException(s"cannot vectorize window aggregate results: $reason")
     }
@@ -333,8 +338,54 @@ object VectorWindowPlanner {
     case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, f)), _)
         if a.mode == Complete && a.filter.isEmpty =>
       frameKind(f).map(k => (a, k))
+    // A window aggregate wrapped in scalar expressions over its result: Spark rewrites a decimal avg
+    // to `cast(avg(UnscaledValue(d)) OVER (...) / scale as decimal(p,s))`, nesting the
+    // WindowExpression inside `Cast(Divide(...))`. Peel the wrapper to the single WindowExpression and
+    // classify by it; the exec projects the wrapper over the computed window column (see aggResults).
+    case Alias(body, _) if !body.isInstanceOf[WindowExpression] =>
+      wrappedAggregateWindow(body).flatMap { case (a, f) =>
+        if (
+          a.mode == Complete && a.filter.isEmpty &&
+          !a.aggregateFunction.isInstanceOf[First] && !a.aggregateFunction.isInstanceOf[Last]
+        )
+          frameKind(f).map(k => (a, k))
+        else None
+      }
     case _ => None
   }
+
+  /**
+   * The single [[WindowExpression]] nested inside a scalar wrapper (`Cast`, `Divide`, arithmetic)
+   * over its result, with its aggregate function and frame -- or None when there is not exactly one
+   * WindowExpression, or its function is not an aggregate. The wrapper itself (whether the scalar
+   * expressions around the result are ones we can compile) is checked when the result is compiled.
+   */
+  private def wrappedAggregateWindow(body: Expression): Option[(AggregateExpression, Expression)] = {
+    val windows = body.collect { case w: WindowExpression => w }
+    windows match {
+      case Seq(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, f))) => Some((a, f))
+      case _ => None
+    }
+  }
+
+  /**
+   * The window alias's output value as an expression over the aggregate's `resultAttribute`: the
+   * scalar wrapper with the nested [[WindowExpression]] replaced by the aggregate's result attribute
+   * (`compileFinalResults` then inlines the aggregate's own evaluate expression and compiles the
+   * wrapper around it). For a bare `Alias(WindowExpression(...), name)` this is just the result
+   * attribute aliased -- the previous behaviour.
+   */
+  private def windowResultExpr(e: NamedExpression, agg: AggregateExpression): NamedExpression = e match {
+    case Alias(WindowExpression(_, _), name) => Alias(agg.resultAttribute, name)()
+    case Alias(body, name) =>
+      val replaced = body.transform { case _: WindowExpression => agg.resultAttribute }
+      Alias(replaced, name)()
+    case other => other
+  }
+
+  /** The offset-family / ranking functions only support a bare window alias; a wrapped result is aggregate-only. */
+  def resultExpressions(es: Seq[NamedExpression], aggs: Seq[AggregateExpression]): Seq[NamedExpression] =
+    es.zip(aggs).map { case (e, a) => windowResultExpr(e, a) }
 
   /**
    * Offset-family kinds: a shifted row, the frame's first row, the frame's last row, the frame's n-th row;
@@ -639,7 +690,7 @@ object VectorWindowPlanner {
         out
       }
     case av: Average if av.child.dataType.isInstanceOf[SparkDecimalType] =>
-      val result = io.sparkvector.spark.agg.DecimalAvgResult(av)
+      val result = io.vecruntime.spark.agg.DecimalAvgResult(av)
       Some { slots =>
         val out = slots.clone()
         out(0) =
@@ -652,12 +703,23 @@ object VectorWindowPlanner {
   /** Whether the running frame needs the aggregate's partial buffer rather than its finalised form. */
   def runsPartial(a: AggregateExpression): Boolean = prefixFinalizer(a).isDefined
 
-  /** Why a window aggregate is not computed: the frame, or the function itself. */
-  private def aggregateReason(e: NamedExpression, input: Seq[Attribute]): Option[String] = e match {
-    case Alias(WindowExpression(a: AggregateExpression, _), _)
-        if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
-    case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) =>
-      frameKind(frame) match {
+  /** Why a window aggregate is not computed: the frame, the function itself, or its scalar wrapper. */
+  private def aggregateReason(e: NamedExpression, input: Seq[Attribute]): Option[String] = {
+    // The aggregate and frame, from a bare `Alias(WindowExpression(...), _)` or one wrapped in scalar
+    // expressions over the result (the decimal-avg `Cast(Divide(...))` rewrite). first_value /
+    // last_value are the offset family's, not this path's.
+    val extracted: Option[(AggregateExpression, Expression)] = e match {
+      case Alias(WindowExpression(a: AggregateExpression, _), _)
+          if a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last] => None
+      case Alias(WindowExpression(a: AggregateExpression, WindowSpecDefinition(_, _, frame)), _) => Some((a, frame))
+      case Alias(body, _) if !body.isInstanceOf[WindowExpression] =>
+        wrappedAggregateWindow(body).filterNot { case (a, _) =>
+          a.aggregateFunction.isInstanceOf[First] || a.aggregateFunction.isInstanceOf[Last]
+        }
+      case _ => None
+    }
+    extracted.flatMap { case (a, frame) =>
+      val funcReason = frameKind(frame) match {
         case Some(kind) =>
           // Decimal aggregates run on the aggregate machinery (the 128-bit accumulators, #259): a running frame
           // takes the partial buffer and finalises per row (prefixFinalizer), a whole partition the final form.
@@ -679,7 +741,14 @@ object VectorWindowPlanner {
               )
           }
       }
-    case _ => None
+      // A scalar wrapper (the decimal-avg cast/divide) must itself compile over the aggregate's result.
+      funcReason.orElse(
+        VectorAggregatePlanner
+          .compileFinalResults(Nil, Seq(a), Seq(a.resultAttribute), Seq(windowResultExpr(e, a)))
+          .left.toOption
+          .map(r => s"window result ${e.name}: $r")
+      )
+    }
   }
 
   def plan(w: WindowExec): Either[String, VectorWindowExec] = {
@@ -694,8 +763,12 @@ object VectorWindowPlanner {
       case Some((aggs, _)) =>
         val reasons = w.windowExpression.flatMap(aggregateReason(_, w.child.output))
         val attrs = aggs.map(_.resultAttribute)
+        // The result columns are the window aliases' values (the aggregate result, wrapped in any
+        // scalar expressions over it -- Spark's decimal-avg cast/divide). Compile the wrappers, not
+        // the bare attributes, so a wrapper we cannot compile is a reason rather than a runtime throw.
+        val resultExprs = resultExpressions(w.windowExpression, aggs)
         val resultReason = if (reasons.nonEmpty) None
-        else VectorAggregatePlanner.compileFinalResults(Nil, aggs, attrs, attrs).left.toOption.map(r =>
+        else VectorAggregatePlanner.compileFinalResults(Nil, aggs, attrs, resultExprs).left.toOption.map(r =>
           s"window aggregate result: $r"
         )
         (reasons ++ resultReason ++ keyFailures).headOption.toLeft(VectorWindowExec(
@@ -753,7 +826,7 @@ private[vector] final class KeyTracker(keys: Array[VectorExpr]) {
   private var lanes: Array[VectorBuffers] = _
   var hasPrevious = false
 
-  def startBatch(ctx: io.sparkvector.spark.expr.EvalContext): Unit = lanes = keys.map(_.eval(ctx))
+  def startBatch(ctx: io.vecruntime.spark.expr.EvalContext): Unit = lanes = keys.map(_.eval(ctx))
 
   /** True when row `i` differs from the remembered row (or none is remembered). */
   def changed(i: Int): Boolean = {

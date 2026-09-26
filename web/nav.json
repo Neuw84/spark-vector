@@ -1,9 +1,9 @@
 {
   "site": {
-    "title": "spark-vector",
-    "description": "A JVM-native vectorized execution engine for Apache Spark SQL. Runs core operators on Arrow-layout columnar batches with the Java Vector API -- no native code -- with its own columnar shuffle over Arrow Flight.",
-    "repo_url": "https://github.com/spark-vector/spark-vector",
-    "baseurl": "/spark-vector"
+    "title": "vecruntime",
+    "description": "A vectorized execution runtime for Apache Spark using Java",
+    "repo_url": "https://github.com/vecruntime/vecruntime",
+    "baseurl": "/vecruntime"
   },
   "nav": [
     {

@@ -1,14 +1,16 @@
-# spark-vector
+# vecruntime
 
-**A JVM-native vectorized execution engine for Apache Spark SQL.**
+**A vectorized execution runtime for Apache Spark using Java**
 
-spark-vector accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
+> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`), the `sparkvector.*` JVM system properties, and the shuffle manager class (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`) are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; and the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`).
 
-Inspired by the execution architecture of Apache DataFusion Comet, spark-vector provides a native-style execution path for **Filter, Project, HashAggregate, Sort, and hash joins**, while preserving Spark as the execution fallback for unsupported operators, expressions, and data types.
+vecruntime accelerates Spark SQL workloads by executing core operators directly on **Arrow-layout columnar batches** using the **Java Vector API**, bringing SIMD-optimized execution to the JVM without native libraries, JNI, or serialization boundaries.
+
+Inspired by the execution architecture of Apache DataFusion Comet, vecruntime provides a native-style execution path for **Filter, Project, HashAggregate, Sort, and hash joins**, while preserving Spark as the execution fallback for unsupported operators, expressions, and data types.
 
 The result is a **fully JVM-based execution engine** that combines the performance potential of vectorized execution with the portability and simplicity of the Java ecosystem.
 
-spark-vector can also integrate with native accelerators such as **Apache DataFusion Comet**: Comet can provide native Parquet decoding and shuffle, while spark-vector performs the intermediate SQL execution directly over the same columnar representation, enabling a **zero-copy execution pipeline** across the stack.
+vecruntime can also integrate with native accelerators such as **Apache DataFusion Comet**: Comet can provide native Parquet decoding and shuffle, while vecruntime performs the intermediate SQL execution directly over the same columnar representation, enabling a **zero-copy execution pipeline** across the stack.
 
 ### Key characteristics
 
@@ -20,7 +22,7 @@ spark-vector can also integrate with native accelerators such as **Apache DataFu
 * **Zero-copy integration:** designed to interoperate with columnar native components such as Comet without serialization between execution stages.
 * **Incremental adoption:** operators can be accelerated individually while the rest of the Spark plan continues to execute normally.
 
-In essence, **spark-vector brings a DataFusion-Comet/Velox-style vectorized execution model to the JVM, using the Java Vector API instead of native code.**
+In essence, **vecruntime brings a DataFusion-Comet/Velox-style vectorized execution model to the JVM, using the Java Vector API instead of native code.**
 
 ## Status
 
@@ -36,7 +38,7 @@ window per engine, all queries once, the median of the measured iteration
 | Spark 4.1.3 | 3309 s | -- | 20 GB heap / 30 GB overhead; the reference |
 | Apache DataFusion Comet 1.0 | 2514 s | 90 | native scan, operators and shuffle |
 | Comet's scan + our operators and shuffle | 2706 s | 67 | `spark.comet.scan.impl=native_datafusion` |
-| **spark-vector** (Spark's scan, our operators, our Flight shuffle) | **2557 s** | **82** | 30 GB heap / 20 GB overhead; 23% under Spark, 2% over Comet |
+| **vecruntime** (Spark's scan, our operators, our Flight shuffle) | **2557 s** | **82** | 30 GB heap / 20 GB overhead; 23% under Spark, 2% over Comet |
 
 Where the plugin wins it is the joins and aggregates (q23a 118 s against Spark's 211 and Comet's
 132; q23b 125 against 291 and 153; q93 66 against 137 and 85; q64 51 against 93 and 56). Where it
@@ -44,11 +46,11 @@ loses it is the scan-bound queries (q88 142 against Spark's 126) and a handful o
 (q99, q36, q12, q57), each with its cause named in `docs/results.md`. Every checksum equals Spark's
 except q65, whose result has ties that every engine orders differently.
 
-The same comparison as a page with per-query charts: [Apache Spark vs spark-vector vs DataFusion Comet on
-TPC-DS 1 TB](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb.html) (rendered from the result
+The same comparison as a page with per-query charts: [Apache Spark vs vecruntime vs DataFusion Comet on
+TPC-DS 1 TB](https://vecruntime.github.io/vecruntime/benchmarks/tpcds-1tb.html) (rendered from the result
 files by `benchmarks/scripts/render-benchmark-page.py`; the source is `docs/benchmarks/tpcds-1tb.html`).
-On AWS Graviton4 (arm64) the same TPC-DS 1 TB comparison against Spark is 1.25x (x86: 1.29x):
-[Apache Spark vs spark-vector on TPC-DS 1 TB, AWS Graviton4](https://spark-vector.github.io/spark-vector/benchmarks/tpcds-1tb-graviton.html).
+On AWS Graviton4 (arm64), with AQE at its defaults for both engines, the TPC-DS 1 TB comparison against Spark is 1.23x (x86 at the earlier 128m settings: 1.29x):
+[Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4](https://vecruntime.github.io/vecruntime/benchmarks/tpcds-1tb-graviton.html).
 
 Requirements and the things it does not do yet are listed under
 [Requirements and known limitations](#requirements-and-known-limitations); every configuration key
@@ -74,42 +76,42 @@ mvn -Piceberg verify                                # also runs the Iceberg suit
 mvn -Pcomet,iceberg verify                          # everything, including Comet's native Iceberg scan
 ```
 
-The plugin jar is `spark/target/spark-vector-spark_2.13-<version>.jar` (kernels shaded in, nothing
+The plugin jar is `spark/target/vecruntime-spark_2.13-<version>.jar` (kernels shaded in, nothing
 else). Spark and Arrow are `provided`.
 
 ## Getting the jars
 
-Every release is on the [releases page](https://github.com/spark-vector/spark-vector/releases): the plugin
-jar (`spark-vector-spark_2.13-<version>.jar`), the columnar shuffle jar
-(`spark-vector-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
+Every release is on the [releases page](https://github.com/vecruntime/vecruntime/releases): the plugin
+jar (`vecruntime-spark_2.13-<version>.jar`), the columnar shuffle jar
+(`vecruntime-shuffle_2.13-<version>.jar`) and a `SHA256SUMS` file. The same artifacts, with their
 POMs, are published to a Maven repository served from this repository's `maven-repo` branch -- no
 account or token needed:
 
 ```xml
 <repositories>
   <repository>
-    <id>spark-vector</id>
-    <url>https://raw.githubusercontent.com/spark-vector/spark-vector/maven-repo/</url>
+    <id>vecruntime</id>
+    <url>https://raw.githubusercontent.com/vecruntime/vecruntime/maven-repo/</url>
   </repository>
 </repositories>
 
 <dependencies>
   <dependency>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-spark_2.13</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-spark_2.13</artifactId>
     <version>0.0.1</version>
   </dependency>
   <!-- the columnar shuffle, if you run with spark.shuffle.manager=...VectorShuffleManager -->
   <dependency>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-shuffle_2.13</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-shuffle_2.13</artifactId>
     <version>0.0.1</version>
   </dependency>
 </dependencies>
 ```
 
 The same coordinates work with `--packages` on `spark-submit` together with
-`--repositories https://raw.githubusercontent.com/spark-vector/spark-vector/maven-repo/`. A release is cut
+`--repositories https://raw.githubusercontent.com/vecruntime/vecruntime/maven-repo/`. A release is cut
 by pushing a `v<version>` tag: the release workflow builds the jars on JDK 25, attaches them to the
 GitHub release with their checksums, and publishes them to the `maven-repo` branch
 (`.github/workflows/release.yml`). `CHANGELOG.md` has what each release carries.
@@ -118,15 +120,15 @@ GitHub release with their checksums, and publishes them to the `maven-repo` bran
 
 ```bash
 spark-submit \
-  --conf spark.plugins=io.sparkvector.spark.VectorPlugin \
+  --conf spark.plugins=io.vecruntime.spark.VectorPlugin \
   --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
   --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
-  --jars spark-vector-spark_2.13-0.0.1.jar \
+  --jars vecruntime-spark_2.13-0.0.1.jar \
   ...
 ```
 
 `spark.plugins` registers the session extension automatically; alternatively set
-`spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions`.
+`spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions`.
 
 Configuration keys (all default to `true` except the last; the complete reference, every
 `spark.vector.*` key with its default and unit, is [docs/configuration.md](docs/configuration.md)):
@@ -140,7 +142,7 @@ Configuration keys (all default to `true` except the last; the complete referenc
 | `spark.vector.exec.aggregate.enabled` | convert `HashAggregateExec` |
 | `spark.vector.exec.aggregate.final.enabled` | also convert Final-mode aggregates (their input is the shuffle) |
 | `spark.vector.exec.sort.enabled` | convert `SortExec` over a columnar child (spills past `spark.vector.sort.spillBytes`, #416) |
-| `spark.vector.agg.spillThreshold` | hard cap on one grouped aggregate table (default `512m`; `0` = never spill). Below it the operator acquires its real footprint from Spark's task memory manager as the table grows and acts on a refusal: a partial aggregate emits its table and starts over, a final one spills into hash buckets and merges them one at a time (#363, #367) |
+| `spark.vector.agg.spillThreshold` | hard cap on one grouped aggregate table (default `1g`, the sort's budget, #511; `0` = never spill). Below it the operator acquires its real footprint from Spark's task memory manager as the table grows and acts on a refusal: a partial aggregate emits its table and starts over, a final one spills into hash buckets and merges them one at a time (#363, #367) |
 | `spark.vector.agg.spillBuckets` | buckets a final aggregate spills into (default `16`) |
 | `spark.vector.agg.passThroughRatio` | a partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on (default `1.5`, `0` = never; #376) |
 | `spark.vector.sort.runRows` | rows per sorted run (default 1048576): the sort orders each run as the partition arrives and k-way merges the runs on output, bounding its scratch to the run (#285) |
@@ -170,7 +172,7 @@ Configuration keys (all default to `true` except the last; the complete referenc
 | `spark.vector.exec.strictFloatingPoint` | **on by default**: double `sum`/`avg` round exactly like Spark (one accumulator per group, rows added in order). `false` uses lane-parallel and interleaved partial sums that differ from Spark's in the last bits (about 7% of aggregate kernel time, 2.5% of TPC-H Q1) and can make an equality between two double sums fail (TPC-H Q15 returns no rows). Comet's `spark.comet.exec.strictFloatingPoint` is the analogous switch with the opposite default (`false`) and mechanism (`true` makes Comet fall back to Spark for such operations; we compute the strict result in our kernels). The benchmark configurations run with `false`, matching Comet's default |
 | `spark.vector.exec.selection.enabled` | pass selection bitmaps between our operators instead of compacting |
 | `spark.vector.comet.shuffle.enabled` | feed Comet's native shuffle from our operators when Comet's shuffle is configured |
-| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288). Default `true`, but it only takes effect with the `spark-vector-shuffle` jar on the classpath and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` -- without those the exchange stays Spark's. TPC-H SF10: 0.59x the row shuffle over the 22 queries (`docs/results.md`) |
+| `spark.vector.shuffle.enabled` | our own columnar shuffle exchange over Arrow IPC and Arrow Flight (#288). Default `true`, but it only takes effect with the `vecruntime-shuffle` jar on the classpath and `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` -- without those the exchange stays Spark's. TPC-H SF10: 0.59x the row shuffle over the 22 queries (`docs/results.md`) |
 | `spark.vector.shuffle.backend` | how a reducer fetches a remote map output: `flight` (default; one Flight server per executor -- for executors that stay up for the job), `block` (Spark's block transfer), or the class name of a `VectorShuffleBackend` from another jar |
 | `spark.vector.shuffle.compression` | body compression of the shuffle's record batches: `zstd` (default; native), `lz4` (Arrow's codec is pure Java and an order of magnitude slower) or `none` |
 | `spark.vector.shuffle.batchRows`, `spark.vector.shuffle.batchBytes`, `spark.vector.shuffle.bufferBytes` | a map task holds each reduce partition's rows until `batchRows` (default `8192`) or `batchBytes` (default `1m`) and writes them as one record batch; `bufferBytes` (default `64m`) caps what one task holds across partitions |
@@ -232,7 +234,7 @@ their footprint by the same factor -- strict mode is the cheapest in memory as w
 | setting | what it bounds |
 |---|---|
 | `spark.executor.memory`, `spark.executor.memoryOverhead`, `-XX:MaxDirectMemorySize` | the tables (heap) and the data (direct); the 1 TB campaign ran 20 GB / 30 GB / 28 GB per 13-core executor |
-| `spark.vector.agg.spillThreshold` | a hard cap on one grouped aggregate table (default `512m`). Below it the operator asks Spark's task memory manager for the table's real footprint as it grows and acts on a refusal: a partial aggregate emits its table and starts over, a final aggregate spills into hash buckets and merges them one at a time (#363, #367). `0` disables both |
+| `spark.vector.agg.spillThreshold` | a hard cap on one grouped aggregate table (default `1g`, #511). Below it the operator asks Spark's task memory manager for the table's real footprint as it grows and acts on a refusal: a partial aggregate emits its table and starts over, a final aggregate spills into hash buckets and merges them one at a time (#363, #367). `0` disables both |
 | `spark.vector.agg.spillBuckets` | buckets a final aggregate spills into (default `16`); each is merged in memory, so the buckets, not the input, must fit |
 | `spark.vector.agg.passThroughRatio` | a partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on (default `1.5`, `0` = never; #376). The exchange receives the same rows either way |
 | `spark.vector.join.maxBuildSize` | the largest build side the hash joins take (per task, on the heap) |
@@ -351,14 +353,14 @@ HashAggregateExec -> VectorHashAggregateExec     Arrow vectors -> ArrowColumnVec
 Sort, Window, Expand, Generate, Limit, Sample,   the same contract: columnar child in, Arrow out
 Union, joins (hash, nested loop, sort-merge)     (see "Supported today")
 ShuffleExchange   -> VectorShuffleExchange       Arrow IPC record batches per reduce partition ->
-(spark-vector-shuffle jar)                       Spark's data file; reducers fetch over Arrow Flight
+(vecruntime-shuffle jar)                       Spark's data file; reducers fetch over Arrow Flight
 ShuffleExchange   -> CometShuffleExchange        Arrow C Data export -> CometVector (zero copy)
 (with Comet)         over VectorToComet
 ```
 
 `VectorColumnarRule` runs in Spark's `preColumnarTransitions`, bottom-up. An operator is converted
 when its child is already columnar with supported types (a vectorized Parquet scan, a Comet scan, or
-another spark-vector operator) and every expression compiles to the kernel IR. Otherwise the reason
+another vecruntime operator) and every expression compiles to the kernel IR. Otherwise the reason
 is stored as a tree-node tag; `VectorFallback.reasons(plan)` lists them.
 
 ### The Vector Acceleration tab
@@ -451,7 +453,7 @@ many times the memory (see "Memory tuning").
 
 ### Columnar shuffle (Arrow IPC over Arrow Flight)
 
-With the `spark-vector-shuffle` jar on the classpath and
+With the `vecruntime-shuffle` jar on the classpath and
 `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`, the rule replaces
 a `ShuffleExchangeExec` above one of our operators with `VectorShuffleExchangeExec` (#288) -- a
 `ShuffleExchangeLike`, so AQE's coalescing, skew splitting and local reads apply -- for hash,
@@ -594,7 +596,7 @@ runner warns when the session it runs in disagrees with the configuration it is 
 | configuration | what the session sets |
 |---|---|
 | `spark` | nothing: plain Spark, its vectorized Parquet reader, its sort-based shuffle |
-| `vector` | `spark.plugins=io.sparkvector.spark.VectorPlugin`; `spark.vector.exec.strictFloatingPoint=false` (Comet's rounding; see the note under Aggregation); `spark.vector.exec.sortMergeJoin.mode=auto`; `spark.sql.parquet.enableVectorizedReader=true` (Spark's default, made explicit -- our operators consume its batches, the row reader would make every plan fall back); `spark.sql.columnVector.offheap.enabled=true` (#403: the reader writes Arrow's fixed-width layout into native memory and the adapter wraps those lanes in place instead of copying them) |
+| `vector` | `spark.plugins=io.vecruntime.spark.VectorPlugin`; `spark.vector.exec.strictFloatingPoint=false` (Comet's rounding; see the note under Aggregation); `spark.vector.exec.sortMergeJoin.mode=auto`; `spark.sql.parquet.enableVectorizedReader=true` (Spark's default, made explicit -- our operators consume its batches, the row reader would make every plan fall back); `spark.sql.columnVector.offheap.enabled=true` (#403: the reader writes Arrow's fixed-width layout into native memory and the adapter wraps those lanes in place instead of copying them) |
 | `vector-shuffle` | `vector` plus `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` and `spark.vector.shuffle.enabled=true`: our columnar exchange (#288) |
 | `vector-shuffle-strict` | `vector-shuffle` with `strictFloatingPoint=true` (bit-identical double sums) |
 | `comet-scan-vector-ourshuffle` | `vector-shuffle` with Comet's plugin and scan (`spark.comet.enabled`, `spark.comet.scan.enabled`, every `spark.comet.exec.*` operator off, `spark.memory.offHeap.enabled` with `OFFHEAP`, 32 g) |
@@ -605,8 +607,11 @@ On the cluster (`benchmarks/k8s/run-matrix.sh <tables> <dataset> <out> <image> [
 variables of `render-run.sh`, and the 1 TB runs in `docs/results.md` use: `EXECUTORS=8`,
 `EXEC_CORES=13`, `EXEC_MEM=30g` (heap), `EXEC_OVERHEAD=20g`, `DIRECT_MEM=30g`
 (`-XX:MaxDirectMemorySize`, where our Arrow batches and the shuffle's buffers live -- see Memory
-tuning), `DRIVER_CORES=2`, `DRIVER_MEM=4g`, `KEEP_EXECUTORS=1`, 200 shuffle partitions, one
-iteration per query. `EXEC_JAVA_OPTS` appends executor JVM options (a JFR recording:
+tuning), `DRIVER_CORES=2`, `DRIVER_MEM=4g`, `KEEP_EXECUTORS=1`, one iteration per query. From
+2026-09-26 the 1 TB runs pass only `--conf spark.sql.shuffle.partitions=300` in `SUBMIT_ARGS` and
+leave AQE at Spark's defaults: no `spark.sql.adaptive.advisoryPartitionSizeInBytes` override (64 MB)
+and no `spark.sql.adaptive.coalescePartitions.minPartitionNum`. The pages published before then used
+`advisoryPartitionSizeInBytes=128m` and `minPartitionNum=208`, as their configuration sections say. `EXEC_JAVA_OPTS` appends executor JVM options (a JFR recording:
 `-XX:StartFlightRecording=delay=55s,duration=60s,filename=/tmp/exec.jfr,settings=profile`, copied
 out of the executor pods with `kubectl cp` before the application ends), `SUBMIT_ARGS` extra
 `--conf` pairs for one run (`--conf spark.vector.sort.spillBytes=4g`). Read a
@@ -855,7 +860,7 @@ whose golden output is Spark's own physical plan, the DataSketches files (`hll`,
 `thetasketch`), whose library refuses to start on any JDK newer than 21, and `udtf/udtf.sql`, which
 needs `pyspark` installed (the Python UDF variants skip themselves without it and count as ignored).
 Everything else passes: 642 test cases, 111 ignored, with 2972 of the 33856 query executions running
-at least one spark-vector operator. Passing is the low bar -- a file passes just as well when every
+at least one vecruntime operator. Passing is the low bar -- a file passes just as well when every
 operator falls back -- so the run also prints a per-test-case table (executions, executions that ran
 one of our operators, operators) split into the 147 cases that run our operators and the 437 that never
 can (analyzer-only cases, DDL, files with no supported operator), and a full run compares every case

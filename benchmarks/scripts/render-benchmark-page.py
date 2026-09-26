@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2025-2026 Angel Conde and the spark-vector contributors
+# Copyright 2025-2026 Angel Conde and the vecruntime contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
 # compliance with the License. You may obtain a copy of the License at
@@ -24,12 +24,12 @@ import argparse, html, json, re, sys
 from pathlib import Path
 
 DEFAULT_META = {
-    "title": "Apache Spark vs spark-vector vs DataFusion Comet on TPC-DS 1 TB",
+    "title": "Apache Spark vs vecruntime vs DataFusion Comet on TPC-DS 1 TB",
     "dataset": "TPC-DS scale factor 1000 (1 TB), Parquet on Amazon S3 (103 query variants, one measured iteration each, no warm-up)",
     "cluster": "Amazon EKS 1.36; 9 x m5.4xlarge (16 vCPU, 64 GB, x86-64 with AVX-512), 20 GB root volume; one node group, the driver on the ninth node",
-    "executors": "8 executors x 13 cores x 50 GB each (Spark: 20 GB heap / 30 GB overhead; spark-vector: 30 GB heap / 20 GB overhead; Comet: 20 GB heap / 6 GB overhead / 24 GB off-heap); driver 2 cores x 6 GB",
+    "executors": "8 executors x 13 cores x 50 GB each (Spark: 20 GB heap / 30 GB overhead; vecruntime: 30 GB heap / 20 GB overhead; Comet: 20 GB heap / 6 GB overhead / 24 GB off-heap); driver 2 cores x 6 GB",
     "storage": "Amazon S3 through Hadoop 3.4.3 S3A with the Analytics Accelerator input stream (the default in 3.4.3)",
-    "versions": {"Spark": "4.1.3", "Scala": "2.13", "JDK": "Amazon Corretto 25", "spark-vector": "main at #465 (0.0.1)", "Comet": "1.0.0", "Hadoop": "3.4.3"},
+    "versions": {"Spark": "4.1.3", "Scala": "2.13", "JDK": "Amazon Corretto 25", "vecruntime": "main at #465 (0.0.1)", "Comet": "1.0.0", "Hadoop": "3.4.3"},
     "common_conf": [
         "spark.sql.shuffle.partitions=300",
         "spark.sql.adaptive.advisoryPartitionSizeInBytes=128m",
@@ -37,7 +37,7 @@ DEFAULT_META = {
         "spark.eventLog.enabled=true",
     ],
     "vector_conf": [
-        "spark.plugins=io.sparkvector.spark.VectorPlugin",
+        "spark.plugins=io.vecruntime.spark.VectorPlugin",
         "spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
         "spark.vector.exec.strictFloatingPoint=false   # Comet's default too",
         "spark.vector.scan.prefetch=0                 # measured: off",
@@ -55,16 +55,16 @@ DEFAULT_META = {
     ],
     "notes": [
         "Every engine returned Spark's row counts and checksums on every query except q65 (its result has ties, ordered differently by every engine) and, for Comet, q64 (0 rows against 12,185 -- a stale dynamic-pruning value, apache/datafusion-comet#6133).",
-        "The four legs ran in one window on the same nodes, one after another (Spark, spark-vector, Comet), each alone on the cluster; the AQE minimum of 208 partitions keeps the sort stages of the window queries wide (measured: Spark -4%, Comet -3%, spark-vector q67 -12%, the rest inside the run-to-run band).",
+        "The four legs ran in one window on the same nodes, one after another (Spark, vecruntime, Comet), each alone on the cluster; the AQE minimum of 208 partitions keeps the sort stages of the window queries wide (measured: Spark -4%, Comet -3%, vecruntime q67 -12%, the rest inside the run-to-run band).",
         "Spark's memory split is the one that completes: at 30 GB heap / 20 GB overhead Spark loses q23b, q24a and q24b to node-disk evictions during q23b's 503 GB spill; per query the heavier heap is 2-3% faster where it completes. Every split is measured in docs/results.md.",
         "coalescePartitions.minPartitionNum=208 is set for this run (and the Graviton4 run that compares with it); it is deprecated in Spark 3.2+, and later TPC-DS runs leave it unset (#253).",
     ],
-    "results_doc": "https://github.com/spark-vector/spark-vector/blob/main/docs/results.md",
-    "repo": "https://github.com/spark-vector/spark-vector",
-    "run_doc": "https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md",
+    "results_doc": "https://github.com/vecruntime/vecruntime/blob/main/docs/results.md",
+    "repo": "https://github.com/vecruntime/vecruntime",
+    "run_doc": "https://github.com/vecruntime/vecruntime/blob/main/benchmarks/k8s/README.md",
 }
 
-ENGINES = [("spark", "Apache Spark 4.1.3", "#6b7280"), ("vector", "spark-vector (plugin + Flight shuffle)", "#2563eb"), ("comet", "DataFusion Comet 1.0.0", "#f59e0b")]
+ENGINES = [("spark", "Apache Spark 4.1.3", "#6b7280"), ("vector", "vecruntime (plugin + Flight shuffle)", "#2563eb"), ("comet", "DataFusion Comet 1.0.0", "#f59e0b")]
 
 
 def load(path):
@@ -111,7 +111,7 @@ def main():
     ap.add_argument("--spark", required=True); ap.add_argument("--vector", required=True); ap.add_argument("--comet", required=True)
     ap.add_argument("--out", required=True); ap.add_argument("--meta")
     ap.add_argument("--web-out", help="also write a standalone web/ page (no Jekyll) to this path")
-    ap.add_argument("--web-base", default="/spark-vector", help="base URL prefix for the web/ page (default /spark-vector)")
+    ap.add_argument("--web-base", default="/vecruntime", help="base URL prefix for the web/ page (default /vecruntime)")
     a = ap.parse_args()
     meta = dict(DEFAULT_META)
     if a.meta:
@@ -191,29 +191,29 @@ title: {json.dumps(meta["title"])}
 </style>
 <div class="bench">
 <h1>{html.escape(meta["title"])}</h1>
-<p class="lede"><a href="{meta["repo"]}">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
+<p class="lede"><a href="{meta["repo"]}">vecruntime</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
 <a href="https://github.com/apache/datafusion-comet">Apache DataFusion Comet</a> offloads the same operators to a native Rust engine. This page
 compares both against plain Apache Spark on the TPC-DS 1 TB workload on Amazon EKS, all three on identical hardware, data and Spark settings.</p>
 
-<div class="tldr"><b>TL;DR.</b> Over the 103 TPC-DS queries at 1 TB, <b>spark-vector</b> finished in <b>{tot["vector"]:,.0f} s</b> against Spark's
+<div class="tldr"><b>TL;DR.</b> Over the 103 TPC-DS queries at 1 TB, <b>vecruntime</b> finished in <b>{tot["vector"]:,.0f} s</b> against Spark's
 {tot["spark"]:,.0f} s -- <b>{tot["spark"] / tot["vector"]:.2f}x</b>, {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime, faster than Spark on {faster["vector"]} of {n} queries
 (best {best_v}: {speed("vector", best_v):.2f}x; largest regression {worst_v}: {100 / speed("vector", worst_v) - 100:.0f}%).
 <b>Comet</b> finished in {tot["comet"]:,.0f} s -- {tot["spark"] / tot["comet"]:.2f}x, {100 - 100 * tot["comet"] / tot["spark"]:.0f}% less, faster on {faster["comet"]} of {n}
 (best {best_c}: {speed("comet", best_c):.2f}x; largest regression {worst_c}: {100 / speed("comet", worst_c) - 100:.0f}%).
-Between the two, spark-vector is faster on {v_lt_c} of {n} queries and leads on the heavy joins; Comet leads on the scan- and aggregate-bound ones.
+Between the two, vecruntime is faster on {v_lt_c} of {n} queries and leads on the heavy joins; Comet leads on the scan- and aggregate-bound ones.
 Every engine returned Spark's results (two footnoted exceptions).</div>
 
 <div class="cards">
 <div class="card"><div class="l">Apache Spark 4.1.3</div><div class="n">{tot["spark"]:,.0f} s</div><div class="l">baseline, 103 queries</div></div>
-<div class="card"><div class="l">spark-vector</div><div class="n">{tot["vector"]:,.0f} s</div><div class="l">{tot["spark"] / tot["vector"]:.2f}x · {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime</div></div>
+<div class="card"><div class="l">vecruntime</div><div class="n">{tot["vector"]:,.0f} s</div><div class="l">{tot["spark"] / tot["vector"]:.2f}x · {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime</div></div>
 <div class="card"><div class="l">DataFusion Comet 1.0.0</div><div class="n">{tot["comet"]:,.0f} s</div><div class="l">{tot["spark"] / tot["comet"]:.2f}x · {100 - 100 * tot["comet"] / tot["spark"]:.0f}% less runtime</div></div>
 </div>
 
 <h2 id="summary">Summary</h2>
 {table(["Engine", "Completion time (s)", "Speedup", "Faster than Spark on", "Executor time (h)", "GC (h)", "Shuffle read (TB)"], [
     ("Apache Spark 4.1.3", f"{tot['spark']:,.1f}", "baseline", "--", f"{exe['spark']:.1f}", f"{gc['spark']:.2f}", f"{shuf['spark']:.2f}"),
-    ("spark-vector", f"{tot['vector']:,.1f}", f"<b>{tot['spark'] / tot['vector']:.2f}x</b> ({100 - 100 * tot['vector'] / tot['spark']:.0f}% less)", f"{faster['vector']} / {n}", f"{exe['vector']:.1f}", f"{gc['vector']:.2f}", f"{shuf['vector']:.2f}"),
+    ("vecruntime", f"{tot['vector']:,.1f}", f"<b>{tot['spark'] / tot['vector']:.2f}x</b> ({100 - 100 * tot['vector'] / tot['spark']:.0f}% less)", f"{faster['vector']} / {n}", f"{exe['vector']:.1f}", f"{gc['vector']:.2f}", f"{shuf['vector']:.2f}"),
     ("DataFusion Comet 1.0.0", f"{tot['comet']:,.1f}", f"<b>{tot['spark'] / tot['comet']:.2f}x</b> ({100 - 100 * tot['comet'] / tot['spark']:.0f}% less)", f"{faster['comet']} / {n}", f"{exe['comet']:.1f}", f"{gc['comet']:.2f}", f"{shuf['comet']:.2f}"),
 ])}
 <div class="chart"><canvas id="totals"></canvas></div>
@@ -230,7 +230,7 @@ runner measures it. The result files, event logs and every study behind a number
 {versions}
 <h3>Configuration</h3>
 <p>Common to all three engines:</p><pre>{html.escape(conf_common)}</pre>
-<div class="two"><div><p>spark-vector:</p><pre>{html.escape(conf_v)}</pre></div><div><p>Comet:</p><pre>{html.escape(conf_c)}</pre></div></div>
+<div class="two"><div><p>vecruntime:</p><pre>{html.escape(conf_v)}</pre></div><div><p>Comet:</p><pre>{html.escape(conf_c)}</pre></div></div>
 
 <h2 id="results">Performance results</h2>
 <h3>Per query</h3>
@@ -244,28 +244,28 @@ runner measures it. The result files, event logs and every study behind a number
 
 <h3>Performance distribution</h3>
 <div class="two">
-<div><p><b>spark-vector</b> vs Spark</p>{table(["Range", "Queries", "Share"], [(k, v, f"{100 * v / n:.0f}%") for k, v in dist_v.items()])}</div>
+<div><p><b>vecruntime</b> vs Spark</p>{table(["Range", "Queries", "Share"], [(k, v, f"{100 * v / n:.0f}%") for k, v in dist_v.items()])}</div>
 <div><p><b>Comet</b> vs Spark</p>{table(["Range", "Queries", "Share"], [(k, v, f"{100 * v / n:.0f}%") for k, v in dist_c.items()])}</div>
 </div>
 
-<h3>Top 10 improvements -- spark-vector</h3>
-{table(["Query", "Spark (s)", "spark-vector (s)", "Speedup"], top("vector"))}
-<h3>Regressions -- spark-vector</h3>
-{table(["Query", "Spark (s)", "spark-vector (s)", "Degradation"], regressions("vector"))}
+<h3>Top 10 improvements -- vecruntime</h3>
+{table(["Query", "Spark (s)", "vecruntime (s)", "Speedup"], top("vector"))}
+<h3>Regressions -- vecruntime</h3>
+{table(["Query", "Spark (s)", "vecruntime (s)", "Degradation"], regressions("vector"))}
 <h3>Top 10 improvements -- Comet</h3>
 {table(["Query", "Spark (s)", "Comet (s)", "Speedup"], top("comet"))}
 <h3>Regressions -- Comet</h3>
 {table(["Query", "Spark (s)", "Comet (s)", "Degradation"], regressions("comet"))}
 
 <h3>Where each engine wins</h3>
-<p>The heavy joins are spark-vector's: q23a {fmt_s(V["q23a"]["medianMs"])} s against Spark's {fmt_s(S["q23a"]["medianMs"])} and Comet's {fmt_s(C["q23a"]["medianMs"])};
+<p>The heavy joins are vecruntime's: q23a {fmt_s(V["q23a"]["medianMs"])} s against Spark's {fmt_s(S["q23a"]["medianMs"])} and Comet's {fmt_s(C["q23a"]["medianMs"])};
 q23b {fmt_s(V["q23b"]["medianMs"])} against {fmt_s(S["q23b"]["medianMs"])} and {fmt_s(C["q23b"]["medianMs"])}; q93 {fmt_s(V["q93"]["medianMs"])} against {fmt_s(S["q93"]["medianMs"])} and {fmt_s(C["q93"]["medianMs"])};
 q64 {fmt_s(V["q64"]["medianMs"])} against {fmt_s(S["q64"]["medianMs"])} and {fmt_s(C["q64"]["medianMs"])}; q50 {fmt_s(V["q50"]["medianMs"])} against {fmt_s(S["q50"]["medianMs"])} and {fmt_s(C["q50"]["medianMs"])}.
 Its shuffled hash join is a grace hash join over dictionary-encoded Arrow batches, and its shuffle moves {shuf["vector"]:.2f} TB where Spark's moves {shuf["spark"]:.2f}
-(q23a: 37 GB written against Spark's 83). Comet leads where the scan and the aggregate dominate: q67 {fmt_s(C["q67"]["medianMs"])} against spark-vector's {fmt_s(V["q67"]["medianMs"])},
+(q23a: 37 GB written against Spark's 83). Comet leads where the scan and the aggregate dominate: q67 {fmt_s(C["q67"]["medianMs"])} against vecruntime's {fmt_s(V["q67"]["medianMs"])},
 q4 {fmt_s(C["q4"]["medianMs"])} against {fmt_s(V["q4"]["medianMs"])}, q95 {fmt_s(C["q95"]["medianMs"])} against {fmt_s(V["q95"]["medianMs"])}, q14a/b by about 12 s each -- its native Parquet reader
-and off-heap execution (GC {gc["comet"]:.2f} h against Spark's {gc["spark"]:.2f} and spark-vector's {gc["vector"]:.2f}) pay on the queries that are read-bound.
-spark-vector's one heavy loss to Spark is q88 ({fmt_s(V["q88"]["medianMs"])} against {fmt_s(S["q88"]["medianMs"])}; Comet {fmt_s(C["q88"]["medianMs"])}): eight scans of <code>store_sales</code>
+and off-heap execution (GC {gc["comet"]:.2f} h against Spark's {gc["spark"]:.2f} and vecruntime's {gc["vector"]:.2f}) pay on the queries that are read-bound.
+vecruntime's one heavy loss to Spark is q88 ({fmt_s(V["q88"]["medianMs"])} against {fmt_s(S["q88"]["medianMs"])}; Comet {fmt_s(C["q88"]["medianMs"])}): eight scans of <code>store_sales</code>
 through Spark's own Parquet reader, where the reader's per-file request latency is the cost and the operators have little to add; its other regressions are short queries (2-9 s)
 where the columnar boundary and shuffle set-up outweigh the operator gains. Each is analysed in <a href="{{{{ '/results.html' | relative_url }}}}">Benchmark results</a>.</p>
 
@@ -274,7 +274,7 @@ where the columnar boundary and shuffle set-up outweigh the operator gains. Each
 
 <h2 id="table">All queries</h2>
 <details open><summary>Seconds per query, the fastest engine in bold</summary>
-{table(["Query", "Spark", "spark-vector", "Comet", "spark-vector speedup", "Comet speedup", "Note"], per_query_rows, "all")}
+{table(["Query", "Spark", "vecruntime", "Comet", "vecruntime speedup", "Comet speedup", "Note"], per_query_rows, "all")}
 </details>
 
 <h2 id="running">Running the benchmark</h2>

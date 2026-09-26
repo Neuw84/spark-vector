@@ -15,7 +15,7 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.VectorConf
+import io.vecruntime.spark.VectorConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, WriteDelta}

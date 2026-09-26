@@ -12,7 +12,7 @@ reads them from the session's `SQLConf` when it plans a query, so a change appli
 their tables). The defaults were set from measurements on TPC-DS at 1 TB and TPC-H at SF10 -- see
 `docs/results.md` for the runs behind each threshold. Size-valued keys accept Spark's size strings
 (`512m`, `1g`) as well as byte counts. Where a `spark.vector.*` key is read is named in
-`spark/src/main/scala/io/sparkvector/spark/VectorConf.scala` (the planner and operator keys),
+`spark/src/main/scala/io/vecruntime/spark/VectorConf.scala` (the planner and operator keys),
 `spark/src/main/scala/org/apache/spark/sql/vector/AggregateSpill.scala` (the aggregate spill keys) and
 the `shuffle` module (the columnar shuffle keys).
 
@@ -28,7 +28,7 @@ the `shuffle` module (the columnar shuffle keys).
 
 ## Operator switches
 
-Each converts one Spark operator into its spark-vector counterpart when the conditions in
+Each converts one Spark operator into its vecruntime counterpart when the conditions in
 `docs/operators.md` hold; set one to `false` to keep Spark's operator for that kind while the rest
 of the plan stays columnar.
 
@@ -68,7 +68,7 @@ of the plan stays columnar.
 
 | Key | Default | Type / values | What it does |
 |---|---|---|---|
-| `spark.vector.agg.spillThreshold` | `512m` | size, `0` = never | Hard cap on one grouped aggregate table; below it the operator acquires its real footprint from Spark's task memory manager and acts on a refusal (#363, #367). Past the budget a buffer-emitting mode emits its table and starts over, a merging mode spills into hash buckets; `0` keeps everything in memory. |
+| `spark.vector.agg.spillThreshold` | `1g` | size, `0` = never | Hard cap on one grouped aggregate table; below it the operator acquires its real footprint from Spark's task memory manager and acts on a refusal (#363, #367). Past the budget a buffer-emitting mode emits its table and starts over, a merging mode spills into hash buckets; `0` keeps everything in memory. |
 | `spark.vector.agg.spillBuckets` | `16` | int (at least 2) | Buckets a merging (Final) aggregate spills its table into and merges one at a time; each bucket is merged in memory, so the buckets, not the input, must fit. |
 | `spark.vector.agg.passThroughRatio` | `1.5` | double, `0` = never | A partial aggregate whose full table reduced its input by less than this factor stops aggregating and passes each batch on to the exchange (#376); `0` keeps aggregating whatever the ratio. |
 | `spark.vector.sort.runRows` | `1048576` | positive int | Rows per sorted run (#285): the sort orders each run as the partition arrives and k-way merges the runs on output, bounding its JVM scratch to the run rather than the partition. |
@@ -84,7 +84,7 @@ of the plan stays columnar.
 |---|---|---|---|
 | `spark.vector.scan.prefetch` | `0` (off) | int 0-8 | Depth of the prefetching converter's queue (#403, lever 2): `1` or `2` inserts `VectorPrefetchScanExec` between a Spark vectorized file scan (Parquet, Iceberg's `BatchScanExec`; not a Comet scan) and the first operator of ours above it, whose helper thread pulls and converts the reader's next batch while the task thread works on the previous one. Memory grows by that many converted batches per task; larger values are accepted and capped at 8. |
 
-## Columnar shuffle (the `spark-vector-shuffle` jar)
+## Columnar shuffle (the `vecruntime-shuffle` jar)
 
 `spark.vector.shuffle.enabled` is a session key; the rest are read from the `SparkConf` by the
 shuffle manager, the writer and the Flight server at start-up, so set them on `spark-submit`. None
@@ -104,6 +104,8 @@ section) and the shuffle jar is on the classpath.
 | `spark.vector.shuffle.writer.dictionaryMaxRatio` | `0.5` | double 0-1 | A string column is dictionary-encoded on the wire only when distinct values / rows in the record batch is at most this (#356); `1` always encodes, `0` never. |
 | `spark.vector.shuffle.rebalance.rowSizing` | `true` | boolean | Session key. A rebalance exchange (the one a data source such as Iceberg asks for ahead of its write) hands AQE partition sizes proportional to rows instead of our compressed bytes, whose bytes per row vary several-fold between kinds of rows (#485). Reducers still fetch by the real sizes. |
 | `spark.vector.shuffle.rebalance.advisoryScaling` | `true` | boolean | Session key. A rebalance's advisory partition size is sized for Spark's shuffle (Iceberg: target file size x Spark's expected shuffle compression); once the map stage has written, it is scaled by our uncompressed bytes per row over an estimate of Spark's `UnsafeRow` bytes for the same rows, so AQE's pieces hold about as many rows as Spark's (#20: the CDC MERGE's write stage took 40-46 s at Iceberg's 384 MiB and Spark's ~24 s at a hand-set 128 MiB). A size set with `spark.sql.iceberg.advisory-partition-size` is kept as given, in our bytes; one set as an Iceberg write option or table property is scaled like the default -- set this key to `false` to keep it exact. |
+| `spark.vector.shuffle.aqe.mapSizeScaling` | `true` | boolean | Session key; `false` restores AQE on our real bytes. Every exchange of ours other than a rebalance reports its map output sizes to AQE times Spark's estimated on-disk bytes per row over ours (`UnsafeRow` estimate with measured string bytes, over `sparkCompressionRatio`, bounded to [1/16, 16]), so coalescing, skew detection and join groups see about Spark's bytes for the same rows. Only the statistics change; reducers fetch the real bytes (#511: our shuffle is 1.6-4.3x smaller than Spark's at TPC-DS 1 TB, so AQE packed up to 2x Spark's rows into a task -- q67's final aggregate ran 150 tasks where Spark's ran 300, and spilled). |
+| `spark.vector.shuffle.aqe.sparkCompressionRatio` | `0` | double | The compression `mapSizeScaling` expects of Spark's shuffle (uncompressed `UnsafeRow` bytes over bytes on disk). `0` or negative, the default, assumes Spark's shuffle compresses as well as ours and takes the uncompressed ratio. On TPC-DS 1 TB (Graviton4, advisory 128m) that gave 1,835.6 s against 1,986.4 s unscaled; `2.5` (Spark's measured 2.57) gave 1,973.8 s, because the larger factor stopped AQE merging the short queries' small partitions. |
 | `spark.vector.shuffle.flight.bindHost` | the executor's block manager host | host name | The address the executor's Flight server binds to; change it when the executor's advertised host is not the one it can bind. |
 | `spark.vector.shuffle.flight.threads` | `max(4, available processors)` | int | Serving threads of the executor's Flight server. |
 
@@ -129,13 +131,13 @@ These matter only with Comet's jar on the classpath; see `docs/comet.md`.
   defaults to the heap size: set it to the executor's memory overhead less what the JVM itself needs
   (the 1 TB campaign ran a 30 GB heap and 20 GB of overhead per 13-core executor, the cluster
   manifests setting the bound to the overhead less 2 GB; see "Memory tuning" in `README.md`).
-- **Registering the plugin.** `spark.plugins=io.sparkvector.spark.VectorPlugin` registers the
+- **Registering the plugin.** `spark.plugins=io.vecruntime.spark.VectorPlugin` registers the
   session extension and attaches the UI tab; alternatively
-  `spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions` injects the planner
+  `spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions` injects the planner
   rule alone.
 - **The columnar shuffle manager.**
   `spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager` (from the
-  `spark-vector-shuffle` jar) is what makes `spark.vector.shuffle.enabled` take effect; the manager
+  `vecruntime-shuffle` jar) is what makes `spark.vector.shuffle.enabled` take effect; the manager
   serves our dependencies with the Arrow IPC writer and reader and delegates every other shuffle to
   Spark's sort shuffle. With `spark.authenticate` on, the Flight server requires Spark's shuffle
   secret as a bearer token; under `spark.ssl.rpc.enabled` it refuses to start, so use

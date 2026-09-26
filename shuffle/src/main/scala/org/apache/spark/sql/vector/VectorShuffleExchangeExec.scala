@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -106,7 +106,7 @@ case class VectorShuffleExchangeExec(
   private[sql] lazy val readMetrics = SQLShuffleReadMetricsReporter.createShuffleReadMetrics(sparkContext)
   override lazy val metrics: Map[String, SQLMetric] = Map(
     "dataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size"),
-    "stringBytes" -> SQLMetrics.createSizeMetric(sparkContext, "string bytes as UnsafeRow (rebalance sizing)"),
+    "stringBytes" -> SQLMetrics.createSizeMetric(sparkContext, "string bytes as UnsafeRow (AQE sizing)"),
     "numPartitions" -> SQLMetrics.createMetric(sparkContext, "partitions")
   ) ++ readMetrics ++ writeMetrics
 
@@ -128,6 +128,23 @@ case class VectorShuffleExchangeExec(
     if (inputRDD.getNumPartitions == 0) Future.successful(null)
     else recordsByPartition match {
       case Some(acc) => VectorShuffleExchangeExec.submitRowSizedMapStage(sparkContext, shuffleDependency, acc)
+      case None if VectorShuffleExchangeExec.mapSizesScaled(shuffleOrigin, conf) =>
+        val compression = VectorShuffleExchangeExec.sparkCompression(conf)
+        VectorShuffleExchangeExec.submitMapStageWith(sparkContext, shuffleDependency) { stats =>
+          val rows = metrics(SQLShuffleWriteMetricsReporter.SHUFFLE_RECORDS_WRITTEN).value
+          val bytes = metrics("dataSize").value
+          val strings = shuffleDependency.stringBytes.map(_.value)
+          val onDisk = stats.bytesByPartitionId.sum
+          val factor =
+            RebalanceAdvisory.mapSizeFactor(output.map(_.dataType), rows, bytes, onDisk, compression, strings)
+          logInfo(
+            f"Map output sizes x$factor%.2f for AQE (#511): $onDisk bytes on disk over $rows rows " +
+              f"(${onDisk.toDouble / math.max(rows, 1)}%.1f per row), ${bytes.toDouble / math.max(rows, 1)}%.1f " +
+              f"uncompressed, Spark's shuffle compression taken as $compression"
+          )
+          if (factor == 1.0) stats
+          else new MapOutputStatistics(stats.shuffleId, RebalanceAdvisory.scaleSizes(stats.bytesByPartitionId, factor))
+        }
       case None => sparkContext.submitMapStage(shuffleDependency)
     }
 
@@ -224,8 +241,38 @@ object VectorShuffleExchangeExec {
   def stringsMeasured(origin: ShuffleOrigin, conf: SQLConf): Boolean = origin match {
     case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE =>
       conf.getConfString(RebalanceAdvisoryScalingKey, "true").toBoolean
-    case _ => false
+    case _ => mapSizesScaled(origin, conf)
   }
+
+  /**
+   * `true` puts the map output sizes AQE reads for every exchange of ours other than a rebalance on
+   * Spark's scale (#511; [[RebalanceAdvisory.mapSizeFactor]]): coalescing, skew detection and the
+   * join groups then see about Spark's bytes for the same rows, where our columnar shuffle's bytes
+   * are 1.6-4.3x smaller (TPC-DS 1 TB) and AQE packs that many more rows into a task -- q67's final
+   * aggregate ran 150 tasks of 5.5 M rows where Spark's ran 300. Only the statistics change: the
+   * reducers fetch the real bytes. Rebalances are sized by rows already (#20).
+   */
+  val MapSizeScalingKey = "spark.vector.shuffle.aqe.mapSizeScaling"
+
+  /**
+   * The compression [[MapSizeScalingKey]] expects of Spark's shuffle (uncompressed `UnsafeRow` bytes
+   * over bytes on disk), or `0` (the default) to assume Spark's shuffle compresses as well as ours and
+   * take the uncompressed ratio. Measured on TPC-DS 1 TB (Graviton4, 2026-09-26, advisory 128m, our
+   * run of main at 1,986.4 s): `0` gave 1,835.6 s and a 2.6 % better geomean, `2.5` (Spark's measured
+   * 2.57 over the run) 1,973.8 s and a 4.5 % worse one -- the larger factor stops AQE merging the short
+   * queries' small partitions. Both fix q67 (91.6 s to 39-40 s).
+   */
+  val SparkCompressionKey = "spark.vector.shuffle.aqe.sparkCompressionRatio"
+  val DefaultSparkCompression = 0.0
+
+  def mapSizesScaled(origin: ShuffleOrigin, conf: SQLConf): Boolean = origin match {
+    case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE => false
+    case _ => conf.getConfString(MapSizeScalingKey, "true").toBoolean
+  }
+
+  def sparkCompression(conf: SQLConf): Double =
+    scala.util.Try(conf.getConfString(SparkCompressionKey, DefaultSparkCompression.toString).trim.toDouble)
+      .getOrElse(DefaultSparkCompression)
 
   /**
    * Whether a rebalance's requested `size` is scaled to our shuffle (#20): the switch is on and the
@@ -253,6 +300,19 @@ object VectorShuffleExchangeExec {
       sc: org.apache.spark.SparkContext,
       dependency: VectorShuffleDependency,
       records: RecordsByPartitionAccumulator
+  ): FutureAction[MapOutputStatistics] =
+    submitMapStageWith(sc, dependency) { result =>
+      RowProportionalSizes.reweight(result.bytesByPartitionId, records.value, dependency.rdd.getNumPartitions)
+        .fold(result)(new MapOutputStatistics(result.shuffleId, _))
+    }
+
+  /**
+   * `SparkContext.submitMapStage` with `resize` applied to the statistics once the stage has finished
+   * (the task accumulators, SQL metrics included, are in by then). The map output tracker keeps the
+   * real sizes, so only what AQE decides from changes.
+   */
+  private[vector] def submitMapStageWith(sc: org.apache.spark.SparkContext, dependency: VectorShuffleDependency)(
+      resize: MapOutputStatistics => MapOutputStatistics
   ): FutureAction[MapOutputStatistics] = {
     sc.assertNotStopped()
     var result: MapOutputStatistics = null
@@ -262,10 +322,7 @@ object VectorShuffleExchangeExec {
       sc.getCallSite(),
       sc.localProperties.get
     )
-    lazy val sized: MapOutputStatistics =
-      if (result == null) null
-      else RowProportionalSizes.reweight(result.bytesByPartitionId, records.value, dependency.rdd.getNumPartitions)
-        .fold(result)(new MapOutputStatistics(result.shuffleId, _))
+    lazy val sized: MapOutputStatistics = if (result == null) null else resize(result)
     new org.apache.spark.SimpleFutureAction[MapOutputStatistics](waiter, sized)
   }
 
@@ -274,8 +331,8 @@ object VectorShuffleExchangeExec {
    * round robin, single, range over lane keys. Columns are lanes or structs of lanes (flattened).
    */
   def supports(partitioning: Partitioning, output: Seq[Attribute]): Boolean = {
-    def laneKey(dt: org.apache.spark.sql.types.DataType) = io.sparkvector.spark.adapter.TypeMapping.hasLane(dt)
-    def column(dt: org.apache.spark.sql.types.DataType) = io.sparkvector.shuffle.StructFlattening.supported(dt)
+    def laneKey(dt: org.apache.spark.sql.types.DataType) = io.vecruntime.spark.adapter.TypeMapping.hasLane(dt)
+    def column(dt: org.apache.spark.sql.types.DataType) = io.vecruntime.shuffle.StructFlattening.supported(dt)
     output.forall(a => column(a.dataType)) && (partitioning match {
       case h: HashPartitioning => h.expressions.forall(e => e.isInstanceOf[Attribute] && column(e.dataType))
       case _: RoundRobinPartitioning => true
@@ -324,7 +381,7 @@ object VectorShuffleExchangeExec {
     // Structs cross as lanes (StructFlattening): the streams carry the flat schema, and a hash key on
     // a struct hashes its leaves. Ordinals past the written columns are materialised keys, which the
     // writer appends after the flat lanes.
-    val layout = io.sparkvector.shuffle.StructFlattening.plan(schema)
+    val layout = io.vecruntime.shuffle.StructFlattening.plan(schema)
     val flatSchema = layout.fold(schema)(_.flatSchema)
     def flatOrdinals(o: Int): Seq[Int] =
       if (o >= written.length) Seq(flatSchema.fields.length + (o - written.length))

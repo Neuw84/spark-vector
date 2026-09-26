@@ -45,5 +45,5 @@ JVM_OPTS=(
   -Dlog4j2.level=warn -Dspark.log.level=WARN
 )
 mkdir -p "$WAREHOUSE"
-"$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.sparkvector.benchmarks.IcebergMorGenerator \
+"$JAVA" "${JVM_OPTS[@]}" -cp "$CP" io.vecruntime.benchmarks.IcebergMorGenerator \
   --data "$DATA" --warehouse "$WAREHOUSE" --namespace "$NS" --threads "$THREADS" "$@"

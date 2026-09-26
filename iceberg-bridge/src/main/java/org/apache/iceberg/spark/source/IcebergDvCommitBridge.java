@@ -31,7 +31,7 @@ import org.apache.spark.sql.connector.write.WriterCommitMessage;
  * <p>This class assembles ONLY the per-task commit message and hands off
  * construction of the deletion vectors to Iceberg's public {@link
  * org.apache.iceberg.deletes.BaseDVFileWriter} (see {@link
- * io.sparkvector.iceberg.bridge.ColumnarDvWriter}); the driver-side commit
+ * io.vecruntime.iceberg.bridge.ColumnarDvWriter}); the driver-side commit
  * stays Iceberg's own {@code RowDelta} through {@code
  * DeltaBatchWrite.commit(messages)}, so nothing about snapshot semantics,
  * metrics or previous-DV bookkeeping is reimplemented here. (The previous-DV
@@ -103,14 +103,34 @@ public final class IcebergDvCommitBridge {
             if (snap == null) {
                 return false;
             }
-            String total = snap.summary() == null ? null : snap.summary().get("total-delete-files");
-            if (total != null) {
-                return Long.parseLong(total) > 0L;
+            java.util.Map<String, String> summary = snap.summary();
+            if (summary == null) {
+                // A live snapshot with no summary at all is unexpected; be conservative and decline.
+                return true;
             }
-            // No summary hint: be conservative and decline.
-            return true;
+            // Iceberg stamps running totals on every snapshot's summary. A delete of any kind
+            // (positional, equality, or deletion vector) leaves a positive count in one of these
+            // keys. On an append-only snapshot (e.g. the INSERT that seeds a fresh v3 table) the
+            // delete totals are either "0" or simply absent -- absent means "none ever committed",
+            // NOT "unknown", so it must read as no deletes, or the strategy would wrongly decline
+            // every clean table and the columnar DELETE would never run.
+            return positiveCount(summary.get("total-delete-files"))
+                    || positiveCount(summary.get("total-position-deletes"))
+                    || positiveCount(summary.get("total-equality-deletes"));
         } catch (RuntimeException e) {
             return true;
+        }
+    }
+
+    /** True when a snapshot-summary count string is present and parses to a value &gt; 0. */
+    private static boolean positiveCount(String value) {
+        if (value == null) {
+            return false;
+        }
+        try {
+            return Long.parseLong(value.trim()) > 0L;
+        } catch (NumberFormatException e) {
+            return false;
         }
     }
 

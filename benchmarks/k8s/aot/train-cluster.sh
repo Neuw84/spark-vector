@@ -11,7 +11,7 @@
 # Three steps, about ten minutes of cluster time on the bench-xl group:
 #   1. a recording run: the vector-shuffle configuration over the training set with the executors in
 #      -XX:AOTMode=record (render-run.sh AOT_RECORD=1), each writing its configuration to the node's
-#      /mnt/spark-vector-aot/<tag>/executor.aotconf. Real executors: the S3A/parquet client, the Flight
+#      /mnt/vecruntime-aot/<tag>/executor.aotconf. Real executors: the S3A/parquet client, the Flight
 #      transport over the network and the executor backend are in the recording -- a local training run
 #      at image build cannot reach them, and measured flat at 1 TB where this took -30% off a cold q18.
 #   2. a DaemonSet on the same nodes: on every node that holds a recording, assemble.sh turns it into
@@ -29,7 +29,7 @@ NAMESPACE="${NAMESPACE:-bench}"; SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-sfi-engine}
 TAG="${IMAGE##*:}"
 BUCKET="${AOT_BUCKET:-${OUT#s3a://}}"; BUCKET="${BUCKET%%/*}"
 DEST="s3://$BUCKET/aot/$TAG/executor.aot"
-HOSTDIR="/mnt/spark-vector-aot/$TAG"
+HOSTDIR="/mnt/vecruntime-aot/$TAG"
 DS="aot-assemble-${TAG//[^a-z0-9-]/-}"
 
 echo "[aot] recording run of $IMAGE: $*"

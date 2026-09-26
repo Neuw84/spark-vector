@@ -3,13 +3,13 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-parent</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-parent</artifactId>
     <version>0.0.2-SNAPSHOT</version>
   </parent>
 
-  <artifactId>spark-vector-kernels</artifactId>
-  <name>spark-vector-kernels</name>
+  <artifactId>vecruntime-kernels</artifactId>
+  <name>vecruntime-kernels</name>
   <description>Java Vector API kernels over Arrow-layout MemorySegment buffers (no Spark dependency)</description>
 
   <dependencies>

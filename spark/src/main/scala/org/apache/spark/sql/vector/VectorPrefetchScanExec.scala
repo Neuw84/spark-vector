@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ import java.lang.foreign.Arena
 import java.util.concurrent.{ArrayBlockingQueue, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
-import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.arrow.{ArrowOutput, SelectedColumnarBatch, VectorAllocators, VectorArrowColumnVector}
+import io.vecruntime.spark.adapter.ColumnVectorAdapters
+import io.vecruntime.spark.arrow.{ArrowOutput, SelectedColumnarBatch, VectorAllocators, VectorArrowColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -186,7 +186,7 @@ final class PrefetchingBatchConverter(
 
   private def startHelper(): Unit = if (helper == null) {
     val name =
-      if (taskContext == null) "spark-vector-prefetch" else s"spark-vector-prefetch-${taskContext.taskAttemptId()}"
+      if (taskContext == null) "vecruntime-prefetch" else s"vecruntime-prefetch-${taskContext.taskAttemptId()}"
     helper = new Thread(() => runHelper(), name)
     helper.setDaemon(true)
     helper.start()

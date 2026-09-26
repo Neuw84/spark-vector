@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,11 +36,11 @@ class RowProportionalSizesSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "localhost")
       .config("spark.sql.shuffle.partitions", "8")
-      .config("spark.plugins", "io.sparkvector.spark.VectorPlugin")
+      .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
       .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .getOrCreate()
-    tempDir = java.nio.file.Files.createTempDirectory("spark-vector-rowsizes")
+    tempDir = java.nio.file.Files.createTempDirectory("vecruntime-rowsizes")
     // Two kinds of rows: a constant string (tiny once dictionary-encoded) and a near-unique one, on
     // different keys so they land in different partitions under the rebalance.
     spark.sql(
@@ -112,10 +112,15 @@ class RowProportionalSizesSuite extends AnyFunSuite with BeforeAndAfterAll {
     } finally spark.conf.unset(VectorShuffleExchangeExec.RebalanceRowSizingKey)
   }
 
-  test("an aggregate's exchange (ENSURE_REQUIREMENTS) keeps the real sizes") {
-    val ex = ourExchange("select k, count(*) c from keys group by k")
-    assert(ex.recordsByPartition.isEmpty)
-    assert(aqeSizes(ex) sameElements realSizes(ex))
+  test("an aggregate's exchange (ENSURE_REQUIREMENTS) keeps the real sizes with AQE map-size scaling off") {
+    // Row sizing is a rebalance's only; with #511's scaling (on by default) the aggregate's sizes are
+    // multiplied instead -- RebalanceAdvisorySuite covers that.
+    spark.conf.set(VectorShuffleExchangeExec.MapSizeScalingKey, "false")
+    try {
+      val ex = ourExchange("select k, count(*) c from keys group by k")
+      assert(ex.recordsByPartition.isEmpty)
+      assert(aqeSizes(ex) sameElements realSizes(ex))
+    } finally spark.conf.unset(VectorShuffleExchangeExec.MapSizeScalingKey)
   }
 
   private def counts(byMap: (Int, Array[Long])*): java.util.Map[Integer, Array[Long]] = {

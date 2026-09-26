@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,10 @@ import java.lang.foreign.Arena
 import java.nio.channels.FileChannel
 import java.nio.file.{Files, StandardOpenOption}
 
-import io.sparkvector.kernels.{Bitmap, PartitionKernels, VecType, VectorBuffers}
-import io.sparkvector.kernels.PartitionKernels.KeyKind
-import io.sparkvector.spark.adapter.{ColumnVectorAdapters, TypeMapping}
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDecimalColumnVector}
+import io.vecruntime.kernels.{Bitmap, PartitionKernels, VecType, VectorBuffers}
+import io.vecruntime.kernels.PartitionKernels.KeyKind
+import io.vecruntime.spark.adapter.{ColumnVectorAdapters, TypeMapping}
+import io.vecruntime.spark.arrow.{ArrowOutput, VectorArrowColumnVector, VectorDecimalColumnVector}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.{FieldVector, VectorSchemaRoot}
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
@@ -298,7 +298,15 @@ object AggSpillPolicy {
   val ThresholdKey = "spark.vector.agg.spillThreshold"
   val BucketsKey = "spark.vector.agg.spillBuckets"
   val PassThroughKey = "spark.vector.agg.passThroughRatio"
-  val DefaultThreshold = "512m"
+
+  /**
+   * 1 GiB, the sort's budget (`spark.vector.sort.spillBytes`, #416/#451). #511: at 512m, TPC-DS q67 at
+   * 1 TB on Graviton4 spilled 115 GB from its final ROLLUP aggregate once AQE coalesced the stage to 150
+   * partitions (5.5 M groups per task) and took 86.5 s; at 1g nothing spilled and it took 54.4 s (2g:
+   * 50.1 s, also no spill). The cap stays below a task's share of the executors' direct memory (30 GB
+   * over 13 cores there) with the sort beside it in the same stage, which 2g would not.
+   */
+  val DefaultThreshold = "1g"
   val DefaultBuckets = 16
   val DefaultPassThroughRatio = 1.5
 }

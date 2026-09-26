@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Angel Conde and the spark-vector contributors
+// Copyright 2025-2026 Angel Conde and the vecruntime contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 // in compliance with the License. You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // or implied. See the License for the specific language governing permissions and limitations under
 // the License.
 
-// Serve web/site/ under the baseurl (default /spark-vector) on 127.0.0.1, mirroring GitHub Pages'
+// Serve web/site/ under the baseurl (default /vecruntime) on 127.0.0.1, mirroring GitHub Pages'
 // project-site path. Usage: node scripts/serve.mjs [port]   (default 8080). Preview only.
 
 import http from "node:http";

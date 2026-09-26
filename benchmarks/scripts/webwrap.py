@@ -1,4 +1,4 @@
-# Copyright 2025-2026 Angel Conde and the spark-vector contributors
+# Copyright 2025-2026 Angel Conde and the vecruntime contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
 # compliance with the License. You may obtain a copy of the License at
@@ -21,7 +21,7 @@ static HTML file for the plain-file site under `web/`:
 
   * the Jekyll front matter is stripped,
   * the ``{{ '/PATH' | relative_url }}`` Liquid links Jekyll would resolve are
-    rewritten to ``<base>/PATH`` (e.g. ``/spark-vector/results.html``),
+    rewritten to ``<base>/PATH`` (e.g. ``/vecruntime/results.html``),
   * the Chart.js ``<script>`` that lived at the top of the body is lifted into
     ``<head>`` (kept, not dropped), and
   * everything else -- every number, table, chart series and note -- is copied
@@ -80,7 +80,7 @@ def to_web_page(page: str, base: str, description: str = "") -> str:
     body = re.sub(r"\{\{\s*'(/[^']*)'\s*\|\s*relative_url\s*\}\}", lambda m: base + m.group(1), body)
     head_extra, body = _lift_head_scripts(body)
 
-    site_title = "spark-vector"
+    site_title = "vecruntime"
     full_title = f"{title} \u00b7 {site_title}" if title and title != site_title else site_title
     desc = description or title or site_title
 
@@ -94,7 +94,7 @@ def to_web_page(page: str, base: str, description: str = "") -> str:
     html = html.replace("__TITLE__", _esc(full_title))
     html = html.replace("__DESCRIPTION__", _esc(desc))
     html = html.replace("__BASE__", base)
-    html = html.replace("__REPO_URL__", "https://github.com/spark-vector/spark-vector")
+    html = html.replace("__REPO_URL__", "https://github.com/vecruntime/vecruntime")
     html = html.replace("__HEAD_EXTRA__", head_extra)
     html = html.replace("__SIDEBAR__", sidebar)
     html = html.replace("__CONTENT__", body)
