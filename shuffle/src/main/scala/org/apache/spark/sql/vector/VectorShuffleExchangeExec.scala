@@ -256,11 +256,14 @@ object VectorShuffleExchangeExec {
 
   /**
    * The compression [[MapSizeScalingKey]] expects of Spark's shuffle (uncompressed `UnsafeRow` bytes
-   * over bytes on disk): 2.5 (TPC-DS 1 TB, 2026-09-26: 2.57 over the run, 1.8-3.4 per query). `0`
-   * assumes Spark's shuffle compresses as well as ours.
+   * over bytes on disk), or `0` (the default) to assume Spark's shuffle compresses as well as ours and
+   * take the uncompressed ratio. Measured on TPC-DS 1 TB (Graviton4, 2026-09-26, advisory 128m, our
+   * run of main at 1,986.4 s): `0` gave 1,835.6 s and a 2.6 % better geomean, `2.5` (Spark's measured
+   * 2.57 over the run) 1,973.8 s and a 4.5 % worse one -- the larger factor stops AQE merging the short
+   * queries' small partitions. Both fix q67 (91.6 s to 39-40 s).
    */
   val SparkCompressionKey = "spark.vector.shuffle.aqe.sparkCompressionRatio"
-  val DefaultSparkCompression = 2.5
+  val DefaultSparkCompression = 0.0
 
   def mapSizesScaled(origin: ShuffleOrigin, conf: SQLConf): Boolean = origin match {
     case REBALANCE_PARTITIONS_BY_COL | REBALANCE_PARTITIONS_BY_NONE => false
