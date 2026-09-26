@@ -6,7 +6,7 @@
 # private, so the clone reads a GitHub token from the Secret `github-read` (key `token`).
 #
 #   sed -e 's|GIT_REF|refs/heads/main|' -e 's|IMAGE_TAG|main-2026-09-19|' benchmarks/k8s/kaniko-build.yaml | kubectl apply -f -
-#   kubectl -n bench logs -f job/spark-vector-image-build
+#   kubectl -n bench logs -f job/vecruntime-image-build
 #
 # The image is built for the architecture of the node the Kaniko pod lands on (#253). For a Graviton
 # image, pin the pod to an arm64 node by adding `nodeSelector: {kubernetes.io/arch: arm64}` to the
@@ -26,7 +26,7 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: spark-vector-image-build
+  name: vecruntime-image-build
   namespace: bench
 spec:
   backoffLimit: 0
@@ -34,7 +34,7 @@ spec:
   template:
     metadata:
       labels:
-        app: spark-vector-image-build
+        app: vecruntime-image-build
     spec:
       serviceAccountName: sfi-engine
       restartPolicy: Never

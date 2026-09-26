@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
-import io.sparkvector.spark.adapter.SparkColumnVectorBuffers
-import io.sparkvector.spark.test.VectorQuerySuite
+import io.vecruntime.spark.adapter.SparkColumnVectorBuffers
+import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.vector.{VectorFilterExec, VectorProjectExec}
 
 /**
@@ -236,14 +236,14 @@ class VectorWideDecimalSuite extends VectorQuerySuite {
     val one = Literal(Decimal(1), DecimalType(1, 0))
     val product = Multiply(price, Subtract(one, discount))
     val speculative =
-      io.sparkvector.spark.expr.ExpressionCompiler.speculativeDecimalArithmetic(product, Seq(price, discount))
+      io.vecruntime.spark.expr.ExpressionCompiler.speculativeDecimalArithmetic(product, Seq(price, discount))
     assert(
-      speculative.exists(_.exists(_.isInstanceOf[io.sparkvector.spark.expr.SpeculativeDecimalMulExpr])),
+      speculative.exists(_.exists(_.isInstanceOf[io.vecruntime.spark.expr.SpeculativeDecimalMulExpr])),
       speculative.toString
     )
     // The same product as a projected value compiles onto the wide lane.
-    val projected = io.sparkvector.spark.expr.ExpressionCompiler.compile(product, Seq(price, discount))
-    assert(projected.exists(_.isInstanceOf[io.sparkvector.spark.expr.WideDecimalArithExpr]), projected.toString)
+    val projected = io.vecruntime.spark.expr.ExpressionCompiler.compile(product, Seq(price, discount))
+    assert(projected.exists(_.isInstanceOf[io.vecruntime.spark.expr.WideDecimalArithExpr]), projected.toString)
   }
 
   Seq("tw_dict", "tw_plain").foreach { t =>

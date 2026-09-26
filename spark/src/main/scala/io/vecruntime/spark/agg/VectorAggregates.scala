@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.agg
+package io.vecruntime.spark.agg
 
-import io.sparkvector.kernels.{
+import io.vecruntime.kernels.{
   AggKernels,
   Bitmap,
   CompareOp,
@@ -25,7 +25,7 @@ import io.sparkvector.kernels.{
   VecType,
   VectorBuffers
 }
-import io.sparkvector.spark.expr.{
+import io.vecruntime.spark.expr.{
   CastExpr,
   EvalContext,
   ExpressionCompiler,
@@ -36,8 +36,8 @@ import io.sparkvector.spark.expr.{
 }
 import org.apache.spark.sql.catalyst.expressions.{Attribute, EvalMode, Expression, Literal}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.ArrowVectorBuffers
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.arrow.ArrowVectorBuffers
 import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, DoubleType, LongType, StringType}
 
 /**

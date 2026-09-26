@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.shuffle
+package io.vecruntime.shuffle
 
 import java.lang.foreign.{Arena, MemorySegment}
 
-import io.sparkvector.kernels.{SegmentVectorBuffers, VecType, VectorBuffers}
-import io.sparkvector.spark.adapter.{ColumnVectorAdapters, TypeMapping}
+import io.vecruntime.kernels.{SegmentVectorBuffers, VecType, VectorBuffers}
+import io.vecruntime.spark.adapter.{ColumnVectorAdapters, TypeMapping}
 import org.apache.spark.sql.types.{BooleanType, DataType, Decimal, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarArray, ColumnarBatch, ColumnarMap}
 import org.apache.spark.unsafe.types.UTF8String
@@ -144,7 +144,7 @@ object StructFlattening {
       bits.fill(0.toByte)
       var i = 0
       while (i < n) {
-        if (!cv.isNullAt(i)) io.sparkvector.kernels.Bitmap.set(bits, i)
+        if (!cv.isNullAt(i)) io.vecruntime.kernels.Bitmap.set(bits, i)
         i += 1
       }
     }

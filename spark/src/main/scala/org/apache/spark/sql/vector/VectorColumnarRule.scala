@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,15 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.VectorConf
-import io.sparkvector.spark.adapter.TypeMapping
+import io.vecruntime.spark.VectorConf
+import io.vecruntime.spark.adapter.TypeMapping
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute}
-import io.sparkvector.spark.expr.ExpressionCompiler
+import io.vecruntime.spark.expr.ExpressionCompiler
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
-import io.sparkvector.spark.comet.{CometBatchBridge, CometMixedBridge}
+import io.vecruntime.spark.comet.{CometBatchBridge, CometMixedBridge}
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning}
 import org.apache.spark.sql.execution.{
   CoalesceExec,
@@ -63,25 +63,25 @@ object VectorExecRule {
    * or the reason it stays Spark's. The transform builds from this decision and never re-derives it.
    */
   val SortMergeDecision: TreeNodeTag[Either[String, org.apache.spark.sql.catalyst.optimizer.BuildSide]] =
-    TreeNodeTag("io.sparkvector.sortMergeJoin.decision")
+    TreeNodeTag("io.vecruntime.sortMergeJoin.decision")
 
   /**
    * Under `auto`, what a sort-merge join becomes and why (#287): `Left(why)` the merge join, `Right((side, why))`
    * the hash rewrite building `side`. The reason is printed on the operator so the plan shows the decision.
    */
   val SortMergeChoice: TreeNodeTag[Either[String, (org.apache.spark.sql.catalyst.optimizer.BuildSide, String)]] =
-    TreeNodeTag("io.sparkvector.sortMergeJoin.choice")
+    TreeNodeTag("io.vecruntime.sortMergeJoin.choice")
 
   /** The decision's reason, carried onto the operator the join became. */
-  val SortMergeWhy: TreeNodeTag[String] = TreeNodeTag("io.sparkvector.sortMergeJoin.why")
+  val SortMergeWhy: TreeNodeTag[String] = TreeNodeTag("io.vecruntime.sortMergeJoin.why")
 }
 
 /** Tags and helpers for explaining why an operator was left to Spark. */
 object VectorFallback {
-  val Tag: TreeNodeTag[String] = TreeNodeTag[String]("io.sparkvector.fallback")
+  val Tag: TreeNodeTag[String] = TreeNodeTag[String]("io.vecruntime.fallback")
 
   /** Set on an operator our rule left to Comet on the allowlist's request (#281), so the mixed pass knows to run ours if Comet declines. */
-  val Delegated: TreeNodeTag[Boolean] = TreeNodeTag[Boolean]("io.sparkvector.delegated")
+  val Delegated: TreeNodeTag[Boolean] = TreeNodeTag[Boolean]("io.vecruntime.delegated")
 
   def reason(plan: SparkPlan): Option[String] = plan.getTagValue(Tag)
 

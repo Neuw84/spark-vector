@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2025-2026 Angel Conde and the spark-vector contributors
+# Copyright 2025-2026 Angel Conde and the vecruntime contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
 # compliance with the License. You may obtain a copy of the License at
@@ -37,7 +37,7 @@ DEFAULT_META = {
         "spark.eventLog.enabled=true",
     ],
     "vector_conf": [
-        "spark.plugins=io.sparkvector.spark.VectorPlugin",
+        "spark.plugins=io.vecruntime.spark.VectorPlugin",
         "spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
         "spark.vector.exec.strictFloatingPoint=false   # Comet's default too",
         "spark.vector.scan.prefetch=0                 # measured: off",

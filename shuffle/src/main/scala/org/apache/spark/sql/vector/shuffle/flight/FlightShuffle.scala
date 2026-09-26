@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.{ConcurrentHashMap, Executors}
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.spark.arrow.VectorAllocators
+import io.vecruntime.spark.arrow.VectorAllocators
 import org.apache.arrow.flight._
 import org.apache.arrow.flight.auth2.{Auth2Constants, BearerCredentialWriter, CallHeaderAuthenticator}
 import org.apache.arrow.flight.grpc.CredentialCallOption
@@ -130,7 +130,7 @@ object FlightShuffle extends Logging {
    * per record batch (the slice's distinct strings), so a block decoded and re-framed by Flight
    * reached the client with batches 2..n indexed against batch 1's dictionary -- out-of-bounds reads
    * or the wrong string silently (#338). As bytes, the client reads the block with the same
-   * [[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader]] a local block goes through, and the
+   * [[io.vecruntime.shuffle.PartitionedIpcFile.StreamReader]] a local block goes through, and the
    * server neither decodes nor re-encodes anything.
    */
   final class Producer(
@@ -180,7 +180,7 @@ object FlightShuffle extends Logging {
           // partitions are consecutive in the data file, and an empty one is a zero-length span.
           val buf = blockData(shuffleId, mapId, reduce, endReduce)
           // The map file's dictionary section ahead of the range (#416): once per map output, not per block.
-          val in = io.sparkvector.shuffle.PartitionedIpcFile.blockStream(buf)
+          val in = io.vecruntime.shuffle.PartitionedIpcFile.blockStream(buf)
           try {
             var more = true
             while (more) {
@@ -524,10 +524,10 @@ final class FlightBlockStream(
    * `getStream` calls issued together every server produces at once and the first message of the
    * stream being read is the only one waited for.
    */
-  private var reader: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = _
-  private def decoder: Option[io.sparkvector.shuffle.PartitionedIpcFile.StreamReader] = {
+  private var reader: Option[io.vecruntime.shuffle.PartitionedIpcFile.StreamReader] = _
+  private def decoder: Option[io.vecruntime.shuffle.PartitionedIpcFile.StreamReader] = {
     if (reader == null) reader = if (channel.isEmpty) None
-    else Some(new io.sparkvector.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
+    else Some(new io.vecruntime.shuffle.PartitionedIpcFile.StreamReader(channel, allocator, schema, compression))
     reader
   }
 

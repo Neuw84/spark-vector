@@ -82,7 +82,7 @@ printf '%s\n' "$SAMPLES" | awk -v total="$TOTAL" -v top="$TOP" '
     if (printed == 0) print "  none"
   }'
 
-section "3. Plugin frames by self time (first io.sparkvector frame on each stack: which kernel or expression owns the samples)"
+section "3. Plugin frames by self time (first io.vecruntime frame on each stack: which kernel or expression owns the samples)"
 printf '%s\n' "$SAMPLES" | awk -v total="$TOTAL" -v top="$TOP" '
   function flush() {
     if (n > 0) {

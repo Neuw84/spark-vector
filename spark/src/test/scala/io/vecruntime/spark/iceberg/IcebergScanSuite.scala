@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.iceberg
+package io.vecruntime.spark.iceberg
 
-import io.sparkvector.spark.{VectorConf, VectorPlugin}
-import io.sparkvector.spark.test.IcebergTest
+import io.vecruntime.spark.{VectorConf, VectorPlugin}
+import io.vecruntime.spark.test.IcebergTest
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.vector.{PlanUtils, VectorPlan, VectorPrefetchScanExec}
 import org.scalatest.Tag
@@ -85,7 +85,7 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
     )
     IcebergTables.useAsT(spark, s"${IcebergTables.Db}.t_wide")
     val columnsBefore = IcebergVectorAdapter.adaptedColumns()
-    val copiedBefore = io.sparkvector.spark.adapter.ColumnVectorAdapters.copiedColumns()
+    val copiedBefore = io.vecruntime.spark.adapter.ColumnVectorAdapters.copiedColumns()
     checkVectorized("SELECT i, w38, w27 FROM t WHERE i % 3 = 0 AND l IS NOT NULL", Seq(Filter))
     checkVectorized("SELECT w38, i + 1 AS j, w27 FROM t WHERE i % 5 = 0", Seq(Filter, Project))
     checkVectorized("SELECT w38, i FROM t SORT BY w38 DESC NULLS LAST", Seq(Sort))
@@ -94,7 +94,7 @@ class IcebergScanSuite extends IcebergMorSuiteBase {
       "expected the wide columns to be adapted by the Iceberg adapter"
     )
     assert(
-      io.sparkvector.spark.adapter.ColumnVectorAdapters.copiedColumns() === copiedBefore,
+      io.vecruntime.spark.adapter.ColumnVectorAdapters.copiedColumns() === copiedBefore,
       "no column should have taken the generic copy path"
     )
     // Under positional deletes the batch is row-id mapped: the wide lane is built over the physical rows.

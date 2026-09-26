@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,19 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.adapter;
+package io.vecruntime.spark.adapter;
 
 import java.lang.foreign.Arena;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import io.sparkvector.kernels.VectorBuffers;
-import io.sparkvector.spark.arrow.ArrowVectorBuffers;
-import io.sparkvector.spark.arrow.BorrowedColumnVector;
-import io.sparkvector.spark.arrow.VectorArrowColumnVector;
-import io.sparkvector.spark.arrow.VectorDecimalColumnVector;
-import io.sparkvector.spark.arrow.VectorDictionaryColumnVector;
-import io.sparkvector.spark.arrow.VectorNarrowIntColumnVector;
+import io.vecruntime.kernels.VectorBuffers;
+import io.vecruntime.spark.arrow.ArrowVectorBuffers;
+import io.vecruntime.spark.arrow.BorrowedColumnVector;
+import io.vecruntime.spark.arrow.VectorArrowColumnVector;
+import io.vecruntime.spark.arrow.VectorDecimalColumnVector;
+import io.vecruntime.spark.arrow.VectorDictionaryColumnVector;
+import io.vecruntime.spark.arrow.VectorNarrowIntColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
 
 /**
@@ -73,8 +73,8 @@ public final class ColumnVectorAdapters {
     static {
         // Comet's and Iceberg's scan vectors are read zero-copy when their jars are on the classpath
         // (executor side); registration is a no-op otherwise.
-        io.sparkvector.spark.comet.CometVectorAdapter.tryRegister();
-        io.sparkvector.spark.iceberg.IcebergVectorAdapter.tryRegister();
+        io.vecruntime.spark.comet.CometVectorAdapter.tryRegister();
+        io.vecruntime.spark.iceberg.IcebergVectorAdapter.tryRegister();
     }
 
     private ColumnVectorAdapters() {}

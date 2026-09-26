@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,15 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
 import org.apache.spark.sql.SparkSessionExtensions
 import org.apache.spark.sql.vector.VectorColumnarRule
 
 /**
  * Registers the planner rule. Enable with
- * `--conf spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions`, or let
- * [[VectorPlugin]] do it through `--conf spark.plugins=io.sparkvector.spark.VectorPlugin`.
+ * `--conf spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions`, or let
+ * [[VectorPlugin]] do it through `--conf spark.plugins=io.vecruntime.spark.VectorPlugin`.
  */
 class VectorSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
   override def apply(extensions: SparkSessionExtensions): Unit = {

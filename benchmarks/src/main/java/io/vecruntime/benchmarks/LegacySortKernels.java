@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks;
+package io.vecruntime.benchmarks;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 
-import io.sparkvector.kernels.Decimal128;
-import io.sparkvector.kernels.VectorBuffers;
+import io.vecruntime.kernels.Decimal128;
+import io.vecruntime.kernels.VectorBuffers;
 
 /**
  * The index sort before #285, kept only as the baseline {@link SortBenchmark}

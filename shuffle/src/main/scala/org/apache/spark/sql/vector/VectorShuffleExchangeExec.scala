@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -331,8 +331,8 @@ object VectorShuffleExchangeExec {
    * round robin, single, range over lane keys. Columns are lanes or structs of lanes (flattened).
    */
   def supports(partitioning: Partitioning, output: Seq[Attribute]): Boolean = {
-    def laneKey(dt: org.apache.spark.sql.types.DataType) = io.sparkvector.spark.adapter.TypeMapping.hasLane(dt)
-    def column(dt: org.apache.spark.sql.types.DataType) = io.sparkvector.shuffle.StructFlattening.supported(dt)
+    def laneKey(dt: org.apache.spark.sql.types.DataType) = io.vecruntime.spark.adapter.TypeMapping.hasLane(dt)
+    def column(dt: org.apache.spark.sql.types.DataType) = io.vecruntime.shuffle.StructFlattening.supported(dt)
     output.forall(a => column(a.dataType)) && (partitioning match {
       case h: HashPartitioning => h.expressions.forall(e => e.isInstanceOf[Attribute] && column(e.dataType))
       case _: RoundRobinPartitioning => true
@@ -381,7 +381,7 @@ object VectorShuffleExchangeExec {
     // Structs cross as lanes (StructFlattening): the streams carry the flat schema, and a hash key on
     // a struct hashes its leaves. Ordinals past the written columns are materialised keys, which the
     // writer appends after the flat lanes.
-    val layout = io.sparkvector.shuffle.StructFlattening.plan(schema)
+    val layout = io.vecruntime.shuffle.StructFlattening.plan(schema)
     val flatSchema = layout.fold(schema)(_.flatSchema)
     def flatOrdinals(o: Int): Seq[Int] =
       if (o >= written.length) Seq(flatSchema.fields.length + (o - written.length))

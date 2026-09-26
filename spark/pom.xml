@@ -3,13 +3,13 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.sparkvector</groupId>
-    <artifactId>spark-vector-parent</artifactId>
+    <groupId>io.github.vecruntime</groupId>
+    <artifactId>vecruntime-parent</artifactId>
     <version>0.0.2-SNAPSHOT</version>
   </parent>
 
-  <artifactId>spark-vector-spark_2.13</artifactId>
-  <name>spark-vector-spark</name>
+  <artifactId>vecruntime-spark_2.13</artifactId>
+  <name>vecruntime-spark</name>
   <description>Spark SQL plugin: planner rules, columnar operators and buffer adapters</description>
 
   <properties>
@@ -17,14 +17,14 @@
       Comet-backed suites are excluded unless the comet profile is active, Iceberg-backed ones
       unless the iceberg profile is; a suite tagged with both needs both profiles (-Pcomet,iceberg).
     -->
-    <test.tags.exclude.comet>io.sparkvector.spark.test.CometTest</test.tags.exclude.comet>
-    <test.tags.exclude.iceberg>io.sparkvector.spark.test.IcebergTest</test.tags.exclude.iceberg>
+    <test.tags.exclude.comet>io.vecruntime.spark.test.CometTest</test.tags.exclude.comet>
+    <test.tags.exclude.iceberg>io.vecruntime.spark.test.IcebergTest</test.tags.exclude.iceberg>
   </properties>
 
   <dependencies>
     <dependency>
-      <groupId>io.sparkvector</groupId>
-      <artifactId>spark-vector-kernels</artifactId>
+      <groupId>io.github.vecruntime</groupId>
+      <artifactId>vecruntime-kernels</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.arrow</groupId>
@@ -97,7 +97,7 @@
               <createDependencyReducedPom>true</createDependencyReducedPom>
               <artifactSet>
                 <includes>
-                  <include>io.sparkvector:spark-vector-kernels</include>
+                  <include>io.github.vecruntime:vecruntime-kernels</include>
                 </includes>
               </artifactSet>
             </configuration>
@@ -139,7 +139,7 @@
     <profile>
       <id>comet</id>
       <properties>
-        <test.tags.exclude.comet>io.sparkvector.spark.test.NoTest</test.tags.exclude.comet>
+        <test.tags.exclude.comet>io.vecruntime.spark.test.NoTest</test.tags.exclude.comet>
       </properties>
       <dependencies>
         <dependency>
@@ -153,7 +153,7 @@
     <profile>
       <id>iceberg</id>
       <properties>
-        <test.tags.exclude.iceberg>io.sparkvector.spark.test.NoTest</test.tags.exclude.iceberg>
+        <test.tags.exclude.iceberg>io.vecruntime.spark.test.NoTest</test.tags.exclude.iceberg>
       </properties>
       <dependencies>
         <!-- Iceberg is only ever reached reflectively from src/main; the runtime jar is for tests. -->

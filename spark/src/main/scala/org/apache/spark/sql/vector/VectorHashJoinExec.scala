@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,10 @@ package org.apache.spark.sql.vector
 import java.lang.foreign.{Arena, MemorySegment}
 import java.util.ArrayDeque
 
-import io.sparkvector.kernels._
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{ArrowOutput, RemappedColumnVector, VectorAllocators}
-import io.sparkvector.spark.expr.{EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.vecruntime.kernels._
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.arrow.{ArrowOutput, RemappedColumnVector, VectorAllocators}
+import io.vecruntime.spark.expr.{EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -276,8 +276,8 @@ case class VectorShuffledHashJoinExec(
     val spec = joinSpec
     val m = vectorMetrics
     // Past the build budget the task splits both sides into buckets on disk (#416, GraceHashJoin).
-    val budget = io.sparkvector.spark.VectorConf.joinSpillBytes(conf, sparkContext.getConf)
-    val buckets = io.sparkvector.spark.VectorConf.joinSpillBuckets(conf)
+    val budget = io.vecruntime.spark.VectorConf.joinSpillBytes(conf, sparkContext.getConf)
+    val buckets = io.vecruntime.spark.VectorConf.joinSpillBuckets(conf)
     buildPlan.executeColumnar().zipPartitions(streamedPlan.executeColumnar()) { (buildIter, streamIter) =>
       GraceHashJoin.iterator(buildIter, streamIter, spec, m, budget, buckets)
     }
@@ -324,28 +324,28 @@ final class BuildTable(
   var rangeRows: Array[Int] = new Array[Int](0)
 
   /** Heap mirrors of the fixed-width columns a join condition reads, made on first use (#332). */
-  private val mirrors = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
+  private val mirrors = new Array[io.vecruntime.kernels.HeapMirror](columns.length)
 
   /** The same lanes in key-clustered order (`rangeRows`), for the range scan; made on first use. */
-  private val clustered = new Array[io.sparkvector.kernels.HeapMirror](columns.length)
+  private val clustered = new Array[io.vecruntime.kernels.HeapMirror](columns.length)
 
   /** The heap mirror of column `c`, or null when the column is not one a mirror covers. A shared table may race to make it; the result is the same. */
-  def mirror(c: Int): io.sparkvector.kernels.HeapMirror = {
+  def mirror(c: Int): io.vecruntime.kernels.HeapMirror = {
     var m = mirrors(c)
-    if (m == null && io.sparkvector.kernels.HeapMirror.mirrors(columns(c))) {
-      m = io.sparkvector.kernels.HeapMirror.of(columns(c))
+    if (m == null && io.vecruntime.kernels.HeapMirror.mirrors(columns(c))) {
+      m = io.vecruntime.kernels.HeapMirror.of(columns(c))
       mirrors(c) = m
     }
     m
   }
 
   /** The mirror of column `c` in key-clustered order, or null when the column has no mirror. Same race note as `mirror`. */
-  def clusteredMirror(c: Int): io.sparkvector.kernels.HeapMirror = {
+  def clusteredMirror(c: Int): io.vecruntime.kernels.HeapMirror = {
     var m = clustered(c)
     if (m == null) {
       val plain = mirror(c)
       if (plain != null) {
-        m = io.sparkvector.kernels.RangeResidual.cluster(plain, rangeRows)
+        m = io.vecruntime.kernels.RangeResidual.cluster(plain, rangeRows)
         clustered(c) = m
       }
     }
@@ -587,18 +587,18 @@ private[vector] class VectorHashJoinIterator(
   /** The pairs of one chunk that passed an inner join's condition (#332). */
   private var survProbeIdx = new Array[Int](0)
   private var survBuildIdx = new Array[Int](0)
-  private val gatherScratch = new io.sparkvector.kernels.HeapMirror.GatherScratch
+  private val gatherScratch = new io.vecruntime.kernels.HeapMirror.GatherScratch
 
   /** Heap mirrors of the streamed columns the condition reads, for the current batch (#332). */
-  private val streamedMirrors = new Array[io.sparkvector.kernels.HeapMirror](spec.streamedWidth)
+  private val streamedMirrors = new Array[io.vecruntime.kernels.HeapMirror](spec.streamedWidth)
   private val streamedMirrorTried = new Array[Boolean](spec.streamedWidth)
 
-  private def streamedMirror(ctx: EvalContext, ordinal: Int): io.sparkvector.kernels.HeapMirror = {
+  private def streamedMirror(ctx: EvalContext, ordinal: Int): io.vecruntime.kernels.HeapMirror = {
     if (!streamedMirrorTried(ordinal)) {
       streamedMirrorTried(ordinal) = true
       val in = ctx.input(ordinal)
-      if (io.sparkvector.kernels.HeapMirror.mirrors(in))
-        streamedMirrors(ordinal) = io.sparkvector.kernels.HeapMirror.of(in)
+      if (io.vecruntime.kernels.HeapMirror.mirrors(in))
+        streamedMirrors(ordinal) = io.vecruntime.kernels.HeapMirror.of(in)
     }
     streamedMirrors(ordinal)
   }
@@ -607,7 +607,7 @@ private[vector] class VectorHashJoinIterator(
   private val conditionRefs: Array[Boolean] = spec.condition.map { cond =>
     val refs = new Array[Boolean](spec.joinedAttrs.length)
     def walk(e: VectorExpr): Unit = e match {
-      case io.sparkvector.spark.expr.ColumnRef(o, _) => refs(o) = true
+      case io.vecruntime.spark.expr.ColumnRef(o, _) => refs(o) = true
       case other => other.children.foreach(walk)
     }
     walk(cond)
@@ -847,11 +847,11 @@ private[vector] class VectorHashJoinIterator(
    * does; the offset is added in the lane's width, wrapping as Spark's non-ANSI Add and DateAdd do.
    */
   private def fusedPredicate(ctx: EvalContext): PairPredicate = spec.condition match {
-    case Some(io.sparkvector.spark.expr.CompareExpr(op, LaneWithOffset(a, ao), LaneWithOffset(b, bo)))
+    case Some(io.vecruntime.spark.expr.CompareExpr(op, LaneWithOffset(a, ao), LaneWithOffset(b, bo)))
         if isSemiOrAnti == false && !keepUnmatched && !isExistence =>
       val ma = mirrorOf(ctx, a); val mb = mirrorOf(ctx, b)
       if (
-        ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.sparkvector.kernels.VecType.INT32 && ma.`type` != io.sparkvector.kernels.VecType.INT64)
+        ma == null || mb == null || ma.`type` != mb.`type` || (ma.`type` != io.vecruntime.kernels.VecType.INT32 && ma.`type` != io.vecruntime.kernels.VecType.INT64)
       ) null
       else new PairPredicate(op, ma, isBuildColumn(a), a, ao, mb, isBuildColumn(b), b, bo)
     case _ => null
@@ -859,17 +859,17 @@ private[vector] class VectorHashJoinIterator(
 
   /** A joined lane, possibly plus or minus an integer literal (date_add / date_sub / +, - on integers). */
   private object LaneWithOffset {
-    import io.sparkvector.spark.expr.{ArithExpr, ColumnRef, LiteralExpr}
-    def unapply(e: io.sparkvector.spark.expr.VectorExpr): Option[(Int, Long)] = e match {
+    import io.vecruntime.spark.expr.{ArithExpr, ColumnRef, LiteralExpr}
+    def unapply(e: io.vecruntime.spark.expr.VectorExpr): Option[(Int, Long)] = e match {
       case ColumnRef(c, _) => Some((c, 0L))
       // Only the plain wrapping form: an ANSI / try_add arithmetic checks overflow, which the fused
       // test does not reproduce, so it keeps the gather-then-compact path.
       case ArithExpr(op, ColumnRef(c, _), LiteralExpr(v, _), _, false, _, false)
           if v != null && integral(
             v
-          ) && (op == io.sparkvector.kernels.ArithOp.ADD || op == io.sparkvector.kernels.ArithOp.SUB) =>
-        Some((c, if (op == io.sparkvector.kernels.ArithOp.ADD) toLong(v) else -toLong(v)))
-      case ArithExpr(io.sparkvector.kernels.ArithOp.ADD, LiteralExpr(v, _), ColumnRef(c, _), _, false, _, false)
+          ) && (op == io.vecruntime.kernels.ArithOp.ADD || op == io.vecruntime.kernels.ArithOp.SUB) =>
+        Some((c, if (op == io.vecruntime.kernels.ArithOp.ADD) toLong(v) else -toLong(v)))
+      case ArithExpr(io.vecruntime.kernels.ArithOp.ADD, LiteralExpr(v, _), ColumnRef(c, _), _, false, _, false)
           if v != null && integral(v) =>
         Some((c, toLong(v)))
       case _ => None
@@ -880,24 +880,24 @@ private[vector] class VectorHashJoinIterator(
   }
 
   /** The heap mirror behind joined ordinal `c` for this batch, or null. */
-  private def mirrorOf(ctx: EvalContext, c: Int): io.sparkvector.kernels.HeapMirror =
+  private def mirrorOf(ctx: EvalContext, c: Int): io.vecruntime.kernels.HeapMirror =
     if (isBuildColumn(c)) build.mirror(buildOrdinal(c))
     else if (TypeMapping.hasLane(spec.joinedAttrs(c)._2)) streamedMirror(ctx, streamedOrdinal(c))
     else null
 
   /** `left [+ lo] OP right [+ ro]` per pair; each side reads the build row or the streamed row of the pair. */
   private final class PairPredicate(
-      op: io.sparkvector.kernels.CompareOp,
-      left: io.sparkvector.kernels.HeapMirror,
+      op: io.vecruntime.kernels.CompareOp,
+      left: io.vecruntime.kernels.HeapMirror,
       leftIsBuild: Boolean,
       leftOrdinal: Int,
       leftOffset: Long,
-      right: io.sparkvector.kernels.HeapMirror,
+      right: io.vecruntime.kernels.HeapMirror,
       rightIsBuild: Boolean,
       rightOrdinal: Int,
       rightOffset: Long
   ) {
-    private val ints = left.`type` == io.sparkvector.kernels.VecType.INT32
+    private val ints = left.`type` == io.vecruntime.kernels.VecType.INT32
     def test(streamed: Int, buildRow: Int): Boolean = {
       val li = if (leftIsBuild) buildRow else streamed
       val ri = if (rightIsBuild) buildRow else streamed
@@ -908,12 +908,12 @@ private[vector] class VectorHashJoinIterator(
           if (ints) Integer.compare(left.ints(li) + leftOffset.toInt, right.ints(ri) + rightOffset.toInt)
           else java.lang.Long.compare(left.longs(li) + leftOffset, right.longs(ri) + rightOffset)
         op match {
-          case io.sparkvector.kernels.CompareOp.EQ => cmp == 0
-          case io.sparkvector.kernels.CompareOp.NE => cmp != 0
-          case io.sparkvector.kernels.CompareOp.LT => cmp < 0
-          case io.sparkvector.kernels.CompareOp.LE => cmp <= 0
-          case io.sparkvector.kernels.CompareOp.GT => cmp > 0
-          case io.sparkvector.kernels.CompareOp.GE => cmp >= 0
+          case io.vecruntime.kernels.CompareOp.EQ => cmp == 0
+          case io.vecruntime.kernels.CompareOp.NE => cmp != 0
+          case io.vecruntime.kernels.CompareOp.LT => cmp < 0
+          case io.vecruntime.kernels.CompareOp.LE => cmp <= 0
+          case io.vecruntime.kernels.CompareOp.GT => cmp > 0
+          case io.vecruntime.kernels.CompareOp.GE => cmp >= 0
         }
       }
     }
@@ -928,15 +928,15 @@ private[vector] class VectorHashJoinIterator(
     private val laneOffset = if (leftIsBuild) leftOffset else rightOffset
 
     /** `build OP streamed` when the build lane is the left operand; the mirrored operator otherwise. */
-    private val mask = io.sparkvector.kernels.RangeResidual.mask(if (leftIsBuild) op
+    private val mask = io.vecruntime.kernels.RangeResidual.mask(if (leftIsBuild) op
     else op match {
-      case io.sparkvector.kernels.CompareOp.LT => io.sparkvector.kernels.CompareOp.GT
-      case io.sparkvector.kernels.CompareOp.LE => io.sparkvector.kernels.CompareOp.GE
-      case io.sparkvector.kernels.CompareOp.GT => io.sparkvector.kernels.CompareOp.LT
-      case io.sparkvector.kernels.CompareOp.GE => io.sparkvector.kernels.CompareOp.LE
+      case io.vecruntime.kernels.CompareOp.LT => io.vecruntime.kernels.CompareOp.GT
+      case io.vecruntime.kernels.CompareOp.LE => io.vecruntime.kernels.CompareOp.GE
+      case io.vecruntime.kernels.CompareOp.GT => io.vecruntime.kernels.CompareOp.LT
+      case io.vecruntime.kernels.CompareOp.GE => io.vecruntime.kernels.CompareOp.LE
       case other => other
     })
-    private var lane: io.sparkvector.kernels.HeapMirror = null
+    private var lane: io.vecruntime.kernels.HeapMirror = null
 
     def streamedValid(streamed: Int): Boolean = streamedMirror.isValid(streamed)
 
@@ -944,7 +944,7 @@ private[vector] class VectorHashJoinIterator(
     def scan(streamed: Int, s: Int, e: Int, hits: Array[Int]): Int = {
       if (lane == null) lane = build.clusteredMirror(buildColumn)
       if (ints)
-        io.sparkvector.kernels.RangeResidual.scanInts(
+        io.vecruntime.kernels.RangeResidual.scanInts(
           lane.ints,
           lane.validity,
           s,
@@ -956,7 +956,7 @@ private[vector] class VectorHashJoinIterator(
           0
         )
       else
-        io.sparkvector.kernels.RangeResidual.scanLongs(
+        io.vecruntime.kernels.RangeResidual.scanLongs(
           lane.longs,
           lane.validity,
           s,
@@ -1325,7 +1325,7 @@ object VectorJoinPlanner {
    */
   def buildSizeReason(buildPlan: SparkPlan, maxBuildSize: Long): Option[String] =
     estimatedBuildSize(buildPlan).filter(_ > maxBuildSize).map { size =>
-      s"build side estimated at $size bytes exceeds ${io.sparkvector.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize"
+      s"build side estimated at $size bytes exceeds ${io.vecruntime.spark.VectorConf.JoinMaxBuildSize}=$maxBuildSize"
     }
 
   /**

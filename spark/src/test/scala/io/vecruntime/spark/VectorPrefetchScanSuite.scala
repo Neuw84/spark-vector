@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
 import java.util.concurrent.atomic.AtomicInteger
 
-import io.sparkvector.spark.arrow.VectorArrowColumnVector
-import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
+import io.vecruntime.spark.arrow.VectorArrowColumnVector
+import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan}

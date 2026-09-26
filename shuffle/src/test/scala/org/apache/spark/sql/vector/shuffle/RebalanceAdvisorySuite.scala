@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,11 +42,11 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "localhost")
       .config("spark.sql.shuffle.partitions", "8")
-      .config("spark.plugins", "io.sparkvector.spark.VectorPlugin")
+      .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
       .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .getOrCreate()
-    tempDir = java.nio.file.Files.createTempDirectory("spark-vector-advisory")
+    tempDir = java.nio.file.Files.createTempDirectory("vecruntime-advisory")
     // The write exchange's shape in small: narrow key columns plus a mostly-null payload.
     spark.sql(
       "select cast(id % 5 as int) g, id pos, cast(id % 3 as int) op, " +

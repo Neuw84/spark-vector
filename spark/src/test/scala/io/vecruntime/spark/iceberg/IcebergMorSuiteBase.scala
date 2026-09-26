@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.iceberg
+package io.vecruntime.spark.iceberg
 
 import java.nio.file.{Files, Path}
 
-import io.sparkvector.spark.VectorConf
-import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
+import io.vecruntime.spark.VectorConf
+import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
 import org.apache.spark.sql.vector.{PlanUtils, VectorFilterExec, VectorHashAggregateExec, VectorProjectExec}
@@ -35,7 +35,7 @@ abstract class IcebergMorSuiteBase extends VectorQuerySuite {
   protected val Project = classOf[VectorProjectExec]
   protected val Agg = classOf[VectorHashAggregateExec]
 
-  private lazy val warehouse: Path = Files.createTempDirectory("spark-vector-iceberg")
+  private lazy val warehouse: Path = Files.createTempDirectory("vecruntime-iceberg")
 
   /** Catalog and extension configuration; subclasses add their reader configuration on top. */
   protected def icebergConf: Map[String, String] = IcebergTables.catalogConf(warehouse.toString)

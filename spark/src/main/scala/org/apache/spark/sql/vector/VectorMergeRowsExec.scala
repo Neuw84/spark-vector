@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,10 @@ import java.util.ArrayDeque
 
 import org.roaringbitmap.longlong.Roaring64Bitmap
 
-import io.sparkvector.kernels.{Bitmap, BitmapKernels, VecType}
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.arrow.{ArrowOutput, RemappedColumnVector, SelectedColumnarBatch}
-import io.sparkvector.spark.expr.{ColumnRef, EvalContext, ExpressionCompiler, LiteralExpr, NullLiteralExpr, VectorExpr}
+import io.vecruntime.kernels.{Bitmap, BitmapKernels, VecType}
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.arrow.{ArrowOutput, RemappedColumnVector, SelectedColumnarBatch}
+import io.vecruntime.spark.expr.{ColumnRef, EvalContext, ExpressionCompiler, LiteralExpr, NullLiteralExpr, VectorExpr}
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, Literal, SortOrder}
@@ -97,10 +97,10 @@ private[vector] final case class CompiledOutput(name: String, dataType: DataType
 private[vector] object AllRowsExpr extends VectorExpr {
   override def dataType: DataType = BooleanType
   override def children: Seq[VectorExpr] = Nil
-  override def eval(ctx: EvalContext): io.sparkvector.kernels.VectorBuffers = {
-    val bits = io.sparkvector.kernels.ArrowLayout.allocateBitmap(ctx.arena, ctx.numRows)
-    io.sparkvector.kernels.Bitmap.fill(bits, ctx.numRows, true)
-    io.sparkvector.kernels.SegmentVectorBuffers.fixedWidth(io.sparkvector.kernels.VecType.BOOL, ctx.numRows, null, bits)
+  override def eval(ctx: EvalContext): io.vecruntime.kernels.VectorBuffers = {
+    val bits = io.vecruntime.kernels.ArrowLayout.allocateBitmap(ctx.arena, ctx.numRows)
+    io.vecruntime.kernels.Bitmap.fill(bits, ctx.numRows, true)
+    io.vecruntime.kernels.SegmentVectorBuffers.fixedWidth(io.vecruntime.kernels.VecType.BOOL, ctx.numRows, null, bits)
   }
 }
 
@@ -248,7 +248,7 @@ private[vector] class VectorMergeRowsIterator(
     metrics: VectorMetrics
 ) extends Iterator[ColumnarBatch] with AutoCloseable {
 
-  private val allocator = io.sparkvector.spark.arrow.VectorAllocators.newChild("VectorMergeRowsExec")
+  private val allocator = io.vecruntime.spark.arrow.VectorAllocators.newChild("VectorMergeRowsExec")
   private val pending = new ArrayDeque[ColumnarBatch]()
   private var emitted: ColumnarBatch = _
   private var closed = false

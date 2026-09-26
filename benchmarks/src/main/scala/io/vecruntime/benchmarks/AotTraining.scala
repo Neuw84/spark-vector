@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks
+package io.vecruntime.benchmarks
 
 import java.nio.file.{Files, Path}
 
@@ -42,8 +42,8 @@ import org.apache.spark.sql.SparkSession
  *
  * {{{
  * java <executor JVM options> -XX:AOTCacheOutput=/opt/spark/aot/executor.aot -cp '/opt/spark/jars/<wildcard>' \
- *   io.sparkvector.benchmarks.AotTraining [--rounds N] [--rows N]
- * java -cp '/opt/spark/jars/<wildcard>' io.sparkvector.benchmarks.AotTraining --module-options   # Spark's launcher defaults, one per line
+ *   io.vecruntime.benchmarks.AotTraining [--rounds N] [--rows N]
+ * java -cp '/opt/spark/jars/<wildcard>' io.vecruntime.benchmarks.AotTraining --module-options   # Spark's launcher defaults, one per line
  * }}}
  */
 object AotTraining {
@@ -59,7 +59,7 @@ object AotTraining {
     }
     val rounds = arg(args, "--rounds").map(_.toInt).getOrElse(3)
     val rows = arg(args, "--rows").map(_.toLong).getOrElse(400000L)
-    val dir = Files.createTempDirectory("spark-vector-aot")
+    val dir = Files.createTempDirectory("vecruntime-aot")
     val start = System.nanoTime()
     val spark = session(dir)
     try {
@@ -93,7 +93,7 @@ object AotTraining {
     .config("spark.local.dir", dir.resolve("local").toString)
     .config("spark.sql.shuffle.partitions", "8")
     .config("spark.sql.autoBroadcastJoinThreshold", "1m")
-    .config("spark.plugins", "io.sparkvector.spark.VectorPlugin")
+    .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
     .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
     .config("spark.vector.shuffle.enabled", "true")
     .config("spark.vector.exec.strictFloatingPoint", "false")

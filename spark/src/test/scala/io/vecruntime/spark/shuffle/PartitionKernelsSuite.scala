@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.shuffle
+package io.vecruntime.spark.shuffle
 
 import java.lang.foreign.Arena
 import java.math.BigInteger
 import scala.util.Random
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, PartitionKernels, SegmentVectorBuffers, VectorBuffers}
-import io.sparkvector.kernels.PartitionKernels.KeyKind
+import io.vecruntime.kernels.{ArrowLayout, Bitmap, PartitionKernels, SegmentVectorBuffers, VectorBuffers}
+import io.vecruntime.kernels.PartitionKernels.KeyKind
 import org.apache.spark.sql.catalyst.expressions.Murmur3HashFunction
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String

@@ -8,6 +8,6 @@
 #   benchmarks/scripts/run-tpcds.sh --report
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-export RUNNER=io.sparkvector.benchmarks.TpcdsRunner
+export RUNNER=io.vecruntime.benchmarks.TpcdsRunner
 export RESULTS_DIR="${RESULTS_DIR:-$ROOT/benchmarks/results/tpcds}"
 exec "$ROOT/benchmarks/scripts/run-tpch.sh" "$@"

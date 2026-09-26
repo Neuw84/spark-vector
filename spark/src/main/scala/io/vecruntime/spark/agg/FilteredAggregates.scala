@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.agg
+package io.vecruntime.spark.agg
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels.{Bitmap, BitmapKernels, Decimal128, GroupAssignment, VecType, VectorBuffers}
-import io.sparkvector.spark.expr.{EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
+import io.vecruntime.kernels.{Bitmap, BitmapKernels, Decimal128, GroupAssignment, VecType, VectorBuffers}
+import io.vecruntime.spark.expr.{EvalContext, ExpressionCompiler, LiteralExpr, VectorExpr}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.types.{BooleanType, DataType, DateType, DoubleType, IntegerType, LongType}
 
@@ -98,7 +98,7 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Bo
       val i = if (ignoreNulls) FirstAgg.firstValid(ctx.masked(v), ctx.numRows, 0)
       else if (ctx.selection == null) (if (ctx.numRows > 0) 0 else -1)
       else FirstAgg.firstValid(
-        new io.sparkvector.kernels.SegmentVectorBuffers(
+        new io.vecruntime.kernels.SegmentVectorBuffers(
           v.`type`(),
           ctx.numRows,
           ctx.selection,
@@ -144,7 +144,7 @@ final case class FirstAgg(input: VectorExpr, dataType: DataType, ignoreNulls: Bo
 object FirstAgg {
   def supports(dt: DataType): Boolean = dt match {
     case IntegerType | LongType | DoubleType | DateType | BooleanType | org.apache.spark.sql.types.StringType => true
-    case _: org.apache.spark.sql.types.DecimalType => io.sparkvector.spark.adapter.TypeMapping.isSupported(dt)
+    case _: org.apache.spark.sql.types.DecimalType => io.vecruntime.spark.adapter.TypeMapping.isSupported(dt)
     case _ => false
   }
 
@@ -170,7 +170,7 @@ object FirstAgg {
 
   /** `supports` plus the wide decimals, for the functions that box a row ([[FirstAgg]], [[LastAgg]]). */
   def supportsWide(dt: DataType): Boolean = supports(dt) || (dt match {
-    case _: org.apache.spark.sql.types.DecimalType => io.sparkvector.spark.adapter.TypeMapping.hasLane(dt)
+    case _: org.apache.spark.sql.types.DecimalType => io.vecruntime.spark.adapter.TypeMapping.hasLane(dt)
     case _ => false
   })
 

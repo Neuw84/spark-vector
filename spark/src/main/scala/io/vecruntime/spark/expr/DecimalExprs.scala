@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.expr
+package io.vecruntime.spark.expr
 
 import java.lang.foreign.MemorySegment
 
-import io.sparkvector.kernels._
-import io.sparkvector.spark.adapter.TypeMapping
+import io.vecruntime.kernels._
+import io.vecruntime.spark.adapter.TypeMapping
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.types._
 

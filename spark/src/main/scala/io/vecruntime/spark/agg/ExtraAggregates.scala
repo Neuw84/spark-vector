@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.agg
+package io.vecruntime.spark.agg
 
-import io.sparkvector.kernels.{Bitmap, GroupAssignment, VecType, VectorBuffers}
-import io.sparkvector.spark.expr.{EvalContext, VectorExpr}
+import io.vecruntime.kernels.{Bitmap, GroupAssignment, VecType, VectorBuffers}
+import io.vecruntime.spark.expr.{EvalContext, VectorExpr}
 import org.apache.spark.sql.types.{BooleanType, DataType, StringType}
 import org.apache.spark.unsafe.types.UTF8String
 

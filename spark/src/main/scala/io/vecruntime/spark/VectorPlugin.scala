@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
 import java.util.Collections
 
@@ -22,7 +22,7 @@ import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext,
 import org.apache.spark.internal.Logging
 
 /**
- * Spark plugin entry point (`spark.plugins=io.sparkvector.spark.VectorPlugin`). The driver side
+ * Spark plugin entry point (`spark.plugins=io.vecruntime.spark.VectorPlugin`). The driver side
  * appends [[VectorSparkSessionExtensions]] to `spark.sql.extensions` so users need a single config
  * key, and attaches the Vector Acceleration tab to the Spark UI; there is no executor-side
  * component beyond the Comet adapter registration.
@@ -60,7 +60,7 @@ class VectorPlugin extends SparkPlugin {
   override def executorPlugin(): ExecutorPlugin = new ExecutorPlugin {
     override def init(ctx: PluginContext, extraConf: java.util.Map[String, String]): Unit = {
       VectorPlugin.requireVectorApi()
-      io.sparkvector.spark.comet.CometVectorAdapter.tryRegister()
+      io.vecruntime.spark.comet.CometVectorAdapter.tryRegister()
       // Starts the Flight shuffle server on this executor when the shuffle module is present, its
       // manager configured and the backend is Flight (#288).
       org.apache.spark.sql.vector.VectorShuffle.executorInit(ctx)

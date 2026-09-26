@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.shuffle
+package io.vecruntime.shuffle
 
 import java.lang.foreign.Arena
 import java.math.BigInteger
@@ -21,9 +21,9 @@ import java.nio.file.Files
 import scala.collection.mutable
 import scala.util.Random
 
-import io.sparkvector.kernels.{ArrowLayout, PartitionKernels, SegmentVectorBuffers, VectorBuffers}
-import io.sparkvector.kernels.PartitionKernels.KeyKind
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorDictionaryColumnVector}
+import io.vecruntime.kernels.{ArrowLayout, PartitionKernels, SegmentVectorBuffers, VectorBuffers}
+import io.vecruntime.kernels.PartitionKernels.KeyKind
+import io.vecruntime.spark.arrow.{ArrowOutput, VectorDictionaryColumnVector}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -93,8 +93,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       ArrowLayout.ofLongs(arena, vdec, ndec),
       ArrowLayout.ofDecimal128(arena, vw, nw)
     )
-    val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
-    io.sparkvector.kernels.Bitmap.fill(all, n, true)
+    val all = arena.allocate(io.vecruntime.kernels.Bitmap.bytesFor(n), 8)
+    io.vecruntime.kernels.Bitmap.fill(all, n, true)
     val columns: Array[ColumnVector] = schema.fields.indices.toArray.map { c =>
       ArrowOutput.compact(schema.fields(c).name, schema.fields(c).dataType, buffers(c), all, n, allocator)
     }
@@ -166,8 +166,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           try {
             // Partition on (i, s): ids from the same kernel the exchange uses.
             val keys = Array(
-              io.sparkvector.spark.adapter.ColumnVectorAdapters.adapt(b.column(0), n, arena),
-              io.sparkvector.spark.adapter.ColumnVectorAdapters.adapt(b.column(6), n, arena)
+              io.vecruntime.spark.adapter.ColumnVectorAdapters.adapt(b.column(0), n, arena),
+              io.vecruntime.spark.adapter.ColumnVectorAdapters.adapt(b.column(6), n, arena)
             )
             val hashes = new Array[Int](n); val ids = new Array[Int](n)
             PartitionKernels.hashPartitionIds(keys, Array(KeyKind.INT, KeyKind.UTF8), n, numPartitions, hashes, ids)
@@ -240,7 +240,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
               dictionary,
               () => ()
             ), // borrowed dictionary: the aggregate's release hook shape
-            new io.sparkvector.spark.arrow.VectorArrowColumnVector(values)
+            new io.vecruntime.spark.arrow.VectorArrowColumnVector(values)
           ),
           n
         )
@@ -303,7 +303,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
       try while (reader.hasNext) {
           val b = reader.next()
           try {
-            if (b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainBlocks += 1
+            if (b.column(7).isInstanceOf[io.vecruntime.spark.arrow.VectorArrowColumnVector]) plainBlocks += 1
             got ++= read(b)
           } finally b.close()
         }
@@ -540,7 +540,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           val b = reader.next()
           sizes += b.numRows()
           assert(
-            b.column(7).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector],
+            b.column(7).isInstanceOf[io.vecruntime.spark.arrow.VectorArrowColumnVector],
             "the coalesced column comes out plain"
           )
           got ++= read(b)
@@ -571,8 +571,8 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           val n = rowsPerWrite
           val ints = Array.tabulate(n)(identity)
           val strings = Array.fill[String](n)(null)
-          val all = arena.allocate(io.sparkvector.kernels.Bitmap.bytesFor(n), 8)
-          io.sparkvector.kernels.Bitmap.fill(all, n, true)
+          val all = arena.allocate(io.vecruntime.kernels.Bitmap.bytesFor(n), 8)
+          io.vecruntime.kernels.Bitmap.fill(all, n, true)
           val columns: Array[ColumnVector] = Array(
             ArrowOutput.compact(
               "i",
@@ -665,7 +665,7 @@ class PartitionedIpcSuite extends AnyFunSuite with BeforeAndAfterAll {
           while (reader.hasNext) {
             val b = reader.next()
             batches += 1
-            if (b.column(6).isInstanceOf[io.sparkvector.spark.arrow.VectorArrowColumnVector]) plainS += 1
+            if (b.column(6).isInstanceOf[io.vecruntime.spark.arrow.VectorArrowColumnVector]) plainS += 1
             else encodedS += 1
             assert(b.column(7).isInstanceOf[VectorDictionaryColumnVector], "dictionary for the five-word column")
             got ++= read(b)

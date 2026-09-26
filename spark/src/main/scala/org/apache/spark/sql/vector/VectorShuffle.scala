@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 
 /**
- * Reflective hook to the columnar shuffle of the `spark-vector-shuffle` module (#288), which is
+ * Reflective hook to the columnar shuffle of the `vecruntime-shuffle` module (#288), which is
  * optional on the classpath (it carries Arrow Flight and gRPC) and only works under its own
  * `spark.shuffle.manager`, so the planner checks both before it replaces an exchange.
  */

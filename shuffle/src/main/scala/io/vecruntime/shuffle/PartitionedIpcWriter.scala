@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.shuffle
+package io.vecruntime.shuffle
 
 import java.io.ByteArrayOutputStream
 import java.lang.foreign.{Arena, MemorySegment}
@@ -22,7 +22,7 @@ import java.nio.channels.{Channels, FileChannel}
 import java.nio.file.{Files, Path, StandardOpenOption}
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.kernels.{
+import io.vecruntime.kernels.{
   Bitmap,
   CompactKernels,
   GatherKernels,
@@ -33,8 +33,8 @@ import io.sparkvector.kernels.{
   VecType,
   VectorBuffers
 }
-import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.arrow.{
+import io.vecruntime.spark.adapter.ColumnVectorAdapters
+import io.vecruntime.spark.arrow.{
   ArrowOutput,
   ArrowVectorBuffers,
   VectorArrowColumnVector,
@@ -1332,7 +1332,7 @@ object PartitionedIpcWriter {
       } else {
         val start = offsets.get(VectorBuffers.LE_INT, i.toLong * 4)
         val end = offsets.get(VectorBuffers.LE_INT, (i.toLong + 1) * 4)
-        var h = (if (end > start) io.sparkvector.kernels.HashKernels.hashBytes(data, start, end - start) else 0) & mask
+        var h = (if (end > start) io.vecruntime.kernels.HashKernels.hashBytes(data, start, end - start) else 0) & mask
         var id = -1
         while (id < 0) {
           val slot = table(h)

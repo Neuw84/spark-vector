@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.expr
+package io.vecruntime.spark.expr
 
-import io.sparkvector.kernels.{Bitmap, BitmapKernels, SegmentVectorBuffers, VecType, VectorBuffers}
-import io.sparkvector.spark.adapter.ColumnVectorAdapters
+import io.vecruntime.kernels.{Bitmap, BitmapKernels, SegmentVectorBuffers, VecType, VectorBuffers}
+import io.vecruntime.spark.adapter.ColumnVectorAdapters
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnVector
 
@@ -79,7 +79,7 @@ final case class SizeExpr(inputOrdinal: Int, path: Seq[Int], isMap: Boolean, leg
     var s = 0
     while (s < steps.length) { if (cv.hasNull) ancestors += cv; cv = cv.getChild(steps(s)); s += 1 }
     val parents = ancestors.toArray
-    val data = io.sparkvector.kernels.ArrowLayout.allocateData(ctx.arena, VecType.INT32, n)
+    val data = io.vecruntime.kernels.ArrowLayout.allocateData(ctx.arena, VecType.INT32, n)
     val validity = if (legacySizeOfNull) null else ctx.bitmap()
     var r = 0
     while (r < n) {

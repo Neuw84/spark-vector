@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.kernels;
+package io.vecruntime.kernels;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteOrder;
@@ -23,7 +23,7 @@ import jdk.incubator.vector.DoubleVector;
 import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 
-import static io.sparkvector.kernels.Species.D;
+import static io.vecruntime.kernels.Species.D;
 
 /**
  * Predicates the comparison kernels do not cover: {@code isnan}, membership in

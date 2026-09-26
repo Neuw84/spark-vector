@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.kernels;
+package io.vecruntime.kernels;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.math.BigDecimal;
 import java.util.Random;
 
-import io.sparkvector.kernels.RoundKernels.Mode;
+import io.vecruntime.kernels.RoundKernels.Mode;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

@@ -19,7 +19,7 @@ LOG="${OUT%.aot}.log"
 "$JAVA" "${AOT_BASE_OPTS[@]}" \
   -Xmx"${TRAIN_HEAP:-4g}" -XX:MaxDirectMemorySize=2g -Dlog4j2.level=warn -Dspark.log.level=WARN \
   -XX:AOTCacheOutput="$OUT" -Xlog:aot=info:file="$LOG" \
-  -cp "$CP" io.sparkvector.benchmarks.AotTraining "$@"
+  -cp "$CP" io.vecruntime.benchmarks.AotTraining "$@"
 
 LINKED=$(grep -a "aot-linked" "$LOG" | grep -a "instance classes" | sed 's/.*aot-linked = *\([0-9]*\).*/\1/' | head -1)
 echo "AOT cache: $(du -h "$OUT" | cut -f1), aot-linked instance classes = ${LINKED:-0}"

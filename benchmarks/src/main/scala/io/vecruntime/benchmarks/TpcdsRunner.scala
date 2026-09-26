@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,11 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks
+package io.vecruntime.benchmarks
 
 import java.nio.charset.StandardCharsets
 
-import io.sparkvector.benchmarks.TpchRunner.Suite
+import io.vecruntime.benchmarks.TpchRunner.Suite
 
 /**
  * TPC-DS runner: the 99 queries (103 with the a/b variants) over the 24 tables `gen-tpcds.sh`

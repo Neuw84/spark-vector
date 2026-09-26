@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,11 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.adapter
+package io.vecruntime.spark.adapter
 
 import java.lang.foreign.Arena
-import io.sparkvector.kernels.{Bitmap, VecType}
-import io.sparkvector.spark.test.SparkVectorFunSuite
+import io.vecruntime.kernels.{Bitmap, VecType}
+import io.vecruntime.spark.test.SparkVectorFunSuite
 import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.vectorized.{OffHeapColumnVector, OnHeapColumnVector, WritableColumnVector}
 import org.apache.spark.sql.types._

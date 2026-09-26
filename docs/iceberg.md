@@ -51,8 +51,8 @@ any columnar producer.
 ## Tests
 
 ```bash
-mvn -Piceberg -pl spark verify -Dsuites=io.sparkvector.spark.iceberg.IcebergScanSuite
-mvn -Pcomet,iceberg -pl spark verify -Dsuites=io.sparkvector.spark.iceberg.CometIcebergSuite
+mvn -Piceberg -pl spark verify -Dsuites=io.vecruntime.spark.iceberg.IcebergScanSuite
+mvn -Pcomet,iceberg -pl spark verify -Dsuites=io.vecruntime.spark.iceberg.CometIcebergSuite
 ```
 
 Both suites share `IcebergMorSuiteBase` and run the same queries; only the expected scan node

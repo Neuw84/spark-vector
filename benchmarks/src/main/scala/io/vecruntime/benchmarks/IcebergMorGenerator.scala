@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks
+package io.vecruntime.benchmarks
 
 import java.io.File
 import java.nio.charset.StandardCharsets
@@ -271,7 +271,7 @@ object IcebergMorGenerator {
     val warehouse = catalogConf(args.warehouse)(s"spark.sql.catalog.$Catalog.warehouse")
     // On the cluster spark-submit sets --master; locally there is none, so default to local[threads].
     val builder = SparkSession.builder()
-      .appName("spark-vector-iceberg-mor-generator")
+      .appName("vecruntime-iceberg-mor-generator")
       .config("spark.ui.enabled", "false")
       .config("spark.sql.shuffle.partitions", args.threads.toString)
     if (Option(System.getProperty("spark.master")).isEmpty && sys.env.get("SPARK_MASTER").isEmpty)

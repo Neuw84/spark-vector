@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks
+package io.vecruntime.benchmarks
 
 import java.io.{File, PrintWriter}
 import java.nio.file.{Files, Path, Paths}
@@ -25,7 +25,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
 import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
-import io.sparkvector.spark.iceberg.IcebergVectorAdapter
+import io.vecruntime.spark.iceberg.IcebergVectorAdapter
 
 /**
  * TPC-H runner: the 22 queries over the tables `gen-tpch.sh` writes. One configuration per JVM
@@ -101,7 +101,7 @@ object TpchRunner {
    * configuration reads the same whatever the plugin's default; Comet accelerates those joins too.
    */
   val VectorFast: Map[String, String] = Map(
-    "spark.plugins" -> "io.sparkvector.spark.VectorPlugin",
+    "spark.plugins" -> "io.vecruntime.spark.VectorPlugin",
     "spark.vector.exec.strictFloatingPoint" -> "false",
     "spark.vector.exec.sortMergeJoin.mode" -> "auto", // #287: the merge join where the order can show or statistics are missing, the hash rewrite otherwise
     // #403: the vectorized Parquet reader is what our operators consume (Spark's default, made explicit),
@@ -122,7 +122,7 @@ object TpchRunner {
     )),
     "comet-scan" -> (Map("spark.plugins" -> "org.apache.spark.CometPlugin") ++ CometScanOnly),
     "comet-scan-vector" -> (VectorFast ++ Map(
-      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin"
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin"
     ) ++ CometScanOnly),
     // The same with strict floating point (the plugin's own default): double sums and averages in
     // Spark's order, so every result equals vanilla Spark's bit for bit. The maintainer's question
@@ -134,13 +134,13 @@ object TpchRunner {
     )),
     // #311: Comet's native scan, our operators, and OUR columnar shuffle (#288) -- Comet's shuffle off.
     "comet-scan-vector-ourshuffle" -> (VectorFast ++ Map(
-      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin",
       "spark.shuffle.manager" -> "org.apache.spark.sql.vector.shuffle.VectorShuffleManager",
       "spark.vector.shuffle.enabled" -> "true"
     ) ++ CometScanOnly),
     // Comet scan and Comet native shuffle, everything in between (and the Final aggregate) ours.
     "comet-scan-vector-shuffle" -> (VectorFast ++ Map(
-      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin",
       "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager"
     ) ++
       CometScanOnly ++ Map("spark.comet.exec.shuffle.enabled" -> "true")),
@@ -149,7 +149,7 @@ object TpchRunner {
     // operator toggles stay off as in the scan-only configurations; a study run turns a candidate on with
     // `--conf spark.comet.exec.<kind>.enabled=true --conf spark.vector.comet.preferComet=<kind> --label <kind>`.
     "hybrid" -> (VectorFast ++ Map(
-      "spark.plugins" -> "org.apache.spark.CometPlugin,io.sparkvector.spark.VectorPlugin",
+      "spark.plugins" -> "org.apache.spark.CometPlugin,io.vecruntime.spark.VectorPlugin",
       "spark.shuffle.manager" -> "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager"
     ) ++
       CometScanOnly ++ Map(
@@ -295,7 +295,7 @@ object TpchRunner {
       } else {
         val builder = SparkSession.builder()
           .master(s"local[${args.threads}]")
-          .appName(s"spark-vector-${args.suite.name}-${args.config}")
+          .appName(s"vecruntime-${args.suite.name}-${args.config}")
           .config("spark.ui.enabled", args.keepAlive.toString)
           .config("spark.sql.shuffle.partitions", args.shufflePartitions.toString)
           .config("spark.sql.adaptive.enabled", "true")
@@ -659,7 +659,7 @@ object TpchRunner {
    * store's file system is the one the cluster used, and writes `cluster-results.md` beside the rows.
    */
   private def clusterReport(suite: Suite, dir: String): Unit = {
-    val builder = SparkSession.builder().appName(s"spark-vector-${suite.name}-report")
+    val builder = SparkSession.builder().appName(s"vecruntime-${suite.name}-report")
     if (sys.props.get("spark.master").isEmpty)
       builder.master("local[1]").config("spark.driver.host", "localhost").config("spark.ui.enabled", "false")
     val spark = builder.getOrCreate()

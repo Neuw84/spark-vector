@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,12 @@ import java.util.concurrent.LinkedBlockingQueue
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.kernels.PartitionKernels
-import io.sparkvector.kernels.PartitionKernels.KeyKind
-import io.sparkvector.kernels.VectorBuffers
-import io.sparkvector.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
-import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.arrow.VectorAllocators
+import io.vecruntime.kernels.PartitionKernels
+import io.vecruntime.kernels.PartitionKernels.KeyKind
+import io.vecruntime.kernels.VectorBuffers
+import io.vecruntime.shuffle.{PartitionedIpcFile, PartitionedIpcWriter}
+import io.vecruntime.spark.adapter.ColumnVectorAdapters
+import io.vecruntime.spark.arrow.VectorAllocators
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.{Partitioner, ShuffleDependency, SparkConf, SparkEnv, SparkException, TaskContext}
 import org.apache.spark.network.buffer.ManagedBuffer
@@ -69,7 +69,7 @@ object VectorPartitioning {
     dt match {
       case IntegerType | DateType | ByteType | ShortType => KeyKind.INT // Spark hashes a byte or short as its int value
       case LongType | TimestampType => KeyKind.LONG
-      case d: DecimalType if d.precision <= io.sparkvector.spark.adapter.TypeMapping.MAX_DECIMAL_PRECISION =>
+      case d: DecimalType if d.precision <= io.vecruntime.spark.adapter.TypeMapping.MAX_DECIMAL_PRECISION =>
         KeyKind.LONG
       case _: DecimalType => KeyKind.DECIMAL128
       case DoubleType => KeyKind.DOUBLE
@@ -90,10 +90,10 @@ final class VectorShuffleDependency(
     /** The exchange's `dataSize` metric -- AQE's runtime statistic for the stage; every map task adds its uncompressed Arrow bytes. */
     val dataSize: org.apache.spark.sql.execution.metric.SQLMetric,
     /**
-     * Struct columns flattened into lanes ([[io.sparkvector.shuffle.StructFlattening]]): `schema` is
+     * Struct columns flattened into lanes ([[io.vecruntime.shuffle.StructFlattening]]): `schema` is
      * then the flat schema the IPC streams carry, and the reader rebuilds the written columns.
      */
-    val layout: Option[io.sparkvector.shuffle.StructFlattening.Layout] = None,
+    val layout: Option[io.vecruntime.shuffle.StructFlattening.Layout] = None,
     /**
      * Rebalance exchanges only (#20): every map task reports its record count per reduce partition,
      * so AQE can size the partitions by rows ([[RowProportionalSizes]]).

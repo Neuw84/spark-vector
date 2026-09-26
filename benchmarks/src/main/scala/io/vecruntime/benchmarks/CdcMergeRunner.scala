@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks
+package io.vecruntime.benchmarks
 
 import java.io.{File, PrintWriter}
 import java.nio.charset.StandardCharsets
@@ -26,8 +26,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
 import org.apache.spark.sql.vector.ui.{Engine, PlanAcceleration}
-import io.sparkvector.spark.iceberg.IcebergVectorAdapter
-import io.sparkvector.benchmarks.IcebergMorGenerator.TableProfile
+import io.vecruntime.spark.iceberg.IcebergVectorAdapter
+import io.vecruntime.benchmarks.IcebergMorGenerator.TableProfile
 
 /**
  * The CDC shape over an Iceberg v2 merge-on-read table (#260's read harness measures the reads;
@@ -181,7 +181,7 @@ object CdcMergeRunner {
     val warehouse = IcebergMorGenerator.resolveWarehouse(args.warehouse)
     // On the cluster spark-submit sets --master; locally default to local[threads].
     val builder = SparkSession.builder()
-      .appName(s"spark-vector-cdc-${args.config}")
+      .appName(s"vecruntime-cdc-${args.config}")
       .config("spark.ui.enabled", "false")
       .config("spark.sql.shuffle.partitions", args.shufflePartitions.toString)
       .config("spark.sql.adaptive.enabled", "true")

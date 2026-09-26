@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,18 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.kernels.reference;
+package io.vecruntime.kernels.reference;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 
-import io.sparkvector.kernels.ArithOp;
-import io.sparkvector.kernels.Bitmap;
-import io.sparkvector.kernels.CompareOp;
-import io.sparkvector.kernels.DateKernels;
-import io.sparkvector.kernels.StringMatchKernels;
-import io.sparkvector.kernels.VecType;
-import io.sparkvector.kernels.VectorBuffers;
+import io.vecruntime.kernels.ArithOp;
+import io.vecruntime.kernels.Bitmap;
+import io.vecruntime.kernels.CompareOp;
+import io.vecruntime.kernels.DateKernels;
+import io.vecruntime.kernels.StringMatchKernels;
+import io.vecruntime.kernels.VecType;
+import io.vecruntime.kernels.VectorBuffers;
 
 /**
  * Straightforward scalar implementations of every kernel. They define the

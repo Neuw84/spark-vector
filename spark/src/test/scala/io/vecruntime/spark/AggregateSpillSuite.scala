@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
 import java.lang.foreign.Arena
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, PartitionKernels}
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorAllocators}
+import io.vecruntime.kernels.{ArrowLayout, Bitmap, PartitionKernels}
+import io.vecruntime.spark.arrow.{ArrowOutput, VectorAllocators}
 import org.apache.spark.sql.types.{IntegerType, LongType}
 import org.apache.spark.sql.vector.AggregateSpill
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
  */
 package org.apache.spark.sql.vector
 
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.spark.expr.VectorExpr
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.spark.expr.VectorExpr
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{
@@ -91,8 +91,8 @@ case class VectorTakeOrderedAndProjectExec(
     val childAttrs = child.output.map(a => (a.name, a.dataType)).toArray
     val childOutput = child.output
     val n = limit
-    val runRows = io.sparkvector.spark.VectorConf.sortRunRows(conf)
-    val spillBytes = io.sparkvector.spark.VectorConf.sortSpillBytes(conf, sparkContext.getConf)
+    val runRows = io.vecruntime.spark.VectorConf.sortRunRows(conf)
+    val spillBytes = io.vecruntime.spark.VectorConf.sortSpillBytes(conf, sparkContext.getConf)
     val m = vectorMetrics
     child.executeColumnar().mapPartitionsInternal { iter =>
       VectorRowStages.toUnsafeRows(

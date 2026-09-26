@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,20 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks;
+package io.vecruntime.benchmarks;
 
 import java.lang.foreign.Arena;
 import java.nio.charset.StandardCharsets;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
-import io.sparkvector.spark.adapter.ColumnVectorAdapters;
-import io.sparkvector.spark.arrow.VectorAllocators;
-import io.sparkvector.spark.arrow.VectorArrowColumnVector;
-import io.sparkvector.spark.arrow.VectorDecimalColumnVector;
-import io.sparkvector.spark.arrow.VectorDictionaryColumnVector;
-import io.sparkvector.spark.comet.CometBatchBridge;
-import io.sparkvector.spark.comet.CometVectorAdapter;
+import io.vecruntime.spark.adapter.ColumnVectorAdapters;
+import io.vecruntime.spark.arrow.VectorAllocators;
+import io.vecruntime.spark.arrow.VectorArrowColumnVector;
+import io.vecruntime.spark.arrow.VectorDecimalColumnVector;
+import io.vecruntime.spark.arrow.VectorDictionaryColumnVector;
+import io.vecruntime.spark.comet.CometBatchBridge;
+import io.vecruntime.spark.comet.CometVectorAdapter;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.Float8Vector;

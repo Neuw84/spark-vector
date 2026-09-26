@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,19 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.arrow;
+package io.vecruntime.spark.arrow;
 
 import java.lang.foreign.MemorySegment;
 
-import io.sparkvector.kernels.Bitmap;
-import io.sparkvector.kernels.BitmapKernels;
-import io.sparkvector.kernels.CompactKernels;
-import io.sparkvector.kernels.GatherKernels;
-import io.sparkvector.kernels.HeapMirror;
-import io.sparkvector.kernels.RunMerge;
-import io.sparkvector.kernels.VecType;
-import io.sparkvector.kernels.VectorBuffers;
-import io.sparkvector.spark.adapter.TypeMapping;
+import io.vecruntime.kernels.Bitmap;
+import io.vecruntime.kernels.BitmapKernels;
+import io.vecruntime.kernels.CompactKernels;
+import io.vecruntime.kernels.GatherKernels;
+import io.vecruntime.kernels.HeapMirror;
+import io.vecruntime.kernels.RunMerge;
+import io.vecruntime.kernels.VecType;
+import io.vecruntime.kernels.VectorBuffers;
+import io.vecruntime.spark.adapter.TypeMapping;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;
@@ -520,7 +520,7 @@ public final class ArrowOutput {
      * sort decodes a run once, #285).
      */
     public static VectorBuffers decodeDictionary(VectorBuffers in, java.lang.foreign.Arena arena) {
-        io.sparkvector.kernels.ColumnBuilder b = new io.sparkvector.kernels.ColumnBuilder(arena, VecType.UTF8, in.length());
+        io.vecruntime.kernels.ColumnBuilder b = new io.vecruntime.kernels.ColumnBuilder(arena, VecType.UTF8, in.length());
         b.append(in);
         return b.view();
     }
@@ -571,10 +571,10 @@ public final class ArrowOutput {
             case DECIMAL128 -> {
                 // A wide decimal literal (an expand's constant slot, #259): the unscaled value as two limbs per row.
                 java.math.BigInteger u = ((org.apache.spark.sql.types.Decimal) value).toJavaBigDecimal().unscaledValue();
-                long hi = io.sparkvector.kernels.Decimal128.hiOf(u);
-                long lo = io.sparkvector.kernels.Decimal128.loOf(u);
+                long hi = io.vecruntime.kernels.Decimal128.hiOf(u);
+                long lo = io.vecruntime.kernels.Decimal128.loOf(u);
                 for (int i = 0; i < length; i++) {
-                    io.sparkvector.kernels.Decimal128.set(data, i, hi, lo);
+                    io.vecruntime.kernels.Decimal128.set(data, i, hi, lo);
                 }
             }
             default -> throw new UnsupportedOperationException("constant column of " + dt);

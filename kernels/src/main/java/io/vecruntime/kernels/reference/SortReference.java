@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,15 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.kernels.reference;
+package io.vecruntime.kernels.reference;
 
 import java.util.Arrays;
 import java.util.Comparator;
 
-import io.sparkvector.kernels.VectorBuffers;
+import io.vecruntime.kernels.VectorBuffers;
 
 /**
- * Oracle for {@link io.sparkvector.kernels.SortKernels}: a stable comparator
+ * Oracle for {@link io.vecruntime.kernels.SortKernels}: a stable comparator
  * sort over boxed row indices implementing Spark's ordering rules directly
  * (null ordering per key, {@code -0.0 == 0.0}, NaN greatest, unsigned byte
  * order for strings).

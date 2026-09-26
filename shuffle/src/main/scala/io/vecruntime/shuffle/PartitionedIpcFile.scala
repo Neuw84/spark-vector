@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.shuffle
+package io.vecruntime.shuffle
 
 import java.nio.ByteBuffer
 import java.nio.channels.{FileChannel, ReadableByteChannel}
@@ -21,9 +21,9 @@ import java.nio.file.{Path, StandardOpenOption}
 import java.util.{HashMap => JHashMap}
 import scala.jdk.CollectionConverters._
 
-import io.sparkvector.spark.adapter.TypeMapping
-import io.sparkvector.kernels.{Bitmap, VectorBuffers}
-import io.sparkvector.spark.arrow.{
+import io.vecruntime.spark.adapter.TypeMapping
+import io.vecruntime.kernels.{Bitmap, VectorBuffers}
+import io.vecruntime.spark.arrow.{
   ArrowVectorBuffers,
   VectorArrowColumnVector,
   VectorDecimalColumnVector,
@@ -423,7 +423,7 @@ object PartitionedIpcFile {
     /** The block's bytes decompressed as one stream (several frames back to back read as one), then read as IPC messages. */
     private val input: ReadableByteChannel = compression match {
       case None => channel
-      case codec => java.nio.channels.Channels.newChannel(io.sparkvector.shuffle.ShuffleCompression.decompressing(
+      case codec => java.nio.channels.Channels.newChannel(io.vecruntime.shuffle.ShuffleCompression.decompressing(
           java.nio.channels.Channels.newInputStream(channel),
           codec
         ))
@@ -504,7 +504,7 @@ object PartitionedIpcFile {
     /** One root and loader per batch shape, keyed by the encoded-columns set. */
     private val roots =
       new JHashMap[java.util.BitSet, (org.apache.arrow.vector.VectorSchemaRoot, org.apache.arrow.vector.VectorLoader)]()
-    private val factory = io.sparkvector.shuffle.ShuffleCompression.Factory
+    private val factory = io.vecruntime.shuffle.ShuffleCompression.Factory
     private var nextBatch: ColumnarBatch = _
 
     /** A full-size batch that arrived while small ones were pending: handed out right after them. */

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.expr
+package io.vecruntime.spark.expr
 
 import java.security.MessageDigest
 import java.util.zip.CRC32
 
-import io.sparkvector.kernels.{ArrowLayout, Bitmap, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
+import io.vecruntime.kernels.{ArrowLayout, Bitmap, SegmentVectorBuffers, StringConcatKernels, VecType, VectorBuffers}
 import org.apache.spark.sql.types.{DataType, IntegerType, LongType, StringType}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.unsafe.hash.Murmur3_x86_32

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.expr
+package io.vecruntime.spark.expr
 
 import java.lang.foreign.Arena
 
-import io.sparkvector.kernels._
-import io.sparkvector.spark.adapter.TypeMapping
+import io.vecruntime.kernels._
+import io.vecruntime.spark.adapter.TypeMapping
 import org.apache.spark.sql.types.{BooleanType, DataType}
 
 /**
@@ -26,7 +26,7 @@ import org.apache.spark.sql.types.{BooleanType, DataType}
  * columns out of twenty never pays for adapting the other eighteen unless the batch survives.
  *
  * `selection` (null for all rows) qualifies the batch's rows when the producer emitted a
- * [[io.sparkvector.spark.arrow.SelectedColumnarBatch]]; `active` is the subset of rows whose result
+ * [[io.vecruntime.spark.arrow.SelectedColumnarBatch]]; `active` is the subset of rows whose result
  * anybody will read while evaluating the current sub-expression. It starts as the selection and is
  * narrowed by `AND`/`OR` for their right operands, so kernels can skip 64-row blocks with no live
  * row and ANSI errors are only raised for rows that survive.

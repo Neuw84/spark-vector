@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.arrow;
+package io.vecruntime.spark.arrow;
 
 import java.lang.foreign.MemorySegment;
 
-import io.sparkvector.kernels.Bitmap;
-import io.sparkvector.kernels.VecType;
-import io.sparkvector.kernels.VectorBuffers;
+import io.vecruntime.kernels.Bitmap;
+import io.vecruntime.kernels.VecType;
+import io.vecruntime.kernels.VectorBuffers;
 import org.apache.arrow.vector.BaseFixedWidthVector;
 import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;

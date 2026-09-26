@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.comet;
+package io.vecruntime.spark.comet;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
@@ -28,11 +28,11 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-import io.sparkvector.kernels.ArrowLayout;
-import io.sparkvector.kernels.Bitmap;
-import io.sparkvector.kernels.VecType;
-import io.sparkvector.kernels.VectorBuffers;
-import io.sparkvector.spark.arrow.ArrowVectorBuffers;
+import io.vecruntime.kernels.ArrowLayout;
+import io.vecruntime.kernels.Bitmap;
+import io.vecruntime.kernels.VecType;
+import io.vecruntime.kernels.VectorBuffers;
+import io.vecruntime.spark.arrow.ArrowVectorBuffers;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.spark.sql.types.BooleanType;
@@ -329,7 +329,7 @@ public final class ArrowCData {
 
     private static MemorySegment copyBitmap(Arena arena, MemorySegment bits, int n) {
         MemorySegment copy = ArrowLayout.allocateBitmap(arena, n);
-        io.sparkvector.kernels.BitmapKernels.copy(bits, copy, n);
+        io.vecruntime.kernels.BitmapKernels.copy(bits, copy, n);
         return copy;
     }
 

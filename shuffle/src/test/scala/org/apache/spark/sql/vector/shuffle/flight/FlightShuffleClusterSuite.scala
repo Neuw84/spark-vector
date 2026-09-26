@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
   private var spark: SparkSession = _
 
   private def session(authenticate: Boolean): SparkSession = {
-    val tempDir = Files.createTempDirectory("spark-vector-flight")
+    val tempDir = Files.createTempDirectory("vecruntime-flight")
     // The workers launch executor JVMs: under spark.testing the launcher needs no SPARK_HOME jars and
     // the executors take the test JVM's classpath and its Vector API flags.
     System.setProperty("spark.testing", "true")
@@ -62,7 +62,7 @@ class FlightShuffleClusterSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.sql.warehouse.dir", tempDir.resolve("wh").toString)
       .config("spark.executor.extraClassPath", System.getProperty("java.class.path"))
       .config("spark.executor.extraJavaOptions", jvmArgs)
-      .config("spark.plugins", "io.sparkvector.spark.VectorPlugin")
+      .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
       .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .config("spark.vector.shuffle.backend", "flight")

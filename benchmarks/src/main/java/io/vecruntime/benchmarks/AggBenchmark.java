@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,16 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks;
+package io.vecruntime.benchmarks;
 
 import java.lang.foreign.Arena;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
-import io.sparkvector.kernels.AggKernels;
-import io.sparkvector.kernels.ArrowLayout;
-import io.sparkvector.kernels.VectorBuffers;
-import io.sparkvector.kernels.reference.ScalarReference;
+import io.vecruntime.kernels.AggKernels;
+import io.vecruntime.kernels.ArrowLayout;
+import io.vecruntime.kernels.VectorBuffers;
+import io.vecruntime.kernels.reference.ScalarReference;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;

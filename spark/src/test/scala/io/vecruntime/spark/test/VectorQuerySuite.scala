@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.test
+package io.vecruntime.spark.test
 
-import io.sparkvector.spark.{VectorConf, VectorSparkSessionExtensions}
+import io.vecruntime.spark.{VectorConf, VectorSparkSessionExtensions}
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.vector.{PlanUtils, VectorFallback}

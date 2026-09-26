@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.comet
+package io.vecruntime.spark.comet
 
-import io.sparkvector.spark.VectorPlugin
-import io.sparkvector.spark.test.{CometTest, TestTables, VectorQuerySuite}
+import io.vecruntime.spark.VectorPlugin
+import io.vecruntime.spark.test.{CometTest, TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.vector.{
@@ -161,7 +161,7 @@ class CometShuffleSuite extends VectorQuerySuite {
     val keys = df.collect().map(r => (Option(r.getString(0)), -r.getLong(1)))
     assert(keys.toSeq === keys.sortBy(k => (k._1.isDefined, k._1.getOrElse(""), k._2)).toSeq) // ASC NULLS FIRST
     assertNoLeak()
-    withConf(io.sparkvector.spark.VectorConf.CometRangeShuffleEnabled -> "false") {
+    withConf(io.vecruntime.spark.VectorConf.CometRangeShuffleEnabled -> "false") {
       val plain = checkVectorized(sql, Seq(Agg))
       val ranges = cometExchanges(
         finalPlan(plain)
@@ -178,7 +178,7 @@ class CometShuffleSuite extends VectorQuerySuite {
   }
 
   test("bridge can be disabled, leaving Comet's row-based columnar shuffle", CometTest) {
-    withConf(io.sparkvector.spark.VectorConf.CometShuffleEnabled -> "false") {
+    withConf(io.vecruntime.spark.VectorConf.CometShuffleEnabled -> "false") {
       val df = checkVectorized("SELECT s, count(*) FROM t GROUP BY s", Seq(Agg))
       assert(nodesOf[VectorToCometExec](df).isEmpty)
     }

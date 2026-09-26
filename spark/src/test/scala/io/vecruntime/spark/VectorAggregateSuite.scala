@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
-import io.sparkvector.spark.test.{TestTables, VectorQuerySuite}
+import io.vecruntime.spark.test.{TestTables, VectorQuerySuite}
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.vector.AggSpillPolicy
 import org.apache.spark.sql.vector.{VectorFilterExec, VectorHashAggregateExec}
@@ -65,7 +65,7 @@ class VectorAggregateSuite extends VectorQuerySuite {
 
   test("#377: string keys are emitted dictionary-encoded, ids over the group table's dictionary") {
     import org.apache.spark.sql.vectorized.ColumnarBatch
-    import io.sparkvector.spark.arrow.{VectorArrowColumnVector, VectorDictionaryColumnVector}
+    import io.vecruntime.spark.arrow.{VectorArrowColumnVector, VectorDictionaryColumnVector}
     def keyColumns(sql: String): Seq[Class[_]] = withPlugin(enabled = true) {
       val plan = finalPlan { val d = spark.sql(sql); d.collect(); d }
       val agg = org.apache.spark.sql.vector.PlanUtils.allNodes(plan).collect { case a: VectorHashAggregateExec =>

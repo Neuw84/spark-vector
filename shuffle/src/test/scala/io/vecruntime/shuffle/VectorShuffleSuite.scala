@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.shuffle
+package io.vecruntime.shuffle
 
 import java.nio.file.{Files, Path}
 
@@ -38,7 +38,7 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
   private var tempDir: Path = _
 
   override def beforeAll(): Unit = {
-    tempDir = Files.createTempDirectory("spark-vector-shuffle")
+    tempDir = Files.createTempDirectory("vecruntime-shuffle")
     spark = SparkSession.builder()
       .master("local[4]")
       .appName("VectorShuffleSuite")
@@ -46,7 +46,7 @@ class VectorShuffleSuite extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.driver.host", "localhost")
       .config("spark.sql.shuffle.partitions", "6")
       .config("spark.sql.warehouse.dir", tempDir.resolve("wh").toString)
-      .config("spark.plugins", "io.sparkvector.spark.VectorPlugin")
+      .config("spark.plugins", "io.vecruntime.spark.VectorPlugin")
       .config("spark.shuffle.manager", "org.apache.spark.sql.vector.shuffle.VectorShuffleManager")
       .config("spark.vector.shuffle.enabled", "true")
       .config("spark.vector.exec.strictFloatingPoint", "true")

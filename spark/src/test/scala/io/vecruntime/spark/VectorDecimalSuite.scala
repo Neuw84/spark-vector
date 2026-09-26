@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark
+package io.vecruntime.spark
 
-import io.sparkvector.spark.test.VectorQuerySuite
+import io.vecruntime.spark.test.VectorQuerySuite
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.vector.{
   VectorFallback,
@@ -187,26 +187,26 @@ class VectorDecimalSuite extends VectorQuerySuite {
       assert(nodesOf[HashAggregateExec](df).isEmpty, "both stages should be ours\n" + finalPlan(df).treeString)
     }
     // Products that fit in 64 bits: no escalation, one lane, the 128-bit sum as before.
-    val before = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+    val before = io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows()
     bothOurs("SELECT sum(dec12 * dec12) AS s FROM t") // decimal(25,4)
     bothOurs("SELECT sum(k * big) AS s FROM t") // decimal(22,3), fits
     bothOurs("SELECT sum(dec12 * 1234567.89) AS s FROM t") // literal operand, decimal(22,4)
     bothOurs("SELECT k, sum(dec12 * dec7) AS s FROM t GROUP BY k") // decimal(20,4), grouped
-    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
+    assert(io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
     // Every product overflows 64 bits: every non-null row is escalated and the total is still exact
     // (a total past the sum's own decimal(38,4) is Spark's null in legacy mode, Spark's error in ANSI).
     withConf("spark.sql.ansi.enabled" -> "false") {
       bothOurs("SELECT sum(big * big) AS s FROM t") // decimal(37,4); the total leaves (38,4) -> null
       val nonNullBig = spark.sql("SELECT count(big) FROM t").collect().head.getLong(0)
-      assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before + nonNullBig)
+      assert(io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() == before + nonNullBig)
       bothOurs("SELECT k, sum(big * big) AS s, count(*) AS n FROM t GROUP BY k")
       // Under a selection: rows a filter dropped are neither summed nor escalated.
-      val beforeFilter = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+      val beforeFilter = io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows()
       bothOurs("SELECT sum(big * big) AS s FROM t WHERE i % 2 = 0 AND dec7 IS NOT NULL")
       val selected =
         spark.sql("SELECT count(big) FROM t WHERE i % 2 = 0 AND dec7 IS NOT NULL").collect().head.getLong(0)
       assert(
-        io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == beforeFilter + selected,
+        io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() == beforeFilter + selected,
         "only the selected rows escalate"
       )
     }
@@ -376,14 +376,14 @@ class VectorDecimalSuite extends VectorQuerySuite {
       "SELECT k, try_avg(dec12), try_avg(big) FROM t GROUP BY k"
     ).foreach(bothOurs)
     // A declared-wide product under the average is speculative like the sum's (TPC-H Q1's shapes).
-    val before = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+    val before = io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows()
     bothOurs("SELECT avg(dec12 * dec7) AS a FROM t") // decimal(20,4) product, decimal(24,8) result
     bothOurs("SELECT k, avg(dec12 * (1 - dec7)) AS a, sum(dec12 * (1 - dec7)) AS s FROM t GROUP BY k")
-    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
+    assert(io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
     bothOurs(
       "SELECT k, avg(big * big) AS a FROM t WHERE i < 3000 GROUP BY k"
     ) // every row escalates; the totals fit decimal(38,4)
-    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() > before)
+    assert(io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() > before)
     // A total past the buffer's decimal(38,4): an ungrouped Final divides the exact total (Spark's generated
     // code keeps it in a local nothing re-checks), a grouped one sees the buffer nulled; a partial past it is
     // null from either engine. In ANSI mode the null buffer is Spark's own ARITHMETIC_OVERFLOW from the division.
@@ -420,7 +420,7 @@ class VectorDecimalSuite extends VectorQuerySuite {
       val df = checkVectorized(sql, Seq(Agg))
       assert(nodesOf[HashAggregateExec](df).isEmpty, "both stages should be ours\n" + finalPlan(df).treeString)
     }
-    val before = io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows()
+    val before = io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows()
     // Sums that fit 64 bits: a lane plus a literal (decimal(19,4)), lanes of different scales, a product plus a lane, differences.
     bothOurs("SELECT sum(dec18 + 1) AS s FROM t") // decimal(19,4)
     bothOurs("SELECT k, sum(dec18 - 1) AS s, avg(dec18 + 1) AS a FROM t GROUP BY k")
@@ -431,12 +431,12 @@ class VectorDecimalSuite extends VectorQuerySuite {
     bothOurs("SELECT sum(dec12 * dec7 - dec18) AS s FROM t") // decimal(21,4)
     bothOurs("SELECT sum(dec12 * (1 - dec7) + dec12 * dec7) AS s FROM t") // two speculative products
     bothOurs("SELECT sum(big + big) AS s, sum(big - big) AS d FROM t") // decimal(19,2): 17-digit values, fits
-    assert(io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
+    assert(io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() == before, "nothing should have escalated")
     // Escalation at the rescale: big * 100 is a 19-digit unscaled value that leaves 64 bits when shifted to scale 4.
     bothOurs("SELECT sum(big * 100 + dec18) AS s FROM t") // decimal(25,4)
     val nonNull = spark.sql("SELECT count(big) FROM t WHERE dec18 IS NOT NULL").collect().head.getLong(0)
     assert(
-      io.sparkvector.spark.expr.SpeculativeDecimals.escalatedRows() == before + 2 * nonNull,
+      io.vecruntime.spark.expr.SpeculativeDecimals.escalatedRows() == before + 2 * nonNull,
       "every row with both operands escalates (bothOurs runs the query twice)"
     )
     // Escalation from an operand: every product of big * big is exact, the add combines exactly.

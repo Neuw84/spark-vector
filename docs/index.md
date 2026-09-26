@@ -30,21 +30,21 @@ operators, expressions, and types transparently fall back to Spark, always with 
 
 ## Getting started
 
-> vecruntime was previously named spark-vector; configuration keys (`spark.vector.*`), packages and artifacts keep their names.
+> vecruntime was previously named spark-vector. The configuration keys (`spark.vector.*`), the `sparkvector.*` JVM system properties, and the shuffle manager class (`spark.shuffle.manager=org.apache.spark.sql.vector.shuffle.VectorShuffleManager`) are **unchanged**. What changed: the plugin class `io.sparkvector.spark.VectorPlugin` → `io.vecruntime.spark.VectorPlugin`; the Java/Scala packages `io.sparkvector.*` → `io.vecruntime.*`; and the Maven coordinates — groupId `io.sparkvector` → `io.github.vecruntime`, artifacts `spark-vector-*` → `vecruntime-*` (e.g. `spark-vector-spark_2.13` → `vecruntime-spark_2.13`).
 
 Add the plugin jar to an existing Spark job -- no code changes:
 
 ```bash
 spark-submit \
-  --conf spark.plugins=io.sparkvector.spark.VectorPlugin \
+  --conf spark.plugins=io.vecruntime.spark.VectorPlugin \
   --conf spark.driver.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
   --conf spark.executor.extraJavaOptions="--add-modules=jdk.incubator.vector --enable-native-access=ALL-UNNAMED" \
-  --jars spark-vector-spark_2.13-0.0.1.jar \
+  --jars vecruntime-spark_2.13-0.0.1.jar \
   ...
 ```
 
 `spark.plugins` registers the session extension automatically; alternatively set
-`spark.sql.extensions=io.sparkvector.spark.VectorSparkSessionExtensions`. Every release, with the
+`spark.sql.extensions=io.vecruntime.spark.VectorSparkSessionExtensions`. Every release, with the
 plugin jar, the columnar shuffle jar and a `SHA256SUMS` file, is on the
 [releases page](https://github.com/vecruntime/vecruntime/releases); the same artifacts are
 published to a Maven repository served from the repository's `maven-repo` branch. See the

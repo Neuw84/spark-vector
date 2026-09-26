@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.expr
+package io.vecruntime.spark.expr
 
-import io.sparkvector.kernels.{Bitmap, StringCaseKernels, VectorBuffers}
-import io.sparkvector.kernels.StringCaseKernels.{Kind, Side}
+import io.vecruntime.kernels.{Bitmap, StringCaseKernels, VectorBuffers}
+import io.vecruntime.kernels.StringCaseKernels.{Kind, Side}
 import org.apache.spark.sql.catalyst.util.CollationSupport
 import org.apache.spark.sql.types.{DataType, StringType}
 import org.apache.spark.unsafe.types.UTF8String

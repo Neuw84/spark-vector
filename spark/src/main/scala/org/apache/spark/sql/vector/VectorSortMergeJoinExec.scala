@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,17 +18,9 @@ package org.apache.spark.sql.vector
 import java.lang.foreign.{Arena, MemorySegment}
 import java.util.ArrayDeque
 
-import io.sparkvector.kernels.{
-  Bitmap,
-  ColumnBuilder,
-  RunKernels,
-  RunMerge,
-  SegmentVectorBuffers,
-  VecType,
-  VectorBuffers
-}
-import io.sparkvector.spark.arrow.{ArrowOutput, VectorAllocators}
-import io.sparkvector.spark.expr.VectorExpr
+import io.vecruntime.kernels.{Bitmap, ColumnBuilder, RunKernels, RunMerge, SegmentVectorBuffers, VecType, VectorBuffers}
+import io.vecruntime.spark.arrow.{ArrowOutput, VectorAllocators}
+import io.vecruntime.spark.expr.VectorExpr
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
@@ -843,7 +835,7 @@ private[vector] class VectorSortMergeJoinIterator(
   private val conditionRefs: Array[Boolean] = spec.condition.map { cond =>
     val refs = new Array[Boolean](spec.joinedAttrs.length)
     def walk(e: VectorExpr): Unit = e match {
-      case io.sparkvector.spark.expr.ColumnRef(o, _) => refs(o) = true
+      case io.vecruntime.spark.expr.ColumnRef(o, _) => refs(o) = true
       case other => other.children.foreach(walk)
     }
     walk(cond)

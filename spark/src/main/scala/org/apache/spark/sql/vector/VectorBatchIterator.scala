@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ package org.apache.spark.sql.vector
 
 import java.lang.foreign.Arena
 
-import io.sparkvector.spark.adapter.ColumnVectorAdapters
-import io.sparkvector.spark.expr.EvalContext
+import io.vecruntime.spark.adapter.ColumnVectorAdapters
+import io.vecruntime.spark.expr.EvalContext
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.execution.metric.SQLMetric
@@ -39,7 +39,7 @@ abstract class VectorBatchIterator(input: Iterator[ColumnarBatch], name: String)
     extends Iterator[ColumnarBatch]
     with AutoCloseable {
 
-  protected val allocator: BufferAllocator = io.sparkvector.spark.arrow.VectorAllocators.newChild(name)
+  protected val allocator: BufferAllocator = io.vecruntime.spark.arrow.VectorAllocators.newChild(name)
 
   private var pending: ColumnarBatch = _
   private var pendingOwned = false
@@ -129,7 +129,7 @@ object EvalContexts {
     try {
       val n = batch.numRows()
       val ctx = batch match {
-        case s: io.sparkvector.spark.arrow.SelectedColumnarBatch =>
+        case s: io.vecruntime.spark.arrow.SelectedColumnarBatch =>
           new EvalContext(
             arena,
             n,
@@ -160,12 +160,12 @@ object EvalContexts {
  * Normalization of input batches from readers whose batch shape differs from Spark's plain
  * `ColumnarBatch`: today Iceberg's JVM reader on merge-on-read tables, whose columns remap row
  * ids through a shared mapping. The result is either the input itself or a
- * [[io.sparkvector.spark.arrow.SelectedColumnarBatch]] over the unwrapped columns that the caller
+ * [[io.vecruntime.spark.arrow.SelectedColumnarBatch]] over the unwrapped columns that the caller
  * must close (it owns only the selection bitmap).
  */
 object InputBatches {
   def normalize(batch: ColumnarBatch): ColumnarBatch =
-    io.sparkvector.spark.iceberg.IcebergVectorAdapter.normalize(batch)
+    io.vecruntime.spark.iceberg.IcebergVectorAdapter.normalize(batch)
 }
 
 /** Metric bookkeeping shared by the operators. */

@@ -18,7 +18,7 @@ Every number below is reproducible with the commands in the README; the JMH text
 
 `-wi 2 -i 3 -w 1 -r 1 -f 1`, throughput in elements per millisecond, one thread, batches of 8192
 (4096 for grouped aggregation). `reference` is the scalar loop in
-`io.sparkvector.kernels.reference.ScalarReference`, the same code the unit tests use as oracle.
+`io.vecruntime.kernels.reference.ScalarReference`, the same code the unit tests use as oracle.
 
 ### Compare (column `<` literal, column `<` column) → selection bitmap
 

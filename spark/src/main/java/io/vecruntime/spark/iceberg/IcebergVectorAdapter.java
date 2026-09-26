@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.spark.iceberg;
+package io.vecruntime.spark.iceberg;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -21,14 +21,14 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.LongAdder;
 
-import io.sparkvector.kernels.ArrowLayout;
-import io.sparkvector.kernels.Decimal128;
-import io.sparkvector.kernels.SegmentVectorBuffers;
-import io.sparkvector.kernels.VecType;
-import io.sparkvector.kernels.VectorBuffers;
-import io.sparkvector.spark.adapter.ColumnVectorAdapters;
-import io.sparkvector.spark.adapter.TypeMapping;
-import io.sparkvector.spark.arrow.SelectedColumnarBatch;
+import io.vecruntime.kernels.ArrowLayout;
+import io.vecruntime.kernels.Decimal128;
+import io.vecruntime.kernels.SegmentVectorBuffers;
+import io.vecruntime.kernels.VecType;
+import io.vecruntime.kernels.VectorBuffers;
+import io.vecruntime.spark.adapter.ColumnVectorAdapters;
+import io.vecruntime.spark.adapter.TypeMapping;
+import io.vecruntime.spark.arrow.SelectedColumnarBatch;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.slf4j.Logger;
@@ -407,7 +407,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             // 4-byte unscaled values, while the lane for every decimal up to 18 digits is INT64: widen
             // into the scratch arena. Wrapping the 4-byte buffer as 8-byte lanes read past its end.
             MemorySegment wide = scratch.allocate((long) numRows << 3, 8);
-            io.sparkvector.kernels.CastKernels.widenInt32(data, numRows, wide);
+            io.vecruntime.kernels.CastKernels.widenInt32(data, numRows, wide);
             WIDENED_INT_COLUMNS.increment();
             return SegmentVectorBuffers.fixedWidth(type, numRows, validity, wide);
         }
@@ -463,7 +463,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         MemorySegment data = ArrowLayout.allocateData(scratch, VecType.DECIMAL128, numRows);
         byte[] be = new byte[width];
         for (int i = 0; i < numRows; i++) {
-            if (validity != null && !io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+            if (validity != null && !io.vecruntime.kernels.Bitmap.isSet(validity, i)) {
                 continue;
             }
             MemorySegment.copy(source, java.lang.foreign.ValueLayout.JAVA_BYTE,
@@ -540,7 +540,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
         }
         MemorySegment data = ArrowLayout.allocateData(scratch, VecType.DECIMAL128, numRows);
         for (int i = 0; i < numRows; i++) {
-            if (validity != null && !io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+            if (validity != null && !io.vecruntime.kernels.Bitmap.isSet(validity, i)) {
                 continue;
             }
             int id = indices.getAtIndex(VectorBuffers.LE_INT, i);
@@ -619,7 +619,7 @@ public final class IcebergVectorAdapter implements ColumnVectorAdapters.Adapter 
             int id = ids[i];
             if (Integer.compareUnsigned(id, size) < 0) {
                 out[i] = lut[id];
-            } else if (validity == null || io.sparkvector.kernels.Bitmap.isSet(validity, i)) {
+            } else if (validity == null || io.vecruntime.kernels.Bitmap.isSet(validity, i)) {
                 return null;
             } else {
                 out[i] = 0L;

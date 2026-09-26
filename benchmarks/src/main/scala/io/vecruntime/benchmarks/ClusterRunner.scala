@@ -1,5 +1,5 @@
 /*
- * Copyright 2025-2026 Angel Conde and the spark-vector contributors
+ * Copyright 2025-2026 Angel Conde and the vecruntime contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.sparkvector.benchmarks
+package io.vecruntime.benchmarks
 
 import java.net.URI
 import java.nio.charset.StandardCharsets
@@ -34,7 +34,7 @@ import org.apache.spark.sql.SparkSession
  * numbers read next to Comet's.
  *
  * {{{
- * spark-submit --class io.sparkvector.benchmarks.TpcdsRunner benchmarks.jar \
+ * spark-submit --class io.vecruntime.benchmarks.TpcdsRunner benchmarks.jar \
  *   --cluster --config vector --tables s3://bucket/tpcds/sf1000/parquet --dataset sf1000-parquet \
  *   --queries-dir s3://bucket/tpcds/queries --iterations 1 --warmup 0 --out s3://bucket/results/sf1000-parquet
  * TpcdsRunner --cluster-report s3://bucket/results/sf1000-parquet
