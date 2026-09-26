@@ -98,7 +98,13 @@ final class VectorShuffleDependency(
      * Rebalance exchanges only (#20): every map task reports its record count per reduce partition,
      * so AQE can size the partitions by rows ([[RowProportionalSizes]]).
      */
-    val recordsByPartition: Option[RecordsByPartitionAccumulator] = None
+    val recordsByPartition: Option[RecordsByPartitionAccumulator] = None,
+    /**
+     * Rebalance exchanges only (#20): the written string values' bytes as Spark's `UnsafeRow` holds
+     * them (each non-null value padded to a word), which our dictionary-encoded columns hide from
+     * `dataSize`; [[RebalanceAdvisory]] estimates Spark's row size from it.
+     */
+    val stringBytes: Option[org.apache.spark.sql.execution.metric.SQLMetric] = None
 ) extends ShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
       rdd,
       partitioner,
@@ -250,6 +256,7 @@ final class VectorShuffleWriter(
   private var lengths: Array[Long] = _
   private var stopped = false
   private var rows = 0L
+  private var stringBytes = 0L
   private val recordCounts: Array[Long] =
     if (dep.recordsByPartition.isDefined) new Array[Long](numPartitions) else null
   private var roundRobinNext = VectorShuffleWriter.roundRobinStart(context, numPartitions)
@@ -290,8 +297,10 @@ final class VectorShuffleWriter(
               var i = 0
               while (i < n) { recordCounts(ids(i)) += 1; i += 1 }
             }
+            val out = if (flat.length > dep.schema.fields.length) flat.take(dep.schema.fields.length) else flat
+            if (dep.stringBytes.isDefined) stringBytes += RebalanceAdvisory.unsafeStringBytes(out, n)
             writer.write(
-              if (flat.length > dep.schema.fields.length) flat.take(dep.schema.fields.length) else flat,
+              out,
               n,
               ids,
               arena
@@ -353,6 +362,7 @@ final class VectorShuffleWriter(
         dep.dataSize.add(math.max(rawBytes, lengths.sum))
         metrics.incRecordsWritten(rows)
         dep.recordsByPartition.foreach(_.add((context.partitionId(), recordCounts)))
+        dep.stringBytes.foreach(_.add(stringBytes))
         Some(MapStatus(blockManager.shuffleServerId, lengths, mapId))
       }
     } finally {
