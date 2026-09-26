@@ -32,6 +32,19 @@ object VectorConf {
   /** Our own columnar shuffle exchange (#288; needs the shuffle module and its shuffle manager). */
   val ShuffleEnabled = "spark.vector.shuffle.enabled"
 
+  /**
+   * The columnar Iceberg v3 deletion-vector writer (#20, option B): on a merge-on-read table whose
+   * delete file format is PUFFIN, the DELETE half of DELETE/UPDATE/MERGE is written from our Arrow
+   * batches' `_file`/`_pos` lanes -- one `PositionDeleteIndex` per data file, one
+   * `BaseDVFileWriter.delete(path, index, spec, partition)` call per file -- instead of Spark's
+   * row-by-row `WriteDeltaExec`. Inserts and the insert half of updates stay on Iceberg's data
+   * writer, and the commit stays Iceberg's own `RowDelta`. v2 tables and anything unsupported decline
+   * to Spark's writer unchanged, with a printed fallback reason. Default OFF while the writer is being
+   * landed slice by slice (the operator is not yet wired); it will default on once every Iceberg
+   * merge-on-read suite is byte-identical with it on and off. See `docs/iceberg.md`.
+   */
+  val IcebergDvWriterEnabled = "spark.vector.iceberg.dvWriter.enabled"
+
   /** The grouped aggregate emits its UTF8 keys dictionary-encoded, ids over the group table's own dictionary (#377). */
   val AggDictionaryKeys = "spark.vector.agg.dictionaryKeys"
   val SortEnabled = "spark.vector.exec.sort.enabled"
@@ -83,6 +96,14 @@ object VectorConf {
   /** Feed Comet's native shuffle from spark-vector operators when Comet's shuffle is configured. */
   def cometShuffleEnabled(conf: SQLConf): Boolean = bool(conf, CometShuffleEnabled, default = true)
   def shuffleEnabled(conf: SQLConf): Boolean = bool(conf, ShuffleEnabled, default = true)
+
+  /**
+   * The columnar Iceberg v3 DV writer (#20). Default `false`: the operator is being landed in slices
+   * and is not wired to the planner yet, so turning it on is currently a no-op reserved for the
+   * writer's own tests. Flips to `true` once the writer is byte-identical to Spark's on every
+   * merge-on-read suite.
+   */
+  def icebergDvWriterEnabled(conf: SQLConf): Boolean = bool(conf, IcebergDvWriterEnabled, default = false)
   def aggDictionaryKeys(conf: SQLConf): Boolean = bool(conf, AggDictionaryKeys, default = true)
 
   /** Pass selection bitmaps between spark-vector operators instead of compacting each batch. */

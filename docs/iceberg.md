@@ -75,6 +75,23 @@ assert the expected scan node sits directly under our operators. `IcebergScanSui
 through counters on the adapter, that merge-on-read batches were normalized and that fixed-width,
 plain string and dictionary string columns were adapted rather than copied.
 
+## The write side: columnar v3 deletion vectors (#20)
+
+Everything above is the **read** side. On the **write** side, the DELETE half of a merge-on-read
+`DELETE` / `UPDATE` / `MERGE INTO` is Spark's row-by-row `WriteDeltaExec` driving Iceberg's delete
+writer. On a **format-version 3** table (delete file format PUFFIN, deletion vectors) that per-row
+routing is replaceable by a columnar path: our batches already carry `_file` / `_pos` as lanes and
+the delta write's REBALANCE exchange already clusters by `_spec_id` / `_partition` / `_file`, so a
+`PositionDeleteIndex` bitmap can be filled per data file and handed to Iceberg's bulk
+`BaseDVFileWriter.delete(path, index, spec, partition)` once per file — the commit stays Iceberg's
+own `RowDelta`. Inserts and the insert half of updates stay on Iceberg's data writer; v2 tables and
+unsupported shapes decline to Spark's writer unchanged.
+
+This is gated behind `spark.vector.iceberg.dvWriter.enabled` (default off while it is landed in
+slices). The design, the placement decision (an optional Iceberg-compiled bridge module vs.
+reflection), and the slice-1 profile split that gates the work are in
+[`docs/iceberg-dv-writer.md`](iceberg-dv-writer.md).
+
 ## Limitations
 
 - The `MERGE INTO`'s row-level operator, `MergeRows`, has a columnar form (`VectorMergeRowsExec`, #21:
