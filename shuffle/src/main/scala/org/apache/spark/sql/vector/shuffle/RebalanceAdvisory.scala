@@ -70,14 +70,67 @@ object RebalanceAdvisory {
   }
 
   /**
+   * Estimated `UnsafeRow` bytes per row for `schema` when the string values' padded bytes per row are
+   * known ([[unsafeStringBytes]]): the fixed part and the non-string extras from the schema, the
+   * strings as measured. Dictionary-encoded columns keep their strings out of our `dataSize`, so the
+   * estimate from our bytes alone misses them (the CDC MERGE's `_file` path: 236 estimated against
+   * 304 bytes per row in Spark's own shuffle).
+   */
+  def unsafeRowBytesWithStrings(schema: Seq[DataType], stringBytesPerRow: Double): Double =
+    unsafeFixed(schema) + schema.map(unsafeExtraNonString).sum + stringBytesPerRow
+
+  /** [[unsafeExtra]] without the strings' padding, which [[unsafeStringBytes]] counts exactly. */
+  private def unsafeExtraNonString(dt: DataType): Double = dt match {
+    case s: StructType =>
+      unsafeFixed(s.fields.map(_.dataType).toSeq) + s.fields.map(f => unsafeExtraNonString(f.dataType)).sum
+    case _: StringType | _: BinaryType => 0.0
+    case other => unsafeExtra(other)
+  }
+
+  /**
+   * The bytes `UnsafeRow` gives the string values of these written columns over `n` rows: each non-null
+   * value's UTF-8 bytes rounded up to a word, dictionary-encoded columns resolved through their
+   * dictionary. Non-string columns count nothing.
+   */
+  def unsafeStringBytes(columns: Array[io.sparkvector.kernels.VectorBuffers], n: Int): Long = {
+    import io.sparkvector.kernels.{Bitmap, VecType, VectorBuffers}
+    var total = 0L
+    var c = 0
+    while (c < columns.length) {
+      val b = columns(c)
+      if (b != null && b.`type`() == VecType.UTF8) {
+        val validity = b.validity()
+        val dict = b.dictionary()
+        val off = if (dict != null) dict.offsets() else b.offsets()
+        val ids = if (dict != null) b.data() else null
+        var i = 0
+        while (i < n) {
+          if (validity == null || Bitmap.isSet(validity, i)) {
+            val e = if (ids != null) ids.get(VectorBuffers.LE_INT, i.toLong << 2) else i
+            val len = off.get(VectorBuffers.LE_INT, (e + 1).toLong << 2) - off.get(VectorBuffers.LE_INT, e.toLong << 2)
+            total += (len + 7) & ~7
+          }
+          i += 1
+        }
+      }
+      c += 1
+    }
+    total
+  }
+
+  /**
    * `size` on our shuffle's scale, given the exchange's written `rows` and uncompressed `bytes`
    * (its `dataSize`). The size is never raised, and never cut below [[MinFactor]]; with no rows the
    * size is returned as is.
    */
-  def scale(size: Long, schema: Seq[DataType], rows: Long, bytes: Long): Long = {
+  def scale(size: Long, schema: Seq[DataType], rows: Long, bytes: Long, stringBytes: Option[Long] = None): Long = {
     if (rows <= 0 || bytes <= 0 || size <= 0) return size
     val ours = bytes.toDouble / rows
-    val factor = math.min(1.0, math.max(MinFactor, ours / unsafeRowBytes(schema, ours)))
+    val spark = stringBytes match {
+      case Some(s) if s >= 0 => unsafeRowBytesWithStrings(schema, s.toDouble / rows)
+      case _ => unsafeRowBytes(schema, ours)
+    }
+    val factor = math.min(1.0, math.max(MinFactor, ours / spark))
     math.max(1L, math.round(size * factor))
   }
 }

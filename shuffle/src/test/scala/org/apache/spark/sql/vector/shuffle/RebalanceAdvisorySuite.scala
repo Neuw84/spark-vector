@@ -52,6 +52,13 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
         "case when id % 4 = 0 then cast(id as string) end payload, cast(id as double) d from range(0, 20000)"
     ).write.parquet(tempDir.resolve("rows").toString)
     spark.read.parquet(tempDir.resolve("rows").toString).createOrReplaceTempView("rows")
+    // Iceberg's _file in small: a long path repeated over many rows, which our shuffle dictionary-encodes.
+    spark.sql(
+      "select cast(id % 5 as int) g, id pos, " +
+        "case when id % 3 = 0 then null else concat('s3://warehouse/db/table/data/00042-1-file-', cast(id % 7 as string), '.parquet') end path " +
+        "from range(0, 20000)"
+    ).write.parquet(tempDir.resolve("paths").toString)
+    spark.read.parquet(tempDir.resolve("paths").toString).createOrReplaceTempView("paths")
   }
 
   override def afterAll(): Unit = {
@@ -66,9 +73,9 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
   })
 
   /** A rebalance on `g` asking for [[Requested]] bytes, as a data source's write asks; our exchange after running it. */
-  private def rebalanced(): VectorShuffleExchangeExec = {
+  private def rebalanced(table: String = "rows"): VectorShuffleExchangeExec = {
     val session = spark.asInstanceOf[org.apache.spark.sql.classic.SparkSession]
-    val child = session.table("rows").queryExecution.analyzed
+    val child = session.table(table).queryExecution.analyzed
     val g = child.output.find(_.name == "g").get
     val df = org.apache.spark.sql.classic.Dataset.ofRows(
       session,
@@ -93,7 +100,13 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
     val rows = ex.metrics("shuffleRecordsWritten").value
     val bytes = ex.metrics("dataSize").value
     assert(rows === 20000L)
-    assert(scaled === RebalanceAdvisory.scale(Requested, ex.output.map(_.dataType), rows, bytes))
+    assert(scaled === RebalanceAdvisory.scale(
+      Requested,
+      ex.output.map(_.dataType),
+      rows,
+      bytes,
+      ex.shuffleDependency.stringBytes.map(_.value)
+    ))
     // Read twice, same answer.
     assert(ex.advisoryPartitionSize.get === scaled)
   }
@@ -114,6 +127,26 @@ class RebalanceAdvisorySuite extends AnyFunSuite with BeforeAndAfterAll {
     spark.conf.set(VectorShuffleExchangeExec.RebalanceAdvisoryScalingKey, "false")
     try assert(rebalanced().advisoryPartitionSize === Some(Requested))
     finally spark.conf.unset(VectorShuffleExchangeExec.RebalanceAdvisoryScalingKey)
+  }
+
+  test("measured string bytes put the estimate within 5% of Spark's rows, dictionary-encoded paths included") {
+    val ex = rebalanced("paths")
+    val rows = ex.metrics("shuffleRecordsWritten").value
+    val strings = ex.shuffleDependency.stringBytes.getOrElse(fail("no string bytes measured")).value
+    assert(rows === 20000L)
+    assert(strings > 0L)
+    val schema = ex.output.map(_.dataType)
+    val project = UnsafeProjection.create(ex.output, ex.output)
+    val toCatalyst = org.apache.spark.sql.catalyst.CatalystTypeConverters
+      .createToCatalystConverter(spark.table("paths").schema)
+    val real = spark.table("paths").collect().map { r =>
+      project(toCatalyst(r).asInstanceOf[InternalRow]).getSizeInBytes.toLong
+    }.sum.toDouble / rows
+    val estimate = RebalanceAdvisory.unsafeRowBytesWithStrings(schema, strings.toDouble / rows)
+    assert(math.abs(estimate - real) / real < 0.05, s"estimate $estimate vs real $real")
+    // The size is scaled by that estimate, not by the one from our bytes alone.
+    val bytes = ex.metrics("dataSize").value
+    assert(ex.advisoryPartitionSize.get === RebalanceAdvisory.scale(Requested, schema, rows, bytes, Some(strings)))
   }
 
   test("the UnsafeRow estimate is within 10% of Spark's real row bytes") {
