@@ -21,10 +21,10 @@ title: 'Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4'
 </style>
 <div class="bench">
 <h1>Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4</h1>
-<p class="lede"><a href="https://github.com/spark-vector/spark-vector">vecruntime</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
+<p class="lede"><a href="https://github.com/vecruntime/vecruntime">vecruntime</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
 This page compares it against plain Apache Spark on the TPC-DS 1 TB workload on Amazon EKS with AWS Graviton4 (arm64) nodes, and sets both against
-the <a href="tpcds-1tb.html">published x86 run</a> (which used a 128m advisory size and coalescePartitions.minPartitionNum=208; this run uses AQE&#x27;s defaults) (<a href="https://github.com/spark-vector/spark-vector/issues/253">#253</a>).</p>
+the <a href="tpcds-1tb.html">published x86 run</a> (which used a 128m advisory size and coalescePartitions.minPartitionNum=208; this run uses AQE&#x27;s defaults) (<a href="https://github.com/vecruntime/vecruntime/issues/253">#253</a>).</p>
 
 <div class="tldr"><b>TL;DR.</b> On Graviton4, over the 103 TPC-DS queries at 1 TB, <b>vecruntime</b> finished in <b>1,801 s</b> against Spark's
 2,207 s -- <b>1.23x</b>, 18% less runtime (geometric mean 1.21x),
@@ -99,7 +99,7 @@ AOT class-data cache off
 
 <h2 id="running">Running the benchmark</h2>
 <p>The cluster runner, the Spark-on-Kubernetes manifests, the image and the data generation are in
-<a href="https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md">the benchmark runner's README</a>; on Graviton the image builds for arm64 on an arm64 node and the runs select the arm64 node group.
+<a href="https://github.com/vecruntime/vecruntime/blob/main/benchmarks/k8s/README.md">the benchmark runner's README</a>; on Graviton the image builds for arm64 on an arm64 node and the runs select the arm64 node group.
 <code>run-matrix.sh</code> writes one JSON-lines result file per run; this page is rendered from two of them, with the x86 page as the reference,
 by <code>benchmarks/scripts/render-graviton-page.py</code>.</p>
 

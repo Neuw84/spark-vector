@@ -2,8 +2,8 @@
   "site": {
     "title": "vecruntime",
     "description": "A vectorized execution runtime for Apache Spark using Java",
-    "repo_url": "https://github.com/spark-vector/spark-vector",
-    "baseurl": "/spark-vector"
+    "repo_url": "https://github.com/vecruntime/vecruntime",
+    "baseurl": "/vecruntime"
   },
   "nav": [
     {

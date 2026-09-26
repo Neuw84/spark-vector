@@ -11,7 +11,7 @@
 # implied. See the License for the specific language governing permissions and limitations under the
 # License.
 """Render the Graviton TPC-DS page (docs/benchmarks/tpcds-1tb-graviton.html, #253): Apache Spark against
-spark-vector on AWS Graviton4, from the cluster runner's two result files, with the published x86 run
+vecruntime on AWS Graviton4, from the cluster runner's two result files, with the published x86 run
 (docs/benchmarks/tpcds-1tb.html, whose per-query data is inlined in the page) as the reference.
 
     render-graviton-page.py --spark spark.jsonl --vector vector-shuffle.jsonl \\
@@ -30,16 +30,16 @@ _spec.loader.exec_module(_base)
 load, qkey, fmt_s, distribution, table = _base.load, _base.qkey, _base.fmt_s, _base.distribution, _base.table
 
 DEFAULT_META = {
-    "title": "Apache Spark vs spark-vector on TPC-DS 1 TB, AWS Graviton4",
+    "title": "Apache Spark vs vecruntime on TPC-DS 1 TB, AWS Graviton4",
     "dataset": "TPC-DS scale factor 1000 (1 TB), Parquet on Amazon S3 (103 query variants, one measured iteration each, no warm-up)",
     "cluster": "Amazon EKS 1.36; 9 x m8g.4xlarge (16 vCPU AWS Graviton4 / Neoverse V2 with SVE2, 64 GB, arm64), 300 GB root volume; one node group, the driver on the ninth node",
-    "executors": "8 executors x 13 cores x 50 GB each (Spark: 20 GB heap / 30 GB overhead; spark-vector: 30 GB heap / 20 GB overhead); driver 2 cores x 4 GB",
+    "executors": "8 executors x 13 cores x 50 GB each (Spark: 20 GB heap / 30 GB overhead; vecruntime: 30 GB heap / 20 GB overhead); driver 2 cores x 4 GB",
     "storage": "Amazon S3 through Hadoop 3.4.3 S3A with the Analytics Accelerator input stream (the default in 3.4.3)",
     "versions": {
         "Spark": "4.1.3",
         "Scala": "2.13",
         "JDK": "Amazon Corretto 25.0.4.1 (aarch64)",
-        "spark-vector": "main at #480 + #481 (arm64 image) + #484 (SVE mask construction)",
+        "vecruntime": "main at #480 + #481 (arm64 image) + #484 (SVE mask construction)",
         "Hadoop": "3.4.3",
     },
     "common_conf": [
@@ -57,7 +57,7 @@ DEFAULT_META = {
     ],
     "platform": [
         "HotSpot on Graviton4: UseSVE=2, MaxVectorSize=16 -- the Vector API's species are 128 bits wide, as on NEON.",
-        "spark-vector's platform probe picks its SVE paths: native compress (SVE COMPACT) for selection, and the broadcast-AND-compare lane masks, because VectorMask.fromLong is not intrinsified at 128-bit SVE on JDK 25 (#253, #484).",
+        "vecruntime's platform probe picks its SVE paths: native compress (SVE COMPACT) for selection, and the broadcast-AND-compare lane masks, because VectorMask.fromLong is not intrinsified at 128-bit SVE on JDK 25 (#253, #484).",
         "The native codecs (snappy, zstd, lz4) and Netty's epoll transport load their aarch64 libraries; neither architecture has libhadoop, as on x86.",
     ],
     "notes": [
@@ -65,11 +65,11 @@ DEFAULT_META = {
         "The two legs ran one after another on the same nodes, each alone on the cluster, with the settings of the published x86 run -- only the instance type and the image's architecture differ; the x86 numbers are that run's (Comet is left out here).",
         "coalescePartitions.minPartitionNum=208 is kept so the two architectures compare; it is deprecated in Spark 3.2+, and runs after this one leave it unset.",
     ],
-    "results_doc": "https://github.com/spark-vector/spark-vector/blob/main/docs/results.md",
-    "repo": "https://github.com/spark-vector/spark-vector",
-    "run_doc": "https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md",
+    "results_doc": "https://github.com/vecruntime/vecruntime/blob/main/docs/results.md",
+    "repo": "https://github.com/vecruntime/vecruntime",
+    "run_doc": "https://github.com/vecruntime/vecruntime/blob/main/benchmarks/k8s/README.md",
     "x86_page": "tpcds-1tb.html",
-    "issue": "https://github.com/spark-vector/spark-vector/issues/253",
+    "issue": "https://github.com/vecruntime/vecruntime/issues/253",
     # How the x86 reference run relates to this one: the lede says "the published x86 run <x86_relation>",
     # the architecture section "..., <x86_settings>." Override both when the two runs' settings differ.
     "x86_relation": "with the same settings",
@@ -77,7 +77,7 @@ DEFAULT_META = {
 }
 
 COLORS = {"spark": "#6b7280", "vector": "#2563eb"}
-LABELS = {"spark": "Apache Spark 4.1.3", "vector": "spark-vector (plugin + Flight shuffle)"}
+LABELS = {"spark": "Apache Spark 4.1.3", "vector": "vecruntime (plugin + Flight shuffle)"}
 
 
 def x86_from_page(path):
@@ -99,7 +99,7 @@ def main():
     ap.add_argument("--spark", required=True); ap.add_argument("--vector", required=True)
     ap.add_argument("--x86-page", required=True); ap.add_argument("--out", required=True); ap.add_argument("--meta")
     ap.add_argument("--web-out", help="also write a standalone web/ page (no Jekyll) to this path")
-    ap.add_argument("--web-base", default="/spark-vector", help="base URL prefix for the web/ page (default /spark-vector)")
+    ap.add_argument("--web-base", default="/vecruntime", help="base URL prefix for the web/ page (default /vecruntime)")
     a = ap.parse_args()
     meta = dict(DEFAULT_META)
     if a.meta:
@@ -193,43 +193,43 @@ title: {json.dumps(meta["title"])}
 </style>
 <div class="bench">
 <h1>{html.escape(meta["title"])}</h1>
-<p class="lede"><a href="{meta["repo"]}">spark-vector</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
+<p class="lede"><a href="{meta["repo"]}">vecruntime</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
 This page compares it against plain Apache Spark on the TPC-DS 1 TB workload on Amazon EKS with AWS Graviton4 (arm64) nodes, and sets both against
 the <a href="{meta["x86_page"]}">published x86 run</a> {html.escape(meta["x86_relation"])} (<a href="{meta["issue"]}">#253</a>).</p>
 
-<div class="tldr"><b>TL;DR.</b> On Graviton4, over the {n} TPC-DS queries at 1 TB, <b>spark-vector</b> finished in <b>{tot["vector"]:,.0f} s</b> against Spark's
+<div class="tldr"><b>TL;DR.</b> On Graviton4, over the {n} TPC-DS queries at 1 TB, <b>vecruntime</b> finished in <b>{tot["vector"]:,.0f} s</b> against Spark's
 {tot["spark"]:,.0f} s -- <b>{tot["spark"] / tot["vector"]:.2f}x</b>, {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime (geometric mean {geo:.2f}x),
 faster than Spark on {faster} of {n} queries (best {best}: {speed(best):.2f}x; largest regression {worst}: {100 / speed(worst) - 100:.0f}%).
 On the x86 nodes the same comparison is {x86tot["spark"] / x86tot["vector"]:.2f}x (geometric mean {x86_geo:.2f}x): the lead carries over to arm64.
-Both engines run faster on Graviton4 than on the m5.4xlarge nodes -- Spark's time is {arch["spark"]:.2f} of its x86 time and spark-vector's
+Both engines run faster on Graviton4 than on the m5.4xlarge nodes -- Spark's time is {arch["spark"]:.2f} of its x86 time and vecruntime's
 {arch["vector"]:.2f}, per query (geometric mean). Row counts equal Spark's on {rows_equal} of {n} queries; checksums on {csum}.</div>
 
 <div class="cards">
 <div class="card"><div class="l">Apache Spark 4.1.3 on Graviton4</div><div class="n">{tot["spark"]:,.0f} s</div><div class="l">baseline, {n} queries (x86: {x86tot["spark"]:,.0f} s)</div></div>
-<div class="card"><div class="l">spark-vector on Graviton4</div><div class="n">{tot["vector"]:,.0f} s</div><div class="l">{tot["spark"] / tot["vector"]:.2f}x · {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime (x86: {x86tot["vector"]:,.0f} s)</div></div>
-<div class="card"><div class="l">Graviton4 against x86</div><div class="n">{arch["spark"]:.2f} / {arch["vector"]:.2f}</div><div class="l">time per query, Spark / spark-vector (geometric mean)</div></div>
+<div class="card"><div class="l">vecruntime on Graviton4</div><div class="n">{tot["vector"]:,.0f} s</div><div class="l">{tot["spark"] / tot["vector"]:.2f}x · {100 - 100 * tot["vector"] / tot["spark"]:.0f}% less runtime (x86: {x86tot["vector"]:,.0f} s)</div></div>
+<div class="card"><div class="l">Graviton4 against x86</div><div class="n">{arch["spark"]:.2f} / {arch["vector"]:.2f}</div><div class="l">time per query, Spark / vecruntime (geometric mean)</div></div>
 </div>
 
 <h2 id="summary">Summary</h2>
 {table(["Engine", "Completion time (s)", "Speedup", "Faster than Spark on", "Executor time (h)", "GC (h)", "Shuffle read (TB)"], [
     ("Apache Spark 4.1.3", f"{tot['spark']:,.1f}", "baseline", "--", f"{exe['spark']:.1f}", f"{gc['spark']:.2f}", f"{shuf['spark']:.2f}"),
-    ("spark-vector", f"{tot['vector']:,.1f}", f"<b>{tot['spark'] / tot['vector']:.2f}x</b> ({100 - 100 * tot['vector'] / tot['spark']:.0f}% less)", f"{faster} / {n}", f"{exe['vector']:.1f}", f"{gc['vector']:.2f}", f"{shuf['vector']:.2f}"),
+    ("vecruntime", f"{tot['vector']:,.1f}", f"<b>{tot['spark'] / tot['vector']:.2f}x</b> ({100 - 100 * tot['vector'] / tot['spark']:.0f}% less)", f"{faster} / {n}", f"{exe['vector']:.1f}", f"{gc['vector']:.2f}", f"{shuf['vector']:.2f}"),
 ])}
 <div class="chart"><canvas id="totals"></canvas></div>
 
 <h2 id="arch">Graviton4 against x86</h2>
 <p>The x86 numbers are the <a href="{meta["x86_page"]}">published run</a>: 9 x m5.4xlarge (16 vCPU, 64 GB, AVX-512), {html.escape(meta["x86_settings"])}.</p>
-{table(["", "Spark (s)", "spark-vector (s)", "spark-vector speedup", "geometric mean"], [
+{table(["", "Spark (s)", "vecruntime (s)", "vecruntime speedup", "geometric mean"], [
     ("Graviton4 (m8g.4xlarge)", f"{tot['spark']:,.1f}", f"{tot['vector']:,.1f}", f"<b>{tot['spark'] / tot['vector']:.2f}x</b>", f"{geo:.2f}x"),
     ("x86 (m5.4xlarge)", f"{x86tot['spark']:,.1f}", f"{x86tot['vector']:,.1f}", f"{x86tot['spark'] / x86tot['vector']:.2f}x", f"{x86_geo:.2f}x"),
     ("Graviton4 / x86, per query (geomean)", f"{arch['spark']:.2f}", f"{arch['vector']:.2f}", "", ""),
 ])}
 <div class="two">
-<div><p>Where spark-vector's lead over Spark <b>shrinks</b> most on Graviton4 -- mostly queries where Spark itself gains more from Graviton4:</p>
-{table(["Query", "Graviton4", "x86", "Spark G/x", "spark-vector G/x"], shift_rows(shift[:8]))}</div>
+<div><p>Where vecruntime's lead over Spark <b>shrinks</b> most on Graviton4 -- mostly queries where Spark itself gains more from Graviton4:</p>
+{table(["Query", "Graviton4", "x86", "Spark G/x", "vecruntime G/x"], shift_rows(shift[:8]))}</div>
 <div><p>Where it <b>grows</b> most -- mostly queries at parity or behind on x86:</p>
-{table(["Query", "Graviton4", "x86", "Spark G/x", "spark-vector G/x"], shift_rows(list(reversed(shift[-8:]))))}</div>
+{table(["Query", "Graviton4", "x86", "Spark G/x", "vecruntime G/x"], shift_rows(list(reversed(shift[-8:]))))}</div>
 </div>
 <p>"G/x" is the query's time on Graviton4 over its time on x86 (below 1 = faster on Graviton4).</p>
 <div class="chart tall"><canvas id="archspeed"></canvas></div>
@@ -244,7 +244,7 @@ was compiled; the time is the wall-clock of the query's execution as the runner 
 {versions}
 <h3>Configuration</h3>
 <p>Common to both engines:</p><pre>{html.escape(conf_common)}</pre>
-<p>spark-vector:</p><pre>{html.escape(conf_v)}</pre>
+<p>vecruntime:</p><pre>{html.escape(conf_v)}</pre>
 <h3>The arm64 platform</h3>
 <ul>{platform}</ul>
 
@@ -255,17 +255,17 @@ was compiled; the time is the wall-clock of the query's execution as the runner 
 <div class="chart tall"><canvas id="perquery2"></canvas></div>
 <div class="chart tall"><canvas id="perquery3"></canvas></div>
 <h3>Performance distribution</h3>
-{table(["spark-vector vs Spark", "Queries", "Share"], [(k, v, f"{100 * v / n:.0f}%") for k, v in dist.items()])}
+{table(["vecruntime vs Spark", "Queries", "Share"], [(k, v, f"{100 * v / n:.0f}%") for k, v in dist.items()])}
 <h3>Top 10 improvements</h3>
-{table(["Query", "Spark (s)", "spark-vector (s)", "Speedup", "x86 speedup"], top())}
+{table(["Query", "Spark (s)", "vecruntime (s)", "Speedup", "x86 speedup"], top())}
 <h3>Regressions</h3>
-{table(["Query", "Spark (s)", "spark-vector (s)", "Degradation", "x86 speedup"], regressions()) if regressions() else "<p>None.</p>"}
+{table(["Query", "Spark (s)", "vecruntime (s)", "Degradation", "x86 speedup"], regressions()) if regressions() else "<p>None.</p>"}
 <h3>Notes</h3>
 <ul>{notes}</ul>
 
 <h2 id="table">All queries</h2>
 <details open><summary>Seconds per query on Graviton4, the faster engine in bold, with the x86 run alongside</summary>
-{table(["Query", "Spark", "spark-vector", "Speedup", "x86 Spark", "x86 spark-vector", "x86 speedup", "Note"], per_query_rows, "all")}
+{table(["Query", "Spark", "vecruntime", "Speedup", "x86 Spark", "x86 vecruntime", "x86 speedup", "Note"], per_query_rows, "all")}
 </details>
 
 <h2 id="running">Running the benchmark</h2>
@@ -299,7 +299,7 @@ new Chart(document.getElementById('archspeed'), {{ type: 'line',
       data: D.queries.map((q, i) => +(D.series.spark[i] / D.series.vector[i]).toFixed(3)) }},
     {{ label: 'x86', borderColor: D.colors.spark, backgroundColor: D.colors.spark, pointRadius: 3, showLine: false,
       data: D.queries.map((q, i) => +(D.x86.spark[i] / D.x86.vector[i]).toFixed(3)) }}] }},
-  options: opts('spark-vector speedup over Spark per query, Graviton4 and x86 (log scale; 1 = Spark)', 'x faster than Spark',
+  options: opts('vecruntime speedup over Spark per query, Graviton4 and x86 (log scale; 1 = Spark)', 'x faster than Spark',
     {{ scales: {{ y: {{ type: 'logarithmic', min: 0.4, max: 4, title: {{ display: true, text: 'x faster than Spark' }} }} }} }}) }});
 </script>
 """

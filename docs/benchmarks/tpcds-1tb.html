@@ -21,7 +21,7 @@ title: 'Apache Spark vs vecruntime vs DataFusion Comet on TPC-DS 1 TB'
 </style>
 <div class="bench">
 <h1>Apache Spark vs vecruntime vs DataFusion Comet on TPC-DS 1 TB</h1>
-<p class="lede"><a href="https://github.com/spark-vector/spark-vector">vecruntime</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
+<p class="lede"><a href="https://github.com/vecruntime/vecruntime">vecruntime</a> runs Spark SQL's filters, projections, aggregates, sorts and joins on Arrow-layout
 batches with the Java Vector API -- on the JVM, no native code -- and moves batches between executors over its own Arrow Flight shuffle.
 <a href="https://github.com/apache/datafusion-comet">Apache DataFusion Comet</a> offloads the same operators to a native Rust engine. This page
 compares both against plain Apache Spark on the TPC-DS 1 TB workload on Amazon EKS, all three on identical hardware, data and Spark settings.</p>
@@ -119,7 +119,7 @@ where the columnar boundary and shuffle set-up outweigh the operator gains. Each
 
 <h2 id="running">Running the benchmark</h2>
 <p>The cluster runner, the Spark-on-Kubernetes manifests, the image and the data generation are in
-<a href="https://github.com/spark-vector/spark-vector/blob/main/benchmarks/k8s/README.md">the benchmark runner's README</a>: <code>run-matrix.sh</code> renders a <code>SparkApplication</code> per engine configuration
+<a href="https://github.com/vecruntime/vecruntime/blob/main/benchmarks/k8s/README.md">the benchmark runner's README</a>: <code>run-matrix.sh</code> renders a <code>SparkApplication</code> per engine configuration
 (<code>spark</code>, <code>vector-shuffle</code>, <code>comet</code>, ...) and writes one JSON-lines result file per run; this page is rendered from three of them by
 <code>benchmarks/scripts/render-benchmark-page.py</code>.</p>
 

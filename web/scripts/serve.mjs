@@ -10,7 +10,7 @@
 // or implied. See the License for the specific language governing permissions and limitations under
 // the License.
 
-// Serve web/site/ under the baseurl (default /spark-vector) on 127.0.0.1, mirroring GitHub Pages'
+// Serve web/site/ under the baseurl (default /vecruntime) on 127.0.0.1, mirroring GitHub Pages'
 // project-site path. Usage: node scripts/serve.mjs [port]   (default 8080). Preview only.
 
 import http from "node:http";

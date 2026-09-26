@@ -19,7 +19,7 @@
 //     carry, then wraps them in the same shell. Every number is copied through untouched, so the
 //     figures are byte-identical to the docs/ pages (verified in build output).
 //   * Links ending in .html that point at a ported doc are rewritten to BASE-prefixed URLs so the
-//     site works under /spark-vector/.
+//     site works under /vecruntime/.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -34,7 +34,7 @@ const DOCS = path.join(REPO, "docs");
 const OUT = path.join(WEB, "site");
 
 const nav = JSON.parse(fs.readFileSync(path.join(WEB, "nav.json"), "utf8"));
-const BASE = nav.site.baseurl.replace(/\/$/, ""); // "/spark-vector"
+const BASE = nav.site.baseurl.replace(/\/$/, ""); // "/vecruntime"
 const REPO_URL = nav.site.repo_url;
 const SITE_TITLE = nav.site.title;
 

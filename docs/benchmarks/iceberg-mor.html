@@ -25,7 +25,7 @@ title: 'vecruntime vs Apache Spark on Iceberg merge-on-read (v2 deletes, v3 dele
 <h1>Iceberg merge-on-read: vecruntime vs Apache Spark</h1>
 <p class="lede">A merge-on-read Iceberg table carries <b>delete files</b> between compactions — the record of the UPDATEs, DELETEs and
 MERGEs applied since the data files were written. A reader must merge those deletes against the data on every scan.
-This page measures that merge on the JVM: <a href="https://github.com/spark-vector/spark-vector">vecruntime</a> — which runs the
+This page measures that merge on the JVM: <a href="https://github.com/vecruntime/vecruntime">vecruntime</a> — which runs the
 scan's filters, aggregates and joins on Arrow batches over Iceberg's own vectorized reader, turning the deletes into a
 selection — against plain Apache Spark, over both the <b>v2 delete encodings</b> (positional and equality delete files, #261)
 and the <b>v3 deletion vectors</b> (one roaring bitmap per data file in a Puffin blob, #262).</p>

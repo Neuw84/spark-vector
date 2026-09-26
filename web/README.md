@@ -45,11 +45,11 @@ npm run build     # writes the site into web/site/
 
 ```bash
 cd web
-npm run serve             # serves web/site/ at http://127.0.0.1:8080/spark-vector/
+npm run serve             # serves web/site/ at http://127.0.0.1:8080/vecruntime/
 npm run serve -- 8099     # choose a port
 ```
 
-The preview server binds to `127.0.0.1` only and serves under `/spark-vector/`, mirroring the path a
+The preview server binds to `127.0.0.1` only and serves under `/vecruntime/`, mirroring the path a
 GitHub Pages **project** site uses, so links and assets resolve exactly as they will in production.
 
 ## Content
@@ -77,13 +77,13 @@ generation time, without changing their `docs/` output:
 benchmarks/scripts/render-benchmark-page.py \
   --spark spark.jsonl --vector vector.jsonl --comet comet.jsonl \
   --out   docs/benchmarks/tpcds-1tb.html \
-  --web-out web/site/benchmarks/tpcds-1tb.html --web-base /spark-vector
+  --web-out web/site/benchmarks/tpcds-1tb.html --web-base /vecruntime
 
 benchmarks/scripts/render-graviton-page.py \
   --spark spark.jsonl --vector vector.jsonl \
   --x86-page docs/benchmarks/tpcds-1tb.html \
   --out   docs/benchmarks/tpcds-1tb-graviton.html \
-  --web-out web/site/benchmarks/tpcds-1tb-graviton.html --web-base /spark-vector
+  --web-out web/site/benchmarks/tpcds-1tb-graviton.html --web-base /vecruntime
 ```
 
 For a normal `npm run build` you do **not** need to run the generators: it transforms the committed
@@ -98,7 +98,7 @@ churn and merge conflicts. Publish by building in CI (below).
 
 ## Publishing
 
-The site is built for a GitHub Pages **project** site under `/spark-vector/` (the same base URL the
+The site is built for a GitHub Pages **project** site under `/vecruntime/` (the same base URL the
 current Jekyll site uses). Two ways to publish it:
 
 1. **GitHub Actions (recommended, included).** `.github/workflows/pages.yml` runs
@@ -111,5 +111,5 @@ current Jekyll site uses). Two ways to publish it:
    GitHub Pages serves (e.g. a `gh-pages` branch, or move it under `docs/` if you retire the Jekyll
    site), and point **Settings → Pages → Source** at it.
 
-Either way the base URL stays `/spark-vector/`. If you ever serve at the domain root instead, change
+Either way the base URL stays `/vecruntime/`. If you ever serve at the domain root instead, change
 `baseurl` in `web/nav.json` and rebuild.
