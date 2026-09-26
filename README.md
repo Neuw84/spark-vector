@@ -605,8 +605,11 @@ On the cluster (`benchmarks/k8s/run-matrix.sh <tables> <dataset> <out> <image> [
 variables of `render-run.sh`, and the 1 TB runs in `docs/results.md` use: `EXECUTORS=8`,
 `EXEC_CORES=13`, `EXEC_MEM=30g` (heap), `EXEC_OVERHEAD=20g`, `DIRECT_MEM=30g`
 (`-XX:MaxDirectMemorySize`, where our Arrow batches and the shuffle's buffers live -- see Memory
-tuning), `DRIVER_CORES=2`, `DRIVER_MEM=4g`, `KEEP_EXECUTORS=1`, 200 shuffle partitions, one
-iteration per query. `EXEC_JAVA_OPTS` appends executor JVM options (a JFR recording:
+tuning), `DRIVER_CORES=2`, `DRIVER_MEM=4g`, `KEEP_EXECUTORS=1`, one iteration per query. From
+2026-09-26 the 1 TB runs pass only `--conf spark.sql.shuffle.partitions=300` in `SUBMIT_ARGS` and
+leave AQE at Spark's defaults: no `spark.sql.adaptive.advisoryPartitionSizeInBytes` override (64 MB)
+and no `spark.sql.adaptive.coalescePartitions.minPartitionNum`. The pages published before then used
+`advisoryPartitionSizeInBytes=128m` and `minPartitionNum=208`, as their configuration sections say. `EXEC_JAVA_OPTS` appends executor JVM options (a JFR recording:
 `-XX:StartFlightRecording=delay=55s,duration=60s,filename=/tmp/exec.jfr,settings=profile`, copied
 out of the executor pods with `kubectl cp` before the application ends), `SUBMIT_ARGS` extra
 `--conf` pairs for one run (`--conf spark.vector.sort.spillBytes=4g`). Read a
